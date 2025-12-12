@@ -32,10 +32,7 @@ Navigate to the collaboration dashboard in your browser:
 http://localhost:3000/collaboration
 ```
 
-**Production:**
-```
-https://agentos.abilityai.dev/collaboration
-```
+For production deployments, use your configured domain.
 
 ### Step 2: Run the Demo Script
 
