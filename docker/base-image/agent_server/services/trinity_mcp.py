@@ -26,7 +26,7 @@ def inject_trinity_mcp_if_configured() -> bool:
     home_dir = Path("/home/developer")
     mcp_file = home_dir / ".mcp.json"
 
-    # Trinity MCP server configuration
+    # Trinity MCP server configuration using HTTP transport
     trinity_mcp_entry = {
         "trinity": {
             "type": "http",

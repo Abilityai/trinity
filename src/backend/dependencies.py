@@ -99,10 +99,11 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
     mcp_key_info = db.validate_mcp_api_key(token)
     if mcp_key_info:  # validate_mcp_api_key returns dict if valid, None if invalid
         user_email = mcp_key_info.get("user_email")
-        user_id = mcp_key_info.get("user_id")
+        user_id = mcp_key_info.get("user_id")  # This is actually username, not DB id
 
-        # Get full user record by email
-        user = db.get_user_by_email(user_email) if user_email else db.get_user_by_id(user_id)
+        # Get full user record - try email first, then username
+        # Note: user_id from MCP key is the username string, not the database id
+        user = db.get_user_by_email(user_email) if user_email else db.get_user_by_username(user_id)
         if user:
             await log_audit_event(
                 event_type="authentication",
