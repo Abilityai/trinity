@@ -49,6 +49,23 @@ ADMIN_PASSWORD=your-secure-password
 ANTHROPIC_API_KEY=sk-ant-your-api-key
 ```
 
+### GitHub Templates (Optional)
+
+To use GitHub-based agent templates (private repositories), add your GitHub Personal Access Token:
+
+```bash
+# GitHub PAT for cloning private template repos
+# Get from: https://github.com/settings/tokens (classic token with 'repo' scope)
+GITHUB_PAT=github_pat_xxxxx
+```
+
+**How it works:**
+- On startup, the backend automatically uploads the PAT to Redis
+- GitHub templates in `config.py` reference this credential
+- When creating an agent from a GitHub template, the PAT is used to clone the repo
+
+**Note:** The PAT is stored in Redis with a fixed credential ID (`github-pat-templates`). If you update the PAT in `.env`, restart the backend to sync it to Redis.
+
 ### Authentication Modes
 
 Trinity supports two authentication modes:

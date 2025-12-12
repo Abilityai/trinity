@@ -18,6 +18,10 @@ AUDIT_URL = os.getenv("AUDIT_URL", "http://audit-logger:8001")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# GitHub PAT for template cloning (auto-uploaded to Redis on startup)
+GITHUB_PAT = os.getenv("GITHUB_PAT", "")
+GITHUB_PAT_CREDENTIAL_ID = "github-pat-templates"  # Fixed ID for consistent reference
+
 # Auth0 Configuration
 # Set these environment variables to enable Auth0 authentication
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")  # e.g., "your-tenant.us.auth0.com"
@@ -57,22 +61,41 @@ CORS_ORIGINS = [
 # Configure your own GitHub agent templates here or via a config file.
 # Format: github:owner/repo - requires GITHUB_PAT credential for private repos
 # See docs/AGENT_TEMPLATE_SPEC.md for template structure
-GITHUB_TEMPLATES = []
-
-# Example template configuration (uncomment and customize):
-# GITHUB_TEMPLATES = [
-#     {
-#         "id": "github:your-org/your-agent",
-#         "display_name": "Your Agent Name",
-#         "description": "Description of what your agent does",
-#         "github_repo": "your-org/your-agent",
-#         "github_credential_id": "your-github-pat-credential-id",  # From Trinity credentials
-#         "source": "github",
-#         "resources": {"cpu": "2", "memory": "4g"},
-#         "mcp_servers": [],
-#         "required_credentials": []
-#     }
-# ]
+GITHUB_TEMPLATES = [
+    {
+        "id": "github:abilityai/agent-ruby",
+        "display_name": "Ruby - Content & Publishing",
+        "description": "Content creation and multi-platform social media distribution agent",
+        "github_repo": "abilityai/agent-ruby",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"]
+    },
+    {
+        "id": "github:abilityai/agent-cornelius",
+        "display_name": "Cornelius - Knowledge Manager",
+        "description": "Knowledge base manager for Obsidian vault and insight extraction",
+        "github_repo": "abilityai/agent-cornelius",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": ["SMART_VAULT_PATH", "GEMINI_API_KEY"]
+    },
+    {
+        "id": "github:abilityai/agent-corbin",
+        "display_name": "Corbin - Business Assistant",
+        "description": "Business operations and Google Workspace management agent",
+        "github_repo": "abilityai/agent-corbin",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": ["GOOGLE_CLOUD_PROJECT_ID", "LINKEDIN_API_KEY"]
+    }
+]
 
 # Combined templates list
 ALL_GITHUB_TEMPLATES = GITHUB_TEMPLATES

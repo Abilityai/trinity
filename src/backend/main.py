@@ -20,7 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, AUDIT_URL
+from config import CORS_ORIGINS, AUDIT_URL, GITHUB_PAT, GITHUB_PAT_CREDENTIAL_ID, REDIS_URL
 from models import User
 from dependencies import get_current_user
 from services.docker_service import docker_client, list_all_agents
@@ -42,6 +42,9 @@ from services.scheduler_service import scheduler_service
 
 # Import activity service
 from services.activity_service import activity_service
+
+# Import credentials manager for GitHub PAT initialization
+from credentials import CredentialManager, CredentialCreate
 
 
 class ConnectionManager:
@@ -80,9 +83,68 @@ scheduler_service.set_broadcast_callback(manager.broadcast)
 activity_service.set_websocket_manager(manager)
 
 
+def initialize_github_pat():
+    """
+    Upload GitHub PAT from environment to Redis on startup.
+    This enables local development without manually adding credentials.
+    """
+    if not GITHUB_PAT:
+        print("GitHub PAT not configured in environment (GITHUB_PAT)")
+        return
+
+    try:
+        credential_manager = CredentialManager(REDIS_URL)
+
+        # Check if credential already exists
+        existing = credential_manager.get_credential(GITHUB_PAT_CREDENTIAL_ID, "admin")
+        if existing:
+            # Update the secret if PAT changed
+            secret_key = f"credentials:{GITHUB_PAT_CREDENTIAL_ID}:secret"
+            import json
+            credential_manager.redis_client.set(secret_key, json.dumps({"token": GITHUB_PAT}))
+            print(f"GitHub PAT updated in Redis (credential_id: {GITHUB_PAT_CREDENTIAL_ID})")
+        else:
+            # Create new credential with fixed ID
+            from datetime import datetime
+            import json
+
+            cred_key = f"credentials:{GITHUB_PAT_CREDENTIAL_ID}"
+            secret_key = f"{cred_key}:secret"
+            metadata_key = f"{cred_key}:metadata"
+            user_creds_key = "user:admin:credentials"
+            now = datetime.utcnow()
+
+            # Store metadata
+            credential_manager.redis_client.hset(metadata_key, mapping={
+                "id": GITHUB_PAT_CREDENTIAL_ID,
+                "name": "GitHub PAT (Templates)",
+                "service": "github",
+                "type": "token",
+                "description": "Auto-configured from GITHUB_PAT environment variable",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "status": "active",
+                "user_id": "admin"
+            })
+
+            # Store secret
+            credential_manager.redis_client.set(secret_key, json.dumps({"token": GITHUB_PAT}))
+
+            # Add to admin's credentials set
+            credential_manager.redis_client.sadd(user_creds_key, GITHUB_PAT_CREDENTIAL_ID)
+
+            print(f"GitHub PAT uploaded to Redis (credential_id: {GITHUB_PAT_CREDENTIAL_ID})")
+
+    except Exception as e:
+        print(f"Error initializing GitHub PAT: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    # Initialize GitHub PAT from environment to Redis
+    initialize_github_pat()
+
     if docker_client:
         try:
             agents = list_all_agents()
