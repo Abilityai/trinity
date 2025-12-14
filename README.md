@@ -127,7 +127,19 @@ my-template/
 └── .env.example              # Documents required env vars
 ```
 
-See [Trinity Compatible Agent Guide](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) for the complete specification.
+### Design Guides
+
+| Guide | Use Case |
+|-------|----------|
+| [Trinity Compatible Agent Guide](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) | **Single agents** — Template structure, CLAUDE.md, credentials, platform injection |
+| [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) | **Multi-agent systems** — Architecture patterns, shared folders, coordination, deployment |
+
+The Multi-Agent System Guide covers Trinity's platform capabilities that enable autonomous operation:
+- **Vector Database (Chroma)** — Per-agent semantic memory with MCP tools
+- **Scheduling System** — Cron-based autonomous execution
+- **Workplan System** — Persistent task DAGs outside context window
+- **Shared Folders** — File-based state sharing between agents
+- **Agent-to-Agent MCP** — Real-time delegation and collaboration
 
 ### Public Agent Templates
 
@@ -221,6 +233,7 @@ AUTH0_DOMAIN=your-tenant.us.auth0.com
 
 - [Deployment Guide](docs/DEPLOYMENT.md) — Production deployment instructions
 - [Trinity Compatible Agent Guide](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md) — Creating Trinity-compatible agents
+- [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) — Building multi-agent systems with coordinated workflows
 - [Testing Guide](docs/TESTING_GUIDE.md) — Testing approach and standards
 - [Known Issues](docs/KNOWN_ISSUES.md) — Current limitations and workarounds
 
