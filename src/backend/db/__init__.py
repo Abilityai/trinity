@@ -8,6 +8,8 @@ This package provides modular database access organized by domain:
 - schedules: Schedule and execution management
 - chat: Chat session and message persistence
 - activities: Activity stream logging
+- permissions: Agent-to-agent permission management
+- shared_folders: Shared folder configuration
 
 All functions are re-exported here for backward compatibility.
 """
@@ -18,6 +20,8 @@ from .mcp_keys import McpKeyOperations
 from .schedules import ScheduleOperations
 from .chat import ChatOperations
 from .activities import ActivityOperations
+from .shared_folders import SharedFolderOperations
+from .settings import SettingsOperations
 
 __all__ = [
     'UserOperations',
@@ -26,4 +30,6 @@ __all__ = [
     'ScheduleOperations',
     'ChatOperations',
     'ActivityOperations',
+    'SharedFolderOperations',
+    'SettingsOperations',
 ]

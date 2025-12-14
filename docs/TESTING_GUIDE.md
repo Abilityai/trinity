@@ -499,6 +499,7 @@ SELECT * FROM chat_sessions WHERE agent_name = 'test-agent';
 | GitHub Sync | github-sync.md | 2025-11-29 | ✅ |
 | Agent Replay Mode | agent-network-replay-mode.md | 2025-12-02 | ✅ |
 | Agents Page UI | agents-page-ui-improvements.md | 2025-12-07 | ✅ |
+| System Settings | system-wide-trinity-prompt.md | 2025-12-14 | ✅ 19/19 |
 
 ---
 

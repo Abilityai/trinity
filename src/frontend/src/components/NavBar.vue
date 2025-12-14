@@ -43,6 +43,14 @@
             >
               MCP Keys
             </router-link>
+            <router-link
+              v-if="isAdmin"
+              to="/settings"
+              class="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              :class="{ 'border-blue-500 text-gray-900': $route.path === '/settings' }"
+            >
+              Settings
+            </router-link>
           </div>
         </div>
         <div class="flex items-center space-x-4">
@@ -104,15 +112,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth0 } from '@auth0/auth0-vue'
 import { useAuthStore } from '../stores/auth'
 import { useWebSocket } from '../utils/websocket'
+import axios from 'axios'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const { isConnected } = useWebSocket()
+
+// Check if user is admin (fetch from backend)
+const userRole = ref(null)
+const isAdmin = computed(() => userRole.value === 'admin')
 
 // Auth0 is always available (plugin always loaded)
 const auth0 = useAuth0()
@@ -121,9 +134,17 @@ const auth0 = useAuth0()
 const showUserMenu = ref(false)
 const userMenuRef = ref(null)
 
-onMounted(() => {
+onMounted(async () => {
   // Add click outside listener
   document.addEventListener('click', handleClickOutside)
+
+  // Fetch user role from backend
+  try {
+    const response = await axios.get('/api/users/me')
+    userRole.value = response.data.role
+  } catch (e) {
+    console.warn('Failed to fetch user role:', e)
+  }
 })
 
 onUnmounted(() => {

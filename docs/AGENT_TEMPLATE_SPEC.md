@@ -82,6 +82,13 @@ platforms:
   - platform1
   - platform2
 
+# Shared folders - file-based collaboration between agents (Req 9.11)
+# These are DEFAULT values when agent is created from template
+# Can be changed at runtime via UI or API
+shared_folders:
+  expose: false     # Expose /home/developer/shared-out to permitted agents
+  consume: false    # Mount shared folders from agents this one has permission to call
+
 # Custom metrics - agent-specific KPIs displayed in Trinity UI
 # See docs/AGENT_CUSTOM_METRICS_SPEC.md for full specification
 metrics:
@@ -225,6 +232,66 @@ my-agent/
 ├── outputs/                   # gitignored or committed
 └── README.md                  # For humans browsing GitHub
 ```
+
+## Shared Folders
+
+Trinity enables file-based collaboration between agents via shared Docker volumes. This allows agents to exchange documents, data files, and artifacts without going through the chat interface.
+
+### Folder Paths
+
+| Path | Purpose |
+|------|---------|
+| `/home/developer/shared-out` | **Your agent's shared folder** - files here are accessible to permitted agents |
+| `/home/developer/shared-in/{agent-name}` | **Other agents' shared folders** - read/write access to permitted agents' folders |
+
+### How It Works
+
+1. **Expose**: When enabled, your agent gets a `/home/developer/shared-out` folder backed by a Docker volume (`agent-{name}-shared`). Other agents that have permission to call your agent can mount this folder.
+
+2. **Consume**: When enabled, your agent mounts the shared folders of all agents it has permission to call at `/home/developer/shared-in/{agent-name}`.
+
+3. **Permissions**: Shared folder access follows the Agent Permissions system. Agent B can only mount Agent A's folder if:
+   - Agent A has expose enabled
+   - Agent B has consume enabled
+   - Agent B has permission to call Agent A (granted via Permissions tab)
+
+### Template Configuration
+
+Set defaults in `template.yaml`:
+
+```yaml
+shared_folders:
+  expose: true    # Expose /home/developer/shared-out to permitted agents
+  consume: true   # Mount shared folders from agents this one has permission to call
+```
+
+These are **default values** when the agent is created. Users can change them at runtime via the UI (Shared Folders tab) or API.
+
+### Example Usage
+
+**Agent A** (exposing):
+```bash
+# Write a file for other agents
+echo "Data from Agent A" > /home/developer/shared-out/report.txt
+```
+
+**Agent B** (consuming, with permission to call Agent A):
+```bash
+# Read Agent A's shared file
+cat /home/developer/shared-in/agent-a/report.txt
+
+# Write back (shared folders are read-write)
+echo "Processed by Agent B" >> /home/developer/shared-in/agent-a/report.txt
+```
+
+### Important Notes
+
+- **Restart required**: Changes to shared folder config require an agent restart to take effect
+- **Read-write access**: All mounts are currently read-write; consumers can modify files
+- **Persistence**: Shared volumes persist across agent restarts
+- **Volume naming**: Volumes are named `agent-{name}-shared` and labeled with `trinity.platform=agent-shared`
+
+---
 
 ## Credential Injection Flow
 

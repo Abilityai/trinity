@@ -316,6 +316,19 @@
                 >
                   Files
                 </button>
+                <button
+                  v-if="agent.can_share"
+                  @click="activeTab = 'folders'"
+                  :class="[
+                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    activeTab === 'folders'
+                      ? 'border-indigo-500 text-indigo-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  ]"
+                  title="Shared folders for file-based collaboration"
+                >
+                  Shared Folders
+                </button>
               </nav>
             </div>
 
@@ -970,6 +983,11 @@ HEYGEN_API_KEY=your_heygen_key
                 </div>
               </div>
             </div>
+
+            <!-- Shared Folders Tab Content -->
+            <div v-if="activeTab === 'folders'" class="p-6">
+              <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
+            </div>
           </div>
         </div>
       </div>
@@ -1002,6 +1020,7 @@ import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import MetricsPanel from '../components/MetricsPanel.vue'
 import WorkplanPanel from '../components/WorkplanPanel.vue'
+import FoldersPanel from '../components/FoldersPanel.vue'
 
 // Configure marked for safe rendering
 marked.setOptions({

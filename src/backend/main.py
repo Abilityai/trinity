@@ -36,6 +36,7 @@ from routers.chat import router as chat_router, set_websocket_manager as set_cha
 from routers.schedules import router as schedules_router
 from routers.git import router as git_router
 from routers.activities import router as activities_router
+from routers.settings import router as settings_router
 
 # Import scheduler service
 from services.scheduler_service import scheduler_service
@@ -201,6 +202,7 @@ app.include_router(mcp_keys_router)
 app.include_router(chat_router)
 app.include_router(schedules_router)
 app.include_router(git_router)
+app.include_router(settings_router)
 
 
 # WebSocket endpoint

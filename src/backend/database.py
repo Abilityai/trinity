@@ -48,6 +48,12 @@ from db_models import (
     ChatMessage,
     AgentPermission,
     AgentPermissionInfo,
+    SharedFolderConfig,
+    SharedFolderConfigUpdate,
+    SharedFolderMount,
+    SharedFolderInfo,
+    SystemSetting,
+    SystemSettingUpdate,
 )
 
 # Re-export connection utilities
@@ -61,6 +67,8 @@ from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
 from db.activities import ActivityOperations
 from db.permissions import PermissionOperations
+from db.shared_folders import SharedFolderOperations
+from db.settings import SettingsOperations
 
 
 def _migrate_agent_sharing_table(cursor, conn):
@@ -367,6 +375,26 @@ def init_database():
             )
         """)
 
+        # Agent shared folder configuration table (Phase 9.11: Agent Shared Folders)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_shared_folder_config (
+                agent_name TEXT PRIMARY KEY,
+                expose_enabled INTEGER DEFAULT 0,
+                consume_enabled INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        # System settings table (system-wide configuration)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # Indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)")
@@ -403,6 +431,9 @@ def init_database():
         # Agent permissions indexes (Phase 9.10)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_permissions_source ON agent_permissions(source_agent)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_permissions_target ON agent_permissions(target_agent)")
+        # Shared folder indexes (Phase 9.11)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_folders_expose ON agent_shared_folder_config(expose_enabled)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_folders_consume ON agent_shared_folder_config(consume_enabled)")
 
         conn.commit()
 
@@ -454,6 +485,8 @@ class DatabaseManager:
         self._chat_ops = ChatOperations()
         self._activity_ops = ActivityOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
+        self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
+        self._settings_ops = SettingsOperations()
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -722,6 +755,58 @@ class DatabaseManager:
 
     def grant_default_permissions(self, agent_name: str, owner_username: str):
         return self._permission_ops.grant_default_permissions(agent_name, owner_username)
+
+    # =========================================================================
+    # Shared Folder Configuration (delegated to db/shared_folders.py) - Phase 9.11
+    # =========================================================================
+
+    def get_shared_folder_config(self, agent_name: str):
+        return self._shared_folder_ops.get_shared_folder_config(agent_name)
+
+    def upsert_shared_folder_config(self, agent_name: str, expose_enabled=None, consume_enabled=None):
+        return self._shared_folder_ops.upsert_shared_folder_config(agent_name, expose_enabled, consume_enabled)
+
+    def delete_shared_folder_config(self, agent_name: str):
+        return self._shared_folder_ops.delete_shared_folder_config(agent_name)
+
+    def get_agents_exposing_folders(self):
+        return self._shared_folder_ops.get_agents_exposing_folders()
+
+    def get_available_shared_folders(self, requesting_agent: str):
+        return self._shared_folder_ops.get_available_shared_folders(requesting_agent)
+
+    def get_consuming_agents(self, source_agent: str):
+        return self._shared_folder_ops.get_consuming_agents(source_agent)
+
+    @staticmethod
+    def get_shared_volume_name(agent_name: str):
+        return SharedFolderOperations.get_shared_volume_name(agent_name)
+
+    @staticmethod
+    def get_shared_mount_path(source_agent: str):
+        return SharedFolderOperations.get_shared_mount_path(source_agent)
+
+    # =========================================================================
+    # System Settings (delegated to db/settings.py)
+    # =========================================================================
+
+    def get_setting(self, key: str):
+        return self._settings_ops.get_setting(key)
+
+    def get_setting_value(self, key: str, default: str = None):
+        return self._settings_ops.get_setting_value(key, default)
+
+    def set_setting(self, key: str, value: str):
+        return self._settings_ops.set_setting(key, value)
+
+    def delete_setting(self, key: str):
+        return self._settings_ops.delete_setting(key)
+
+    def get_all_settings(self):
+        return self._settings_ops.get_all_settings()
+
+    def get_settings_dict(self):
+        return self._settings_ops.get_settings_dict()
 
 
 # Global database manager instance

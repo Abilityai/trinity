@@ -22,6 +22,7 @@ PLANS_ARCHIVE_DIR = WORKSPACE_DIR / "plans" / "archive"
 TRINITY_DIR = WORKSPACE_DIR / ".trinity"
 CLAUDE_COMMANDS_DIR = WORKSPACE_DIR / ".claude" / "commands" / "trinity"
 TRINITY_META_PROMPT_DIR = Path("/trinity-meta-prompt")
+VECTOR_STORE_DIR = WORKSPACE_DIR / "vector-store"
 
 # File size limits
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100MB

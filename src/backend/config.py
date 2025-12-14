@@ -71,7 +71,9 @@ GITHUB_TEMPLATES = [
         "source": "github",
         "resources": {"cpu": "2", "memory": "4g"},
         "mcp_servers": [],
-        "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"]
+        "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"],
+        # Optional: shared_folders - default expose/consume settings (Req 9.11)
+        # "shared_folders": {"expose": True, "consume": False}
     },
     {
         "id": "github:abilityai/agent-cornelius",
@@ -94,6 +96,40 @@ GITHUB_TEMPLATES = [
         "resources": {"cpu": "2", "memory": "4g"},
         "mcp_servers": [],
         "required_credentials": ["GOOGLE_CLOUD_PROJECT_ID", "LINKEDIN_API_KEY"]
+    },
+    # Ruby Multi-Agent Content System
+    {
+        "id": "github:abilityai/ruby-orchestrator",
+        "display_name": "Ruby Orchestrator - Calendar & State Manager",
+        "description": "Master coordinator for content scheduling, state management, and agent triggering",
+        "github_repo": "Abilityai/ruby-orchestrator",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": []
+    },
+    {
+        "id": "github:abilityai/ruby-content",
+        "display_name": "Ruby Content - Discovery & Production",
+        "description": "Content discovery, classification, and production agent with AI short generation",
+        "github_repo": "Abilityai/ruby-content",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": []
+    },
+    {
+        "id": "github:abilityai/ruby-engagement",
+        "display_name": "Ruby Engagement - Social & Growth",
+        "description": "Engagement monitoring, viral reply hunting, and comment response agent",
+        "github_repo": "Abilityai/ruby-engagement",
+        "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
+        "source": "github",
+        "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [],
+        "required_credentials": []
     }
 ]
 

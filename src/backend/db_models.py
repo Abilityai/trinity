@@ -234,3 +234,57 @@ class AgentPermissionInfo(BaseModel):
     status: str  # "running" or "stopped"
     type: str
     permitted: bool = False
+
+
+# =========================================================================
+# Shared Folder Models (Phase 9.11: Agent Shared Folders)
+# =========================================================================
+
+class SharedFolderConfig(BaseModel):
+    """Configuration for an agent's shared folder settings."""
+    agent_name: str
+    expose_enabled: bool = False  # Whether this agent exposes a shared folder
+    consume_enabled: bool = False  # Whether this agent mounts other agents' shared folders
+    created_at: datetime
+    updated_at: datetime
+
+
+class SharedFolderConfigUpdate(BaseModel):
+    """Request model for updating shared folder config."""
+    expose_enabled: Optional[bool] = None
+    consume_enabled: Optional[bool] = None
+
+
+class SharedFolderMount(BaseModel):
+    """A mounted shared folder from another agent."""
+    source_agent: str  # The agent exposing the folder
+    mount_path: str    # Where it's mounted in the consuming agent
+    access_mode: str = "rw"  # "rw" or "ro"
+    currently_mounted: bool = False
+
+
+class SharedFolderInfo(BaseModel):
+    """Response model with full shared folder information."""
+    agent_name: str
+    expose_enabled: bool
+    consume_enabled: bool
+    exposed_volume: Optional[str] = None  # Volume name if exposing
+    exposed_path: str = "/home/developer/shared-out"
+    consumed_folders: List[SharedFolderMount] = []
+    restart_required: bool = False  # True if config changed and restart needed
+
+
+# =========================================================================
+# System Settings Models
+# =========================================================================
+
+class SystemSetting(BaseModel):
+    """A system-wide setting."""
+    key: str
+    value: str
+    updated_at: datetime
+
+
+class SystemSettingUpdate(BaseModel):
+    """Request model for updating a system setting."""
+    value: str

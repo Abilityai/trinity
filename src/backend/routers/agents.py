@@ -69,10 +69,23 @@ async def inject_trinity_meta_prompt(agent_name: str, max_retries: int = 5, retr
     logger = logging.getLogger(__name__)
     agent_url = f"http://agent-{agent_name}:8000"
 
+    # Fetch system-wide custom prompt setting
+    custom_prompt = db.get_setting_value("trinity_prompt", default=None)
+    if custom_prompt:
+        logger.info(f"Found trinity_prompt setting ({len(custom_prompt)} chars), will inject into {agent_name}")
+
+    # Build request payload
+    payload = {"force": False}
+    if custom_prompt:
+        payload["custom_prompt"] = custom_prompt
+
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(f"{agent_url}/api/trinity/inject")
+                response = await client.post(
+                    f"{agent_url}/api/trinity/inject",
+                    json=payload
+                )
 
                 if response.status_code == 200:
                     result = response.json()
@@ -496,6 +509,53 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
             if container_meta_prompt_path.exists():
                 volumes[host_meta_prompt_path] = {'bind': '/trinity-meta-prompt', 'mode': 'ro'}
 
+            # Phase 9.11: Agent Shared Folders - mount shared volumes based on config
+            shared_folder_config = db.get_shared_folder_config(config.name)
+            if shared_folder_config:
+                # If agent exposes a shared folder, create and mount the shared volume
+                if shared_folder_config.expose_enabled:
+                    shared_volume_name = db.get_shared_volume_name(config.name)
+                    volume_created = False
+                    try:
+                        docker_client.volumes.get(shared_volume_name)
+                    except docker.errors.NotFound:
+                        docker_client.volumes.create(
+                            name=shared_volume_name,
+                            labels={
+                                'trinity.platform': 'agent-shared',
+                                'trinity.agent-name': config.name
+                            }
+                        )
+                        volume_created = True
+
+                    # Fix ownership of new volumes (Docker creates them as root)
+                    if volume_created:
+                        try:
+                            docker_client.containers.run(
+                                'alpine',
+                                command='chown 1000:1000 /shared',
+                                volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
+                                remove=True
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not fix shared volume ownership: {e}")
+
+                    volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
+
+                # If agent consumes shared folders, mount available shared volumes
+                if shared_folder_config.consume_enabled:
+                    available_folders = db.get_available_shared_folders(config.name)
+                    for source_agent in available_folders:
+                        source_volume = db.get_shared_volume_name(source_agent)
+                        mount_path = db.get_shared_mount_path(source_agent)
+                        # Only mount if the source volume exists
+                        try:
+                            docker_client.volumes.get(source_volume)
+                            volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
+                        except docker.errors.NotFound:
+                            # Source agent hasn't started yet or doesn't have shared volume
+                            pass
+
             container = docker_client.containers.run(
                 config.base_image,
                 detach=True,
@@ -655,6 +715,19 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         print(f"Warning: Failed to delete permissions for agent {agent_name}: {e}")
 
+    # Phase 9.11: Delete shared folder config and shared volume
+    try:
+        db.delete_shared_folder_config(agent_name)
+        # Also delete the shared volume if it exists
+        shared_volume_name = db.get_shared_volume_name(agent_name)
+        try:
+            shared_volume = docker_client.volumes.get(shared_volume_name)
+            shared_volume.remove()
+        except docker.errors.NotFound:
+            pass  # Volume doesn't exist
+    except Exception as e:
+        print(f"Warning: Failed to delete shared folder config for agent {agent_name}: {e}")
+
     db.delete_agent_ownership(agent_name)
 
     if manager:
@@ -675,6 +748,163 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     return {"message": f"Agent {agent_name} deleted"}
 
 
+async def _recreate_container_with_shared_folders(agent_name: str, old_container, owner_username: str):
+    """
+    Recreate an agent container with updated shared folder mounts.
+    Preserves the agent's workspace volume and other configuration.
+    """
+    # Extract configuration from old container
+    old_config = old_container.attrs.get("Config", {})
+    old_host_config = old_container.attrs.get("HostConfig", {})
+
+    # Get key settings
+    image = old_config.get("Image", "trinity-agent:latest")
+    env_vars = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in old_config.get("Env", []) if "=" in e}
+    labels = old_config.get("Labels", {})
+
+    # Get port from labels
+    ssh_port = int(labels.get("trinity.ssh-port", 2222))
+
+    # Get resource limits
+    cpu = labels.get("trinity.cpu", "2")
+    memory = labels.get("trinity.memory", "4g")
+
+    # Stop and remove old container
+    try:
+        old_container.stop()
+    except Exception:
+        pass
+    old_container.remove()
+
+    # Build new volume configuration
+    agent_volume_name = f"agent-{agent_name}-workspace"
+
+    # Start with base volumes - get existing bind mounts
+    old_mounts = old_container.attrs.get("Mounts", [])
+    volumes = {}
+
+    for m in old_mounts:
+        dest = m.get("Destination", "")
+        # Skip shared folder mounts - we'll add the correct ones
+        if dest == "/home/developer/shared-out" or dest.startswith("/home/developer/shared-in/"):
+            continue
+        # Keep other mounts
+        if m.get("Type") == "bind":
+            volumes[m.get("Source")] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
+        elif m.get("Type") == "volume":
+            vol_name = m.get("Name")
+            if vol_name:
+                volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
+
+    # Add shared folder mounts based on current config
+    shared_config = db.get_shared_folder_config(agent_name)
+    if shared_config:
+        if shared_config.expose_enabled:
+            shared_volume_name = db.get_shared_volume_name(agent_name)
+            volume_created = False
+            try:
+                docker_client.volumes.get(shared_volume_name)
+            except docker.errors.NotFound:
+                docker_client.volumes.create(
+                    name=shared_volume_name,
+                    labels={
+                        'trinity.platform': 'agent-shared',
+                        'trinity.agent-name': agent_name
+                    }
+                )
+                volume_created = True
+
+            # Fix ownership of new volumes (Docker creates them as root)
+            if volume_created:
+                try:
+                    docker_client.containers.run(
+                        'alpine',
+                        command='chown 1000:1000 /shared',
+                        volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
+                        remove=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not fix shared volume ownership: {e}")
+
+            volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
+
+        if shared_config.consume_enabled:
+            available_folders = db.get_available_shared_folders(agent_name)
+            for source_agent in available_folders:
+                source_volume = db.get_shared_volume_name(source_agent)
+                mount_path = db.get_shared_mount_path(source_agent)
+                try:
+                    docker_client.volumes.get(source_volume)
+                    volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
+                except docker.errors.NotFound:
+                    pass
+
+    # Create new container
+    new_container = docker_client.containers.run(
+        image,
+        detach=True,
+        name=f"agent-{agent_name}",
+        ports={'22/tcp': ssh_port},
+        volumes=volumes,
+        environment=env_vars,
+        labels=labels,
+        security_opt=['no-new-privileges:true', 'apparmor:docker-default'],
+        cap_drop=['ALL'],
+        cap_add=['NET_BIND_SERVICE'],
+        read_only=False,
+        tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
+        network='trinity-agent-network',
+        mem_limit=memory,
+        cpu_count=int(cpu)
+    )
+
+    print(f"Recreated container for agent {agent_name} with updated shared folder mounts")
+    return new_container
+
+
+def _check_shared_folder_mounts_match(container, agent_name: str) -> bool:
+    """
+    Check if container's shared folder mounts match the current config.
+    Returns True if mounts are correct, False if recreation needed.
+    """
+    config = db.get_shared_folder_config(agent_name)
+    if not config:
+        # No config - check that no shared mounts exist
+        mounts = container.attrs.get("Mounts", [])
+        for m in mounts:
+            dest = m.get("Destination", "")
+            if dest == "/home/developer/shared-out" or dest.startswith("/home/developer/shared-in/"):
+                return False  # Has mounts but no config - needs recreation to remove
+        return True
+
+    mounts = container.attrs.get("Mounts", [])
+    mount_dests = {m.get("Destination") for m in mounts}
+
+    # Check expose mount
+    if config.expose_enabled:
+        if "/home/developer/shared-out" not in mount_dests:
+            return False  # Config says expose, but mount missing
+    else:
+        if "/home/developer/shared-out" in mount_dests:
+            return False  # Config says no expose, but mount exists
+
+    # Check consume mounts
+    if config.consume_enabled:
+        available = db.get_available_shared_folders(agent_name)
+        for source_agent in available:
+            mount_path = db.get_shared_mount_path(source_agent)
+            source_volume = db.get_shared_volume_name(source_agent)
+            # Check if volume exists
+            try:
+                docker_client.volumes.get(source_volume)
+                if mount_path not in mount_dests:
+                    return False  # Should be mounted but isn't
+            except docker.errors.NotFound:
+                pass  # Volume doesn't exist yet, OK to skip
+
+    return True
+
+
 @router.post("/{agent_name}/start")
 async def start_agent_endpoint(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
     """Start an agent."""
@@ -683,6 +913,15 @@ async def start_agent_endpoint(agent_name: str, request: Request, current_user: 
         raise HTTPException(status_code=404, detail="Agent not found")
 
     try:
+        # Phase 9.11: Check if shared folder config requires container recreation
+        container.reload()
+        needs_recreation = not _check_shared_folder_mounts_match(container, agent_name)
+
+        if needs_recreation:
+            # Recreate container with updated mounts
+            await _recreate_container_with_shared_folders(agent_name, container, current_user.username)
+            container = get_agent_container(agent_name)
+
         container.start()
 
         # Inject Trinity meta-prompt (non-blocking, runs in background)
@@ -2009,4 +2248,231 @@ async def get_agent_metrics(
             "status": "running",
             "message": f"Failed to read metrics: {str(e)}"
         }
+
+
+# ============================================================================
+# Shared Folders Endpoints (Phase 9.11: Agent Shared Folders)
+# ============================================================================
+
+@router.get("/{agent_name}/folders")
+async def get_agent_folders(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get shared folder configuration for an agent.
+
+    Returns:
+    - expose_enabled: Whether this agent exposes a shared folder
+    - consume_enabled: Whether this agent mounts other agents' shared folders
+    - exposed_volume: Volume name if exposing
+    - consumed_folders: List of mounted folders from other agents
+    - restart_required: Whether config changed and restart is needed
+    """
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get config from database (or defaults if none)
+    config = db.get_shared_folder_config(agent_name)
+    expose_enabled = config.expose_enabled if config else False
+    consume_enabled = config.consume_enabled if config else False
+
+    # Get actual mounted volumes from container
+    container.reload()
+    mounts = container.attrs.get("Mounts", [])
+
+    # Check if agent is exposing (has /home/developer/shared-out mount)
+    shared_out_mounted = any(
+        m.get("Destination") == "/home/developer/shared-out"
+        for m in mounts
+    )
+
+    # Build list of consumed folders
+    consumed_folders = []
+    if consume_enabled:
+        available = db.get_available_shared_folders(agent_name)
+        for source_agent in available:
+            mount_path = db.get_shared_mount_path(source_agent)
+            source_volume = db.get_shared_volume_name(source_agent)
+
+            # Check if this volume is actually mounted
+            is_mounted = any(
+                m.get("Destination") == mount_path
+                for m in mounts
+            )
+
+            consumed_folders.append({
+                "source_agent": source_agent,
+                "mount_path": mount_path,
+                "access_mode": "rw",
+                "currently_mounted": is_mounted
+            })
+
+    # Determine if restart is required
+    # Restart needed if config says expose but not mounted (or vice versa)
+    restart_required = (expose_enabled != shared_out_mounted)
+
+    # Also check consume status
+    if consume_enabled and consumed_folders:
+        # Check if any expected mounts are missing
+        for folder in consumed_folders:
+            if not folder["currently_mounted"]:
+                restart_required = True
+                break
+
+    return {
+        "agent_name": agent_name,
+        "expose_enabled": expose_enabled,
+        "consume_enabled": consume_enabled,
+        "exposed_volume": db.get_shared_volume_name(agent_name) if expose_enabled else None,
+        "exposed_path": "/home/developer/shared-out",
+        "consumed_folders": consumed_folders,
+        "restart_required": restart_required,
+        "status": container.status
+    }
+
+
+@router.put("/{agent_name}/folders")
+async def update_agent_folders(
+    agent_name: str,
+    request: Request,
+    body: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update shared folder configuration for an agent.
+
+    Body:
+    - expose_enabled: (optional) Whether to expose a shared folder
+    - consume_enabled: (optional) Whether to mount other agents' shared folders
+
+    Note: Changes require agent restart to take effect.
+    """
+    # Only owner can modify folder sharing
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only the owner can modify folder sharing")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    expose_enabled = body.get("expose_enabled")
+    consume_enabled = body.get("consume_enabled")
+
+    # Update config
+    config = db.upsert_shared_folder_config(
+        agent_name,
+        expose_enabled=expose_enabled,
+        consume_enabled=consume_enabled
+    )
+
+    await log_audit_event(
+        event_type="agent_folders",
+        action="update_config",
+        user_id=current_user.username,
+        agent_name=agent_name,
+        ip_address=request.client.host if request.client else None,
+        result="success",
+        details={
+            "expose_enabled": config.expose_enabled,
+            "consume_enabled": config.consume_enabled
+        }
+    )
+
+    return {
+        "status": "updated",
+        "agent_name": agent_name,
+        "expose_enabled": config.expose_enabled,
+        "consume_enabled": config.consume_enabled,
+        "restart_required": True,
+        "message": "Configuration updated. Restart the agent to apply changes."
+    }
+
+
+@router.get("/{agent_name}/folders/available")
+async def get_available_shared_folders(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get list of shared folders available for this agent to mount.
+
+    Returns agents that:
+    1. Have expose_enabled=True
+    2. This agent has permission to communicate with
+
+    Useful for showing which folders can be mounted.
+    """
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    available = db.get_available_shared_folders(agent_name)
+
+    # Build detailed list with mount info
+    available_folders = []
+    for source_agent in available:
+        source_container = get_agent_container(source_agent)
+        available_folders.append({
+            "source_agent": source_agent,
+            "volume_name": db.get_shared_volume_name(source_agent),
+            "mount_path": db.get_shared_mount_path(source_agent),
+            "source_status": source_container.status if source_container else "not_found"
+        })
+
+    return {
+        "agent_name": agent_name,
+        "available_folders": available_folders,
+        "count": len(available_folders)
+    }
+
+
+@router.get("/{agent_name}/folders/consumers")
+async def get_folder_consumers(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get list of agents that can consume this agent's shared folder.
+
+    Returns agents that:
+    1. Have consume_enabled=True
+    2. Have permission to communicate with this agent
+
+    Useful for understanding who will see exposed files.
+    """
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get agents that can consume from this agent
+    consumers = db.get_consuming_agents(agent_name)
+
+    consumer_list = []
+    for consumer_agent in consumers:
+        consumer_container = get_agent_container(consumer_agent)
+        consumer_list.append({
+            "agent_name": consumer_agent,
+            "mount_path": db.get_shared_mount_path(agent_name),
+            "status": consumer_container.status if consumer_container else "not_found"
+        })
+
+    return {
+        "source_agent": agent_name,
+        "consumers": consumer_list,
+        "count": len(consumer_list)
+    }
 

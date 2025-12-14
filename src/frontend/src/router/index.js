@@ -44,6 +44,12 @@ const routes = [
     component: () => import('../views/ApiKeys.vue'),
     meta: { requiresAuth: true }
   },
+  {
+    path: '/settings',
+    name: 'Settings',
+    component: () => import('../views/Settings.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
   // Legacy redirect for /network -> Dashboard
   {
     path: '/network',

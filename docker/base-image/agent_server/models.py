@@ -177,6 +177,7 @@ class FileInfo(BaseModel):
 class TrinityInjectRequest(BaseModel):
     """Request to inject Trinity meta-prompt"""
     force: bool = False  # If true, re-inject even if already done
+    custom_prompt: Optional[str] = None  # System-wide custom prompt to inject into CLAUDE.md
 
 
 class TrinityInjectResponse(BaseModel):
@@ -195,6 +196,7 @@ class TrinityStatusResponse(BaseModel):
     meta_prompt_mounted: bool
     files: Dict[str, bool]
     directories: Dict[str, bool]
+    vector_memory: Dict[str, bool] = {}  # Vector memory injection status
     claude_md_has_trinity_section: bool
 
 

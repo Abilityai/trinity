@@ -194,7 +194,7 @@ class SchedulerService:
             agent_name=schedule.agent_name,
             message=schedule.message,
             source=ExecutionSource.SCHEDULE,
-            source_user_id=schedule.owner_id
+            source_user_id=str(schedule.owner_id) if schedule.owner_id else None
         )
 
         # Track schedule start activity
@@ -444,7 +444,7 @@ class SchedulerService:
             agent_name=schedule.agent_name,
             message=schedule.message,
             source=ExecutionSource.SCHEDULE,
-            source_user_id=schedule.owner_id
+            source_user_id=str(schedule.owner_id) if schedule.owner_id else None
         )
 
         # Submit to queue (will wait if agent is busy)

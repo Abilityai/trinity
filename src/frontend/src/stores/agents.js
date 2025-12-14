@@ -538,6 +538,39 @@ export const useAgentsStore = defineStore('agents', {
 
     setSortBy(sortBy) {
       this.sortBy = sortBy
+    },
+
+    // Shared Folders Actions (Phase 9.11: Agent Shared Folders)
+    async getAgentFolders(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/folders`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async updateAgentFolders(name, config) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/folders`, config, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async getAvailableFolders(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/folders/available`, {
+        headers: authStore.authHeader
+      })
+      return response.data.available_folders || []
+    },
+
+    async getFolderConsumers(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/folders/consumers`, {
+        headers: authStore.authHeader
+      })
+      return response.data.consumers || []
     }
   }
 })
