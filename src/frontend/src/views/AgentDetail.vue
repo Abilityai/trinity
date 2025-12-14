@@ -174,12 +174,12 @@
 
           <!-- Tabs -->
           <div class="bg-white shadow rounded-lg">
-            <div class="border-b border-gray-200">
-              <nav class="-mb-px flex">
+            <div class="border-b border-gray-200 overflow-x-auto">
+              <nav class="-mb-px flex whitespace-nowrap">
                 <button
                   @click="activeTab = 'info'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'info'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -190,7 +190,7 @@
                 <button
                   @click="activeTab = 'metrics'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'metrics'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -202,7 +202,7 @@
                 <button
                   @click="activeTab = 'chat'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'chat'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -213,7 +213,7 @@
                 <button
                   @click="activeTab = 'logs'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'logs'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -224,7 +224,7 @@
                 <button
                   @click="activeTab = 'credentials'"
                   :class="[
-                    'inline-flex items-center px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'inline-flex items-center px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'credentials'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -239,7 +239,7 @@
                   v-if="agent.can_share"
                   @click="activeTab = 'sharing'"
                   :class="[
-                    'inline-flex items-center px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'inline-flex items-center px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'sharing'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -251,7 +251,7 @@
                   v-if="agent.can_share"
                   @click="activeTab = 'permissions'"
                   :class="[
-                    'inline-flex items-center px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'inline-flex items-center px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'permissions'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -262,7 +262,7 @@
                 <button
                   @click="activeTab = 'schedules'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'schedules'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -273,7 +273,7 @@
                 <button
                   @click="activeTab = 'executions'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'executions'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -284,7 +284,7 @@
                 <button
                   @click="activeTab = 'plans'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'plans'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -297,7 +297,7 @@
                   v-if="hasGitSync"
                   @click="activeTab = 'git'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'git'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -308,7 +308,7 @@
                 <button
                   @click="activeTab = 'files'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'files'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -320,14 +320,14 @@
                   v-if="agent.can_share"
                   @click="activeTab = 'folders'"
                   :class="[
-                    'px-6 py-3 border-b-2 font-medium text-sm transition-colors',
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
                     activeTab === 'folders'
                       ? 'border-indigo-500 text-indigo-600'
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                   ]"
                   title="Shared folders for file-based collaboration"
                 >
-                  Shared Folders
+                  Folders
                 </button>
               </nav>
             </div>
