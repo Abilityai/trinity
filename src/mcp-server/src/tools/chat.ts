@@ -135,7 +135,12 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         "Send a message to an agent and receive a response. " +
         "This is the primary way to delegate tasks to sub-agents. " +
         "The message will be processed by Claude Code running inside the agent container. " +
-        "Responses may take some time depending on the complexity of the task.",
+        "Responses may take some time depending on the complexity of the task. " +
+        "\n\n**Execution Modes:**\n" +
+        "- `parallel=false` (default): Sequential chat mode. Uses execution queue, maintains conversation history. " +
+        "Best for multi-turn conversations requiring context.\n" +
+        "- `parallel=true`: Parallel task mode. Stateless, no queue, can run N tasks concurrently. " +
+        "Best for independent tasks, batch processing, orchestrator delegation.",
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
         message: z
@@ -143,14 +148,58 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           .describe(
             "The message or task to send to the agent. Be clear and specific about what you want the agent to do."
           ),
+        parallel: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "If true, run in parallel task mode (stateless, no queue). " +
+            "Use for independent tasks that don't need conversation history. " +
+            "Multiple parallel=true calls can run simultaneously."
+          ),
+        model: z
+          .string()
+          .optional()
+          .describe(
+            "Model override for this request (sonnet, opus, haiku). Only applies when parallel=true."
+          ),
+        allowed_tools: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Restrict which tools the agent can use (e.g., ['Read', 'Write']). Only applies when parallel=true."
+          ),
+        system_prompt: z
+          .string()
+          .optional()
+          .describe(
+            "Additional system prompt to append for this task. Only applies when parallel=true."
+          ),
+        timeout_seconds: z
+          .number()
+          .optional()
+          .default(300)
+          .describe(
+            "Execution timeout in seconds (default: 300). Only applies when parallel=true."
+          ),
       }),
       execute: async (
         {
           agent_name,
           message,
+          parallel,
+          model,
+          allowed_tools,
+          system_prompt,
+          timeout_seconds,
         }: {
           agent_name: string;
           message: string;
+          parallel?: boolean;
+          model?: string;
+          allowed_tools?: string[];
+          system_prompt?: string;
+          timeout_seconds?: number;
         },
         context: any
       ) => {
@@ -174,11 +223,31 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
 
         // Log successful collaboration
         if (authContext?.scope === "agent") {
-          console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name}`);
+          console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name} (${parallel ? 'parallel' : 'sequential'})`);
         }
 
         // Pass source agent for collaboration tracking
         const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
+
+        // Use parallel task mode or sequential chat mode based on parameter
+        if (parallel) {
+          // Parallel task mode - stateless, no queue
+          console.log(`[Parallel Task] Sending task to ${agent_name}`);
+          const response = await apiClient.task(
+            agent_name,
+            message,
+            {
+              model,
+              allowed_tools,
+              system_prompt,
+              timeout_seconds,
+            },
+            sourceAgent
+          );
+          return JSON.stringify(response, null, 2);
+        }
+
+        // Sequential chat mode - uses queue, maintains context
         const response = await apiClient.chat(agent_name, message, sourceAgent);
 
         // Check if response is a queue status (agent busy)
@@ -190,7 +259,8 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
             queue_status: response.queue_status,
             retry_after_seconds: response.retry_after,
             message: `Agent '${agent_name}' is currently busy. The execution queue is full. ` +
-              `Please wait ${response.retry_after} seconds before retrying, or try a different agent.`,
+              `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
+              `Consider using parallel=true for independent tasks.`,
             details: response.details,
           }, null, 2);
         }

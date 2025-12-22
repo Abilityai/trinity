@@ -297,3 +297,84 @@ def generate_credential_files(
             files[file_path] = content
 
     return files
+
+
+# ============================================================================
+# Trinity-Compatible Validation (Local Agent Deployment)
+# ============================================================================
+
+from typing import Tuple
+
+
+def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:
+    """
+    Check if a directory contains a Trinity-compatible agent.
+
+    A Trinity-compatible agent must have:
+    1. template.yaml file
+    2. name field in template.yaml
+    3. resources field in template.yaml
+
+    Args:
+        path: Path to the agent directory
+
+    Returns:
+        Tuple of (is_compatible, error_message, template_data)
+        - is_compatible: True if the agent is Trinity-compatible
+        - error_message: Description of why validation failed (None if valid)
+        - template_data: Parsed template.yaml data (None if invalid)
+    """
+    template_path = path / "template.yaml"
+
+    if not template_path.exists():
+        return (False, "Missing template.yaml", None)
+
+    try:
+        with open(template_path) as f:
+            template_data = yaml.safe_load(f)
+    except Exception as e:
+        return (False, f"Invalid template.yaml: {e}", None)
+
+    if not template_data:
+        return (False, "template.yaml is empty", None)
+
+    if not template_data.get("name"):
+        return (False, "template.yaml missing required field: name", None)
+
+    if not template_data.get("resources"):
+        return (False, "template.yaml missing required field: resources", None)
+
+    # Validate resources has expected structure
+    resources = template_data.get("resources", {})
+    if not isinstance(resources, dict):
+        return (False, "template.yaml resources must be a dictionary", None)
+
+    # Check for CLAUDE.md (warn but don't fail)
+    claude_md = path / "CLAUDE.md"
+    if not claude_md.exists():
+        # This is a warning, not an error - we still allow deployment
+        print(f"Warning: {path} does not contain CLAUDE.md (recommended)")
+
+    return (True, None, template_data)
+
+
+def get_name_from_template(path: Path) -> Optional[str]:
+    """
+    Extract agent name from template.yaml.
+
+    Args:
+        path: Path to the agent directory
+
+    Returns:
+        Agent name from template.yaml, or None if not found
+    """
+    template_path = path / "template.yaml"
+    if not template_path.exists():
+        return None
+
+    try:
+        with open(template_path) as f:
+            template_data = yaml.safe_load(f)
+            return template_data.get("name") if template_data else None
+    except Exception:
+        return None

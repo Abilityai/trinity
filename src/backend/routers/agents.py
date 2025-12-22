@@ -743,6 +743,373 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
     return await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
 
 
+# ============================================================================
+# Local Agent Deployment (Deploy from local directory via MCP)
+# ============================================================================
+
+import base64
+import tarfile
+import tempfile
+import shutil
+from io import BytesIO
+from typing import List
+
+from models import DeployLocalRequest, DeployLocalResponse, VersioningInfo, CredentialImportResult
+from services.template_service import is_trinity_compatible
+
+# Size limits for local deployment
+MAX_ARCHIVE_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_CREDENTIALS = 100
+MAX_FILES = 1000
+
+
+def get_agents_by_prefix(prefix: str) -> List[AgentStatus]:
+    """
+    Get all agents that match a base name prefix.
+
+    Matches:
+    - Exact name (e.g., "my-agent")
+    - Versioned names (e.g., "my-agent-2", "my-agent-3")
+
+    Args:
+        prefix: Base agent name to match
+
+    Returns:
+        List of matching AgentStatus objects
+    """
+    all_agents = list_all_agents()
+    matching = []
+
+    for agent in all_agents:
+        name = agent.name
+        if name == prefix:
+            matching.append(agent)
+        elif name.startswith(f"{prefix}-"):
+            # Check if suffix is a version number
+            suffix = name[len(prefix) + 1:]
+            if suffix.isdigit():
+                matching.append(agent)
+
+    return matching
+
+
+def get_next_version_name(base_name: str) -> str:
+    """
+    Get next available version name for an agent.
+
+    Pattern: {base-name} -> {base-name}-2 -> {base-name}-3
+
+    Args:
+        base_name: Base agent name
+
+    Returns:
+        Next available version name
+    """
+    existing = get_agents_by_prefix(base_name)
+
+    if not existing:
+        return base_name
+
+    # Find highest version number
+    max_version = 1
+    for agent in existing:
+        if agent.name == base_name:
+            max_version = max(max_version, 1)
+        elif agent.name.startswith(f"{base_name}-"):
+            suffix = agent.name[len(base_name) + 1:]
+            try:
+                v = int(suffix)
+                max_version = max(max_version, v)
+            except ValueError:
+                pass
+
+    return f"{base_name}-{max_version + 1}"
+
+
+def get_latest_version(base_name: str) -> Optional[AgentStatus]:
+    """
+    Get the most recent version of an agent.
+
+    Args:
+        base_name: Base agent name
+
+    Returns:
+        Most recent AgentStatus or None if no versions exist
+    """
+    existing = get_agents_by_prefix(base_name)
+    if not existing:
+        return None
+
+    # Sort by version number (highest first)
+    def get_version(agent):
+        if agent.name == base_name:
+            return 1
+        suffix = agent.name[len(base_name) + 1:]
+        try:
+            return int(suffix)
+        except ValueError:
+            return 0
+
+    return max(existing, key=get_version)
+
+
+@router.post("/deploy-local")
+async def deploy_local_agent(
+    body: DeployLocalRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Deploy a Trinity-compatible local agent.
+
+    This endpoint receives a base64-encoded tar.gz archive of a local agent
+    directory, validates it's Trinity-compatible (has template.yaml), handles
+    versioning if an agent with the same name exists, imports credentials,
+    and creates the agent.
+
+    Flow:
+    1. Decode and extract base64 archive
+    2. Validate Trinity-compatible (template.yaml exists)
+    3. Handle versioning (stop old version if exists)
+    4. Import credentials with conflict resolution
+    5. Copy to templates directory
+    6. Create agent via create_agent_internal
+    7. Hot-reload credentials into running agent
+    8. Return response with version and credential info
+    """
+    import httpx
+
+    temp_dir = None
+
+    try:
+        # 1. Validate archive size
+        try:
+            archive_bytes = base64.b64decode(body.archive)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Invalid base64 encoding: {e}",
+                    "code": "INVALID_ARCHIVE"
+                }
+            )
+
+        if len(archive_bytes) > MAX_ARCHIVE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Archive exceeds maximum size of {MAX_ARCHIVE_SIZE // (1024*1024)}MB",
+                    "code": "ARCHIVE_TOO_LARGE"
+                }
+            )
+
+        # 2. Validate credentials count
+        if body.credentials and len(body.credentials) > MAX_CREDENTIALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Credentials exceed maximum count of {MAX_CREDENTIALS}",
+                    "code": "TOO_MANY_CREDENTIALS"
+                }
+            )
+
+        # 3. Extract archive to temp directory
+        temp_dir = Path(tempfile.mkdtemp(prefix="trinity-deploy-"))
+        try:
+            with tarfile.open(fileobj=BytesIO(archive_bytes), mode='r:gz') as tar:
+                # Security: Check for path traversal
+                for member in tar.getmembers():
+                    if member.name.startswith('/') or '..' in member.name:
+                        raise HTTPException(
+                            status_code=400,
+                            detail={
+                                "error": "Invalid archive: contains path traversal",
+                                "code": "INVALID_ARCHIVE"
+                            }
+                        )
+
+                # Check file count
+                if len(tar.getmembers()) > MAX_FILES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": f"Archive exceeds maximum file count of {MAX_FILES}",
+                            "code": "TOO_MANY_FILES"
+                        }
+                    )
+
+                tar.extractall(temp_dir)
+        except tarfile.TarError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Invalid tar.gz archive: {e}",
+                    "code": "INVALID_ARCHIVE"
+                }
+            )
+
+        # 4. Find the root directory (handle nested extraction)
+        contents = list(temp_dir.iterdir())
+        if len(contents) == 1 and contents[0].is_dir():
+            extract_root = contents[0]
+        else:
+            extract_root = temp_dir
+
+        # 5. Validate Trinity-compatible
+        is_compatible, error_msg, template_data = is_trinity_compatible(extract_root)
+        if not is_compatible:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Agent is not Trinity-compatible: {error_msg}",
+                    "code": "NOT_TRINITY_COMPATIBLE"
+                }
+            )
+
+        # 6. Determine agent name
+        base_name = body.name or template_data.get("name")
+        if not base_name:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "No agent name specified and template.yaml has no name field",
+                    "code": "MISSING_NAME"
+                }
+            )
+
+        base_name = sanitize_agent_name(base_name)
+
+        # 7. Version handling
+        version_name = get_next_version_name(base_name)
+        previous_version = get_latest_version(base_name)
+        previous_stopped = False
+
+        if previous_version and previous_version.status == "running":
+            # Stop the previous version
+            try:
+                container = get_agent_container(previous_version.name)
+                if container:
+                    container.stop()
+                    previous_stopped = True
+                    print(f"Stopped previous version: {previous_version.name}")
+            except Exception as e:
+                print(f"Warning: Failed to stop previous version {previous_version.name}: {e}")
+
+        # 8. Import credentials
+        cred_results = {}
+        if body.credentials:
+            for key, value in body.credentials.items():
+                result = credential_manager.import_credential_with_conflict_resolution(
+                    key, value, current_user.username
+                )
+                cred_results[key] = CredentialImportResult(
+                    status=result["status"],
+                    name=result["name"],
+                    original=result.get("original")
+                )
+
+        # 9. Copy to templates directory
+        templates_dir = Path("/agent-configs/templates")
+        if not templates_dir.exists():
+            templates_dir = Path("./config/agent-templates")
+
+        dest_path = templates_dir / version_name
+        if dest_path.exists():
+            shutil.rmtree(dest_path)
+
+        shutil.copytree(extract_root, dest_path)
+        print(f"Copied agent template to: {dest_path}")
+
+        # 10. Create agent
+        agent_config = AgentConfig(
+            name=version_name,
+            template=f"local:{version_name}",
+            type=template_data.get("type", "business-assistant"),
+            resources=template_data.get("resources", {"cpu": "2", "memory": "4g"})
+        )
+
+        agent_status = await create_agent_internal(
+            agent_config,
+            current_user,
+            request,
+            skip_name_sanitization=True
+        )
+
+        # 11. Hot-reload credentials if any were imported
+        if body.credentials:
+            try:
+                # Wait a moment for the agent to start
+                import asyncio
+                await asyncio.sleep(2)
+
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    await client.post(
+                        f"http://agent-{version_name}:8000/api/credentials/update",
+                        json={
+                            "credentials": {k: v for k, v in body.credentials.items()},
+                            "mcp_config": None
+                        }
+                    )
+                    print(f"Hot-reloaded {len(body.credentials)} credentials into {version_name}")
+            except Exception as e:
+                print(f"Warning: Failed to hot-reload credentials: {e}")
+
+        # 12. Audit log
+        await log_audit_event(
+            event_type="agent_management",
+            action="deploy_local",
+            user_id=current_user.username,
+            agent_name=version_name,
+            ip_address=request.client.host if request.client else None,
+            result="success",
+            details={
+                "base_name": base_name,
+                "previous_version": previous_version.name if previous_version else None,
+                "previous_stopped": previous_stopped,
+                "credentials_count": len(cred_results),
+                "archive_size": len(archive_bytes)
+            }
+        )
+
+        # 13. Return response
+        return DeployLocalResponse(
+            status="success",
+            agent=agent_status,
+            versioning=VersioningInfo(
+                base_name=base_name,
+                previous_version=previous_version.name if previous_version else None,
+                previous_version_stopped=previous_stopped,
+                new_version=version_name
+            ),
+            credentials_imported={k: v.dict() for k, v in cred_results.items()},
+            credentials_injected=len(cred_results)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await log_audit_event(
+            event_type="agent_management",
+            action="deploy_local",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="failed",
+            severity="error",
+            details={"error": str(e)}
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deploy local agent: {str(e)}"
+        )
+    finally:
+        # Cleanup temp directory
+        if temp_dir and temp_dir.exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+
+
 @router.delete("/{agent_name}")
 async def delete_agent_endpoint(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
     """Delete an agent.

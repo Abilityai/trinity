@@ -1,3 +1,342 @@
+### 2025-12-22 20:00:00
+🚀 **Parallel Headless Execution - Feature Implemented (12.1)**
+
+Implemented stateless parallel task execution enabling orchestrators to spawn N concurrent worker tasks without queue blocking.
+
+**New Endpoints**:
+- `POST /api/task` (agent-server) - Stateless task execution, no lock, no --continue
+- `POST /api/agents/{name}/task` (backend) - Proxy endpoint bypassing execution queue
+
+**MCP Tool Updated**:
+- `chat_with_agent` now supports `parallel: boolean` parameter
+- `parallel=false` (default): Sequential chat mode with execution queue
+- `parallel=true`: Stateless parallel task mode, N concurrent allowed
+
+**Key Implementation Details**:
+- `execute_headless_task()` function runs Claude Code without --continue flag
+- No execution lock acquired (parallel allowed)
+- Each task gets unique session_id
+- Supports model override, allowed_tools, system_prompt, timeout_seconds
+- Activity tracking with parallel_mode flag
+- Audit logging for parallel tasks
+
+**Modified Files**:
+- `docker/base-image/agent_server/models.py` - Added ParallelTaskRequest, ParallelTaskResponse
+- `docker/base-image/agent_server/services/claude_code.py` - Added execute_headless_task()
+- `docker/base-image/agent_server/routers/chat.py` - Added POST /api/task endpoint
+- `src/backend/models.py` - Added ParallelTaskRequest
+- `src/backend/routers/chat.py` - Added POST /api/agents/{name}/task endpoint
+- `src/mcp-server/src/client.ts` - Added task() method
+- `src/mcp-server/src/tools/chat.ts` - Updated chat_with_agent with parallel parameter
+- `tests/test_parallel_task.py` - New test file with 12 tests
+
+**Use Cases**:
+- Orchestrator spawns N parallel worker tasks
+- Batch processing without context pollution
+- Agent-to-agent delegation at scale
+
+**Feature Flow Doc**: `docs/memory/feature-flows/parallel-headless-execution.md`
+
+---
+
+### 2025-12-22 18:30:00
+📋 **Parallel Headless Execution - Requirements Document Created (12.1)**
+
+Created comprehensive requirements document for parallel task execution feature based on Claude Code documentation research.
+
+**Research Findings**:
+- Claude Code headless mode (`claude -p`) runs stateless, independent sessions
+- No `--continue` flag = no conversation memory = can run in parallel
+- Can spawn N instances concurrently
+- Output format: `--output-format stream-json` for structured results
+
+**Proposed Architecture**:
+- **Sequential Chat** (existing): `POST /api/agents/{name}/chat` - uses `--continue`, execution queue, maintains context
+- **Parallel Task** (new): `POST /api/agents/{name}/task` - stateless, no queue, N concurrent allowed
+
+**Key Requirements**:
+1. Agent-server: New `/api/task` endpoint (no lock, no --continue)
+2. Backend: New `/api/agents/{name}/task` endpoint (bypasses execution queue)
+3. MCP: Update `chat_with_agent` with `parallel: boolean` parameter
+4. Concurrency limits: Agent-level (default 5), platform-level (default 50)
+5. Activity tracking: New `parallel_task` activity type
+
+**Use Cases**:
+- Orchestrator spawns N parallel worker tasks
+- Batch processing without context pollution
+- Agent-to-agent delegation at scale
+
+**Design Doc**: `docs/drafts/PARALLEL_HEADLESS_EXECUTION.md`
+
+---
+
+### 2025-12-22 15:30:00
+🐛 **Fixed Template Detail Endpoint for GitHub Templates**
+
+Fixed `GET /api/templates/{id}` returning 404 for GitHub templates like `github:abilityai/agent-ruby`.
+
+**Root Cause**: The `/` in GitHub template IDs (e.g., `github:org/repo`) was interpreted as a URL path separator by FastAPI, causing the route to not match at all.
+
+**Fix**: Changed route from `{template_id}` to `{template_id:path}` to capture the full path including slashes.
+
+**Verified**: `.env Template Endpoint` already works correctly - code at lines 110-130 handles both string credentials (GitHub templates) and dict credentials (local templates).
+
+**Modified Files**:
+- `src/backend/routers/templates.py` - Changed route to use `{template_id:path}` (~5 lines)
+
+---
+
+### 2025-12-22 04:55:00
+🐛 **Fixed Port Allocation Race Condition**
+
+Fixed agent creation failing with "port already allocated" when a port was in use by another process on the host system.
+
+**Root Cause**: `get_next_available_port()` only checked Trinity container labels, not actual host port availability.
+
+**Fix**: Added `is_port_available()` that tests actual TCP socket binding before assigning a port.
+
+**Modified Files**:
+- `src/backend/services/docker_service.py` - Added is_port_available(), enhanced get_next_available_port() (~25 lines)
+
+---
+
+### 2025-12-21 16:30:00
+🚀 **Local Agent Deployment via MCP (New Feature)**
+
+Implemented the ability to deploy Trinity-compatible local agents to Trinity platform with a single MCP command. This enables zero-setup deployment from local development to remote platform.
+
+**New MCP Tool**: `deploy_local_agent`
+- Packages local agent directory as tar.gz
+- Auto-imports credentials from `.env` with conflict resolution
+- Versioned deployment (my-agent → my-agent-2 on repeat deploy)
+- Validates Trinity-compatible structure (template.yaml required)
+
+**Backend Endpoint**: `POST /api/agents/deploy-local`
+- Accepts base64-encoded archive + credentials
+- Validates template.yaml with `name` and `resources` fields
+- Size limits: 50MB archive, 100 credentials, 1000 files
+- Security: Path traversal protection, temp cleanup
+
+**Credential Import with Conflict Resolution**:
+- Same name + same value = reuse existing
+- Same name + different value = create with suffix (_2, _3)
+- New name = create new credential
+
+**Versioning Logic**:
+- `get_next_version_name()` finds next available version
+- Previous version is stopped (not deleted)
+- Pattern: base-name → base-name-2 → base-name-3
+
+**Modified Files**:
+- `src/backend/models.py` - Added DeployLocalRequest, DeployLocalResponse, VersioningInfo, CredentialImportResult (~40 lines)
+- `src/backend/services/template_service.py` - Added is_trinity_compatible(), get_name_from_template() (~70 lines)
+- `src/backend/credentials.py` - Added import_credential_with_conflict_resolution(), get_credential_by_name() (~100 lines)
+- `src/backend/routers/agents.py` - Added deploy-local endpoint + versioning functions (~250 lines)
+- `src/mcp-server/src/tools/agents.ts` - Added deployLocalAgent tool (~190 lines)
+- `src/mcp-server/src/server.ts` - Registered new tool
+- `docs/memory/feature-flows/local-agent-deploy.md` - New feature flow doc
+
+**Total**: ~470 lines of new code
+
+---
+
+### 2025-12-21 14:15:00
+🧪 **Added UI Integration Test Phases for OTel and System Agent**
+
+Added two new test phases to the modular testing framework:
+
+**Phase 14: OpenTelemetry Integration**
+- Tests OTel status API, collector health, Prometheus metrics
+- Validates Dashboard header stats (cost/tokens display)
+- Verifies agent OTel environment variable injection
+- Tests resilience to collector downtime
+- 10 test steps covering full OTel integration
+
+**Phase 15: System Agent & Fleet Operations**
+- Tests system agent auto-deployment and status API
+- Validates deletion protection (403 on DELETE)
+- Tests fleet status and health APIs
+- Validates System Agent UI page (/system-agent)
+- Tests operations console and quick actions
+- Tests reinitialize and ops settings endpoints
+- 18 test steps covering full system agent functionality
+
+**Test Results**: Both phases PASSED (100% success rate)
+
+**Modified Files**:
+- `docs/testing/phases/PHASE_14_OPENTELEMETRY.md` - New file (250 lines)
+- `docs/testing/phases/PHASE_15_SYSTEM_AGENT.md` - New file (400 lines)
+- `docs/testing/phases/INDEX.md` - Added phases 14-15
+- `.claude/agents/ui-integration-tester.md` - Updated phase list and paths
+
+---
+
+### 2025-12-21 13:00:00
+📚 **Authentication & Authorization Architecture Documentation**
+
+Expanded the architecture document with a comprehensive "Authentication & Authorization Architecture" section that covers all component authentication flows:
+
+**7 Authentication Layers Documented**:
+1. **User Authentication** - Dev mode (username/password) and Prod mode (Auth0/OAuth)
+2. **MCP API Keys** - User → MCP Server authentication via `trinity_mcp_*` keys
+3. **MCP Server → Backend** - Key passthrough pattern (no admin credentials in prod)
+4. **Agent MCP Keys** - Auto-generated keys with `scope: "agent"` for agent-to-agent collaboration
+5. **Agent-to-Agent Permissions** - Fine-grained permission checks at MCP layer
+6. **System Agent** - `scope: "system"` bypasses all permission checks
+7. **External Credentials** - Redis-backed storage with hot-reload to containers
+
+**Added**:
+- ASCII diagram showing authentication flow between all components
+- Tables for each authentication layer with key properties
+- MCP Scope Summary table (user/agent/system)
+- Permission rules matrix for agent-to-agent access
+
+**Modified File**: `docs/memory/architecture.md`
+
+---
+
+### 2025-12-21 11:45:00
+🐛 **System Agent OTel Access Fix**
+
+Fixed issue where the system agent couldn't access OpenTelemetry metrics via the `/ops/costs` command.
+
+**Root Cause**:
+1. Environment variable mismatch: Slash command used `$TRINITY_API_KEY` but agent has `$TRINITY_MCP_API_KEY`
+2. System agent missing `/trinity-meta-prompt` mount - not being created with the volume
+3. Reinitialize endpoint deleted `.claude/commands/ops/` from template without re-copying
+
+**Fixes Applied**:
+- Updated `costs.md` slash command to use correct env var `$TRINITY_MCP_API_KEY`
+- Added Trinity meta-prompt mount to `system_agent_service.py` `_create_system_agent()`
+- Added template copy step to `system_agent.py` reinitialize endpoint (copies `.claude` and `CLAUDE.md` after cleanup)
+- Updated `CLAUDE.md` Cost Monitoring section with explicit API call instructions
+
+**Modified Files**:
+- `config/agent-templates/trinity-system/.claude/commands/ops/costs.md` - Fixed env var name
+- `config/agent-templates/trinity-system/CLAUDE.md` - Expanded Cost Monitoring section
+- `src/backend/services/system_agent_service.py` - Added `/trinity-meta-prompt` mount
+- `src/backend/routers/system_agent.py` - Added template copy step in reinitialize
+
+**Testing**: Verified system agent can now call `/api/ops/costs` and receive OTel metrics.
+
+---
+
+### 2025-12-21 11:20:00
+🎨 **System Agent Visibility Improvements**
+
+Made the trinity-system agent distinct from user agents across the UI.
+
+**Changes**:
+- **Agents Page**: System agent hidden from list (users only see their agents)
+- **Dashboard**: System agent has distinct purple styling:
+  - Purple background and border (vs white for user agents)
+  - "System Dashboard" link instead of "View Details" button
+  - Links directly to `/system-agent` page
+
+**Modified Files**:
+- `src/frontend/src/stores/agents.js` - Added `userAgents` getter, updated `sortedAgents` to exclude system
+- `src/frontend/src/components/AgentNode.vue` - Added purple styling for system agents, replaced button with link
+
+---
+
+### 2025-12-21 11:10:00
+📊 **System Agent UI: Compact Header with OTel Visualization (Req 11.3)**
+
+Redesigned the System Agent page (`/system-agent`) with a compact header and integrated OpenTelemetry metrics visualization.
+
+**UI Changes**:
+- **Compact Header**: Agent info, status, and actions on single line
+- **Fleet Stats Bar**: Inline horizontal display (Fleet: X agents | Y running | Z stopped)
+- **OTel Metrics Grid**: 6 metric cards with mini progress bars and icons
+  - Total Cost ($) with progress bar scaled to $10 max
+  - Tokens with colored breakdown (blue=input, purple=output, teal=cache)
+  - Sessions, Active Time, Commits, Lines of Code
+
+**Technical Details**:
+- Fetches from `/api/observability/metrics` directly (no store dependency)
+- OTel metrics poll every 30 seconds (fleet status every 10s)
+- Graceful handling: disabled, unavailable, no-data states
+- Added `/ops/costs` quick command button in Operations Console
+
+**Modified Files**:
+- `src/frontend/src/views/SystemAgent.vue` - Complete rewrite (~830 lines)
+
+**Verified**: OTel metrics display live data ($0.07 cost, 19.9K tokens after test chat)
+
+---
+
+### 2025-12-21 00:15:00
+📊 **System Agent OTel Integration (Req 11.2 Enhancement)**
+
+Added `/api/ops/costs` endpoint to give the system agent access to OpenTelemetry metrics in an ops-focused format. This keeps OTel (data collection) and Ops (interpretation) decoupled.
+
+**New Endpoint**: `GET /api/ops/costs`
+- Fetches raw metrics from OTel Collector's Prometheus endpoint
+- Reuses parsing from `observability.py` (no code duplication)
+- Adds ops-specific analysis: threshold checks, cost alerts, formatted output
+- Returns structured JSON the system agent can interpret
+
+**Features**:
+- Cost summary with daily limit tracking (`ops_cost_limit_daily_usd` setting)
+- Alerts when approaching (80%) or exceeding daily limit
+- Cost breakdown by model with token counts
+- Productivity metrics (sessions, commits, PRs, lines added/removed)
+- Graceful handling when OTel is disabled or collector is unreachable
+
+**Modified Files**:
+- `src/backend/routers/ops.py` - Added `get_ops_costs()` endpoint (~170 lines)
+- `config/agent-templates/trinity-system/.claude/commands/ops/costs.md` - Updated slash command with API details
+- `docs/memory/feature-flows/internal-system-agent.md` - Documented Cost & Observability section
+
+**Architecture Decision**: System agent calls the ops API to get interpreted metrics rather than accessing OTel directly. This keeps the two features independent:
+- **OTel Integration** = Raw data collection + Prometheus endpoint + Dashboard UI
+- **Ops Module** = Threshold analysis + alerts + system agent commands
+
+---
+
+### 2025-12-20 23:30:00
+🐛 **Critical: Fleet Status API Fix**
+
+Fixed critical bug in `/api/ops/fleet/status` and related endpoints where agent data was not being read correctly.
+
+**Root Cause**: `list_all_agents()` returns `AgentStatus` Pydantic objects, but the ops.py code was using `.get("name")` dictionary syntax instead of attribute access (`.name`). This caused all agent lookups to fail silently, returning 0 counts.
+
+**Fixed Files**:
+- `src/backend/routers/ops.py` - Changed all `agent.get("field")` to `agent.field` attribute access
+
+**Affected Endpoints**:
+- `GET /api/ops/fleet/status` - Now returns correct agent list and summary counts
+- `GET /api/ops/fleet/health` - Now correctly iterates over agents
+- `POST /api/ops/fleet/restart` - Now correctly identifies agents to restart
+- `POST /api/ops/fleet/stop` - Now correctly identifies agents to stop
+- `POST /api/ops/emergency-stop` - Now correctly stops non-system agents
+
+**Restart Required**: Backend must be restarted for fix to take effect.
+
+---
+
+### 2025-12-20 23:15:00
+🐛 **System Agent UI Fixes**
+
+Fixed two issues with the System Agent page:
+
+**Bug Fixes**:
+- Fleet status cards now show correct agent counts (was showing 0s due to incorrect API response parsing)
+- Changed from manual filtering to using `response.data.summary` from fleet API
+
+**UI Improvements**:
+- Removed aggressive purple gradient header - now uses clean white/gray design matching rest of system
+- Toned down Quick Action buttons from bright solid colors to muted bordered style
+- Emergency Stop now uses subtle red border instead of solid red background
+- Restart/Pause/Resume buttons now use gray borders, consistent with Dashboard
+- Quick command buttons (/ops/status etc.) now use gray instead of purple
+- Chat bubbles changed from purple to blue (matching system color scheme)
+- NavBar System link icon changed from purple to gray (consistent with other nav items)
+
+**Design Principle**: Consistent muted color palette across all pages - no more aggressive bright colors.
+
+---
+
 ### 2025-12-20 22:30:00
 🖥️ **System Agent UI (Req 11.3) - IMPLEMENTED**
 

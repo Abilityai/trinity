@@ -212,6 +212,13 @@ class SystemAgentService:
             volumes[str(host_template_path)] = {'bind': '/template', 'mode': 'ro'}
             logger.info(f"Mounting template from {host_template_path} to /template")
 
+        # Mount Trinity meta-prompt for task DAG planning and vector memory docs
+        container_meta_prompt_path = Path("/trinity-meta-prompt")
+        host_meta_prompt_path = os.getenv("HOST_META_PROMPT_PATH", "./config/trinity-meta-prompt")
+        if container_meta_prompt_path.exists():
+            volumes[host_meta_prompt_path] = {'bind': '/trinity-meta-prompt', 'mode': 'ro'}
+            logger.info(f"Mounting Trinity meta-prompt from {host_meta_prompt_path}")
+
         # Container labels
         labels = {
             'trinity.platform': 'agent',

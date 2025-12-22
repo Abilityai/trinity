@@ -238,3 +238,25 @@ class TaskUpdateRequest(BaseModel):
     """Request to update a task"""
     status: str  # pending, active, completed, failed
     result: Optional[str] = None
+
+
+# ============================================================================
+# Parallel Task Execution Models (Headless Mode)
+# ============================================================================
+
+class ParallelTaskRequest(BaseModel):
+    """Request for parallel task execution (stateless, no conversation context)"""
+    message: str  # The task to execute
+    model: Optional[str] = None  # Model override: sonnet, opus, haiku, or full model name
+    allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
+    system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
+    timeout_seconds: Optional[int] = 300  # Execution timeout (5 minutes default)
+
+
+class ParallelTaskResponse(BaseModel):
+    """Response from parallel task execution"""
+    response: str  # Claude's response
+    execution_log: List[ExecutionLogEntry] = []  # Tool calls and results
+    metadata: ExecutionMetadata  # Cost, tokens, duration
+    session_id: str  # Unique session ID for this task
+    timestamp: str  # ISO timestamp

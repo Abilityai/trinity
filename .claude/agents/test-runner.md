@@ -13,7 +13,7 @@ Run the Trinity API test suite, analyze results, and generate detailed testing r
 
 ## Test Suite Location
 
-The test suite is located at: `/Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests/`
+The test suite is located at: `/Users/eugene/Dropbox/trinity/trinity/tests/`
 
 ## IMPORTANT: Test Tier Selection
 
@@ -22,7 +22,7 @@ Before running tests, determine which tier to use based on the user's request:
 ### Tier 1: SMOKE TESTS (~30 seconds)
 Use for: Quick validation, CI pipelines, development feedback
 ```bash
-cd /Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests
+cd /Users/eugene/Dropbox/trinity/trinity/tests
 source .venv/bin/activate
 python -m pytest -m smoke -v --tb=short 2>&1
 ```
@@ -31,7 +31,7 @@ Tests: auth, templates, mcp_keys (no agent creation)
 ### Tier 2: CORE TESTS (~3-5 minutes)
 Use for: Standard validation, pre-commit checks, feature verification
 ```bash
-cd /Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests
+cd /Users/eugene/Dropbox/trinity/trinity/tests
 source .venv/bin/activate
 python -m pytest -m "not slow" -v --tb=short 2>&1
 ```
@@ -40,7 +40,7 @@ Tests: Everything except slow chat execution tests
 ### Tier 3: FULL SUITE (~5-8 minutes)
 Use for: Release validation, comprehensive testing, post-deployment verification
 ```bash
-cd /Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests
+cd /Users/eugene/Dropbox/trinity/trinity/tests
 source .venv/bin/activate
 python -m pytest -v --tb=short 2>&1
 ```
@@ -57,7 +57,7 @@ When invoked, follow these steps:
 
 ### 1. Environment Setup
 ```bash
-cd /Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests
+cd /Users/eugene/Dropbox/trinity/trinity/tests
 source .venv/bin/activate
 ```
 
@@ -119,7 +119,7 @@ For each failure:
 
 ## Report Format
 
-Save reports to: `/Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/tests/reports/`
+Save reports to: `/Users/eugene/Dropbox/trinity/trinity/tests/reports/`
 
 Create the following files:
 1. `test-report-{timestamp}.md` - Detailed markdown report
@@ -143,6 +143,9 @@ The test suite covers:
 - **Execution Queue** (test_execution_queue.py) - Queue management
 - **System Manifest** (test_systems.py) - Multi-agent deployment from YAML, permissions, folders, schedules (Req 10.7)
 - **Settings** (test_settings.py) - System settings and Trinity prompt management
+- **Fleet Operations** (test_ops.py) - Fleet status/health, restart/stop, schedule pause/resume, emergency stop, alerts, costs [SLOW for fleet ops]
+- **System Agent** (test_system_agent.py) - System agent status, restart, reinitialize [SLOW for restart/reinit]
+- **Observability** (test_observability.py) - OTel status, metrics, cost tracking
 - **Agent Server Direct** (agent_server/) - Direct agent server tests [SKIPPED unless TEST_AGENT_NAME set]
 
 ## Performance Notes (2025-12-09)

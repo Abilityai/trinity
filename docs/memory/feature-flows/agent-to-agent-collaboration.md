@@ -237,6 +237,32 @@ async function checkAgentAccess(
 
 ---
 
+## Parallel Delegation Mode (Added 2025-12-22)
+
+For orchestrator-worker patterns where an agent delegates to multiple workers simultaneously, use the `parallel` parameter:
+
+```python
+# Orchestrator sends 5 parallel tasks (no queue blocking)
+for worker in ["worker-1", "worker-2", "worker-3", "worker-4", "worker-5"]:
+    mcp__trinity__chat_with_agent(
+        agent_name=worker,
+        message=f"Process your assigned batch",
+        parallel=true,  # Bypass queue, run stateless
+        timeout_seconds=300
+    )
+```
+
+**Key Benefits for Collaboration**:
+- All 5 workers execute concurrently (no serial queue)
+- Each task runs in isolation (no conversation context pollution)
+- Orchestrator can fan-out work and collect results
+
+**Trade-off**: Parallel mode is stateless. For multi-turn collaborative reasoning, use standard chat mode.
+
+See [Parallel Headless Execution](parallel-headless-execution.md) for full details.
+
+---
+
 ## Agent Discovery
 
 Agents can discover other available agents using the Trinity MCP `list_agents` tool:
@@ -401,6 +427,7 @@ Visualized in real-time on the [Collaboration Dashboard](collaboration-dashboard
 - **Downstream**: [Collaboration Dashboard](collaboration-dashboard.md) - Real-time visualization of agent interactions
 - **Upstream**: [MCP Orchestration](mcp-orchestration.md) - Trinity MCP server provides chat_with_agent tool (shares auth pattern)
 - **Related**: [Agent Lifecycle](agent-lifecycle.md) - MCP API keys generated on agent creation
+- **Related**: [Parallel Headless Execution](parallel-headless-execution.md) - Use `parallel: true` for concurrent delegation (Added 2025-12-22)
 
 ---
 

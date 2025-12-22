@@ -16,14 +16,19 @@ export const useAgentsStore = defineStore('agents', {
   }),
 
   getters: {
+    // Filter out system agents for regular lists
+    userAgents() {
+      return this.agents.filter(agent => !agent.is_system)
+    },
     runningAgents() {
-      return this.agents.filter(agent => agent.status === 'running')
+      return this.userAgents.filter(agent => agent.status === 'running')
     },
     stoppedAgents() {
-      return this.agents.filter(agent => agent.status === 'stopped')
+      return this.userAgents.filter(agent => agent.status === 'stopped')
     },
     sortedAgents() {
-      const sorted = [...this.agents]
+      // Only show non-system agents in the Agents page
+      const sorted = [...this.userAgents]
       switch (this.sortBy) {
         case 'created_desc':
           return sorted.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))

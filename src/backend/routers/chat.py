@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ActivityType, ExecutionSource
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ExecutionSource
 from dependencies import get_current_user
 from services.audit_service import log_audit_event
 from services.docker_service import get_agent_container
@@ -291,6 +291,164 @@ async def chat_with_agent(
     finally:
         # Always release the queue slot when done
         await queue.complete(name, success=execution_success)
+
+
+@router.post("/{name}/task")
+async def execute_parallel_task(
+    name: str,
+    request: ParallelTaskRequest,
+    current_user: User = Depends(get_current_user),
+    x_source_agent: Optional[str] = Header(None)
+):
+    """
+    Execute a stateless task in parallel mode (no conversation context).
+
+    Unlike /chat, this endpoint:
+    - Does NOT use execution queue (parallel allowed)
+    - Does NOT use --continue flag (stateless)
+    - Each call is independent and can run concurrently
+
+    Use this for:
+    - Agent delegation from orchestrators
+    - Batch processing without context pollution
+    - Parallel task execution
+
+    Note: Does NOT update conversation history or session state.
+    """
+    container = get_agent_container(name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    if container.status != "running":
+        raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # Determine execution source for logging
+    if x_source_agent:
+        source = ExecutionSource.AGENT
+    else:
+        source = ExecutionSource.USER
+
+    # Track parallel task activity
+    task_activity_id = await activity_service.track_activity(
+        agent_name=name,
+        activity_type=ActivityType.CHAT_START,  # Reusing CHAT_START for now
+        user_id=current_user.id,
+        triggered_by="agent" if x_source_agent else "user",
+        details={
+            "message_preview": request.message[:100],
+            "source_agent": x_source_agent,
+            "parallel_mode": True,
+            "model": request.model,
+            "timeout_seconds": request.timeout_seconds
+        }
+    )
+
+    # Broadcast collaboration event if this is agent-to-agent communication
+    if x_source_agent:
+        await broadcast_collaboration_event(
+            source_agent=x_source_agent,
+            target_agent=name,
+            action="parallel_task"
+        )
+
+    try:
+        # Build payload for agent's /api/task endpoint
+        payload = {
+            "message": request.message,
+            "model": request.model,
+            "allowed_tools": request.allowed_tools,
+            "system_prompt": request.system_prompt,
+            "timeout_seconds": request.timeout_seconds
+        }
+
+        start_time = datetime.utcnow()
+
+        # Call agent's /api/task endpoint directly (no execution queue)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"http://agent-{name}:8000/api/task",
+                json=payload,
+                timeout=float(request.timeout_seconds or 300) + 10  # Add buffer to agent timeout
+            )
+            response.raise_for_status()
+
+            response_data = response.json()
+
+            execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            metadata = response_data.get("metadata", {})
+
+            # Track task completion
+            await activity_service.complete_activity(
+                activity_id=task_activity_id,
+                status="completed",
+                details={
+                    "session_id": response_data.get("session_id"),
+                    "cost_usd": metadata.get("cost_usd"),
+                    "execution_time_ms": execution_time_ms,
+                    "tool_count": len(response_data.get("execution_log", [])),
+                    "parallel_mode": True
+                }
+            )
+
+            await log_audit_event(
+                event_type="agent_interaction",
+                action="parallel_task",
+                user_id=current_user.username,
+                agent_name=name,
+                resource=f"agent-{name}",
+                result="success",
+                details={
+                    "source": source.value,
+                    "source_agent": x_source_agent,
+                    "session_id": response_data.get("session_id")
+                }
+            )
+
+            return response_data
+
+    except httpx.TimeoutException:
+        await activity_service.complete_activity(
+            activity_id=task_activity_id,
+            status="failed",
+            error="Task execution timed out"
+        )
+
+        await log_audit_event(
+            event_type="agent_interaction",
+            action="parallel_task",
+            user_id=current_user.username,
+            agent_name=name,
+            resource=f"agent-{name}",
+            result="failed",
+            severity="error",
+            details={"error": "timeout", "source_agent": x_source_agent}
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"Task execution timed out after {request.timeout_seconds} seconds"
+        )
+
+    except httpx.HTTPError as e:
+        await activity_service.complete_activity(
+            activity_id=task_activity_id,
+            status="failed",
+            error=str(e)
+        )
+
+        await log_audit_event(
+            event_type="agent_interaction",
+            action="parallel_task",
+            user_id=current_user.username,
+            agent_name=name,
+            resource=f"agent-{name}",
+            result="failed",
+            severity="error",
+            details={"error": str(e), "source_agent": x_source_agent}
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to execute task: {str(e)}"
+        )
 
 
 @router.get("/{name}/chat/history")

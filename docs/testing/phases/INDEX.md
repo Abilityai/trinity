@@ -25,8 +25,10 @@
 | 11 | Multi-Agent Dashboard | 10 min | Phase 10 | All features together | 🟢 |
 | 12 | Cleanup | 5 min | Any phase | All agents deleted | 🟢 |
 | 13 | System Settings | 15 min | Phase 1 | Trinity Prompt CRUD + injection | 🟢 |
+| 14 | OpenTelemetry | 15 min | Phase 1 | OTel metrics collection + UI display | 🟢 |
+| 15 | System Agent & Ops | 20 min | Phase 1, 14 | System agent, fleet ops, admin UI | 🟢 |
 
-**Total Time**: ~190 minutes (~3.2 hours) for full suite
+**Total Time**: ~225 minutes (~3.75 hours) for full suite
 
 ---
 
@@ -230,9 +232,15 @@ Phase 10 (Error Handling)
 Phase 11 (Multi-Agent Dashboard)
     ↓
 Phase 12 (Cleanup)
+
+Independent Phases (can run after Phase 1):
+    Phase 1 → Phase 13 (System Settings)
+    Phase 1 → Phase 14 (OpenTelemetry)
+    Phase 1 + Phase 14 → Phase 15 (System Agent)
 ```
 
 Each phase assumes **all previous phases PASSED**.
+Phases 13-15 are independent features that only require Phase 1 (authentication).
 
 ---
 
@@ -310,7 +318,9 @@ docs/testing/phases/
 ├── PHASE_10_ERROR_HANDLING.md
 ├── PHASE_11_MULTI_AGENT_DASHBOARD.md
 ├── PHASE_12_CLEANUP.md
-└── PHASE_13_SETTINGS.md
+├── PHASE_13_SETTINGS.md
+├── PHASE_14_OPENTELEMETRY.md
+└── PHASE_15_SYSTEM_AGENT.md
 ```
 
 ---
@@ -351,6 +361,8 @@ Phase X+1: Name
 
 | Date | Changes |
 |------|---------|
+| 2025-12-21 | Added Phase 14: OpenTelemetry Integration (Req 10.8) |
+| 2025-12-21 | Added Phase 15: System Agent & Ops (Req 11.1, 11.2) |
 | 2025-12-14 | Added Phase 13: System Settings for Trinity Prompt (Req 10.6) |
 | 2025-12-10 | Added Agent Permissions testing (Req 9.10) to Phase 2 and Phase 5 |
 | 2025-12-09 | Created modular phase structure (Phases 0-5 complete, 6-12 TBD) |
@@ -376,5 +388,5 @@ python3 docs/testing/run_test_phases.py --all
 
 ---
 
-**All Phases Ready**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 (14 total)
-**Last Updated**: 2025-12-14
+**All Phases Ready**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 (16 total)
+**Last Updated**: 2025-12-21

@@ -2,11 +2,13 @@
   <div
     :class="[
       'px-5 py-4 rounded-xl border-2 shadow-lg',
-      'bg-white dark:bg-gray-800',
-      'border-gray-200 dark:border-gray-700',
       'transition-all duration-200 hover:shadow-xl cursor-move',
       'relative',
-      'flex flex-col'
+      'flex flex-col',
+      // System agent gets distinct purple styling
+      isSystemAgent
+        ? 'bg-purple-50 dark:bg-purple-900/20 border-purple-300 dark:border-purple-700'
+        : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'
     ]"
     style="width: 280px; min-height: 160px;"
   >
@@ -111,13 +113,22 @@
         </div>
       </div>
 
-      <!-- Click-through button (nodrag class prevents drag) -->
+      <!-- Click-through button (nodrag class prevents drag) - Hidden for system agents -->
       <button
+        v-if="!isSystemAgent"
         class="nodrag w-full px-3 py-2 bg-blue-50 dark:bg-blue-900/30 hover:bg-blue-100 dark:hover:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-blue-200 dark:border-blue-700 hover:border-blue-300 dark:hover:border-blue-600 mt-auto"
         @click="viewDetails"
       >
         View Details
       </button>
+      <!-- System agent: Link to System page instead -->
+      <router-link
+        v-else
+        to="/system-agent"
+        class="nodrag w-full px-3 py-2 bg-purple-50 dark:bg-purple-900/30 hover:bg-purple-100 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-purple-200 dark:border-purple-700 hover:border-purple-300 dark:hover:border-purple-600 mt-auto text-center block"
+      >
+        System Dashboard
+      </router-link>
     </div>
 
     <Handle

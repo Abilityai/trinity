@@ -167,9 +167,13 @@ async def get_template_env_template(
         raise HTTPException(status_code=500, detail=f"Failed to generate env template: {str(e)}")
 
 
-@router.get("/{template_id}")
+@router.get("/{template_id:path}")
 async def get_template(template_id: str, current_user: User = Depends(get_current_user)):
-    """Get template details including required credentials."""
+    """Get template details including required credentials.
+
+    Note: Uses {template_id:path} to capture full path including slashes,
+    which is needed for GitHub template IDs like 'github:org/repo'.
+    """
     try:
         if template_id.startswith("github:"):
             gh_template = get_github_template(template_id)

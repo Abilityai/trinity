@@ -327,5 +327,197 @@ export function createAgentTools(
         return JSON.stringify(status, null, 2);
       },
     },
+
+    // ========================================================================
+    // deploy_local_agent - Deploy a Trinity-compatible local agent
+    // ========================================================================
+    deployLocalAgent: {
+      name: "deploy_local_agent",
+      description:
+        "Deploy a Trinity-compatible local agent to Trinity platform. " +
+        "Packages the agent directory, auto-imports credentials from .env, and deploys. " +
+        "The agent must have a valid template.yaml file with 'name' and 'resources' fields. " +
+        "If agent name exists, creates new version (my-agent-2) and stops old one.",
+      parameters: z.object({
+        path: z.string().describe("Absolute path to the local agent directory"),
+        name: z
+          .string()
+          .optional()
+          .describe("Agent name (defaults to name from template.yaml)"),
+        include_env: z
+          .boolean()
+          .default(true)
+          .describe("Include credentials from local .env file (default: true)"),
+      }),
+      execute: async (
+        args: { path: string; name?: string; include_env?: boolean },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const fs = await import("fs");
+        const path_module = await import("path");
+        const { execSync } = await import("child_process");
+
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        const agentPath = args.path;
+        const includeEnv = args.include_env !== false;
+
+        // 1. Validate path exists
+        if (!fs.existsSync(agentPath)) {
+          throw new Error(`Directory does not exist: ${agentPath}`);
+        }
+
+        // 2. Check for template.yaml (Trinity-compatible check)
+        const templatePath = path_module.join(agentPath, "template.yaml");
+        if (!fs.existsSync(templatePath)) {
+          throw new Error(
+            "Not Trinity-compatible: missing template.yaml. " +
+              "Create a template.yaml with at least 'name' and 'resources' fields."
+          );
+        }
+
+        // 3. Read and validate template.yaml
+        let templateContent: string;
+        try {
+          templateContent = fs.readFileSync(templatePath, "utf-8");
+        } catch (e) {
+          throw new Error(`Failed to read template.yaml: ${e}`);
+        }
+
+        // Basic YAML validation (check for required fields)
+        if (!templateContent.includes("name:")) {
+          throw new Error(
+            "Not Trinity-compatible: template.yaml missing 'name' field"
+          );
+        }
+        if (!templateContent.includes("resources:")) {
+          throw new Error(
+            "Not Trinity-compatible: template.yaml missing 'resources' field"
+          );
+        }
+
+        // 4. Read credentials from .env if requested
+        const credentials: Record<string, string> = {};
+        if (includeEnv) {
+          const envPath = path_module.join(agentPath, ".env");
+          if (fs.existsSync(envPath)) {
+            const envContent = fs.readFileSync(envPath, "utf-8");
+            for (const line of envContent.split("\n")) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#")) continue;
+              const eqIndex = trimmed.indexOf("=");
+              if (eqIndex > 0) {
+                const key = trimmed.substring(0, eqIndex).trim();
+                let value = trimmed.substring(eqIndex + 1).trim();
+                // Remove surrounding quotes
+                if (
+                  (value.startsWith('"') && value.endsWith('"')) ||
+                  (value.startsWith("'") && value.endsWith("'"))
+                ) {
+                  value = value.slice(1, -1);
+                }
+                // Only include valid env var names
+                if (/^[A-Z][A-Z0-9_]*$/.test(key) && value) {
+                  credentials[key] = value;
+                }
+              }
+            }
+            console.log(
+              `[deploy_local_agent] Read ${Object.keys(credentials).length} credentials from .env`
+            );
+          }
+        }
+
+        // 5. Create tar.gz archive
+        // Use shell command for simplicity (tar is available on all platforms)
+        const archivePath = `/tmp/trinity-deploy-${Date.now()}.tar.gz`;
+        const excludes = [
+          ".git",
+          "node_modules",
+          "__pycache__",
+          ".venv",
+          "venv",
+          ".env", // We extract credentials separately, don't include in archive
+          "*.pyc",
+          ".DS_Store",
+        ];
+
+        const excludeArgs = excludes.map((e) => `--exclude='${e}'`).join(" ");
+
+        try {
+          execSync(
+            `tar -czf "${archivePath}" ${excludeArgs} -C "${path_module.dirname(agentPath)}" "${path_module.basename(agentPath)}"`,
+            { stdio: "pipe" }
+          );
+        } catch (e) {
+          throw new Error(`Failed to create archive: ${e}`);
+        }
+
+        // 6. Read and base64 encode
+        const archiveBuffer = fs.readFileSync(archivePath);
+        const archiveBase64 = archiveBuffer.toString("base64");
+
+        // Check size limit (50MB)
+        if (archiveBuffer.length > 50 * 1024 * 1024) {
+          fs.unlinkSync(archivePath);
+          throw new Error(
+            `Archive too large: ${(archiveBuffer.length / (1024 * 1024)).toFixed(1)}MB exceeds 50MB limit`
+          );
+        }
+
+        // Cleanup archive
+        try {
+          fs.unlinkSync(archivePath);
+        } catch {
+          // Ignore cleanup errors
+        }
+
+        console.log(
+          `[deploy_local_agent] Created archive: ${(archiveBuffer.length / 1024).toFixed(1)}KB`
+        );
+
+        // 7. Call backend
+        interface DeployLocalResponse {
+          status: string;
+          agent?: {
+            name: string;
+            status: string;
+            port: number;
+            template: string;
+          };
+          versioning?: {
+            base_name: string;
+            previous_version?: string;
+            previous_version_stopped: boolean;
+            new_version: string;
+          };
+          credentials_imported: Record<
+            string,
+            {
+              status: string;
+              name: string;
+              original?: string;
+            }
+          >;
+          credentials_injected: number;
+          error?: string;
+          code?: string;
+        }
+
+        const response = await apiClient.request<DeployLocalResponse>(
+          "POST",
+          "/api/agents/deploy-local",
+          {
+            archive: archiveBase64,
+            credentials:
+              Object.keys(credentials).length > 0 ? credentials : undefined,
+            name: args.name,
+          }
+        );
+
+        return JSON.stringify(response, null, 2);
+      },
+    },
   };
 }

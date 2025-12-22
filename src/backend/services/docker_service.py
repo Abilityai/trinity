@@ -81,8 +81,39 @@ def get_agent_by_name(name: str) -> Optional[AgentStatus]:
     return None
 
 
+def is_port_available(port: int) -> bool:
+    """Check if a port is available on the host system."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.bind(('0.0.0.0', port))
+            return True
+    except (socket.error, OSError):
+        return False
+
+
 def get_next_available_port() -> int:
-    """Get next available SSH port by checking existing containers."""
+    """Get next available SSH port by checking existing containers and host availability.
+
+    Finds the next port that is:
+    1. Not used by any existing Trinity agent container
+    2. Actually available on the host system (not bound by other processes)
+    """
     agents = list_all_agents()
-    existing_ports = [a.port for a in agents if a.port]
-    return max(existing_ports or [2289]) + 1
+    existing_ports = set(a.port for a in agents if a.port)
+
+    # Start from max existing port + 1, or 2290 if no agents exist
+    start_port = max(existing_ports or {2289}) + 1
+
+    # Try up to 100 ports to find an available one
+    for port in range(start_port, start_port + 100):
+        if port not in existing_ports and is_port_available(port):
+            return port
+
+    # Fallback: if all sequential ports are taken, scan from base
+    for port in range(2290, 2500):
+        if port not in existing_ports and is_port_available(port):
+            return port
+
+    raise RuntimeError("No available ports in range 2290-2500")

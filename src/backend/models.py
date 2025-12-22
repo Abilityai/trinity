@@ -88,6 +88,15 @@ class ModelChangeRequest(BaseModel):
     model: str  # Model alias: sonnet, opus, haiku, or full model name
 
 
+class ParallelTaskRequest(BaseModel):
+    """Request model for parallel task execution (stateless, no conversation context)."""
+    message: str  # The task to execute
+    model: Optional[str] = None  # Model override: sonnet, opus, haiku, or full model name
+    allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
+    system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
+    timeout_seconds: Optional[int] = 300  # Execution timeout (5 minutes default)
+
+
 # ============================================================================
 # Activity Stream Models
 # ============================================================================
@@ -252,3 +261,40 @@ class SystemDeployResponse(BaseModel):
     permissions_configured: int = 0
     schedules_created: int = 0
     warnings: List[str] = []
+
+
+# ============================================================================
+# Local Agent Deployment Models
+# ============================================================================
+
+class CredentialImportResult(BaseModel):
+    """Result of importing a single credential."""
+    status: str  # "created", "reused", "renamed"
+    name: str
+    original: Optional[str] = None  # Original name if renamed
+
+
+class VersioningInfo(BaseModel):
+    """Versioning information for local agent deployment."""
+    base_name: str
+    previous_version: Optional[str] = None
+    previous_version_stopped: bool = False
+    new_version: str
+
+
+class DeployLocalRequest(BaseModel):
+    """Request to deploy a local agent."""
+    archive: str  # Base64-encoded tar.gz
+    credentials: Optional[Dict[str, str]] = None  # KEY=VALUE pairs
+    name: Optional[str] = None  # Override name from template.yaml
+
+
+class DeployLocalResponse(BaseModel):
+    """Response from local agent deployment."""
+    status: str  # "success" or "error"
+    agent: Optional[AgentStatus] = None
+    versioning: Optional[VersioningInfo] = None
+    credentials_imported: Dict[str, CredentialImportResult] = {}
+    credentials_injected: int = 0
+    error: Optional[str] = None
+    code: Optional[str] = None  # Error code for machine-readable errors

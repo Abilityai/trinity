@@ -1,6 +1,8 @@
 # Feature Flow: Internal System Agent
 
 > **Phase 11.1 & 11.2** - Platform operations manager with privileged access
+>
+> **Updated 2025-12-21**: Added Cost Monitoring data flow, 5-step reinitialize process, OTel access fix documentation
 
 ## Overview
 
@@ -82,7 +84,7 @@ The Internal System Agent (`trinity-system`) is an auto-deployed, deletion-prote
 |------|---------|
 | `config/agent-templates/trinity-system/template.yaml` | Template configuration |
 | `config/agent-templates/trinity-system/CLAUDE.md` | Operations instructions |
-| `config/agent-templates/trinity-system/commands/ops/*.md` | Slash commands |
+| `config/agent-templates/trinity-system/.claude/commands/ops/*.md` | Slash commands |
 | `src/backend/services/system_agent_service.py` | Auto-deployment logic |
 | `src/backend/routers/system_agent.py` | Admin management endpoints |
 | `src/backend/routers/ops.py` | Fleet operations endpoints |
@@ -133,9 +135,9 @@ The `SystemAgent.vue` view provides a dedicated, ops-focused interface:
 
 | Feature | Description |
 |---------|-------------|
-| **Purple Header** | Gradient header with system agent branding |
+| **Clean Header** | White/gray header with SYSTEM badge, consistent with rest of platform |
 | **Fleet Overview Cards** | Total, Running, Stopped, Issues counts |
-| **Quick Actions** | Emergency Stop, Restart All, Pause/Resume Schedules |
+| **Quick Actions** | Emergency Stop, Restart All, Pause/Resume Schedules (muted styling) |
 | **Operations Console** | Chat interface for ops commands |
 | **Quick Command Buttons** | One-click `/ops/status`, `/ops/health`, `/ops/schedules` |
 | **Auto-refresh** | Polls status every 10 seconds |
@@ -143,10 +145,11 @@ The `SystemAgent.vue` view provides a dedicated, ops-focused interface:
 ### Design Decisions
 
 1. **Simplified Layout**: Unlike regular `AgentDetail.vue` with many tabs, this is a single-page ops dashboard
-2. **Purple Branding**: Distinguishes from regular agents (which use blue/green)
+2. **Consistent Styling**: Uses same muted color palette as rest of platform (no aggressive colors)
 3. **Quick Actions**: One-click buttons for common operations (no need to type commands)
 4. **Fleet Focus**: Shows aggregate stats, not individual agent details
 5. **Admin-Only**: Protected route - only admins can access
+6. **Blue Theme**: Chat bubbles and send button use blue (matching system color scheme)
 
 ## API Endpoints
 
@@ -174,6 +177,57 @@ The `SystemAgent.vue` view provides a dedicated, ops-focused interface:
 | `/api/ops/schedules/pause` | POST | Pause all schedules |
 | `/api/ops/schedules/resume` | POST | Resume all schedules |
 | `/api/ops/emergency-stop` | POST | Halt all executions immediately |
+
+### Cost & Observability (OTel Integration)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/ops/costs` | GET | Cost report with OTel metrics, alerts, and thresholds |
+
+The `/api/ops/costs` endpoint provides an ops-focused view of OpenTelemetry metrics:
+
+**Response Structure**:
+```json
+{
+  "enabled": true,
+  "available": true,
+  "timestamp": "2025-12-20T...",
+  "summary": {
+    "total_cost": 0.0234,
+    "total_tokens": 48093,
+    "daily_limit": 50.0,
+    "cost_percent_of_limit": 0.05
+  },
+  "alerts": [
+    {
+      "severity": "warning",
+      "type": "cost_limit_approaching",
+      "message": "...",
+      "recommendation": "..."
+    }
+  ],
+  "cost_by_model": [...],
+  "tokens_by_type": {...},
+  "productivity": {
+    "sessions": 5,
+    "active_time_formatted": "1h",
+    "commits": 3,
+    "pull_requests": 1,
+    "lines_added": 42,
+    "lines_removed": 15
+  }
+}
+```
+
+**Alert Types**:
+- `cost_limit_exceeded` (critical) - Daily cost >= limit
+- `cost_limit_approaching` (warning) - Daily cost >= 80% of limit
+
+**Integration with OTel**:
+- Fetches raw metrics from OTel Collector's Prometheus endpoint (`:8889/metrics`)
+- Reuses parsing from `observability.py` (decoupled architecture)
+- Adds ops-specific analysis: threshold checks, alerts, formatted output
+- System agent interprets the data via `/ops/costs` slash command
 
 ### Ops Settings
 
@@ -208,7 +262,7 @@ Stored in `system_settings` table with these defaults:
 
 ## Slash Commands
 
-Commands are located in `config/agent-templates/trinity-system/commands/ops/`:
+Commands are located in `config/agent-templates/trinity-system/.claude/commands/ops/`:
 
 | Command | File | Description |
 |---------|------|-------------|
@@ -250,7 +304,9 @@ Backend Startup
 │ _create_system_agent()           │
 │ 1. Load template                 │
 │ 2. Create MCP key (scope=system) │
-│ 3. Start container               │
+│ 3. Start container with mounts:  │
+│    - /template (ro)              │
+│    - /trinity-meta-prompt (ro)   │
 │ 4. Register ownership (is_system)│
 └──────────────────────────────────┘
 ```
@@ -321,6 +377,147 @@ POST /api/ops/emergency-stop
 │    - agents_stopped: N           │
 │    - errors: [...]               │
 └──────────────────────────────────┘
+```
+
+### 4. Cost Monitoring Flow (OTel Access)
+
+The system agent accesses OpenTelemetry metrics via the REST API using its MCP API key:
+
+```
+User: /ops/costs (or "show me platform costs")
+       │
+       ▼
+┌──────────────────────────────────┐
+│ System Agent reads costs.md      │
+│ (slash command instructions)     │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│ Execute Bash curl command:                               │
+│ curl -s http://backend:8000/api/ops/costs \              │
+│   -H "Authorization: Bearer $TRINITY_MCP_API_KEY"        │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Backend /api/ops/costs endpoint  │
+│ 1. Validate MCP API key (system) │
+│ 2. Check OTEL_ENABLED env var    │
+│ 3. Fetch from OTel Collector     │
+│    (http://collector:8889/metrics)│
+│ 4. Parse Prometheus format       │
+│ 5. Add alerts & thresholds       │
+│ 6. Return JSON response          │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ System Agent parses response:    │
+│ - enabled: true/false            │
+│ - available: true/false          │
+│ - summary: cost, tokens, limit   │
+│ - alerts: warnings/critical      │
+│ - cost_by_model: breakdown       │
+│ - productivity: commits, PRs     │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Generate formatted report        │
+│ based on response state          │
+└──────────────────────────────────┘
+```
+
+**Key Implementation Details (2025-12-21 Fix):**
+
+| Issue | Root Cause | Fix |
+|-------|------------|-----|
+| Agent couldn't access OTel | Slash command used `$TRINITY_API_KEY` but agent has `$TRINITY_MCP_API_KEY` | Updated `costs.md` to use correct env var |
+| Agent said "I don't have access" | No explicit documentation in CLAUDE.md | Added Cost Monitoring section with curl example |
+| MCP key works for REST API | `dependencies.py` already supports MCP key auth | No code change needed (discovery) |
+
+**Environment Variable:**
+- `$TRINITY_MCP_API_KEY` - Auto-injected when system agent is created
+- Used for both MCP tool calls AND REST API authentication
+- System scope bypasses permission checks
+
+**Files Modified:**
+- `config/agent-templates/trinity-system/.claude/commands/ops/costs.md:11` - Fixed env var
+- `config/agent-templates/trinity-system/CLAUDE.md:128-147` - Added Cost Monitoring section
+
+### 5. Reinitialize Flow (5-Step Process)
+
+The reinitialize endpoint resets the system agent to a clean state without losing database records:
+
+```
+POST /api/system-agent/reinitialize (admin-only)
+       │
+       ▼
+┌──────────────────────────────────┐
+│ Step 1: STOPPED                  │
+│ - container.stop(timeout=30)     │
+│ - Wait for clean shutdown        │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│ Step 2: WORKSPACE_CLEARED                                │
+│ - container.start()                                      │
+│ - exec: rm -rf /home/developer/workspace/*               │
+│         /home/developer/.claude /home/developer/.trinity │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Step 3: STARTED                  │
+│ - Container already running      │
+│   from step 2                    │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│ Step 4: TEMPLATE_COPIED (2025-12-21 Fix)                 │
+│ - exec: cp -r /template/.claude /home/developer/         │
+│ - exec: cp /template/CLAUDE.md /home/developer/          │
+│ - Restores slash commands deleted in step 2              │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Step 5: TRINITY_INJECTED         │
+│ - inject_trinity_meta_prompt()   │
+│ - Copies /trinity-meta-prompt/*  │
+│   to agent workspace             │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ Return result:                   │
+│ - success: true                  │
+│ - steps_completed: [...]         │
+│ - warnings: [any errors]         │
+└──────────────────────────────────┘
+```
+
+**Why Step 4 Was Added (2025-12-21):**
+
+The previous reinitialize flow had 4 steps but was missing template re-copy:
+1. Step 2 deleted `/home/developer/.claude` (including `/ops/` slash commands)
+2. Step 5 only injected Trinity meta-prompt (not template content)
+3. Result: System agent lost its `/ops/` slash commands after reinitialize
+
+Fix: Added explicit template copy step between workspace clear and Trinity injection.
+
+**File:** `src/backend/routers/system_agent.py:163-174`
+
+```python
+# Step 4: Re-copy template files (.claude and CLAUDE.md)
+copy_result = container.exec_run(
+    "bash -c 'cp -r /template/.claude /home/developer/ 2>/dev/null; "
+    "cp /template/CLAUDE.md /home/developer/ 2>/dev/null; true'",
+    user="developer"
+)
 ```
 
 ## Testing
@@ -408,9 +605,45 @@ curl -X PUT http://localhost:8000/api/settings/ops/config \
 3. Review workspace cleanup errors in response
 
 ### Ops Commands Not Working
-1. Verify slash commands exist at `config/agent-templates/trinity-system/commands/ops/`
+1. Verify slash commands exist at `config/agent-templates/trinity-system/.claude/commands/ops/`
 2. Check agent has been re-initialized after template update
 3. Verify agent can access MCP tools
+
+### System Agent Can't Access OTel Metrics (2025-12-21 Fix)
+
+**Symptom**: Agent responds "I don't have direct access to view OpenTelemetry metrics" when asked about costs.
+
+**Root Causes and Fixes**:
+
+1. **Wrong environment variable in slash command**
+   - Problem: `costs.md` used `$TRINITY_API_KEY`
+   - Fix: Change to `$TRINITY_MCP_API_KEY` (what the agent actually has)
+   - File: `config/agent-templates/trinity-system/.claude/commands/ops/costs.md`
+
+2. **Missing /trinity-meta-prompt mount on creation**
+   - Problem: System agent created without Trinity meta-prompt mount
+   - Fix: Added mount in `_create_system_agent()` (line 216-220)
+   - File: `src/backend/services/system_agent_service.py`
+
+3. **Reinitialize deleted slash commands without restoring them**
+   - Problem: Step 2 deleted `.claude/` dir, step 5 only injected Trinity prompt
+   - Fix: Added step 4 to re-copy template files before Trinity injection
+   - File: `src/backend/routers/system_agent.py`
+
+4. **No explicit documentation in CLAUDE.md**
+   - Problem: Agent didn't know it could call REST API with its MCP key
+   - Fix: Added "Cost Monitoring" section with curl example
+   - File: `config/agent-templates/trinity-system/CLAUDE.md`
+
+**Verification**:
+```bash
+# SSH into system agent and verify environment
+echo $TRINITY_MCP_API_KEY  # Should show the key
+
+# Test the API call directly
+curl -s http://backend:8000/api/ops/costs \
+  -H "Authorization: Bearer $TRINITY_MCP_API_KEY"
+```
 
 ## Related Documents
 

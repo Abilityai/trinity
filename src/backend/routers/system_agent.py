@@ -160,7 +160,20 @@ async def reinitialize_system_agent(
         steps_completed.append("started")
         logger.info(f"System agent {SYSTEM_AGENT_NAME} started after re-initialization")
 
-        # Step 4: Re-inject Trinity meta-prompt
+        # Step 4: Re-copy template files (.claude and CLAUDE.md)
+        try:
+            copy_result = container.exec_run(
+                "bash -c 'cp -r /template/.claude /home/developer/ 2>/dev/null; cp /template/CLAUDE.md /home/developer/ 2>/dev/null; true'",
+                user="developer"
+            )
+            if copy_result.exit_code == 0:
+                steps_completed.append("template_copied")
+            else:
+                errors.append(f"Template copy warning: {copy_result.output.decode()}")
+        except Exception as e:
+            errors.append(f"Template copy error: {str(e)}")
+
+        # Step 5: Re-inject Trinity meta-prompt
         if _inject_trinity_meta_prompt:
             try:
                 injection_result = await _inject_trinity_meta_prompt(SYSTEM_AGENT_NAME)

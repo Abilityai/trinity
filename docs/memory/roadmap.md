@@ -14,8 +14,8 @@
 | Status | Item | Description | Priority |
 |--------|------|-------------|----------|
 | ✅ | Context % Calculation Bug | **Fixed 2025-12-12**: Main bug was in agent_server/routers/chat.py incorrectly summing input_tokens + cache_creation_tokens + cache_read_tokens, causing >100% display (130%, 289%). cache_creation and cache_read are billing SUBSETS, not additional tokens. Now uses metadata.input_tokens directly (authoritative total from modelUsage). Also fixed in scheduler_service.py (2 locations, 2025-12-06) and claude_code.py logging. | HIGH |
-| ⏳ | Template Detail Endpoint 500 | `GET /api/templates/{id}` returns 500 Internal Server Error. Need to investigate template retrieval logic and add error handling. Found in test suite 2025-12-17. | MEDIUM |
-| ⏳ | .env Template Endpoint Bug | `GET /api/templates/env-template` returns 500 due to `AttributeError: 'str' object has no attribute 'get'` at `templates.py:106`. Code assumes `cred` is dict but it's sometimes a string. Fix: add type checking before `.get()`. Found in test suite 2025-12-17. | MEDIUM |
+| ✅ | Template Detail Endpoint 404 | **Fixed 2025-12-22**: `GET /api/templates/{id}` returned 404 for GitHub templates like `github:org/repo`. Root cause: The `/` in the template ID was interpreted as path separator. Fix: Changed route from `{template_id}` to `{template_id:path}` to capture full path including slashes. | MEDIUM |
+| ✅ | .env Template Endpoint Bug | **Verified 2025-12-22**: Endpoint works correctly. Code at lines 110-130 already handles both string credentials (GitHub templates) and dict credentials (local templates). Tested all GitHub templates + local templates - all pass. | MEDIUM |
 
 ---
 
@@ -58,6 +58,7 @@
 | ✅ | **OpenTelemetry Integration** | OTel Collector + env var injection for Claude Code metrics export. Completed 2025-12-20. | HIGH |
 | ✅ | **OpenTelemetry UI (10.8)** | Display OTel metrics in Dashboard - cost, tokens, productivity. Backend API + header summary + panel detail. Completed 2025-12-20. | HIGH |
 | ✅ | **Internal System Agent (11.1)** | Auto-deployed platform orchestrator (`trinity-system`) with deletion protection, system-scoped MCP key, permission bypass. Completed 2025-12-20. | HIGH |
+| ✅ | **Parallel Headless Execution (12.1)** | Stateless parallel task execution - enables orchestrator to spawn N worker tasks simultaneously. `POST /api/agents/{name}/task` bypasses queue. MCP `chat_with_agent(parallel=true)`. Completed 2025-12-22. | **HIGH** |
 | ⏳ | System Manifest UI | Upload YAML, view deployment results, group agents by system prefix | MEDIUM |
 | ⏳ | A2A Protocol Support | Agent discovery and negotiation across boundaries | LOW |
 | ⏳ | Agent collaboration execution tracking | Extend schedule_executions | LOW |
@@ -231,6 +232,7 @@ Items not yet scheduled. Will be prioritized as needed.
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2025-12-22 | Parallel Headless Execution (12.1) | Two execution modes: Sequential Chat (maintains context with --continue) and Parallel Task (stateless, no lock). Enables orchestrators to spawn N parallel worker tasks. Based on Claude Code headless mode research. |
 | 2025-12-20 | Internal System Agent (11.1) | Platform needs a privileged orchestrator that auto-deploys on startup, executes system-level user requests, and cannot be deleted. Enables unified multi-agent coordination. |
 | 2025-12-08 | Deprioritize Task DAG Graph Viz | Backend workplan system complete; text-based UI sufficient for now; graph viz is nice-to-have |
 | 2025-12-05 | Deep Agent positioning | Trinity = "Four Pillars of Deep Agency" platform. Pillar I (Explicit Planning) is the priority gap. |

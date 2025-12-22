@@ -559,6 +559,8 @@ await log_audit_event(
 - **Upstream**: Agent Lifecycle (agent must be running)
 - **Integrates With**:
   - Execution Queue (`execution-queue.md`) - **Critical**: All chat requests go through queue to prevent parallel execution (Added 2025-12-06)
+- **Alternative Mode**:
+  - Parallel Headless Execution (`parallel-headless-execution.md`) - For stateless parallel tasks, use `POST /api/agents/{name}/task` instead of `/chat`. This endpoint bypasses the execution queue and runs without `--continue` flag. (Added 2025-12-22)
 - **Downstream**:
   - Activity Monitoring (`activity-monitoring.md`) - Real-time in-memory tool tracking
   - Unified Activity Stream (`activity-stream.md`) - Persistent database tracking (Req 9.7)
@@ -576,6 +578,7 @@ await log_audit_event(
 | Date | Changes |
 |------|---------|
 | 2025-12-20 | Verified and updated all line numbers for frontend (AgentDetail.vue), backend (routers/chat.py), and agent server (chat.py, claude_code.py, state.py). Updated timeout from 120s to 300s. Verified execution queue integration. |
+| 2025-12-22 | Added reference to Parallel Headless Execution as alternative mode for stateless tasks |
 | 2025-12-19 | **Bug Fix**: Fixed context resetting to ~4 tokens on subsequent messages with `--continue` flag. Implemented monotonic growth - context only increases within a session. |
 | 2025-12-11 | **Critical Bug Fix**: Fixed context percentage calculation showing >100% (e.g., 130%, 289%). Changed from incorrectly summing `input_tokens + cache_creation_tokens + cache_read_tokens` to using just `metadata.input_tokens`, which already contains the authoritative total from Claude's `modelUsage.inputTokens`. Cache tokens are billing breakdowns (subsets), not additional tokens. |
 | 2025-12-06 | Updated agent-server references to new modular structure (`agent_server/` package) |

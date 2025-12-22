@@ -58,7 +58,10 @@
 | **Dark Mode / Theme Switching** | Low | [dark-mode-theme.md](feature-flows/dark-mode-theme.md) | Client-side theme system with Light/Dark/System modes, localStorage persistence, Tailwind class strategy (Implemented 2025-12-14) |
 | **System Manifest Deployment** | High | [system-manifest.md](feature-flows/system-manifest.md) | Recipe-based multi-agent deployment via YAML manifest - complete with permissions, folders, schedules, auto-start (Completed 2025-12-18, Req 10.7) |
 | **OpenTelemetry Integration** | Medium | [opentelemetry-integration.md](feature-flows/opentelemetry-integration.md) | OTel metrics export from Claude Code agents to Prometheus via OTEL Collector - cost, tokens, productivity metrics with Dashboard UI (Phase 2.5 UI completed 2025-12-20) |
-| **Internal System Agent** | High | [internal-system-agent.md](feature-flows/internal-system-agent.md) | Platform operations manager (trinity-system) with fleet ops API, health monitoring, schedule control, and emergency stop. Ops-only scope (Req 11.1, 11.2 - Updated 2025-12-20) |
+| **Internal System Agent** | High | [internal-system-agent.md](feature-flows/internal-system-agent.md) | Platform operations manager (trinity-system) with fleet ops API, health monitoring, schedule control, and emergency stop. Ops-only scope. **2025-12-21**: OTel access fix, 5-step reinitialize, Cost Monitoring flow (Req 11.1, 11.2) |
+| **System Agent UI** | High | [system-agent-ui.md](feature-flows/system-agent-ui.md) | Admin-only `/system-agent` page with fleet overview cards, quick actions (Emergency Stop, Restart All, Pause/Resume Schedules), and Operations Console chat interface (Req 11.3 - Created 2025-12-20) |
+| **Local Agent Deployment** | High | [local-agent-deploy.md](feature-flows/local-agent-deploy.md) | Deploy Trinity-compatible local agents via MCP tool - packages directory, auto-imports credentials, versioned deployment (Implemented 2025-12-21) |
+| **Parallel Headless Execution** | High | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) | Stateless parallel task execution via `POST /task` endpoint - bypasses queue, enables orchestrator-worker patterns (Implemented 2025-12-22, Req 12.1) |
 
 ---
 

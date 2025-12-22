@@ -342,6 +342,131 @@ class CredentialManager:
         return None
 
     # ============================================================================
+    # Credential Import with Conflict Resolution (Local Agent Deployment)
+    # ============================================================================
+
+    def get_credential_by_name(self, name: str, user_id: str) -> Optional[Credential]:
+        """
+        Find a credential by name for a specific user.
+
+        Searches all credentials owned by user and returns first match.
+
+        Args:
+            name: Credential name to search for
+            user_id: User ID to filter by
+
+        Returns:
+            Credential if found, None otherwise
+        """
+        user_creds = self.list_credentials(user_id)
+        for cred in user_creds:
+            if cred.name == name:
+                return cred
+        return None
+
+    def import_credential_with_conflict_resolution(
+        self,
+        key: str,
+        value: str,
+        user_id: str
+    ) -> Dict[str, str]:
+        """
+        Import a credential with conflict resolution.
+
+        Resolution logic:
+        - If no credential with same name exists: create new
+        - If credential with same name and same value exists: reuse
+        - If credential with same name but different value: create with suffix
+
+        Args:
+            key: Credential name (e.g., "API_KEY")
+            value: Credential value
+            user_id: User ID for ownership
+
+        Returns:
+            Dict with 'status' (created/reused/renamed), 'name', and optionally 'original'
+        """
+        existing = self.get_credential_by_name(key, user_id)
+
+        if existing:
+            # Check if values match
+            existing_secret = self.get_credential_secret(existing.id, user_id)
+            existing_value = None
+
+            if existing_secret:
+                # Handle different credential formats
+                if isinstance(existing_secret, dict):
+                    # For single-value credentials, value is stored as {"api_key": "value"}
+                    # or {"token": "value"} or with the key name itself
+                    existing_value = (
+                        existing_secret.get("api_key") or
+                        existing_secret.get("token") or
+                        existing_secret.get(key) or
+                        (list(existing_secret.values())[0] if existing_secret else None)
+                    )
+                else:
+                    existing_value = existing_secret
+
+            if existing_value == value:
+                # Same name, same value -> reuse
+                return {"status": "reused", "name": key}
+            else:
+                # Same name, different value -> create with suffix
+                new_key = self._find_unique_credential_name(key, user_id)
+                self._create_simple_credential(new_key, value, user_id)
+                return {"status": "renamed", "name": new_key, "original": key}
+        else:
+            # New credential
+            self._create_simple_credential(key, value, user_id)
+            return {"status": "created", "name": key}
+
+    def _find_unique_credential_name(self, base_name: str, user_id: str) -> str:
+        """
+        Find next available credential name with suffix.
+
+        Args:
+            base_name: Base credential name
+            user_id: User ID
+
+        Returns:
+            Unique name like "API_KEY_2", "API_KEY_3", etc.
+        """
+        n = 2
+        while True:
+            candidate = f"{base_name}_{n}"
+            if not self.get_credential_by_name(candidate, user_id):
+                return candidate
+            n += 1
+
+    def _create_simple_credential(self, name: str, value: str, user_id: str) -> Credential:
+        """
+        Create a simple single-value credential.
+
+        Args:
+            name: Credential name
+            value: Credential value
+            user_id: User ID for ownership
+
+        Returns:
+            Created Credential object
+        """
+        # Import here to avoid circular imports
+        from utils.helpers import infer_service_from_key, infer_type_from_key
+
+        service = infer_service_from_key(name)
+        cred_type = infer_type_from_key(name)
+
+        cred_data = CredentialCreate(
+            name=name,
+            service=service,
+            type=cred_type,
+            credentials={"api_key": value, name: value},
+            description="Auto-imported from local agent"
+        )
+
+        return self.create_credential(user_id, cred_data)
+
+    # ============================================================================
     # MCP API Key Management - MOVED TO database.py for SQLite persistence
     # ============================================================================
     # All MCP API key methods have been migrated to src/backend/database.py

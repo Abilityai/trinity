@@ -658,30 +658,192 @@ oauth_state:{state} → {
 
 ---
 
-## Security Architecture
+## Authentication & Authorization Architecture
 
-### Authentication Flow
+Trinity has multiple authentication layers for different component interactions:
 
-**Runtime Mode Detection** (Added 2025-12-05):
-- Backend controls auth mode via `DEV_MODE_ENABLED` env var
-- Frontend calls `GET /api/auth/mode` to detect mode at runtime
-- No frontend rebuild needed to switch between dev and prod modes
-- JWT tokens include `mode` claim ("dev" or "prod") to prevent token mixing
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    Authentication & Authorization Flow                            │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                   │
+│   [Human User]                                                                    │
+│        │                                                                          │
+│        │ (1) User Auth: JWT via Auth0/OAuth or Dev credentials                    │
+│        ▼                                                                          │
+│   ┌─────────┐    JWT Token    ┌─────────────┐                                    │
+│   │ Browser │───────────────►│   Backend   │                                    │
+│   └────┬────┘                 │   FastAPI   │                                    │
+│        │                      └──────┬──────┘                                    │
+│        │                             │                                            │
+│   [Claude Code Client]               │                                            │
+│        │                             │                                            │
+│        │ (2) MCP API Key             │                                            │
+│        ▼                             │                                            │
+│   ┌───────────┐  Validates Key  ┌────┴────┐                                      │
+│   │ MCP Server│◄───────────────►│ Backend │                                      │
+│   │  FastMCP  │                 └────┬────┘                                      │
+│   └─────┬─────┘                      │                                            │
+│         │                            │                                            │
+│         │ (3) Agent MCP Key          │                                            │
+│         ▼                            │                                            │
+│   ┌─────────────┐  (4) Permissions   │                                            │
+│   │ Agent A     │◄──────────────────►│                                            │
+│   │ Container   │    Database        │                                            │
+│   └──────┬──────┘                    │                                            │
+│          │                           │                                            │
+│          │ (5) External Credentials  │                                            │
+│          ▼                           │                                            │
+│   ┌─────────────┐   (6) Hot-reload   │                                            │
+│   │ External    │◄──────────────────►│                                            │
+│   │ Services    │    via Redis       │                                            │
+│   └─────────────┘                    │                                            │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
 
-**Development Mode** (`DEV_MODE_ENABLED=true`):
-1. User enters username/password on login form
-2. `POST /api/token` validates credentials
-3. Returns JWT with `mode: "dev"` claim
+### 1. User Authentication (Human → Platform)
 
-**Production Mode** (`DEV_MODE_ENABLED=false`):
-1. User clicks "Sign in with Google"
-2. Auth0 handles OAuth flow
-3. Returns Auth0 token to frontend
-4. `POST /api/auth/exchange` validates token with Auth0
-5. Backend creates JWT with `mode: "prod"` claim
-6. Frontend sends JWT in `Authorization: Bearer` header
+Users authenticate to the Trinity web UI and API.
 
-### Container Security
+| Mode | Flow | Token |
+|------|------|-------|
+| **Dev** (`DEV_MODE_ENABLED=true`) | Username/password → `POST /api/token` | JWT with `mode: "dev"` |
+| **Prod** (`DEV_MODE_ENABLED=false`) | Google OAuth via Auth0 → `POST /api/auth/exchange` | JWT with `mode: "prod"` |
+
+- Runtime mode detection via `GET /api/auth/mode` (no rebuild to switch)
+- Domain restriction (e.g., `@ability.ai`) enforced server-side
+- Token mode claim prevents dev tokens in prod mode
+
+### 2. MCP API Keys (User → MCP Server)
+
+External Claude Code clients authenticate to Trinity MCP Server using MCP API Keys.
+
+| Component | Details |
+|-----------|---------|
+| **Creation** | User creates via UI `/api-keys` page |
+| **Format** | `trinity_mcp_{random}` (44 chars) |
+| **Storage** | SHA-256 hash in SQLite |
+| **Transport** | `Authorization: Bearer trinity_mcp_...` header |
+| **Validation** | MCP Server calls `POST /api/mcp/validate` |
+
+**Client Configuration** (`.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "trinity": {
+      "url": "http://localhost:8080/mcp",
+      "headers": { "Authorization": "Bearer trinity_mcp_..." }
+    }
+  }
+}
+```
+
+### 3. MCP Server → Backend (Key Passthrough)
+
+The MCP server authenticates backend API calls using the user's MCP API key.
+
+| Step | Action |
+|------|--------|
+| 1 | MCP Server receives request with user's MCP API key |
+| 2 | FastMCP `authenticate` callback validates key via backend |
+| 3 | Returns `McpAuthContext` with userId, email, scope |
+| 4 | MCP tools use user's key for backend API calls |
+| 5 | Backend `get_current_user()` validates JWT OR MCP API key |
+
+**Key Point**: In production (`MCP_REQUIRE_API_KEY=true`), MCP server has NO admin credentials. All API calls use the user's MCP key.
+
+### 4. Agent MCP Keys (Agent → Trinity MCP)
+
+Each agent gets an auto-generated MCP API key for agent-to-agent collaboration.
+
+| Property | Value |
+|----------|-------|
+| **Scope** | `agent` (vs `user` for human users) |
+| **Agent Name** | Stored with key for permission checks |
+| **Injection** | Auto-added to agent's `.mcp.json` on creation |
+| **Environment** | `TRINITY_MCP_API_KEY` env var in container |
+| **MCP URL** | Internal: `http://mcp-server:8080/mcp` |
+
+**Agent .mcp.json** (auto-generated):
+```json
+{
+  "mcpServers": {
+    "trinity": {
+      "type": "http",
+      "url": "http://mcp-server:8080/mcp",
+      "headers": { "Authorization": "Bearer ${TRINITY_MCP_API_KEY}" }
+    }
+  }
+}
+```
+
+### 5. Agent-to-Agent Permissions
+
+Fine-grained control over which agents can communicate with each other.
+
+| Scope | Enforcement |
+|-------|-------------|
+| **`list_agents`** | Returns only permitted agents + self |
+| **`chat_with_agent`** | Blocks calls to non-permitted targets |
+
+**Permission Rules**:
+
+| Source | Target | Access |
+|--------|--------|--------|
+| Agent (any) | Self | ✅ Always allowed |
+| Agent (same owner) | Same owner agents | ✅ Default on creation |
+| Agent (different owner) | Shared agent | ✅ If `is_shared=true` |
+| Agent (different owner) | Private agent | ❌ Denied |
+| System agent | Any agent | ✅ Bypasses all checks |
+
+**Configuration**: Permissions tab in Agent Detail UI (`PUT /api/agents/{name}/permissions`)
+
+### 6. System Agent (Privileged Access)
+
+The internal system agent (`trinity-system`) has special privileges.
+
+| Property | Value |
+|----------|-------|
+| **Scope** | `system` (not `user` or `agent`) |
+| **Permission Check** | Bypassed entirely |
+| **Access** | Can call any agent, any tool |
+| **Protection** | Cannot be deleted via API |
+| **Purpose** | Platform operations (health, costs, fleet management) |
+
+### 7. External Credentials (Agent → External Services)
+
+Credentials for external APIs (OpenAI, HeyGen, etc.) injected into agent containers.
+
+| Storage | Redis with separate metadata and secrets |
+|---------|------------------------------------------|
+| **Injection** | At agent creation + hot-reload at runtime |
+| **Files** | `.env` (KEY=VALUE) + `.mcp.json` (substituted) |
+| **Template** | `.mcp.json.template` with `${VAR_NAME}` placeholders |
+| **Hot-reload** | `POST /api/agents/{name}/credentials/hot-reload` |
+
+**Flow**:
+```
+User uploads credentials → Redis storage → Agent creation OR hot-reload
+                                              ↓
+                                    .env written to container
+                                              ↓
+                                    .mcp.json generated from template
+                                              ↓
+                                    MCP servers pick up credentials
+```
+
+### MCP Scope Summary
+
+| Scope | Description | Permission Enforcement |
+|-------|-------------|----------------------|
+| `user` | Human user via Claude Code client | Owner/admin/shared checks |
+| `agent` | Regular agent calling other agents | Explicit permission list |
+| `system` | System agent only | **Bypasses all checks** |
+
+---
+
+## Container Security
+
 - Non-root execution (`developer:1000`)
 - `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`
 - `security_opt: no-new-privileges:true`
@@ -689,22 +851,18 @@ oauth_state:{state} → {
 - Isolated network (`172.28.0.0/16`)
 - No external UI port exposure
 
-### Credential Security
-- Stored encrypted in Redis
-- Injected at runtime (never in images)
-- Hot-reload without container restart
-- Audit logged (operations, not values)
-
 ---
 
 ## External Integrations
 
-### Auth0
-- Domain: Configure via `AUTH0_DOMAIN` env var
-- Client ID: Configure via `VITE_AUTH0_CLIENT_ID` env var
-- Allowed domain: Configure via `AUTH0_ALLOWED_DOMAIN` env var (optional)
+### Auth0 (User Authentication)
+| Setting | Environment Variable |
+|---------|---------------------|
+| Domain | `AUTH0_DOMAIN` |
+| Client ID | `VITE_AUTH0_CLIENT_ID` |
+| Allowed Domain | `AUTH0_ALLOWED_DOMAIN` (optional) |
 
-### OAuth Providers
+### OAuth Providers (Agent Credentials)
 - Google (Workspace access)
 - Slack (Bot/User tokens)
 - GitHub (PAT for repos)

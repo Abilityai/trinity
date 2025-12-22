@@ -447,3 +447,160 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
 def get_execution_lock():
     """Get the execution lock for chat endpoint"""
     return _execution_lock
+
+
+async def execute_headless_task(
+    prompt: str,
+    model: Optional[str] = None,
+    allowed_tools: Optional[List[str]] = None,
+    system_prompt: Optional[str] = None,
+    timeout_seconds: int = 300
+) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
+    """
+    Execute Claude Code in headless mode for parallel task execution.
+
+    Unlike execute_claude_code(), this function:
+    - Does NOT acquire execution lock (parallel allowed)
+    - Does NOT use --continue flag (stateless, no conversation context)
+    - Each call is independent and can run concurrently
+
+    Args:
+        prompt: The task to execute
+        model: Optional model override (sonnet, opus, haiku)
+        allowed_tools: Optional list of allowed tools (restricts available tools)
+        system_prompt: Optional additional system prompt
+        timeout_seconds: Execution timeout (default 5 minutes)
+
+    Returns: (response_text, execution_log, metadata, session_id)
+    """
+    import signal
+
+    if not agent_state.claude_code_available:
+        raise HTTPException(
+            status_code=503,
+            detail="Claude Code is not available in this container"
+        )
+
+    try:
+        # Get ANTHROPIC_API_KEY from environment
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="ANTHROPIC_API_KEY not configured in agent container"
+            )
+
+        # Build command - NO --continue flag (stateless)
+        cmd = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
+
+        # Add MCP config if .mcp.json exists (for agent-to-agent collaboration via Trinity MCP)
+        mcp_config_path = Path.home() / ".mcp.json"
+        if mcp_config_path.exists():
+            cmd.extend(["--mcp-config", str(mcp_config_path)])
+
+        # Add model selection if specified
+        if model:
+            cmd.extend(["--model", model])
+            logger.info(f"[Headless Task] Using model: {model}")
+
+        # Add allowed tools restriction if specified
+        if allowed_tools:
+            tools_str = ",".join(allowed_tools)
+            cmd.extend(["--allowedTools", tools_str])
+            logger.info(f"[Headless Task] Restricting tools to: {tools_str}")
+
+        # Add system prompt if specified
+        if system_prompt:
+            cmd.extend(["--append-system-prompt", system_prompt])
+            logger.info(f"[Headless Task] Appending system prompt ({len(system_prompt)} chars)")
+
+        # Initialize tracking structures
+        execution_log: List[ExecutionLogEntry] = []
+        metadata = ExecutionMetadata()
+        tool_start_times: Dict[str, datetime] = {}
+        response_parts: List[str] = []
+        task_session_id = str(uuid.uuid4())
+
+        logger.info(f"[Headless Task] Starting task {task_session_id}: {' '.join(cmd[:5])}...")
+
+        # Use Popen for real-time streaming
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1  # Line buffered
+        )
+
+        # Write prompt to stdin and close it
+        process.stdin.write(prompt)
+        process.stdin.close()
+
+        # Helper function that reads subprocess output (runs in thread pool)
+        def read_subprocess_output_with_timeout():
+            """Blocking function to read subprocess output line by line with timeout"""
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if not line:
+                        break
+                    # Process each line immediately
+                    process_stream_line(line, execution_log, metadata, tool_start_times, response_parts)
+            except Exception as e:
+                logger.error(f"[Headless Task] Error reading output: {e}")
+
+            # Wait for process to complete and get stderr
+            stderr = process.stderr.read()
+            return_code = process.wait()
+            return stderr, return_code
+
+        # Run with timeout using asyncio
+        loop = asyncio.get_event_loop()
+        try:
+            stderr_output, return_code = await asyncio.wait_for(
+                loop.run_in_executor(None, read_subprocess_output_with_timeout),
+                timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            # Kill the process on timeout
+            process.kill()
+            process.wait()
+            logger.error(f"[Headless Task] Task {task_session_id} timed out after {timeout_seconds}s")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Task execution timed out after {timeout_seconds} seconds"
+            )
+
+        # Check for errors
+        if return_code != 0:
+            logger.error(f"[Headless Task] Task {task_session_id} failed (exit {return_code}): {stderr_output[:500]}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Task execution failed: {stderr_output[:200] if stderr_output else 'Unknown error'}"
+            )
+
+        # Build final response text
+        response_text = "\n".join(response_parts) if response_parts else ""
+
+        if not response_text:
+            raise HTTPException(
+                status_code=500,
+                detail="Task returned empty response"
+            )
+
+        # Count unique tools used
+        tool_use_count = len([e for e in execution_log if e.type == "tool_use"])
+        metadata.tool_count = tool_use_count
+
+        # Use session_id from Claude if available, otherwise use our generated one
+        final_session_id = metadata.session_id or task_session_id
+
+        logger.info(f"[Headless Task] Task {final_session_id} completed: cost=${metadata.cost_usd}, duration={metadata.duration_ms}ms, tools={metadata.tool_count}")
+
+        return response_text, execution_log, metadata, final_session_id
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Headless Task] Execution error: {e}")
+        raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")

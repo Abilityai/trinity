@@ -350,9 +350,33 @@ async function validateMcpApiKey(
 
 | Tool | Line | Parameters | Backend Endpoint |
 |------|------|------------|------------------|
-| `chat_with_agent` | 88-131 | `{agent_name, message}` | `POST /api/agents/{name}/chat` |
+| `chat_with_agent` | 88-131 | `{agent_name, message, parallel?, ...}` | `POST /api/agents/{name}/chat` or `/task` |
 | `get_chat_history` | 137-151 | `{agent_name}` | `GET /api/agents/{name}/chat/history` |
 | `get_agent_logs` | 158-182 | `{agent_name, lines?}` | `GET /api/agents/{name}/logs` |
+
+### Parallel Mode (Added 2025-12-22)
+
+The `chat_with_agent` tool now supports a `parallel` parameter for stateless, concurrent execution:
+
+```typescript
+chat_with_agent({
+  agent_name: "worker-1",
+  message: "Process this task",
+  parallel: true,              // Bypass queue, run stateless
+  model: "sonnet",             // Optional: model override
+  allowed_tools: ["Read"],     // Optional: tool restrictions
+  system_prompt: "Be concise", // Optional: additional instructions
+  timeout_seconds: 300         // Optional: timeout (default 5 min)
+})
+```
+
+**When `parallel: true`**:
+- Calls `POST /api/agents/{name}/task` instead of `/chat`
+- Bypasses execution queue entirely
+- Runs without `--continue` flag (no conversation context)
+- Allows N concurrent tasks per agent
+
+See [Parallel Headless Execution](parallel-headless-execution.md) for full details.
 
 ### Queue-Aware Chat (429 Handling) - Added 2025-12-06
 
@@ -778,5 +802,6 @@ curl http://localhost:8000/api/agents/user2-agent | jq .owner  # Should be user2
 
 - **Upstream**: Auth0 Authentication (user creates keys)
 - **Integrates With**:
-  - Execution Queue (`execution-queue.md`) - All `chat_with_agent` calls go through queue with 429 handling (Added 2025-12-06)
+  - Execution Queue (`execution-queue.md`) - `chat_with_agent` calls go through queue with 429 handling (unless `parallel: true`)
+  - Parallel Headless Execution (`parallel-headless-execution.md`) - When `parallel: true`, bypasses queue and uses `/task` endpoint (Added 2025-12-22)
 - **Downstream**: Agent Lifecycle, Agent Chat, Credential Injection, Agent Sharing (access control)

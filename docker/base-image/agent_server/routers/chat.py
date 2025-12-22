@@ -7,9 +7,9 @@ from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..models import ChatRequest, ModelRequest
+from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
-from ..services.claude_code import execute_claude_code, get_execution_lock
+from ..services.claude_code import execute_claude_code, execute_headless_task, get_execution_lock
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -78,6 +78,45 @@ async def chat(request: ChatRequest):
             },
             "timestamp": datetime.now().isoformat()
         }
+
+
+@router.post("/api/task")
+async def execute_task(request: ParallelTaskRequest):
+    """
+    Execute a stateless task in parallel mode (no conversation context).
+
+    Unlike /api/chat, this endpoint:
+    - Does NOT acquire execution lock (parallel allowed)
+    - Does NOT use --continue flag (stateless)
+    - Each call is independent and can run concurrently
+
+    Use this for:
+    - Agent delegation from orchestrators
+    - Batch processing without context pollution
+    - Parallel task execution
+
+    Note: Does NOT update conversation history or session state.
+    """
+    logger.info(f"[Task] Executing parallel task: {request.message[:50]}...")
+
+    # Execute in headless mode (no lock, no --continue)
+    response_text, execution_log, metadata, session_id = await execute_headless_task(
+        prompt=request.message,
+        model=request.model,
+        allowed_tools=request.allowed_tools,
+        system_prompt=request.system_prompt,
+        timeout_seconds=request.timeout_seconds or 300
+    )
+
+    logger.info(f"[Task] Task {session_id} completed successfully")
+
+    return {
+        "response": response_text,
+        "execution_log": [entry.model_dump() for entry in execution_log],
+        "metadata": metadata.model_dump(),
+        "session_id": session_id,
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 @router.get("/api/chat/history")

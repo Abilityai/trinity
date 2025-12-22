@@ -164,6 +164,7 @@ export async function createServer(config: ServerConfig = {}) {
   server.addTool(agentTools.listTemplates);
   server.addTool(agentTools.reloadCredentials);
   server.addTool(agentTools.getCredentialStatus);
+  server.addTool(agentTools.deployLocalAgent);
 
   // Register chat tools with auth context for access control
   const chatTools = createChatTools(client, requireApiKey);

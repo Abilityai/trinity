@@ -24,6 +24,23 @@ Claude Code maintains conversation state in memory. When multiple execution requ
 2. **Agent-to-Agent + User**: Orchestrator calls agent while user is chatting -> race condition
 3. **Multiple Schedules**: Two cron jobs trigger at same minute -> chaos
 
+### Queue Bypass: Parallel Task Execution (Added 2025-12-22)
+
+For stateless, parallel workloads, the queue can be bypassed using `POST /api/agents/{name}/task`:
+- **No queue serialization** - Requests execute immediately
+- **No --continue flag** - Each task runs in isolation (no conversation context)
+- **Multiple concurrent tasks** - N tasks can run simultaneously per agent
+
+See [Parallel Headless Execution](parallel-headless-execution.md) for details.
+
+**When to use /task vs /chat**:
+| Use `/chat` | Use `/task` |
+|-------------|-------------|
+| Multi-turn conversations | One-shot tasks |
+| Context continuity needed | Stateless operations |
+| User interactive chat | Agent-to-agent delegation |
+| Sequential reasoning | Batch processing |
+
 ---
 
 ## Solution Architecture
@@ -687,8 +704,11 @@ curl -X POST http://localhost:8000/api/agents/my-agent/queue/release \
 - **Integrates With**:
   - Agent Chat (`agent-chat.md`) - Queue enforced on all chat requests
   - Agent Scheduling (`scheduling.md`) - Scheduled executions use queue
-  - MCP Orchestration (`mcp-orchestration.md`) - Agent-to-agent calls use queue
+  - MCP Orchestration (`mcp-orchestration.md`) - Agent-to-agent calls use queue (unless `parallel: true`)
   - Activity Stream (`activity-stream.md`) - Queue status tracked in activities
+
+- **Bypassed By**:
+  - Parallel Headless Execution (`parallel-headless-execution.md`) - `POST /api/agents/{name}/task` bypasses queue entirely (Added 2025-12-22)
 
 - **Downstream**:
   - Activity Monitoring (`activity-monitoring.md`) - Tool execution tracking
@@ -699,6 +719,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/queue/release \
 
 | Date | Changes |
 |------|---------|
+| 2025-12-22 | Added Queue Bypass section for Parallel Task Execution (/api/task endpoint) |
 | 2025-12-19 | Updated line numbers for all source files based on current codebase |
 | 2025-12-19 | Updated models.py reference to lines 163-210 |
 | 2025-12-19 | Updated agents.py queue endpoints to lines 1152-1261 |

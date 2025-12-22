@@ -329,6 +329,73 @@ export class TrinityClient {
   }
 
   /**
+   * Execute a parallel task on an agent (stateless, no conversation context)
+   *
+   * Unlike chat(), this method:
+   * - Does NOT use execution queue (parallel allowed)
+   * - Does NOT use --continue flag (stateless)
+   * - Each call is independent and can run concurrently
+   *
+   * @param name - Agent name
+   * @param message - The task to execute
+   * @param options - Optional parameters
+   * @param sourceAgent - Optional source agent name for collaboration tracking
+   */
+  async task(
+    name: string,
+    message: string,
+    options?: {
+      model?: string;
+      allowed_tools?: string[];
+      system_prompt?: string;
+      timeout_seconds?: number;
+    },
+    sourceAgent?: string
+  ): Promise<ChatResponse> {
+    // Prepare headers
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(this.token && { Authorization: `Bearer ${this.token}` }),
+    };
+
+    // Add X-Source-Agent header for collaboration tracking
+    if (sourceAgent) {
+      headers["X-Source-Agent"] = sourceAgent;
+    }
+
+    const body = {
+      message,
+      model: options?.model,
+      allowed_tools: options?.allowed_tools,
+      system_prompt: options?.system_prompt,
+      timeout_seconds: options?.timeout_seconds,
+    };
+
+    const timeout = (options?.timeout_seconds || 300) + 10; // Add buffer
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`API error (${response.status}): ${error}`);
+      }
+
+      return (await response.json()) as ChatResponse;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
    * Get an agent's conversation history
    */
   async getChatHistory(name: string): Promise<ChatMessage[]> {

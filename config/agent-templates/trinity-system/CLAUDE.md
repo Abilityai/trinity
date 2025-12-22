@@ -125,10 +125,26 @@ For fleet-wide operations:
 
 ## Cost Monitoring
 
-If OTel is enabled, monitor:
-- Daily cost per agent
-- Total platform cost
-- Alert if approaching limits
+You have access to OpenTelemetry metrics via the `/ops/costs` slash command or by calling the API directly:
+
+```bash
+curl -s http://backend:8000/api/ops/costs \
+  -H "Authorization: Bearer $TRINITY_MCP_API_KEY"
+```
+
+Your MCP API key (`$TRINITY_MCP_API_KEY` env var) is authorized to call REST API endpoints.
+
+**What you can monitor:**
+- Total platform cost (daily spending)
+- Cost by model (Claude Sonnet, Claude Haiku, etc.)
+- Token usage breakdown (input, output, cache)
+- Productivity metrics (commits, PRs, lines of code)
+- Daily spending limit and alerts
+
+**When to check costs:**
+- When user asks about costs or metrics
+- As part of `/ops/status` reports
+- When cost alerts are triggered
 
 ## Alerting Guidelines
 
