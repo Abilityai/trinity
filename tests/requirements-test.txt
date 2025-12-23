@@ -1,8 +1,8 @@
 # Test dependencies for Trinity API tests
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-timeout>=2.2.0
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-timeout>=2.3.0
 pytest-html>=4.1.0
-pytest-cov>=4.1.0
-httpx>=0.27.0
-python-dotenv>=1.0.0
+pytest-cov>=6.0.0
+httpx>=0.28.0
+python-dotenv>=1.0.1

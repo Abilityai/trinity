@@ -1,3 +1,57 @@
+### 2025-12-23 15:00:00
+📦 **Dependencies Updated to Latest Versions**
+
+Audited and updated all project dependencies to their latest stable versions.
+
+**Backend (docker/backend/Dockerfile)**:
+- fastapi: 0.104.1 → 0.115.6
+- uvicorn: 0.24.0 → 0.34.0
+- pydantic: 2.5.0 → 2.10.4
+- python-multipart: 0.0.6 → 0.0.20
+- websockets: 12.0 → 14.1
+- redis: 5.0.1 → 5.2.1
+- httpx: 0.25.2 → 0.28.1
+- pyyaml: 6.0.1 → 6.0.2
+- docker: 7.0.0 → 7.1.0
+- aiofiles: 23.2.1 → 24.1.0
+- apscheduler: 3.10.4 → 3.11.0
+- croniter: 2.0.1 → 5.0.1
+- pytz: 2024.1 → 2024.2
+- Added bcrypt==4.2.1 pin (for passlib compatibility)
+- Removed deprecated urllib3/requests version constraints
+
+**Base Image (docker/base-image/Dockerfile)**:
+- Go: 1.21.5 → 1.23.4
+
+**Frontend (src/frontend/package.json)**:
+- vue: 3.3.8 → 3.5.13
+- vite: 5.0.2 → 6.0.6
+- pinia: 2.1.7 → 2.3.0
+- axios: 1.6.2 → 1.7.9
+- chart.js: 4.4.0 → 4.4.7
+- vue-router: 4.2.5 → 4.5.0
+- tailwindcss: 3.3.5 → 3.4.17
+- @vitejs/plugin-vue: 4.5.0 → 5.2.1
+- postcss: 8.4.31 → 8.4.49
+- autoprefixer: 10.4.16 → 10.4.20
+
+**MCP Server (src/mcp-server/package.json)**:
+- fastmcp: 3.23.1 → 3.24.0
+- zod: 3.23.8 → 3.24.1
+
+**Root (package.json)**:
+- @modelcontextprotocol/sdk: 1.21.1 → 1.25.1
+
+**Tests (tests/requirements-test.txt)**:
+- pytest: 8.0.0 → 8.3.0
+- pytest-asyncio: 0.23.0 → 0.24.0
+- pytest-cov: 4.1.0 → 6.0.0
+- httpx: 0.27.0 → 0.28.0
+
+**Security Note**: passlib remains at 1.7.4 (unmaintained but no replacement). bcrypt pinned to 4.2.1 for compatibility (5.0.0 breaks passlib).
+
+---
+
 ### 2025-12-23 14:30:00
 🔑 **MCP Keys First-Time Setup UX Improvements**
 
