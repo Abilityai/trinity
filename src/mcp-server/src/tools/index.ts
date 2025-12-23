@@ -6,3 +6,4 @@
 
 export { createAgentTools } from "./agents.js";
 export { createChatTools } from "./chat.js";
+export { createDocsTools } from "./docs.js";

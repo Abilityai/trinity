@@ -10,6 +10,7 @@ import { TrinityClient } from "./client.js";
 import { createAgentTools } from "./tools/agents.js";
 import { createChatTools } from "./tools/chat.js";
 import { createSystemTools } from "./tools/systems.js";
+import { createDocsTools } from "./tools/docs.js";
 import type { McpAuthContext } from "./types.js";
 
 export interface ServerConfig {
@@ -179,8 +180,12 @@ export async function createServer(config: ServerConfig = {}) {
   server.addTool(systemTools.restartSystem);
   server.addTool(systemTools.getSystemManifest);
 
-  const totalTools = Object.keys(agentTools).length + Object.keys(chatTools).length + Object.keys(systemTools).length;
-  console.log(`Registered ${totalTools} tools (${Object.keys(agentTools).length} agent, ${Object.keys(chatTools).length} chat, ${Object.keys(systemTools).length} system)`);
+  // Register documentation tools
+  const docsTools = createDocsTools();
+  server.addTool(docsTools.getAgentRequirements);
+
+  const totalTools = Object.keys(agentTools).length + Object.keys(chatTools).length + Object.keys(systemTools).length + Object.keys(docsTools).length;
+  console.log(`Registered ${totalTools} tools (${Object.keys(agentTools).length} agent, ${Object.keys(chatTools).length} chat, ${Object.keys(systemTools).length} system, ${Object.keys(docsTools).length} docs)`);
 
   return { server, port, client, requireApiKey };
 }
