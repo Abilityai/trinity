@@ -1,3 +1,27 @@
+### 2025-12-23 14:30:00
+🔑 **MCP Keys First-Time Setup UX Improvements**
+
+Improved the MCP API Keys page for better first-time user experience. When a user first visits the MCP Keys page without any user-scoped keys, a default key is automatically created and displayed with the full MCP configuration ready to copy.
+
+**Backend Changes**:
+- `routers/mcp_keys.py` - Added `POST /api/mcp/keys/ensure-default` endpoint that auto-creates a default MCP key for first-time users
+
+**Frontend Changes**:
+- `ApiKeys.vue` - Auto-calls ensure-default on page load, shows modal with full MCP config when key created
+- Key created modal now shows ready-to-copy MCP JSON configuration with the key embedded
+- Added "Copy Config" button for one-click MCP config copying
+- Agent-scoped keys filtered from non-admin users (system/agent keys are internal)
+- Added scope badges (Agent/System) for admin visibility
+
+**First-Time UX Flow**:
+1. User logs in → navigates to MCP Keys
+2. System auto-creates "Default MCP Key"
+3. Modal displays with full `.mcp.json` configuration including the key
+4. User clicks "Copy Config" → pastes into their MCP client
+5. Done!
+
+---
+
 ### 2025-12-23 11:00:00
 ❌ **Workplan System Removed (9.8) - Complete Cleanup**
 

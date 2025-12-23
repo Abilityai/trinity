@@ -56,7 +56,7 @@
             <p class="mt-4 text-gray-500 dark:text-gray-400">Loading API keys...</p>
           </div>
 
-          <div v-else-if="apiKeys.length === 0" class="text-center py-12">
+          <div v-else-if="displayedKeys.length === 0" class="text-center py-12">
             <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
             </svg>
@@ -65,7 +65,7 @@
           </div>
 
           <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
-            <li v-for="key in apiKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
+            <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
               <div class="flex items-center justify-between">
                 <div class="flex items-center flex-1">
                   <div class="flex-shrink-0">
@@ -82,6 +82,13 @@
                       <span class="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
                             :class="key.is_active ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 text-red-800 dark:text-red-300'">
                         {{ key.is_active ? 'Active' : 'Revoked' }}
+                      </span>
+                      <!-- Scope badge for admin visibility -->
+                      <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 dark:bg-purple-900/50 text-purple-800 dark:text-purple-300">
+                        Agent
+                      </span>
+                      <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300">
+                        System
                       </span>
                     </div>
                     <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
@@ -184,7 +191,7 @@
       <div class="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:p-0">
         <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"></div>
 
-        <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+        <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-2xl sm:w-full">
           <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
             <div class="flex items-center mb-4">
               <div class="flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-green-100 dark:bg-green-900/50">
@@ -192,25 +199,52 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <h3 class="ml-4 text-lg font-medium text-gray-900 dark:text-white">API Key Created</h3>
+              <h3 class="ml-4 text-lg font-medium text-gray-900 dark:text-white">Your MCP API Key is Ready!</h3>
             </div>
 
             <div class="bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-4">
               <div class="flex">
-                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-yellow-400 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
                 </svg>
                 <div class="ml-3">
                   <p class="text-sm font-medium text-yellow-800 dark:text-yellow-300">
-                    Copy this key now - it won't be shown again!
+                    Copy the configuration below before closing - the key won't be shown again!
                   </p>
                 </div>
               </div>
             </div>
 
             <div class="space-y-4">
+              <!-- MCP Configuration (Primary - Copy this!) -->
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Your API Key</label>
+                <div class="flex items-center justify-between mb-1">
+                  <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    MCP Configuration
+                    <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">(add to your .mcp.json)</span>
+                  </label>
+                  <button
+                    @click="copyMcpConfig"
+                    class="inline-flex items-center px-3 py-1 text-xs font-medium rounded-md"
+                    :class="copiedConfig
+                      ? 'bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300'
+                      : 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900'"
+                  >
+                    <svg v-if="!copiedConfig" class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    <svg v-else class="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    {{ copiedConfig ? 'Copied!' : 'Copy Config' }}
+                  </button>
+                </div>
+                <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-green-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
+              </div>
+
+              <!-- Raw API Key (Secondary) -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">API Key Only</label>
                 <div class="flex items-center space-x-2">
                   <input
                     :type="showApiKey ? 'text' : 'password'"
@@ -221,6 +255,7 @@
                   <button
                     @click="showApiKey = !showApiKey"
                     class="p-2 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700"
+                    title="Show/hide key"
                   >
                     <svg v-if="!showApiKey" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -233,6 +268,7 @@
                   <button
                     @click="copyApiKey"
                     class="p-2 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700"
+                    title="Copy key"
                   >
                     <svg v-if="!copied" class="h-5 w-5 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
@@ -251,7 +287,7 @@
               @click="closeKeyModal"
               class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-indigo-600 text-base font-medium text-white hover:bg-indigo-700 focus:outline-none sm:text-sm"
             >
-              Done
+              I've copied the configuration
             </button>
           </div>
         </div>
@@ -286,6 +322,8 @@ const creating = ref(false)
 const createdApiKey = ref('')
 const showApiKey = ref(false)
 const copied = ref(false)
+const copiedConfig = ref(false)
+const isAdmin = ref(false)
 
 const newKey = ref({
   name: '',
@@ -310,6 +348,44 @@ const mcpServerUrl = computed(() => {
   return `https://${host}/mcp`
 })
 
+// Filter out agent-scoped keys for non-admin users
+const displayedKeys = computed(() => {
+  if (isAdmin.value) {
+    return apiKeys.value
+  }
+  return apiKeys.value.filter(k => k.scope !== 'agent')
+})
+
+// Generate MCP config JSON with the given API key
+const getMcpConfig = (apiKey) => {
+  return JSON.stringify({
+    mcpServers: {
+      trinity: {
+        url: mcpServerUrl.value,
+        headers: {
+          Authorization: `Bearer ${apiKey}`
+        }
+      }
+    }
+  }, null, 2)
+}
+
+const fetchUserRole = async () => {
+  try {
+    const response = await fetch('/api/users/me', {
+      headers: {
+        'Authorization': `Bearer ${authStore.token}`
+      }
+    })
+    if (response.ok) {
+      const userData = await response.json()
+      isAdmin.value = userData.role === 'admin'
+    }
+  } catch (error) {
+    console.error('Failed to fetch user role:', error)
+  }
+}
+
 const fetchApiKeys = async () => {
   try {
     const response = await fetch('/api/mcp/keys', {
@@ -324,6 +400,29 @@ const fetchApiKeys = async () => {
     console.error('Failed to fetch API keys:', error)
   } finally {
     loading.value = false
+  }
+}
+
+// Ensure user has a default MCP key on first visit
+const ensureDefaultKey = async () => {
+  try {
+    const response = await fetch('/api/mcp/keys/ensure-default', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${authStore.token}`
+      }
+    })
+    if (response.ok) {
+      const data = await response.json()
+      // If a key was created, show it to the user
+      if (data && data.api_key) {
+        createdApiKey.value = data.api_key
+        showKeyModal.value = true
+        await fetchApiKeys() // Refresh the list
+      }
+    }
+  } catch (error) {
+    console.error('Failed to ensure default key:', error)
   }
 }
 
@@ -422,11 +521,24 @@ const copyApiKey = async () => {
   }
 }
 
+const copyMcpConfig = async () => {
+  try {
+    await navigator.clipboard.writeText(getMcpConfig(createdApiKey.value))
+    copiedConfig.value = true
+    setTimeout(() => {
+      copiedConfig.value = false
+    }, 2000)
+  } catch (error) {
+    console.error('Failed to copy config:', error)
+  }
+}
+
 const closeKeyModal = () => {
   showKeyModal.value = false
   createdApiKey.value = ''
   showApiKey.value = false
   copied.value = false
+  copiedConfig.value = false
 }
 
 const formatDate = (dateString) => {
@@ -435,7 +547,10 @@ const formatDate = (dateString) => {
   return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
 }
 
-onMounted(() => {
-  fetchApiKeys()
+onMounted(async () => {
+  await fetchUserRole()
+  await fetchApiKeys()
+  // After loading keys, ensure user has a default key (for first-time users)
+  await ensureDefaultKey()
 })
 </script>

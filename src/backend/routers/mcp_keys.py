@@ -79,6 +79,70 @@ async def list_mcp_api_keys_endpoint(
         raise HTTPException(status_code=500, detail=f"Failed to list MCP API keys: {str(e)}")
 
 
+@router.post("/keys/ensure-default", response_model=McpApiKeyWithSecret | None)
+async def ensure_default_mcp_api_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Ensure the user has at least one user-scoped MCP API key.
+    If no user-scoped keys exist, creates a default one and returns it.
+
+    This is used for first-time setup to provide users with a ready-to-use
+    MCP configuration.
+
+    Returns:
+        - The newly created key (with full api_key) if one was created
+        - None if the user already has a user-scoped key
+    """
+    try:
+        # Check if user has any user-scoped keys
+        keys = db.list_mcp_api_keys(current_user.username)
+        user_keys = [k for k in keys if k.scope == "user" and k.is_active]
+
+        if user_keys:
+            # User already has a key, no need to create
+            return None
+
+        # Create a default key
+        from database import McpApiKeyCreate
+        key_data = McpApiKeyCreate(
+            name="Default MCP Key",
+            description="Auto-generated key for MCP access"
+        )
+
+        api_key = db.create_mcp_api_key(current_user.username, key_data)
+
+        if not api_key:
+            raise HTTPException(status_code=400, detail="Failed to create default API key")
+
+        await log_audit_event(
+            event_type="mcp_api_key",
+            action="create_default",
+            user_id=current_user.username,
+            resource=f"mcp_key-{api_key.id}",
+            ip_address=request.client.host if request.client else None,
+            result="success",
+            details={"key_name": key_data.name, "auto_created": True}
+        )
+
+        return api_key
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await log_audit_event(
+            event_type="mcp_api_key",
+            action="create_default",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="failed",
+            severity="error",
+            details={"error": str(e)}
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to ensure default MCP API key: {str(e)}")
+
+
 @router.get("/keys/{key_id}", response_model=McpApiKey)
 async def get_mcp_api_key_endpoint(
     key_id: str,
