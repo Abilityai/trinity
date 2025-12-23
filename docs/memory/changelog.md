@@ -1,3 +1,82 @@
+### 2025-12-23 21:35:00
+🐛 **Fleet Operations Schedule Resume Bug Fixed**
+
+Fixed 500 Internal Server Error in `POST /api/ops/schedules/resume` endpoint.
+
+**Root Cause**: Two bugs in `routers/ops.py:559`:
+1. `agent.get("name")` → `agent.name` - `list_all_agents()` returns `AgentStatus` Pydantic models, not dicts
+2. `db.list_schedules()` → `db.list_agent_schedules()` - Incorrect method name
+
+**Impact**: Fleet operations schedule resume now works correctly.
+
+**Files Changed**:
+- `src/backend/routers/ops.py` - Fixed `resume_all_schedules()` fallback logic
+
+**Testing**:
+- `test_ops.py::TestScheduleControl::test_resume_schedules_returns_count` - PASSED
+
+---
+
+### 2025-12-23 16:00:00
+📚 **Feature Flow Documentation Updated**
+
+Updated all outdated feature flows after recent platform changes.
+
+**Workplan/Task DAG Removal** (Req 9.8 - system deleted):
+- `testing-agents.md` - Removed reference to deleted `agent_server/routers/plans.py`
+- `agent-custom-metrics.md` - Removed test-worker metrics referencing plans
+- `agent-network.md` - Updated header stats (removed plans), updated revision history
+- `internal-system-agent.md` - Changed "archive old plans" to "clear stale context"
+- `activity-stream-collaboration-tracking.md` - Updated context polling description
+
+**OWASP Security Documentation**:
+- `auth0-authentication.md` - Added Security Hardening section documenting bcrypt password hashing and SECRET_KEY handling
+
+**New Feature Flows Verified**:
+- `first-time-setup.md` - Status updated to Working (was Not Tested)
+- `public-agent-links.md` - Complete flow documented
+- `parallel-headless-execution.md` - Complete flow documented
+
+**Index Updated**:
+- `feature-flows.md` - Added 2025-12-23 update note summarizing all changes
+
+---
+
+### 2025-12-23 14:30:00
+🔒 **OWASP Security Hardening - Critical & High Issues Fixed**
+
+Addressed 7 of 14 security issues from OWASP Top 10:2025 compliance audit.
+
+**Critical Fixes (A02, A04)**:
+- `config.py` - SECRET_KEY now auto-generates if not set, warns on default value
+- `docker-compose.yml` - Removed default SECRET_KEY and ADMIN_PASSWORD values
+- `database.py` - Admin password now hashed with bcrypt; auto-migrates plaintext passwords
+
+**High Priority Fixes (A02, A10)**:
+- `docker-compose.yml` - DEV_MODE_ENABLED now defaults to `false`
+- `docker-compose.yml` - Redis supports optional password via REDIS_PASSWORD env var
+- `config.py` - REDIS_URL construction supports password authentication
+- `routers/auth.py`, `routers/agents.py`, `routers/chat.py` - Removed `str(e)` from HTTP responses (prevents internal error exposure)
+- `main.py` - Audit logs endpoint sanitized error responses
+
+**Medium Priority Fixes (A01, A02)**:
+- `main.py` - WebSocket endpoint now accepts JWT token via query param or first message
+- `main.py` - CORS methods/headers restricted in production mode (when DEV_MODE_ENABLED=false)
+
+**New Files**:
+- `utils/errors.py` - Centralized error handling utilities with logging and safe messages
+
+**Configuration Updates**:
+- `.env.example` - Added REDIS_PASSWORD, security documentation, removed default SECRET_KEY
+
+**Remaining Work**:
+- ~40 `str(e)` occurrences in less critical endpoints (medium-term)
+- Security alerting, account lockout, MFA (long-term)
+
+See `docs/security/OWASP_COMPLIANCE_REPORT.md` for full audit and remediation status.
+
+---
+
 ### 2025-12-23 12:16:00
 📦 **Dependencies Updated to Latest Versions**
 

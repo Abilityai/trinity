@@ -208,17 +208,19 @@ async def exchange_auth0_token(request: Request, token_data: Auth0TokenExchange)
     except HTTPException:
         raise
     except Exception as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Auth0 token exchange failed: {e}")
         await log_audit_event(
             event_type="authentication",
             action="auth0_exchange",
             ip_address=request.client.host if request.client else None,
             result="error",
             severity="error",
-            details={"error": str(e)}
+            details={"error_type": type(e).__name__}  # Log type only, not message
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Auth0 token exchange failed: {str(e)}"
+            detail="Authentication failed. Please try again."
         )
 
 

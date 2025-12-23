@@ -136,16 +136,15 @@ Same as above, plus:
 
 ## Test Agents with Metrics
 
-All 8 test agents have metrics defined:
+All test agents have metrics defined:
 
 1. **test-echo**: messages_echoed, total_words, total_characters, avg_message_length
 2. **test-counter**: counter_value, increment_count, decrement_count, reset_count, total_operations
 3. **test-delegator**: delegations_sent, delegations_succeeded, delegations_failed, success_rate, unique_agents_contacted
-4. **test-worker**: plans_created, tasks_completed, tasks_failed, active_plans, completion_rate
-5. **test-scheduler**: scheduled_executions, manual_executions, last_execution_status, total_log_entries, uptime_seconds
-6. **test-queue**: requests_processed, total_delay_seconds, avg_delay, queue_depth, quick_requests
-7. **test-files**: files_created, files_deleted, total_bytes_written, current_file_count, directories_created
-8. **test-error**: normal_responses, intentional_failures, timeouts, error_rate, last_error_type
+4. **test-scheduler**: scheduled_executions, manual_executions, last_execution_status, total_log_entries, uptime_seconds
+5. **test-queue**: requests_processed, total_delay_seconds, avg_delay, queue_depth, quick_requests
+6. **test-files**: files_created, files_deleted, total_bytes_written, current_file_count, directories_created
+7. **test-error**: normal_responses, intentional_failures, timeouts, error_rate, last_error_type
 
 ## Future Enhancements
 

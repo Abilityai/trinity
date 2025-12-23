@@ -535,6 +535,78 @@ docker-compose up
 
 ---
 
-**Last Updated**: 2025-12-19
+**Last Updated**: 2025-12-23
 **Status**: Working (dev mode tested, production mode tested)
-**Changes**: Updated line numbers and verified against current codebase
+**Changes**:
+- 2025-12-23: Documented bcrypt password hashing (OWASP Phase 12.3), SECRET_KEY handling
+- 2025-12-19: Updated line numbers and verified against current codebase
+
+---
+
+## Security Hardening (OWASP Phase 12.3)
+
+### Password Hashing
+
+Passwords are now hashed using bcrypt (passlib) instead of plaintext storage:
+
+**File**: `src/backend/dependencies.py:16-38`
+
+```python
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    return pwd_context.hash(password)
+
+def verify_password(plain_password: str, stored_password: str) -> bool:
+    """Verify password against stored hash.
+    Supports both bcrypt hashes and legacy plaintext for migration.
+    """
+    try:
+        if pwd_context.verify(plain_password, stored_password):
+            return True
+    except Exception:
+        pass
+    # Fall back to plaintext comparison for legacy passwords
+    return plain_password == stored_password
+```
+
+### SECRET_KEY Handling
+
+**File**: `src/backend/config.py:12-23`
+
+```python
+# SECURITY: SECRET_KEY must be set via environment variable in production
+_secret_key = os.getenv("SECRET_KEY", "")
+if not _secret_key:
+    _secret_key = secrets.token_hex(32)
+    print("WARNING: SECRET_KEY not set - generated random key for this session")
+elif _secret_key == "your-secret-key-change-in-production":
+    print("CRITICAL: Default SECRET_KEY detected - change immediately!")
+
+SECRET_KEY = _secret_key
+```
+
+**Best Practices**:
+- Always set `SECRET_KEY` via environment variable in production
+- Use `secrets.token_hex(32)` to generate secure keys
+- Never use the default placeholder value
+
+### Database Migration
+
+Existing plaintext passwords are automatically migrated to bcrypt on first login:
+
+**File**: `src/backend/database.py:555-569`
+
+```python
+# Check if existing password needs migration from plaintext to bcrypt
+if existing_hash and not existing_hash.startswith('$2'):
+    # Password is likely plaintext (bcrypt hashes start with $2)
+    if admin_password and existing_hash == admin_password:
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        hashed = pwd_context.hash(admin_password)
+        cursor.execute("UPDATE users SET password_hash = ? WHERE username = 'admin'", (hashed,))
+        print("Migrated admin password from plaintext to bcrypt")
+```

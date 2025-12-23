@@ -526,20 +526,47 @@ def init_database():
 
 
 def _ensure_admin_user(cursor, conn):
-    """Ensure the admin user exists."""
-    admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
+    """Ensure the admin user exists with properly hashed password."""
+    admin_password = os.getenv("ADMIN_PASSWORD", "")
 
-    cursor.execute("SELECT id FROM users WHERE username = ?", ("admin",))
-    if cursor.fetchone() is None:
+    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", ("admin",))
+    existing = cursor.fetchone()
+
+    if existing is None:
+        # Create admin user
+        if not admin_password:
+            print("WARNING: ADMIN_PASSWORD not set - skipping admin user creation")
+            print("         Set ADMIN_PASSWORD environment variable to create admin user")
+            return
+
         now = datetime.utcnow().isoformat()
-        # Store password as plaintext for now (consistent with current implementation)
-        # In production, use proper hashing
+        # Hash password using bcrypt
+        from passlib.context import CryptContext
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        hashed = pwd_context.hash(admin_password)
+
         cursor.execute("""
             INSERT INTO users (username, password_hash, role, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        """, ("admin", admin_password, "admin", now, now))
+        """, ("admin", hashed, "admin", now, now))
         conn.commit()
-        print("Created default admin user")
+        print("Created admin user with hashed password")
+    else:
+        # Check if existing password needs migration from plaintext to bcrypt
+        existing_hash = existing[1]
+        if existing_hash and not existing_hash.startswith("$2"):
+            # Password is likely plaintext (bcrypt hashes start with $2)
+            if admin_password and existing_hash == admin_password:
+                # Migrate to bcrypt
+                from passlib.context import CryptContext
+                pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+                hashed = pwd_context.hash(admin_password)
+                cursor.execute("""
+                    UPDATE users SET password_hash = ?, updated_at = ?
+                    WHERE username = ?
+                """, (hashed, datetime.utcnow().isoformat(), "admin"))
+                conn.commit()
+                print("Migrated admin password from plaintext to bcrypt")
 
 
 class DatabaseManager:

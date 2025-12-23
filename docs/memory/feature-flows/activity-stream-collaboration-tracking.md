@@ -792,7 +792,7 @@ await log_audit_event(
 - **Lazy Loading**: Historical data fetched only when dashboard opens
 - **Pagination**: Limited to 15 events in history panel (scrollable)
 - **Edge Deduplication**: Single edge per agent pair, count label shows frequency
-- **Context Polling**: Every 5 seconds for context/plan stats
+- **Context Polling**: Every 5 seconds for context stats and activity state
 - **Agent Refresh**: Every 10 seconds for agent list updates
 
 ### Scalability Limits

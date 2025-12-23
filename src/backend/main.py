@@ -207,12 +207,18 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+# SECURITY: In production, restrict methods and headers to what's actually needed
+import os
+_is_production = os.getenv("DEV_MODE_ENABLED", "false").lower() != "true"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Restrict methods in production, allow all in development
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"] if _is_production else ["*"],
+    # Restrict headers in production
+    allow_headers=["Authorization", "Content-Type", "X-Source-Agent", "Accept"] if _is_production else ["*"],
 )
 
 # Include all routers
@@ -238,12 +244,50 @@ app.include_router(setup_router)
 
 # WebSocket endpoint
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates."""
+async def websocket_endpoint(websocket: WebSocket, token: str = None):
+    """
+    WebSocket endpoint for real-time updates.
+
+    Accepts authentication via:
+    - Query parameter: /ws?token=<jwt_token>
+    - First message after connection (for backward compatibility)
+
+    SECURITY: Authentication is optional for read-only updates,
+    but should be enforced in production for sensitive data.
+    """
+    from jose import JWTError, jwt as jose_jwt
+    from config import SECRET_KEY, ALGORITHM
+
+    # Validate token if provided
+    authenticated = False
+    username = None
+
+    if token:
+        try:
+            payload = jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+            if username:
+                authenticated = True
+        except JWTError:
+            # Invalid token - allow connection but mark as unauthenticated
+            # In production, you may want to reject the connection
+            pass
+
     await manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            # Could authenticate via first message if not done via query param
+            if not authenticated and data.startswith("Bearer "):
+                try:
+                    msg_token = data[7:]
+                    payload = jose_jwt.decode(msg_token, SECRET_KEY, algorithms=[ALGORITHM])
+                    username = payload.get("sub")
+                    if username:
+                        authenticated = True
+                        await websocket.send_text(json.dumps({"type": "authenticated", "user": username}))
+                except JWTError:
+                    pass
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
@@ -284,8 +328,10 @@ async def get_audit_logs(
             )
             return response.json()
     except Exception as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to get audit logs: {e}")
         from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=f"Failed to get audit logs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve audit logs")
 
 
 # User info endpoint

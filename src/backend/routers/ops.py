@@ -556,7 +556,7 @@ async def resume_all_schedules(
         all_schedules = []
         agents = list_all_agents()
         for agent in agents:
-            agent_schedules = db.list_schedules(agent.get("name"))
+            agent_schedules = db.list_agent_schedules(agent.name)
             all_schedules.extend([s for s in agent_schedules if not s.enabled])
         schedules = all_schedules
 

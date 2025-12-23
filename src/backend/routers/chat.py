@@ -267,11 +267,14 @@ async def chat_with_agent(
 
             return response_data
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to communicate with agent {name}: {e}")
+
         # Track chat failure
         await activity_service.complete_activity(
             activity_id=chat_activity_id,
             status="failed",
-            error=str(e)
+            error=type(e).__name__  # Don't expose full error message
         )
 
         await log_audit_event(
@@ -282,11 +285,11 @@ async def chat_with_agent(
             resource=f"agent-{name}",
             result="failed",
             severity="error",
-            details={"error": str(e), "execution_id": execution.id}
+            details={"error_type": type(e).__name__, "execution_id": execution.id}
         )
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to communicate with agent: {str(e)}"
+            detail="Failed to communicate with agent. The agent may be starting up or busy."
         )
     finally:
         # Always release the queue slot when done
@@ -429,10 +432,13 @@ async def execute_parallel_task(
         )
 
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to execute parallel task on {name}: {e}")
+
         await activity_service.complete_activity(
             activity_id=task_activity_id,
             status="failed",
-            error=str(e)
+            error=type(e).__name__
         )
 
         await log_audit_event(
@@ -443,11 +449,11 @@ async def execute_parallel_task(
             resource=f"agent-{name}",
             result="failed",
             severity="error",
-            details={"error": str(e), "source_agent": x_source_agent}
+            details={"error_type": type(e).__name__, "source_agent": x_source_agent}
         )
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to execute task: {str(e)}"
+            detail="Failed to execute task. The agent may be unavailable."
         )
 
 
@@ -476,9 +482,11 @@ async def get_agent_chat_history(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to get chat history for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to get chat history: {str(e)}"
+            detail="Failed to get chat history"
         )
 
 
@@ -515,9 +523,11 @@ async def reset_agent_chat_history(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to reset chat history for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to reset chat history: {str(e)}"
+            detail="Failed to reset chat history"
         )
 
 
@@ -546,9 +556,11 @@ async def get_agent_chat_session(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to get session info for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to get session info: {str(e)}"
+            detail="Failed to get session info"
         )
 
 
@@ -625,9 +637,11 @@ async def get_agent_activity_detail(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to get activity detail for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to get activity detail: {str(e)}"
+            detail="Failed to get activity detail"
         )
 
 
@@ -656,9 +670,11 @@ async def clear_agent_activity(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to clear activity for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to clear activity: {str(e)}"
+            detail="Failed to clear activity"
         )
 
 
@@ -689,9 +705,11 @@ async def get_agent_model(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to get model info for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to get model info: {str(e)}"
+            detail="Failed to get model info"
         )
 
 
@@ -733,9 +751,11 @@ async def set_agent_model(
 
             return response.json()
     except httpx.HTTPError as e:
+        import logging
+        logging.getLogger("trinity.errors").error(f"Failed to set model for {name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to set model: {str(e)}"
+            detail="Failed to set model"
         )
 
 

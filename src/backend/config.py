@@ -9,13 +9,36 @@ import os
 DEV_MODE_ENABLED = os.getenv("DEV_MODE_ENABLED", "false").lower() == "true"
 
 # JWT Settings
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+# SECURITY: SECRET_KEY must be set via environment variable in production
+# Generate with: openssl rand -hex 32
+_secret_key = os.getenv("SECRET_KEY", "")
+if not _secret_key:
+    import secrets
+    _secret_key = secrets.token_hex(32)
+    print("WARNING: SECRET_KEY not set - generated random key for this session")
+    print("         For production, set SECRET_KEY environment variable")
+elif _secret_key == "your-secret-key-change-in-production":
+    print("CRITICAL: Default SECRET_KEY detected - change immediately for production!")
+    print("         Generate with: openssl rand -hex 32")
+SECRET_KEY = _secret_key
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Service URLs
 AUDIT_URL = os.getenv("AUDIT_URL", "http://audit-logger:8001")
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+
+# Redis URL - supports password via REDIS_PASSWORD env var or in URL
+_redis_password = os.getenv("REDIS_PASSWORD", "")
+_redis_base_url = os.getenv("REDIS_URL", "redis://redis:6379")
+if _redis_password and "://@" not in _redis_base_url and "://:" not in _redis_base_url:
+    # Insert password into URL if not already present
+    if "://" in _redis_base_url:
+        scheme, rest = _redis_base_url.split("://", 1)
+        REDIS_URL = f"{scheme}//:{_redis_password}@{rest}"
+    else:
+        REDIS_URL = _redis_base_url
+else:
+    REDIS_URL = _redis_base_url
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 

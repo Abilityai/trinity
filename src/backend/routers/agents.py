@@ -728,9 +728,11 @@ async def create_agent_internal(
                 ip_address=request.client.host if request.client else None,
                 result="failed",
                 severity="error",
-                details={"error": str(e)}
+                details={"error_type": type(e).__name__}  # Don't expose error message
             )
-            raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
+            import logging
+            logging.getLogger("trinity.errors").error(f"Failed to create agent {config.name}: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
         raise HTTPException(
             status_code=503,

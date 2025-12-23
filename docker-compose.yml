@@ -7,13 +7,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
-      - DEV_MODE_ENABLED=${DEV_MODE_ENABLED:-true}  # Enable local login for development
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-password}  # Dev mode login: admin / password
+      # SECURITY: Set these in your .env file, not here
+      - SECRET_KEY=${SECRET_KEY:-}  # Required - generate with: openssl rand -hex 32
+      - DEV_MODE_ENABLED=${DEV_MODE_ENABLED:-false}  # Set to true for local development
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}  # Required for dev mode - set a strong password
       - AUDIT_URL=http://audit-logger:8001
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
       - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}  # Optional - set for production
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
@@ -85,7 +87,18 @@ services:
       - redis-data:/data
     networks:
       - trinity-network
-    command: redis-server --appendonly yes
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    # SECURITY: Set REDIS_PASSWORD in .env for production
+    command: >
+      sh -c '
+        if [ -n "$REDIS_PASSWORD" ]; then
+          redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+        else
+          echo "WARNING: Redis running without authentication"
+          redis-server --appendonly yes
+        fi
+      '
 
   audit-logger:
     build:
@@ -119,7 +132,7 @@ services:
       - MCP_PORT=8080
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
-      - TRINITY_PASSWORD=${TRINITY_PASSWORD:-password}  # Match ADMIN_PASSWORD
+      - TRINITY_PASSWORD=${TRINITY_PASSWORD:-}  # Match ADMIN_PASSWORD in .env
       - MCP_REQUIRE_API_KEY=true
     depends_on:
       - backend

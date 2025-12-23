@@ -22,7 +22,7 @@ The Internal System Agent (`trinity-system`) is an auto-deployed, deletion-prote
 | **Schedule Control** | Enable/disable schedules, trigger manual runs, pause automation |
 | **Validation** | Pre-flight checks before agent operations |
 | **Alerting** | Notify on anomalies, failures, threshold breaches |
-| **Cleanup** | Reset stuck sessions, archive old plans |
+| **Cleanup** | Reset stuck sessions, clear stale context |
 | **Reporting** | Fleet status, cost summaries, health reports |
 
 ### Out of Scope (Not Ops)

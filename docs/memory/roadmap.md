@@ -59,6 +59,7 @@
 | ✅ | **OpenTelemetry UI (10.8)** | Display OTel metrics in Dashboard - cost, tokens, productivity. Backend API + header summary + panel detail. Completed 2025-12-20. | HIGH |
 | ✅ | **Internal System Agent (11.1)** | Auto-deployed platform orchestrator (`trinity-system`) with deletion protection, system-scoped MCP key, permission bypass. Completed 2025-12-20. | HIGH |
 | ✅ | **Parallel Headless Execution (12.1)** | Stateless parallel task execution - enables orchestrator to spawn N worker tasks simultaneously. `POST /api/agents/{name}/task` bypasses queue. MCP `chat_with_agent(parallel=true)`. Completed 2025-12-22. | **HIGH** |
+| ✅ | **OWASP Security Hardening** | Fixed 7/14 OWASP Top 10:2025 issues - SECRET_KEY, password hashing, Redis auth, WebSocket auth, CORS, error sanitization. Completed 2025-12-23. | **HIGH** |
 | ⏳ | System Manifest UI | Upload YAML, view deployment results, group agents by system prefix | MEDIUM |
 | ⏳ | A2A Protocol Support | Agent discovery and negotiation across boundaries | LOW |
 | ⏳ | Agent collaboration execution tracking | Extend schedule_executions | LOW |

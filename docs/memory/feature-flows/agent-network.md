@@ -37,7 +37,7 @@ Main dashboard view component with integrated Agent Network visualization.
 - Lines 67-77: **Time Range Filter** dropdown (1h, 6h, 24h, 3d, 7d)
 - Lines 94-104: Refresh button to reload agents and historical data
 - Lines 106-115: Reset Layout button to clear saved positions
-- Lines 8-40: **Compact Header** with inline stats (agents, running, plans, messages)
+- Lines 8-40: **Compact Header** with inline stats (agents, running, messages)
 - Lines 44-64: **Live/Replay Mode Toggle** buttons
 - Lines 319-396: **Message History Panel** (collapsible) with "Live Feed" and "Historical" sections
 - Lines 120-226: **Replay Controls Panel** (visible in replay mode) with playback controls and timeline scrubber
@@ -645,7 +645,7 @@ Removes node and edges from graph.
 | Step | Action | Expected Result | Verification |
 |------|--------|-----------------|--------------|
 | 1 | Navigate to `/` (or `/network` which redirects) | Dashboard loads | NavBar shows "Dashboard" as active |
-| 2 | Check compact header stats | Shows agent count, running count, plans, messages | Inline stats visible in header |
+| 2 | Check compact header stats | Shows agent count, running count, messages | Inline stats visible in header |
 | 3 | Verify grid layout | All agents positioned in grid | Nodes spaced 350px apart |
 | 4 | Check connection status | WebSocket connected | Green dot (not pulsing), no "Disconnected" label |
 | 5 | Verify minimap | Minimap shows all nodes | Bottom-right corner shows overview |

@@ -3,6 +3,12 @@
 > **Purpose**: Maps features to detailed vertical slice documentation.
 > Each flow documents the complete path from UI → API → Database → Side Effects.
 
+> **Updated (2025-12-23)**: Major updates across feature flows:
+> - **Workplan/Task DAG Removal**: Removed all references to workplans, plans, task DAGs (Req 9.8 - deleted system)
+> - **OWASP Security Hardening**: Added bcrypt password hashing and SECRET_KEY handling documentation to auth0-authentication.md
+> - **New Features**: First-Time Setup, Public Agent Links, Parallel Headless Execution flows added
+> - **Internal System Agent**: Updated with Cost Monitoring data flow, 5-step reinitialize, OTel access fix
+
 > **Important (2025-12-07)**: The Dashboard page now contains the Agent Network visualization (previously in a separate AgentNetwork.vue). Route `/network` redirects to `/`. See [agent-network.md](feature-flows/agent-network.md) for details.
 
 > **Updated (2025-12-12)**: Critical bug fix:

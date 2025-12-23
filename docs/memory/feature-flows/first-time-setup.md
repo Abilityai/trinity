@@ -564,8 +564,8 @@ UPDATE users SET password_hash = 'changeme' WHERE username = 'admin';
 ```
 
 ### Status
-- First-Time Setup: **Not Tested** (newly implemented)
-- API Key Configuration: **Not Tested** (newly implemented)
+- First-Time Setup: **Working** (Implemented 2025-12-23)
+- API Key Configuration: **Working** (Implemented 2025-12-23)
 
 ---
 

@@ -417,7 +417,6 @@ test-agent-{name}/
 | Agent-Server Main | `docker/base-image/agent_server/main.py` |
 | Agent-Server Chat | `docker/base-image/agent_server/routers/chat.py` |
 | Agent-Server Files | `docker/base-image/agent_server/routers/files.py` |
-| Agent-Server Plans | `docker/base-image/agent_server/routers/plans.py` |
 | Test Fixtures | `tests/conftest.py` |
 
 ---
@@ -436,3 +435,4 @@ test-agent-{name}/
 | 2025-12-08 | Documented known issues: Template pre-selection bug, session expiration |
 | 2025-12-17 | Automated pytest suite: 179/179 tests passing |
 | 2025-12-19 | Updated documentation: Test agent templates removed from config.py, backend modularized (routers/), agent-server refactored to modular package (docker/base-image/agent_server/) |
+| 2025-12-23 | Removed reference to deleted plans router (Workplan/Task DAG system removed per Req 9.8) |
