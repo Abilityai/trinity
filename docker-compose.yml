@@ -25,6 +25,10 @@ services:
       - OTEL_LOGS_EXPORTER=${OTEL_LOGS_EXPORTER:-otlp}
       - OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
       - OTEL_METRIC_EXPORT_INTERVAL=${OTEL_METRIC_EXPORT_INTERVAL:-60000}
+      # Email Service Configuration (for public link verification)
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app

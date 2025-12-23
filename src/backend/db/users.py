@@ -126,6 +126,25 @@ class UserOperations:
 
             return self.get_user_by_username(username)
 
+    def update_user_password(self, username: str, hashed_password: str) -> bool:
+        """Update user's password hash.
+
+        Args:
+            username: The username to update
+            hashed_password: The bcrypt-hashed password
+
+        Returns:
+            True if the user was found and updated, False otherwise
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+                UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?
+            """, (hashed_password, now, username))
+            conn.commit()
+            return cursor.rowcount > 0
+
     def update_last_login(self, username: str):
         """Update user's last login timestamp."""
         with get_db_connection() as conn:

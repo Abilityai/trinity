@@ -17,8 +17,24 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    return pwd_context.hash(password)
+
+
 def verify_password(plain_password: str, stored_password: str) -> bool:
-    """Verify password (simple plaintext comparison)."""
+    """Verify password against stored hash.
+
+    For backward compatibility, also checks plaintext passwords.
+    """
+    # First try bcrypt verification
+    try:
+        if pwd_context.verify(plain_password, stored_password):
+            return True
+    except Exception:
+        pass
+
+    # Fall back to plaintext comparison for legacy passwords
     return plain_password == stored_password
 
 

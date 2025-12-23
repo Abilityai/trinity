@@ -17,6 +17,17 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 AUDIT_URL = os.getenv("AUDIT_URL", "http://audit-logger:8001")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Email Service Configuration (for public link verification)
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "resend")  # "console", "smtp", "sendgrid", "resend"
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "noreply@trinity.example.com")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
 # GitHub PAT for template cloning (auto-uploaded to Redis on startup)
 GITHUB_PAT = os.getenv("GITHUB_PAT", "")

@@ -356,3 +356,232 @@ def get_ops_setting(key: str, as_type: type = str):
     elif as_type == bool:
         return value.lower() in ("true", "1", "yes")
     return value
+
+
+# ============================================================================
+# API Keys Management Endpoints
+# ============================================================================
+
+import os
+import httpx
+
+
+class ApiKeyUpdate(BaseModel):
+    """Request body for updating an API key."""
+    api_key: str
+
+
+class ApiKeyTest(BaseModel):
+    """Request body for testing an API key."""
+    api_key: str
+
+
+def get_anthropic_api_key() -> str:
+    """Get Anthropic API key from settings, fallback to env var."""
+    key = db.get_setting_value('anthropic_api_key', None)
+    if key:
+        return key
+    return os.getenv('ANTHROPIC_API_KEY', '')
+
+
+def mask_api_key(key: str) -> str:
+    """Mask an API key for display, showing only last 4 characters."""
+    if not key or len(key) < 8:
+        return "****"
+    return f"...{key[-4:]}"
+
+
+@router.get("/api-keys")
+async def get_api_keys_status(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get status of configured API keys.
+
+    Admin-only. Returns masked key info for security.
+    """
+    require_admin(current_user)
+
+    try:
+        # Get Anthropic key
+        anthropic_key = get_anthropic_api_key()
+        anthropic_configured = bool(anthropic_key)
+
+        # Check if it's from settings or env
+        key_from_settings = bool(db.get_setting_value('anthropic_api_key', None))
+
+        await log_audit_event(
+            event_type="system_settings",
+            action="read_api_keys",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="success"
+        )
+
+        return {
+            "anthropic": {
+                "configured": anthropic_configured,
+                "masked": mask_api_key(anthropic_key) if anthropic_configured else None,
+                "source": "settings" if key_from_settings else ("env" if anthropic_configured else None)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get API keys status: {str(e)}")
+
+
+@router.put("/api-keys/anthropic")
+async def update_anthropic_key(
+    body: ApiKeyUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set or update the Anthropic API key.
+
+    Admin-only. Key is stored in system settings.
+    """
+    require_admin(current_user)
+
+    try:
+        # Validate format
+        key = body.api_key.strip()
+        if not key.startswith('sk-ant-'):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid API key format. Anthropic keys start with 'sk-ant-'"
+            )
+
+        # Store in settings
+        db.set_setting('anthropic_api_key', key)
+
+        await log_audit_event(
+            event_type="system_settings",
+            action="update_anthropic_key",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="success",
+            details={"key_masked": mask_api_key(key)}
+        )
+
+        return {
+            "success": True,
+            "masked": mask_api_key(key)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await log_audit_event(
+            event_type="system_settings",
+            action="update_anthropic_key",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="failed",
+            severity="error",
+            details={"error": str(e)}
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
+
+
+@router.delete("/api-keys/anthropic")
+async def delete_anthropic_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete the Anthropic API key from settings.
+
+    Admin-only. Will fall back to env var if configured.
+    """
+    require_admin(current_user)
+
+    try:
+        deleted = db.delete_setting('anthropic_api_key')
+
+        await log_audit_event(
+            event_type="system_settings",
+            action="delete_anthropic_key",
+            user_id=current_user.username,
+            ip_address=request.client.host if request.client else None,
+            result="success",
+            details={"deleted": deleted}
+        )
+
+        # Check if env var fallback exists
+        env_key = os.getenv('ANTHROPIC_API_KEY', '')
+
+        return {
+            "success": True,
+            "deleted": deleted,
+            "fallback_configured": bool(env_key)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete API key: {str(e)}")
+
+
+@router.post("/api-keys/anthropic/test")
+async def test_anthropic_key(
+    body: ApiKeyTest,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Test if an Anthropic API key is valid.
+
+    Admin-only. Makes a lightweight API call to validate the key.
+    """
+    require_admin(current_user)
+
+    try:
+        key = body.api_key.strip()
+
+        # Validate format first
+        if not key.startswith('sk-ant-'):
+            return {
+                "valid": False,
+                "error": "Invalid format. Anthropic keys start with 'sk-ant-'"
+            }
+
+        # Make a lightweight API call to test the key
+        # Using the models endpoint which is simple and doesn't create any resources
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01"
+                },
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                await log_audit_event(
+                    event_type="system_settings",
+                    action="test_anthropic_key",
+                    user_id=current_user.username,
+                    ip_address=request.client.host if request.client else None,
+                    result="success",
+                    details={"valid": True}
+                )
+                return {"valid": True}
+            elif response.status_code == 401:
+                return {
+                    "valid": False,
+                    "error": "Invalid API key"
+                }
+            else:
+                return {
+                    "valid": False,
+                    "error": f"API returned status {response.status_code}"
+                }
+
+    except httpx.TimeoutException:
+        return {
+            "valid": False,
+            "error": "Request timed out. Please try again."
+        }
+    except Exception as e:
+        return {
+            "valid": False,
+            "error": f"Error testing key: {str(e)}"
+        }

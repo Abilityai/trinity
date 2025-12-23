@@ -20,6 +20,11 @@ from database import db
 from dependencies import authenticate_user, create_access_token
 from services.audit_service import log_audit_event
 
+
+def is_setup_completed() -> bool:
+    """Check if initial setup is completed."""
+    return db.get_setting_value('setup_completed', 'false') == 'true'
+
 router = APIRouter()
 
 
@@ -35,11 +40,13 @@ async def get_auth_mode():
         - dev_mode_enabled: Whether local username/password login is allowed
         - auth0_configured: Whether Auth0 OAuth is available
         - allowed_domain: The email domain restriction (for display)
+        - setup_completed: Whether first-time setup is complete
     """
     return {
         "dev_mode_enabled": DEV_MODE_ENABLED,
         "auth0_configured": bool(AUTH0_DOMAIN),
-        "allowed_domain": AUTH0_ALLOWED_DOMAIN
+        "allowed_domain": AUTH0_ALLOWED_DOMAIN,
+        "setup_completed": is_setup_completed()
     }
 
 
@@ -50,6 +57,13 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     This endpoint is only available when DEV_MODE_ENABLED=true.
     In production, use Auth0 OAuth via /api/auth/exchange.
     """
+    # Block login if setup is not completed
+    if not is_setup_completed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="setup_required"
+        )
+
     # Gate this endpoint in production
     if not DEV_MODE_ENABLED:
         raise HTTPException(

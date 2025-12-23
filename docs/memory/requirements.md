@@ -1185,6 +1185,119 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
   4. Test emergency stop pauses schedules and stops agents
   5. Verify ops settings have defaults and can be modified
 
+#### 11.3 Public Agent Links (Phase 12.2)
+- **Status**: ✅ Implemented (2025-12-22)
+- **Priority**: Medium
+- **Description**: Generate shareable public links that allow unauthenticated users to chat with agents
+- **Design Doc**: `docs/drafts/PUBLIC_AGENT_LINKS.md`
+- **Features**:
+  - Agent owners can create public links with optional email verification
+  - Public links have unique tokens (URL-safe, 24 characters)
+  - Optional expiration dates for links
+  - Rate limiting per IP (30 messages/minute)
+  - Email verification uses 6-digit codes (10-minute expiry)
+  - Session tokens for verified users (24-hour validity)
+  - Usage tracking (message counts, unique users, last used)
+- **Database Tables**:
+  | Table | Purpose |
+  |-------|---------|
+  | `agent_public_links` | Link metadata (token, agent, settings) |
+  | `public_link_verifications` | Email verification codes and sessions |
+  | `public_link_usage` | Usage tracking (messages, IPs, users) |
+- **API Endpoints (Owner)**:
+  | Endpoint | Method | Description |
+  |----------|--------|-------------|
+  | `/api/agents/{name}/public-links` | GET | List all public links |
+  | `/api/agents/{name}/public-links` | POST | Create new public link |
+  | `/api/agents/{name}/public-links/{id}` | GET | Get link details |
+  | `/api/agents/{name}/public-links/{id}` | PUT | Update link settings |
+  | `/api/agents/{name}/public-links/{id}` | DELETE | Delete/revoke link |
+- **API Endpoints (Public)**:
+  | Endpoint | Method | Description |
+  |----------|--------|-------------|
+  | `/api/public/link/{token}` | GET | Get link info (valid, requires email) |
+  | `/api/public/verify/request` | POST | Request verification code |
+  | `/api/public/verify/confirm` | POST | Confirm code, get session |
+  | `/api/public/chat/{token}` | POST | Send chat message |
+- **Frontend Components**:
+  | Component | Purpose |
+  |-----------|---------|
+  | `PublicChat.vue` | Public-facing chat interface |
+  | `PublicLinksPanel.vue` | Owner management in AgentDetail |
+- **Email Providers**: Console (dev), SMTP, SendGrid
+- **Acceptance Criteria**:
+  - [x] Create/edit/delete public links via UI
+  - [x] Copy link URL to clipboard
+  - [x] Enable/disable links
+  - [x] Email verification flow (when enabled)
+  - [x] Public chat interface without login
+  - [x] Usage statistics displayed to owner
+  - [x] Rate limiting prevents abuse
+  - [x] Audit logging for all public access
+- **Testing**:
+  1. Create public link without email requirement
+  2. Access `/chat/{token}`, verify chat works
+  3. Create link with email requirement
+  4. Verify email flow, receive code, confirm
+  5. Test rate limiting (>30 messages/min)
+  6. Disable link, verify chat blocked
+  7. Delete link, verify 404 response
+
+#### 11.4 First-Time Setup (Phase 12.3)
+- **Status**: ✅ Implemented (2025-12-23)
+- **Priority**: High
+- **Description**: First-time setup wizard for admin password and API key configuration
+- **Features**:
+  - On first launch, redirect to `/setup` to set admin password
+  - Password must be at least 8 characters
+  - Uses bcrypt hashing for secure password storage
+  - Login blocked until setup complete
+  - Settings page includes API Keys section for Anthropic key management
+  - API key can be tested before saving
+  - API key from settings takes precedence over environment variable
+- **Backend Changes**:
+  | Change | Description |
+  |--------|-------------|
+  | `dependencies.py` | Added `hash_password()`, updated `verify_password()` for bcrypt |
+  | `db/users.py` | Added `update_user_password()` method |
+  | `routers/setup.py` | New router with `/api/setup/status` and `/api/setup/admin-password` |
+  | `routers/auth.py` | Added `is_setup_completed()` check, blocks login if setup incomplete |
+  | `routers/settings.py` | Added API key endpoints: GET/PUT/DELETE `/api/settings/api-keys/anthropic`, POST `/api/settings/api-keys/anthropic/test` |
+  | Agent creation | Uses `get_anthropic_api_key()` helper (settings > env fallback) |
+- **Frontend Changes**:
+  | Component | Description |
+  |-----------|-------------|
+  | `SetupPassword.vue` | New view for initial password setup |
+  | `router/index.js` | Added `/setup` route with setup status check guard |
+  | `Settings.vue` | Added API Keys section with test/save functionality |
+- **API Endpoints**:
+  | Endpoint | Method | Description |
+  |----------|--------|-------------|
+  | `/api/setup/status` | GET | Check if setup is complete (no auth) |
+  | `/api/setup/admin-password` | POST | Set initial admin password (no auth, once only) |
+  | `/api/settings/api-keys` | GET | Get API keys status (admin) |
+  | `/api/settings/api-keys/anthropic` | PUT | Set Anthropic API key (admin) |
+  | `/api/settings/api-keys/anthropic` | DELETE | Delete Anthropic API key (admin) |
+  | `/api/settings/api-keys/anthropic/test` | POST | Test API key validity (admin) |
+- **Acceptance Criteria**:
+  - [x] First launch shows /setup page
+  - [x] Password form validates length and match
+  - [x] Password strength indicator
+  - [x] Bcrypt hashing for secure storage
+  - [x] Login blocked until setup complete
+  - [x] API key section in Settings
+  - [x] Test button validates key with Anthropic API
+  - [x] Save button stores key in database
+  - [x] Agent creation uses stored key with env fallback
+- **Testing**:
+  1. Fresh install: Delete `setup_completed` setting from database
+  2. Navigate to any page, verify redirect to /setup
+  3. Set password, verify redirect to /login
+  4. Login with new password
+  5. Navigate to Settings, add Anthropic API key
+  6. Test key, verify validation works
+  7. Save key, create agent, verify agent uses stored key
+
 ---
 
 ## Non-Functional Requirements

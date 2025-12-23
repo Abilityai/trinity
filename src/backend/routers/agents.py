@@ -31,6 +31,7 @@ from services.execution_queue import get_execution_queue
 from services import git_service
 from utils.helpers import sanitize_agent_name
 from credentials import CredentialManager
+from routers.settings import get_anthropic_api_key
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -508,7 +509,7 @@ async def create_agent_internal(
         'AGENT_NAME': config.name,
         'AGENT_TYPE': config.type,
         'CREDENTIALS_FILE': '/config/credentials.json',
-        'ANTHROPIC_API_KEY': os.getenv('ANTHROPIC_API_KEY', ''),
+        'ANTHROPIC_API_KEY': get_anthropic_api_key(),
         'ENABLE_SSH': 'true',
         'ENABLE_AGENT_UI': 'true',
         'AGENT_SERVER_PORT': '8000',

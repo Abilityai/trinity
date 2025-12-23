@@ -337,6 +337,19 @@
                 >
                   Folders
                 </button>
+                <button
+                  v-if="agent.can_share"
+                  @click="activeTab = 'public-links'"
+                  :class="[
+                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
+                    activeTab === 'public-links'
+                      ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                      : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
+                  ]"
+                  title="Generate public shareable links"
+                >
+                  Public Links
+                </button>
               </nav>
             </div>
 
@@ -996,6 +1009,11 @@ HEYGEN_API_KEY=your_heygen_key
             <div v-if="activeTab === 'folders'" class="p-6">
               <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
             </div>
+
+            <!-- Public Links Tab Content -->
+            <div v-if="activeTab === 'public-links'" class="p-6">
+              <PublicLinksPanel :agent-name="agent.name" />
+            </div>
           </div>
         </div>
       </div>
@@ -1029,6 +1047,7 @@ import InfoPanel from '../components/InfoPanel.vue'
 import MetricsPanel from '../components/MetricsPanel.vue'
 import WorkplanPanel from '../components/WorkplanPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
+import PublicLinksPanel from '../components/PublicLinksPanel.vue'
 
 // Configure marked for safe rendering
 marked.setOptions({

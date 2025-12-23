@@ -54,6 +54,17 @@ from db_models import (
     SharedFolderInfo,
     SystemSetting,
     SystemSettingUpdate,
+    # Public Agent Links (Phase 12.2)
+    PublicLinkCreate,
+    PublicLink,
+    PublicLinkUpdate,
+    PublicLinkWithUrl,
+    PublicLinkInfo,
+    VerificationRequest,
+    VerificationConfirm,
+    VerificationResponse,
+    PublicChatRequest,
+    PublicChatResponse,
 )
 
 # Re-export connection utilities
@@ -69,6 +80,7 @@ from db.activities import ActivityOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.settings import SettingsOperations
+from db.public_links import PublicLinkOperations
 
 
 def _migrate_agent_sharing_table(cursor, conn):
@@ -412,6 +424,53 @@ def init_database():
             )
         """)
 
+        # Public agent links table (Phase 12.2: Public Agent Links)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_public_links (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                enabled INTEGER DEFAULT 1,
+                name TEXT,
+                require_email INTEGER DEFAULT 0,
+                FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+        """)
+
+        # Public link email verifications table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS public_link_verifications (
+                id TEXT PRIMARY KEY,
+                link_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                verified INTEGER DEFAULT 0,
+                session_token TEXT,
+                session_expires_at TEXT,
+                FOREIGN KEY (link_id) REFERENCES agent_public_links(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Public link usage tracking table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS public_link_usage (
+                id TEXT PRIMARY KEY,
+                link_id TEXT NOT NULL,
+                email TEXT,
+                ip_address TEXT,
+                message_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                FOREIGN KEY (link_id) REFERENCES agent_public_links(id) ON DELETE CASCADE
+            )
+        """)
+
         # Indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)")
@@ -451,6 +510,14 @@ def init_database():
         # Shared folder indexes (Phase 9.11)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_folders_expose ON agent_shared_folder_config(expose_enabled)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_shared_folders_consume ON agent_shared_folder_config(consume_enabled)")
+        # Public links indexes (Phase 12.2)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_public_links_token ON agent_public_links(token)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_public_links_agent ON agent_public_links(agent_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_link ON public_link_verifications(link_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_email ON public_link_verifications(email)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_verifications_code ON public_link_verifications(code)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_link ON public_link_usage(link_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_ip ON public_link_usage(ip_address)")
 
         conn.commit()
 
@@ -504,6 +571,7 @@ class DatabaseManager:
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._settings_ops = SettingsOperations()
+        self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -529,6 +597,9 @@ class DatabaseManager:
 
     def update_last_login(self, username: str):
         return self._user_ops.update_last_login(username)
+
+    def update_user_password(self, username: str, hashed_password: str):
+        return self._user_ops.update_user_password(username, hashed_password)
 
     def get_or_create_auth0_user(self, auth0_sub: str, email: str, name: str = None, picture: str = None):
         return self._user_ops.get_or_create_auth0_user(auth0_sub, email, name, picture)
@@ -830,6 +901,59 @@ class DatabaseManager:
 
     def get_settings_dict(self):
         return self._settings_ops.get_settings_dict()
+
+    # =========================================================================
+    # Public Agent Links (delegated to db/public_links.py) - Phase 12.2
+    # =========================================================================
+
+    def create_public_link(self, agent_name: str, created_by: str, name: str = None,
+                           require_email: bool = False, expires_at: str = None):
+        return self._public_link_ops.create_public_link(agent_name, created_by, name, require_email, expires_at)
+
+    def get_public_link(self, link_id: str):
+        return self._public_link_ops.get_public_link(link_id)
+
+    def get_public_link_by_token(self, token: str):
+        return self._public_link_ops.get_public_link_by_token(token)
+
+    def list_agent_public_links(self, agent_name: str):
+        return self._public_link_ops.list_agent_public_links(agent_name)
+
+    def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
+                           require_email: bool = None, expires_at: str = None):
+        return self._public_link_ops.update_public_link(link_id, name, enabled, require_email, expires_at)
+
+    def delete_public_link(self, link_id: str):
+        return self._public_link_ops.delete_public_link(link_id)
+
+    def delete_agent_public_links(self, agent_name: str):
+        return self._public_link_ops.delete_agent_public_links(agent_name)
+
+    def is_public_link_valid(self, token: str):
+        return self._public_link_ops.is_link_valid(token)
+
+    # Email verification methods
+    def create_verification(self, link_id: str, email: str, expiry_minutes: int = 10):
+        return self._public_link_ops.create_verification(link_id, email, expiry_minutes)
+
+    def verify_code(self, link_id: str, email: str, code: str, session_hours: int = 24):
+        return self._public_link_ops.verify_code(link_id, email, code, session_hours)
+
+    def validate_session(self, link_id: str, session_token: str):
+        return self._public_link_ops.validate_session(link_id, session_token)
+
+    def count_recent_verification_requests(self, email: str, minutes: int = 10):
+        return self._public_link_ops.count_recent_verification_requests(email, minutes)
+
+    # Usage tracking methods
+    def record_public_link_usage(self, link_id: str, email: str = None, ip_address: str = None):
+        return self._public_link_ops.record_usage(link_id, email, ip_address)
+
+    def get_public_link_usage_stats(self, link_id: str):
+        return self._public_link_ops.get_link_usage_stats(link_id)
+
+    def count_recent_messages_by_ip(self, ip_address: str, minutes: int = 1):
+        return self._public_link_ops.count_recent_messages_by_ip(ip_address, minutes)
 
 
 # Global database manager instance

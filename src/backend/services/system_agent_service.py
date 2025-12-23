@@ -21,6 +21,7 @@ from services.docker_service import (
     get_next_available_port,
 )
 from credentials import CredentialManager
+from routers.settings import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ class SystemAgentService:
         env_vars = {
             'AGENT_NAME': SYSTEM_AGENT_NAME,
             'AGENT_TYPE': agent_type,
-            'ANTHROPIC_API_KEY': os.getenv('ANTHROPIC_API_KEY', ''),
+            'ANTHROPIC_API_KEY': get_anthropic_api_key(),
             'ENABLE_SSH': 'true',
             'ENABLE_AGENT_UI': 'true',
             'AGENT_SERVER_PORT': '8000',

@@ -288,3 +288,82 @@ class SystemSetting(BaseModel):
 class SystemSettingUpdate(BaseModel):
     """Request model for updating a system setting."""
     value: str
+
+
+# =========================================================================
+# Public Agent Link Models (Phase 12.2: Public Agent Links)
+# =========================================================================
+
+class PublicLinkCreate(BaseModel):
+    """Request model for creating a public link."""
+    name: Optional[str] = None  # Friendly name for the link
+    require_email: bool = False  # Whether email verification is required
+    expires_at: Optional[str] = None  # ISO timestamp for expiration
+
+
+class PublicLinkUpdate(BaseModel):
+    """Request model for updating a public link."""
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    require_email: Optional[bool] = None
+    expires_at: Optional[str] = None
+
+
+class PublicLink(BaseModel):
+    """A public shareable link for an agent."""
+    id: str
+    agent_name: str
+    token: str
+    created_by: str  # User ID who created the link
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    enabled: bool = True
+    name: Optional[str] = None
+    require_email: bool = False
+
+
+class PublicLinkWithUrl(PublicLink):
+    """Public link with generated URL."""
+    url: str
+    usage_stats: Optional[dict] = None
+
+
+class PublicLinkInfo(BaseModel):
+    """Public-facing link information (no sensitive data)."""
+    valid: bool
+    require_email: bool = False
+    agent_available: bool = True
+    reason: Optional[str] = None  # "expired", "disabled", "not_found"
+
+
+class VerificationRequest(BaseModel):
+    """Request to send a verification code."""
+    token: str  # The public link token
+    email: str  # Email to verify
+
+
+class VerificationConfirm(BaseModel):
+    """Request to confirm a verification code."""
+    token: str  # The public link token
+    email: str
+    code: str  # 6-digit code
+
+
+class VerificationResponse(BaseModel):
+    """Response after verification confirmation."""
+    verified: bool
+    session_token: Optional[str] = None
+    expires_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PublicChatRequest(BaseModel):
+    """Request to chat via a public link."""
+    message: str
+    session_token: Optional[str] = None  # Required if link requires email verification
+
+
+class PublicChatResponse(BaseModel):
+    """Response from a public chat."""
+    response: str
+    usage: Optional[dict] = None  # {"input_tokens": N, "output_tokens": N}

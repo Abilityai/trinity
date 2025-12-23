@@ -1,3 +1,110 @@
+### 2025-12-23 09:30:00
+🔐 **First-Time Setup - Feature Implemented (12.3)**
+
+Implemented first-time setup wizard for admin password and API key configuration. On fresh install, users are redirected to `/setup` to set an admin password before accessing the platform.
+
+**New Features**:
+- Setup wizard for initial admin password
+- Bcrypt password hashing for security
+- Login blocked until setup complete
+- API Keys management in Settings page
+- Anthropic API key test button
+- Settings-based API key with env var fallback
+
+**Backend Changes**:
+- `dependencies.py` - Added `hash_password()`, updated `verify_password()` for bcrypt
+- `db/users.py` - Added `update_user_password()` method
+- `database.py` - Added delegation method for password update
+- `routers/setup.py` - New router for setup endpoints
+- `routers/auth.py` - Added setup status check, login block
+- `routers/settings.py` - Added API key management endpoints
+- `routers/agents.py` - Uses `get_anthropic_api_key()` helper
+- `services/system_agent_service.py` - Uses `get_anthropic_api_key()` helper
+- `main.py` - Registered setup router
+
+**Frontend Changes**:
+- `SetupPassword.vue` - New setup wizard view
+- `router/index.js` - Added `/setup` route with setup guard
+- `Settings.vue` - Added API Keys section with test/save
+
+**API Endpoints**:
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/setup/status` | GET | No | Check setup status |
+| `/api/setup/admin-password` | POST | No | Set admin password (once) |
+| `/api/settings/api-keys` | GET | Admin | Get API key status |
+| `/api/settings/api-keys/anthropic` | PUT | Admin | Save API key |
+| `/api/settings/api-keys/anthropic` | DELETE | Admin | Delete API key |
+| `/api/settings/api-keys/anthropic/test` | POST | Admin | Test API key |
+
+**Security**:
+- Bcrypt hashing (passlib with bcrypt scheme)
+- Setup endpoint only works once (403 after completion)
+- Backward compatible with plaintext passwords
+- API keys never exposed in full (masked display)
+
+---
+
+### 2025-12-22 22:30:00
+🔗 **Public Agent Links - Feature Implemented (12.2)**
+
+Implemented shareable public links that allow unauthenticated users to chat with agents. Owners can create links with optional email verification, expiration dates, and usage tracking.
+
+**New Features**:
+- Public links with unique URL-safe tokens
+- Optional email verification (6-digit codes, 10-min expiry)
+- Session tokens for verified users (24-hour validity)
+- Usage statistics (message counts, unique users)
+- Link enable/disable and expiration
+- Rate limiting (30 messages/minute per IP)
+
+**Backend Changes**:
+- 3 new database tables: `agent_public_links`, `public_link_verifications`, `public_link_usage`
+- New router: `routers/public_links.py` - Owner endpoints (CRUD)
+- New router: `routers/public.py` - Public endpoints (no auth)
+- New service: `services/email_service.py` - Email verification (console/SMTP/SendGrid)
+- Database operations: `db/public_links.py`
+- Pydantic models in `db_models.py`
+- Config additions: `FRONTEND_URL`, email settings
+
+**Frontend Changes**:
+- `PublicChat.vue` - Public chat interface with verification flow
+- `PublicLinksPanel.vue` - Owner management panel
+- New route: `/chat/:token` (public, no auth required)
+- "Public Links" tab in AgentDetail (owner only)
+
+**API Endpoints**:
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/agents/{name}/public-links` | GET | Yes | List links |
+| `/api/agents/{name}/public-links` | POST | Yes | Create link |
+| `/api/agents/{name}/public-links/{id}` | PUT | Yes | Update link |
+| `/api/agents/{name}/public-links/{id}` | DELETE | Yes | Delete link |
+| `/api/public/link/{token}` | GET | No | Check link |
+| `/api/public/verify/request` | POST | No | Request code |
+| `/api/public/verify/confirm` | POST | No | Verify code |
+| `/api/public/chat/{token}` | POST | No | Send message |
+
+**Configuration**:
+- `EMAIL_PROVIDER`: console (default), smtp, sendgrid
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`
+- `SENDGRID_API_KEY`
+- `FRONTEND_URL`: Base URL for public link generation
+
+**Use Cases**:
+- Share agent demo with prospects
+- Customer support bots without login
+- Public information agents
+
+**Testing** (17:34 UTC):
+- All API endpoints tested and working
+- Full link lifecycle verified (create, list, update, enable/disable, delete)
+- Email verification flow tested (console mode)
+- Public chat requires agents with `/api/task` endpoint (Phase 12.1 base image)
+- Test file: `tests/test_public_links.py`
+
+---
+
 ### 2025-12-22 20:00:00
 🚀 **Parallel Headless Execution - Feature Implemented (12.1)**
 
