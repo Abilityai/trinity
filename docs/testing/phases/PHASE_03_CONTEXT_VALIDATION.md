@@ -277,7 +277,6 @@ Phase 3 is **PASSED** when **ONE** of these is true:
 
 - **Phase 4**: State Persistence (test-counter)
 - **Phase 5**: Agent-to-Agent Collaboration (test-delegator)
-- **Phase 6**: Workplan System (test-worker)
 - **Phase 7**: Scheduling (test-scheduler)
 - **Phase 8**: Execution Queue (test-queue)
 - **Phase 9**: File Browser (test-files)

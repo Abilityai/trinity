@@ -10,7 +10,6 @@ export const useAgentsStore = defineStore('agents', {
     error: null,
     // Context stats for agents list page
     contextStats: {},  // Map of agent name -> stats
-    planStats: {},     // Map of agent name -> plan stats
     contextPollingInterval: null,
     sortBy: 'created_desc'  // Default sort order
   }),
@@ -379,67 +378,6 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    // Plans / Task DAG Actions (Phase 9 - Pillar I: Explicit Planning)
-    async getAgentPlans(name, status = null) {
-      const authStore = useAuthStore()
-      const params = status ? { status } : {}
-      const response = await axios.get(`/api/agents/${name}/plans`, {
-        params,
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async getAgentPlansSummary(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/plans/summary`, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async getAgentPlan(name, planId) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/plans/${planId}`, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async createAgentPlan(name, planData) {
-      const authStore = useAuthStore()
-      const response = await axios.post(`/api/agents/${name}/plans`, planData, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async updateAgentPlan(name, planId, updates) {
-      const authStore = useAuthStore()
-      const response = await axios.put(`/api/agents/${name}/plans/${planId}`, updates, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async deleteAgentPlan(name, planId) {
-      const authStore = useAuthStore()
-      const response = await axios.delete(`/api/agents/${name}/plans/${planId}`, {
-        headers: authStore.authHeader
-      })
-      return response.data
-    },
-
-    async updateAgentTask(name, planId, taskId, taskUpdate) {
-      const authStore = useAuthStore()
-      const response = await axios.put(
-        `/api/agents/${name}/plans/${planId}/tasks/${taskId}`,
-        taskUpdate,
-        { headers: authStore.authHeader }
-      )
-      return response.data
-    },
-
     // Custom Metrics Actions (Phase 9.9)
     async getAgentMetrics(name) {
       const authStore = useAuthStore()
@@ -479,42 +417,6 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
-    async fetchPlanStats() {
-      try {
-        const authStore = useAuthStore()
-        const response = await axios.get('/api/agents/plans/aggregate', {
-          headers: authStore.authHeader
-        })
-        const data = response.data
-
-        // Update per-agent plan stats from agent_summaries
-        const newPlanStats = {}
-        if (data.agent_summaries) {
-          data.agent_summaries.forEach(agentData => {
-            const agentName = agentData.agent_name
-            const totalTasks = agentData.total_tasks || 0
-            const completedTasks = agentData.completed_tasks || 0
-
-            newPlanStats[agentName] = {
-              activePlan: agentData.active_plans > 0,
-              totalPlans: agentData.total_plans || 0,
-              activeTasks: agentData.active_tasks || 0,
-              completedTasks: completedTasks,
-              totalTasks: totalTasks,
-              currentTask: agentData.current_task?.name || null,
-              taskProgress: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0
-            }
-          })
-        }
-        this.planStats = newPlanStats
-      } catch (error) {
-        // Don't log 404 errors as they're expected when no plans exist
-        if (error.response?.status !== 404) {
-          console.error('Failed to fetch plan stats:', error)
-        }
-      }
-    },
-
     startContextPolling() {
       if (this.contextPollingInterval) {
         clearInterval(this.contextPollingInterval)
@@ -522,15 +424,13 @@ export const useAgentsStore = defineStore('agents', {
 
       // Fetch immediately
       this.fetchContextStats()
-      this.fetchPlanStats()
 
       // Then poll every 5 seconds
       this.contextPollingInterval = setInterval(() => {
         this.fetchContextStats()
-        this.fetchPlanStats()
       }, 5000)
 
-      console.log('[Agents] Started context and plan polling (every 5s)')
+      console.log('[Agents] Started context polling (every 5s)')
     },
 
     stopContextPolling() {

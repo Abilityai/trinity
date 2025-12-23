@@ -134,7 +134,6 @@ The test suite covers:
 - **Agent Lifecycle** (test_agent_lifecycle.py) - CRUD, start/stop, logs
 - **Agent Chat** (test_agent_chat.py) - Message sending, history, sessions
 - **Agent Files** (test_agent_files.py) - File browser, downloads
-- **Agent Plans** (test_agent_plans.py) - Workplan management, DAG execution
 - **Agent Sharing** (test_agent_sharing.py) - Share/unshare agents
 - **Agent Permissions** (test_agent_permissions.py) - Agent-to-agent permission CRUD, defaults, cascade delete (Req 9.10)
 - **Agent Git** (test_agent_git.py) - Git sync operations

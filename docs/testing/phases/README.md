@@ -48,7 +48,6 @@ The monolithic `UI_INTEGRATION_TEST.md` has been **split into individual phase f
 | 3 | Context Validation | 10 min | **CRITICAL: context %, progress bar** |
 | 4 | State Persistence | 10 min | File I/O, counter.txt, state |
 | 5 | Agent Collaboration + Permissions | 25 min | Trinity MCP, delegation, Pillar II, **permissions UI + enforcement** |
-| 6 | Workplan System | 20 min | Task DAGs, dependencies, Pillar I |
 | 7 | Scheduling | 15 min | Cron, execution history, autonomy |
 | 8 | Execution Queue | 15 min | Concurrency, 429, queue ordering |
 | 9 | File Browser | 10 min | Tree structure, download, security |
@@ -96,7 +95,6 @@ All files in `docs/testing/phases/`:
 | **PHASE_03_CONTEXT_VALIDATION.md** | Context %, progress bar (CRITICAL) |
 | **PHASE_04_STATE_PERSISTENCE.md** | File I/O, counter operations |
 | **PHASE_05_AGENT_COLLABORATION.md** | Trinity MCP, delegation, **Permissions system** |
-| **PHASE_06_WORKPLAN_SYSTEM.md** | Task DAGs, dependencies, Pillar I |
 | **PHASE_07_SCHEDULING.md** | Cron, execution history, autonomy |
 | **PHASE_08_EXECUTION_QUEUE.md** | Concurrency, 429, queue ordering |
 | **PHASE_09_FILE_BROWSER.md** | Tree structure, download, security |

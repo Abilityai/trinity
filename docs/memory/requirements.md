@@ -9,7 +9,7 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
 
 | Pillar | Description | Implementation Status |
 |--------|-------------|----------------------|
-| **I. Explicit Planning** | Task DAGs persisting outside context window | 🚧 In Progress (9.8 - backend done, injection API pending) |
+| **I. Explicit Planning** | Task DAGs persisting outside context window | ❌ REMOVED (2025-12-23) - Individual agent planning deferred to orchestrator-level |
 | **II. Hierarchical Delegation** | Orchestrator-Worker with context quarantine | ✅ Agent-to-Agent via MCP |
 | **III. Persistent Memory** | Virtual filesystems, memory folding | ✅ Chat persistence, file browser |
 | **IV. Extreme Context Engineering** | High-Order Prompts defining reasoning | ✅ Templates with CLAUDE.md |
@@ -693,64 +693,17 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
   - Cost/context stored in chat_messages/schedule_executions only (JOIN pattern)
 
 #### 9.8 Task DAG System (Pillar I - Explicit Planning)
-- **Status**: 🚧 In Progress
-- **Priority**: High
-- **Description**: External task graph representation for plan visibility, cross-agent coordination, and failure recovery
-- **Architecture** (Centralized via Agent Server):
-  - **Agent Server owns all injection logic** - No startup.sh file manipulation
-  - Trinity meta-prompt mounted read-only at `/trinity-meta-prompt`
-  - Agent server exposes injection API endpoints
-  - Backend triggers injection via agent server after container starts
-  - Plans stored as YAML in agent workspace `plans/active/` and `plans/archive/`
-  - Plan API endpoints for CRUD operations
-- **Acceptance Criteria**:
-  - [x] Trinity meta-prompt config (`config/trinity-meta-prompt/prompt.md`)
-  - [x] Planning commands (`trinity-plan-create`, `trinity-plan-status`, `trinity-plan-update`, `trinity-plan-list`)
-  - [x] Plan API in agent-server.py (GET/POST/PUT/DELETE plans)
-  - [x] Plan summary endpoint for dashboard (`GET /api/plans/summary`)
-  - [x] Backend proxy endpoints (`/api/agents/{name}/plans/*`)
-  - [x] Cross-agent aggregate endpoint (`/api/agents/plans/aggregate`)
-  - [x] **Agent Server Injection API** (Completed 2025-12-06):
-    - `POST /api/trinity/inject` - Inject meta-prompt, commands, create directories
-    - `POST /api/trinity/reset` - Reset Trinity injection to clean state
-    - `GET /api/trinity/status` - Check injection status
-  - [x] **Backend Integration** (Completed 2025-12-06):
-    - Call injection API after agent starts (in start_agent endpoint)
-    - Retry logic with timeout (5 retries, 2s delay)
-  - [x] **Remove startup.sh injection code** - All injection via agent-server API
-  - [x] Task DAG visualization in Collaboration Dashboard (AgentNode shows current task, progress bar)
-  - [x] **AgentDetail Plans UI** (Completed 2025-12-07):
-    - Plans tab in AgentDetail.vue showing all plans for the agent
-    - Plan list view with status badges (active/completed/failed/paused)
-    - Plan detail modal showing all tasks with dependencies
-    - Task status indicators (pending/active/completed/failed/blocked)
-    - Task results and timestamps display
-    - Status filter dropdown (All/Active/Completed/Failed/Paused)
-  - [ ] **Task DAG Graph Visualization** (NEW):
-    - Visual dependency graph showing task relationships
-    - Node colors indicating task status
-    - Edge arrows showing dependency direction
-    - Could reuse Vue Flow from Collaboration Dashboard
-  - [ ] **Task Actions** (NEW - Optional):
-    - Manual task completion button (mark as done)
-    - Manual task failure button (mark as failed)
-    - Re-run failed task button
-- **Injection Flow**:
-  1. Agent container starts with `/trinity-meta-prompt` mounted
-  2. Backend calls `POST agent:8000/api/trinity/inject`
-  3. Agent server copies files from mount to workspace:
-     - `/trinity-meta-prompt/prompt.md` → `.trinity/prompt.md`
-     - `/trinity-meta-prompt/commands/*.md` → `.claude/commands/trinity/`
-     - Creates `plans/active/` and `plans/archive/` directories
-     - Appends Trinity section to `CLAUDE.md`
-  4. Agent server returns injection status
-  5. Agent is ready for planning operations
-- **Benefits**:
-  - Centralized control in agent-server.py
-  - Can update/reset injection without restart
-  - Clear API contract
-  - Better error handling and logging
-  - Testable endpoints
+- **Status**: ❌ REMOVED (2025-12-23)
+- **Reason**: Individual agent-level task planning removed. Task management at agent level is handled by Claude Code itself. System-level task management will be implemented via orchestrator agents in future phases.
+- **What was removed**:
+  - Workplan tab and WorkplanPanel.vue from AgentDetail
+  - Task progress display from AgentNode.vue and Dashboard
+  - Plan API endpoints from backend and agent-server
+  - Workplan command files from trinity-meta-prompt
+  - Plan-related state from stores (agents.js, network.js)
+- **What remains**:
+  - Trinity injection for agent collaboration (MCP tools, vector memory)
+  - Basic Trinity meta-prompt (simplified, no workplan instructions)
 
 #### 9.9 Agent Custom Metrics
 - **Status**: 🚧 In Progress

@@ -458,7 +458,6 @@ const totalCollaborationCount = ref(0)
 const timeRangeHours = ref(24)            // Default to last 24 hours
 const isLoadingHistory = ref(false)
 const contextStats = ref({})              // Map of agent name -> context stats
-const planStats = ref({})                 // Map of agent name -> plan stats
 ```
 
 #### Replay Mode State (Lines 36-42)
@@ -627,7 +626,6 @@ function jumpToEvent(index) { ... }
 <div class="flex items-center space-x-3 text-xs text-gray-500">
   <span>{{ agents.length }} agents</span>
   <span>{{ runningCount }} running</span>
-  <span v-if="aggregatePlanStats.active_plans > 0">{{ aggregatePlanStats.active_plans }} plans</span>
   <span>{{ totalCollaborationCount }} messages ({{ timeRangeHours }}h)</span>
   <span v-if="activeCollaborationCount > 0">{{ activeCollaborationCount }} active</span>
 </div>

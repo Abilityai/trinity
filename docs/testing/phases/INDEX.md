@@ -17,8 +17,7 @@
 | 3 | Context Validation (CRITICAL) | 10 min | Phase 2 | Context tracking verified | 🟡 Known bug |
 | 4 | State Persistence + Activity | 10 min | Phase 3 | File I/O + Activity tracking | 🟢 |
 | 5 | Agent Collaboration + Permissions | 25 min | Phase 4 | MCP communication + permission enforcement | 🟢 |
-| 6 | Workplan System | 20 min | Phase 5 | Workplan creation & tracking | 🟢 |
-| 7 | Scheduling & Autonomy | 15 min | Phase 6 | Schedule execution verified | 🟢 |
+| 7 | Scheduling & Autonomy | 15 min | Phase 5 | Schedule execution verified | 🟢 |
 | 8 | Execution Queue | 15 min | Phase 7 | Concurrency handling tested | 🟢 |
 | 9 | File Browser | 10 min | Phase 8 | File operations verified | 🟢 |
 | 10 | Error Handling | 10 min | Phase 9 | Failure recovery tested | 🟢 |
@@ -48,7 +47,7 @@ python3 run_test_phases.py --phase 3
 python3 run_test_phases.py --from 2 --to 5
 
 # Skip to phase (requires manual verification of prior phases)
-python3 run_test_phases.py --phase 6 --skip-prerequisites
+python3 run_test_phases.py --phase 7 --skip-prerequisites
 ```
 
 ### Manual (Single Phase)
@@ -116,9 +115,8 @@ All other phases can be skipped if time-constrained, but phases 0-3 are mandator
 |-------|-------|--------|--------|
 | 2 | Template pre-selection bug | Known | Minor - use API workaround |
 | 3 | **Context stuck at 0%** | **CRITICAL BUG** | **Blocks testing** |
-| 3 | Task indicator stuck at "—" | Needs investigation | Blocks workplan testing |
 | 5 | UI tab switching broken | Confirmed | Use API for testing |
-| 6+ | Not yet executed | TBD | Unknown |
+| 7+ | Not yet executed | TBD | Unknown |
 
 ---
 
@@ -219,8 +217,6 @@ Phase 4 (State Persistence)
     ↓
 Phase 5 (Agent Collaboration)
     ↓
-Phase 6 (Workplan System)
-    ↓
 Phase 7 (Scheduling)
     ↓
 Phase 8 (Execution Queue)
@@ -257,7 +253,6 @@ Prerequisite Checklist:
 - [ ] Context tracking working (Phase 3) - or bug documented
 - [ ] State persistence working (Phase 4)
 - [ ] Agent collaboration working (Phase 5)
-- [ ] Workplan system working (Phase 6)
 
 Only after all above: can proceed to Phase 7
 
@@ -311,7 +306,6 @@ docs/testing/phases/
 ├── PHASE_03_CONTEXT_VALIDATION.md
 ├── PHASE_04_STATE_PERSISTENCE.md
 ├── PHASE_05_AGENT_COLLABORATION.md
-├── PHASE_06_WORKPLAN_SYSTEM.md
 ├── PHASE_07_SCHEDULING.md
 ├── PHASE_08_EXECUTION_QUEUE.md
 ├── PHASE_09_FILE_BROWSER.md

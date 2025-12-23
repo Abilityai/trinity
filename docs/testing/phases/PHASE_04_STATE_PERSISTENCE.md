@@ -296,7 +296,7 @@ Phase 4 is **PASSED** when:
 
 Once Phase 4 is **PASSED**, proceed to:
 - **Phase 5**: Agent-to-Agent Collaboration (test-delegator)
-- **Phase 6**: Workplan System (test-worker)
+- **Phase 7**: Scheduling (test-scheduler)
 
 ---
 

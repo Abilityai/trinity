@@ -20,11 +20,6 @@
                   <span class="font-medium text-green-600 dark:text-green-400">{{ runningCount }}</span>
                   <span>running</span>
                 </span>
-                <span v-if="aggregatePlanStats.active_plans > 0" class="text-gray-300 dark:text-gray-600">·</span>
-                <span v-if="aggregatePlanStats.active_plans > 0" class="flex items-center space-x-1">
-                  <span class="font-medium text-purple-600 dark:text-purple-400">{{ aggregatePlanStats.active_plans }}</span>
-                  <span>plans</span>
-                </span>
                 <span class="text-gray-300 dark:text-gray-600">·</span>
                 <span class="flex items-center space-x-1">
                   <span class="font-medium text-blue-600 dark:text-blue-400">{{ totalCollaborationCount }}</span>
@@ -459,7 +454,6 @@ const {
   totalCollaborationCount,
   timeRangeHours,
   isLoadingHistory,
-  aggregatePlanStats,
   // Replay state
   isReplayMode,
   isPlaying,

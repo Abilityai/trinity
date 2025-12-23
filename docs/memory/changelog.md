@@ -1,3 +1,42 @@
+### 2025-12-23 11:00:00
+❌ **Workplan System Removed (9.8) - Complete Cleanup**
+
+Removed the individual agent-level Workplan/Task DAG system. Task management at the agent level is handled by Claude Code itself. System-level task management will be implemented via orchestrator agents in future phases.
+
+**Code Removed**:
+- `WorkplanPanel.vue` component and "Workplan" tab from AgentDetail
+- Task progress display from AgentNode.vue and Dashboard.vue
+- Plan API endpoints from backend (`/api/agents/{name}/plans/*`, `/api/agents/plans/aggregate`)
+- Plan router from agent-server (`routers/plans.py`)
+- Task DAG models from agent-server (`models.py`)
+- Workplan command files from `config/trinity-meta-prompt/commands/`
+- Plan-related state and actions from stores (agents.js, network.js)
+- planStats helper functions from Agents.vue
+- Test files: `tests/test_agent_plans.py`, `tests/agent_server/test_agent_plans_direct.py`
+
+**Templates/Configs Removed**:
+- `config/agent-templates/test-worker/` - Workplan test agent template
+- `.claude/commands/demo-agent-fleet.md` - Demo command (heavily workplan-focused)
+
+**Testing Docs Removed**:
+- `docs/testing/phases/PHASE_06_WORKPLAN_SYSTEM.md`
+- `docs/memory/TERMINOLOGY_CLARITY_REFACTOR.md` (obsolete)
+
+**Pillar Update**: Four Pillars of Deep Agency updated:
+1. Hierarchical Delegation → (was: Explicit Planning)
+2. Persistent Memory
+3. Extreme Context Engineering
+4. Autonomous Operations → (new)
+
+**Documentation Updated**:
+- `README.md` and `CLAUDE.md` - Updated Four Pillars, removed Workplan feature
+- `requirements.md` - 9.8 marked as REMOVED
+- `feature-flows.md` - Removed workplan flow entries
+- Feature flow docs - Removed workplan references from 7 files
+- Testing docs - Updated INDEX.md, README.md, phase files to remove Phase 6
+
+---
+
 ### 2025-12-23 09:30:00
 🔐 **First-Time Setup - Feature Implemented (12.3)**
 

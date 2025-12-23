@@ -470,7 +470,6 @@ Phase 5 is **PASSED** when:
 ## Next Phase
 
 Once Phase 5 is **PASSED**, proceed to:
-- **Phase 6**: Workplan System (test-worker)
 - **Phase 7**: Scheduling (test-scheduler)
 
 ---

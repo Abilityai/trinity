@@ -20,7 +20,6 @@ from .routers import (
     git_router,
     files_router,
     trinity_router,
-    plans_router,
     info_router,
 )
 from .state import agent_state
@@ -54,7 +53,6 @@ app.include_router(credentials_router)  # Credential management
 app.include_router(git_router)  # Git sync endpoints
 app.include_router(files_router)  # File browser endpoints
 app.include_router(trinity_router)  # Trinity injection API
-app.include_router(plans_router)  # Task DAG / Plan endpoints
 
 
 def run_server():

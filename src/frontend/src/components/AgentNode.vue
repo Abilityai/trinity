@@ -81,38 +81,6 @@
         </div>
       </div>
 
-      <!-- Task DAG Progress (always shown for consistent card height) -->
-      <div class="mb-3">
-        <!-- Current task (only shown when there is one) -->
-        <div v-if="currentTask" class="mb-2">
-          <div class="flex items-center space-x-1 mb-1">
-            <svg class="w-3 h-3 text-blue-500 flex-shrink-0 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 0l-3 3a1 1 0 001.414 1.414L9 9.414V13a1 1 0 102 0V9.414l1.293 1.293a1 1 0 001.414-1.414z" clip-rule="evenodd" />
-            </svg>
-            <span class="text-xs text-gray-500 dark:text-gray-400">Current Task</span>
-          </div>
-          <div class="text-xs font-medium text-gray-700 dark:text-gray-300 truncate pl-4" :title="currentTask">
-            {{ currentTask }}
-          </div>
-        </div>
-        <!-- Task progress bar (always shown) -->
-        <div class="flex items-center justify-between mb-1">
-          <span class="text-xs text-gray-500 dark:text-gray-400 flex items-center space-x-1">
-            <svg class="w-3 h-3 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-            </svg>
-            <span>Tasks</span>
-          </span>
-          <span class="text-xs font-semibold text-gray-700 dark:text-gray-300">{{ taskProgressDisplay }}</span>
-        </div>
-        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
-          <div
-            class="h-full rounded-full transition-all duration-500 bg-purple-500"
-            :style="{ width: taskProgressPercent + '%' }"
-          ></div>
-        </div>
-      </div>
-
       <!-- Click-through button (nodrag class prevents drag) - Hidden for system agents -->
       <button
         v-if="!isSystemAgent"
@@ -226,33 +194,6 @@ const progressBarColor = computed(() => {
   if (percent >= 75) return 'bg-orange-500'
   if (percent >= 50) return 'bg-yellow-500'
   return 'bg-green-500'
-})
-
-// Task DAG progress computed properties
-const hasActivePlan = computed(() => {
-  return props.data.activePlan || props.data.totalTasks > 0
-})
-
-const currentTask = computed(() => {
-  return props.data.currentTask || null
-})
-
-const completedTasks = computed(() => {
-  return props.data.completedTasks || 0
-})
-
-const totalTasks = computed(() => {
-  return props.data.totalTasks || 0
-})
-
-const taskProgressPercent = computed(() => {
-  if (totalTasks.value === 0) return 0
-  return Math.round((completedTasks.value / totalTasks.value) * 100)
-})
-
-const taskProgressDisplay = computed(() => {
-  if (totalTasks.value === 0) return '—'
-  return `${completedTasks.value}/${totalTasks.value}`
 })
 
 function viewDetails() {

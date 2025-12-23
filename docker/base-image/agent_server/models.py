@@ -201,46 +201,6 @@ class TrinityStatusResponse(BaseModel):
 
 
 # ============================================================================
-# Task DAG / Plan Models
-# ============================================================================
-
-class TaskModel(BaseModel):
-    """A single task in a plan"""
-    id: str
-    name: str
-    description: Optional[str] = None
-    status: str = "pending"  # pending, active, completed, failed, blocked
-    dependencies: List[str] = []
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    result: Optional[str] = None
-
-
-class PlanModel(BaseModel):
-    """A task plan/DAG"""
-    id: str
-    name: str
-    description: Optional[str] = None
-    created: str
-    updated: Optional[str] = None
-    status: str = "active"  # active, completed, failed, paused
-    tasks: List[TaskModel] = []
-
-
-class PlanCreateRequest(BaseModel):
-    """Request to create a new plan"""
-    name: str
-    description: Optional[str] = None
-    tasks: List[dict] = []  # List of task definitions
-
-
-class TaskUpdateRequest(BaseModel):
-    """Request to update a task"""
-    status: str  # pending, active, completed, failed
-    result: Optional[str] = None
-
-
-# ============================================================================
 # Parallel Task Execution Models (Headless Mode)
 # ============================================================================
 

@@ -8,10 +8,10 @@ Unlike reactive chatbots ("System 1" AI), Deep Agents operate with deliberative 
 
 Trinity implements four foundational capabilities that transform simple AI assistants into autonomous agents:
 
-1. **Explicit Planning** — Workplans that persist outside the context window
-2. **Hierarchical Delegation** — Orchestrator-Worker pattern with context quarantine
-3. **Persistent Memory** — Virtual filesystems, memory folding, episodic memory
-4. **Extreme Context Engineering** — High-Order Prompts defining reasoning processes
+1. **Hierarchical Delegation** — Orchestrator-Worker pattern with context quarantine
+2. **Persistent Memory** — Virtual filesystems, vector databases, episodic memory
+3. **Extreme Context Engineering** — High-Order Prompts defining reasoning processes
+4. **Autonomous Operations** — Scheduling, monitoring, and self-healing capabilities
 
 ## Features
 
@@ -24,7 +24,6 @@ Trinity implements four foundational capabilities that transform simple AI assis
 ### Agent Capabilities
 - **MCP Integration** — 16 tools for external agent orchestration via Model Context Protocol
 - **Agent-to-Agent Communication** — Hierarchical delegation with fine-grained permission controls
-- **Workplan System** — Visual task graphs with dependencies and progress tracking
 - **Vector Memory (Chroma)** — Per-agent semantic memory with MCP tools for retrieval
 - **Shared Folders** — File-based state sharing between agents via Docker volumes
 - **Parallel Task Execution** — Stateless parallel tasks for orchestrator-worker patterns
@@ -167,7 +166,6 @@ my-template/
 The Multi-Agent System Guide covers Trinity's platform capabilities that enable autonomous operation:
 - **Vector Database (Chroma)** — Per-agent semantic memory with MCP tools
 - **Scheduling System** — Cron-based autonomous execution
-- **Workplan System** — Persistent task DAGs outside context window
 - **Shared Folders** — File-based state sharing between agents
 - **Agent-to-Agent MCP** — Real-time delegation and collaboration
 

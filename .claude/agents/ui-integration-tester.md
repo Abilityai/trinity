@@ -23,7 +23,6 @@ Execute ONE specific test phase (0-15) from the modular testing framework. You M
 | 3 | `PHASE_03_CONTEXT_VALIDATION.md` | Context %, progress bar (CRITICAL) |
 | 4 | `PHASE_04_STATE_PERSISTENCE.md` | File I/O, counter operations |
 | 5 | `PHASE_05_AGENT_COLLABORATION.md` | Trinity MCP, delegation |
-| 6 | `PHASE_06_WORKPLAN_SYSTEM.md` | Task DAG, dependencies |
 | 7 | `PHASE_07_SCHEDULING.md` | Cron, execution history |
 | 8 | `PHASE_08_EXECUTION_QUEUE.md` | Concurrency, 429 handling |
 | 9 | `PHASE_09_FILE_BROWSER.md` | File listing, download |

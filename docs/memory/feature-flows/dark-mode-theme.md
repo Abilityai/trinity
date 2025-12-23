@@ -172,7 +172,6 @@ Dark mode classes follow Tailwind's `dark:` variant pattern:
 | UnifiedActivityPanel | `UnifiedActivityPanel.vue` | Session activity, timeline, modal |
 | InfoPanel | `InfoPanel.vue` | Template info sections, colored badges |
 | MetricsPanel | `MetricsPanel.vue` | Metrics grid, empty states |
-| WorkplanPanel | `WorkplanPanel.vue` | Summary stats, plans list, modal |
 | FoldersPanel | `FoldersPanel.vue` | Shared folders config, toggles, cards |
 | AgentNode | `AgentNode.vue` | Dashboard agent tiles, progress bars, buttons |
 | GitPanel | `GitPanel.vue` | Git status, commits, changes list |
@@ -308,7 +307,6 @@ localStorage.getItem('trinity-theme')  // Should return current theme
 - [x] UnifiedActivityPanel dark mode
 - [x] InfoPanel dark mode
 - [x] MetricsPanel dark mode
-- [x] WorkplanPanel dark mode
 
 ## Files Modified
 
@@ -331,7 +329,6 @@ localStorage.getItem('trinity-theme')  // Should return current theme
 | `src/frontend/src/components/UnifiedActivityPanel.vue` | Dark mode Tailwind classes |
 | `src/frontend/src/components/InfoPanel.vue` | Dark mode Tailwind classes |
 | `src/frontend/src/components/MetricsPanel.vue` | Dark mode Tailwind classes |
-| `src/frontend/src/components/WorkplanPanel.vue` | Dark mode Tailwind classes |
 | `src/frontend/src/components/FoldersPanel.vue` | Dark mode Tailwind classes (2025-12-19) |
 | `src/frontend/src/components/AgentNode.vue` | Dark mode Tailwind classes (2025-12-19) |
 | `src/frontend/src/components/GitPanel.vue` | Dark mode Tailwind classes (2025-12-19) |

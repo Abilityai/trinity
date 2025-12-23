@@ -6,7 +6,7 @@
 
 ## Overview
 
-Enhance the Agents list page (`/agents`) with status indicators, context stats, task progress, and sorting capabilities by reusing existing APIs and components from the Collaboration Dashboard.
+Enhance the Agents list page (`/agents`) with status indicators, context stats, and sorting capabilities by reusing existing APIs and components from the Collaboration Dashboard.
 
 ## Current State Analysis
 
@@ -15,20 +15,18 @@ Enhance the Agents list page (`/agents`) with status indicators, context stats, 
 - Shows: agent name, type, port, status badge (running/stopped)
 - Start/Stop buttons with loading spinners
 - "Shared by X" badge for shared agents
-- **Missing**: Activity state indicators, context stats, task progress, sorting
+- **Missing**: Activity state indicators, context stats, sorting
 
 ### Collaboration Dashboard (AgentNode.vue) - Already Has
 - Activity state (Active/Idle/Offline) with pulsing green dot
 - Context progress bar with color coding (green → yellow → orange → red)
 - GitHub repo display
-- Task DAG progress (current task, completed/total tasks)
 - Status dot with pulse animation
 
 ### Existing APIs to Reuse
 | Endpoint | Purpose | Used By |
 |----------|---------|---------|
 | `GET /api/agents/context-stats` | Context % + activity state for all agents | network.js, agents.js |
-| `GET /api/agents/plans/aggregate` | Task DAG summary with per-agent stats | network.js, agents.js |
 | `GET /api/agents` | Base agent list | agents.js, network.js |
 
 ---
@@ -72,20 +70,7 @@ Enhance the Agents list page (`/agents`) with status indicators, context stats, 
 - `contextUsed`: Number (tokens used)
 - `contextMax`: Number (max tokens)
 
-### 3. Task Progress (Optional)
-**Description**: Show current task and progress if agent has an active plan
-
-**Visual Design**:
-- Small task icon + "X/Y tasks" text
-- Current task name (truncated)
-- Only shown if agent has active plan
-
-**Data Source**: `GET /api/agents/plans/aggregate`
-- `agent_summaries[].current_task.name`
-- `agent_summaries[].total_tasks`
-- `agent_summaries[].completed_tasks`
-
-### 4. Sorting & Filtering
+### 3. Sorting & Filtering
 **Description**: Add sort controls to organize agent list
 
 **Sort Options**:
@@ -251,14 +236,6 @@ Keep agents.js self-contained. Extract shared logic into a composable if needed 
                             ></div>
                           </div>
                         </div>
-
-                        <!-- NEW: Task progress (if has active plan) -->
-                        <div v-if="hasActivePlan(agent.name)" class="mt-1 text-xs text-gray-500">
-                          <span class="inline-flex items-center">
-                            <ClipboardIcon class="h-3 w-3 mr-1 text-purple-500" />
-                            {{ getTaskProgress(agent.name) }}
-                          </span>
-                        </div>
                       </div>
                     </div>
                   </router-link>
@@ -319,18 +296,6 @@ const getProgressBarColor = (agentName) => {
   if (percent >= 50) return 'bg-yellow-500'
   return 'bg-green-500'
 }
-
-// Task progress helpers
-const hasActivePlan = (agentName) => {
-  const stats = agentsStore.planStats?.[agentName]
-  return stats?.activePlan || false
-}
-
-const getTaskProgress = (agentName) => {
-  const stats = agentsStore.planStats?.[agentName]
-  if (!stats) return ''
-  return `${stats.completedTasks}/${stats.totalTasks} tasks`
-}
 ```
 
 ---
@@ -339,21 +304,19 @@ const getTaskProgress = (agentName) => {
 
 ### Files to Modify
 1. **`src/frontend/src/stores/agents.js`**
-   - Add `contextStats` and `planStats` state
-   - Add `fetchContextStats()` and `fetchPlanStats()` actions
+   - Add `contextStats` state
+   - Add `fetchContextStats()` actions
    - Add `startContextPolling()` and `stopContextPolling()` actions
 
 2. **`src/frontend/src/views/Agents.vue`**
    - Add sort dropdown and sorting logic
    - Add activity state indicator (dot + label)
    - Add context progress bar for running agents
-   - Add task progress for agents with active plans
    - Add CSS for pulse animation
    - Call polling on mount/unmount
 
 ### New Code Reuse
 - **API**: `GET /api/agents/context-stats` (already exists)
-- **API**: `GET /api/agents/plans/aggregate` (already exists)
 - **CSS**: Pulse animation from AgentNode.vue
 - **Logic**: Progress bar color coding from AgentNode.vue
 - **Logic**: Activity state detection from network.js
@@ -362,21 +325,17 @@ const getTaskProgress = (agentName) => {
 
 ## Implementation Order
 
-1. **Phase 1: Sorting** (5 min)
+1. **Phase 1: Sorting**
    - Add sort dropdown
    - Implement sorting computed property
    - Default to newest first
 
-2. **Phase 2: Context Stats** (15 min)
+2. **Phase 2: Context Stats**
    - Add store methods for context stats polling
    - Add activity state indicator (dot + label)
    - Add context progress bar
 
-3. **Phase 3: Task Progress** (10 min)
-   - Add plan stats to store
-   - Show task count for agents with active plans
-
-4. **Phase 4: Polish** (5 min)
+3. **Phase 3: Polish**
    - Add loading states
    - Test with various agent states
    - Ensure polling stops on unmount
@@ -417,6 +376,6 @@ const getTaskProgress = (agentName) => {
 
 - **AgentNode.vue**: `/src/frontend/src/components/AgentNode.vue` - Visual design reference
 - **network.js**: `/src/frontend/src/stores/network.js:564-601` - API polling reference (fetchContextStats)
-- **agents.js**: `/src/frontend/src/stores/agents.js:452-537` - Context and plan stats fetching + polling
+- **agents.js**: `/src/frontend/src/stores/agents.js` - Context stats fetching + polling
 - **Backend endpoint**: `/src/backend/routers/agents.py:208-290` - context-stats endpoint
 - **Agents.vue**: `/src/frontend/src/views/Agents.vue:1-295` - Full component with dark mode support

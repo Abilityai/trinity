@@ -88,9 +88,6 @@ Use these commands for common operations:
 3. **Container Failure**: Container exited or unhealthy
    - Action: Attempt restart with backoff
 
-4. **Failed Tasks**: Workplan task in `failed` state
-   - Action: Log, notify, optionally pause
-
 ### Health Check Process
 
 When asked to check health:

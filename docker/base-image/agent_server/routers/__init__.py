@@ -7,7 +7,6 @@ from .credentials import router as credentials_router
 from .git import router as git_router
 from .files import router as files_router
 from .trinity import router as trinity_router
-from .plans import router as plans_router
 from .info import router as info_router
 
 __all__ = [
@@ -17,6 +16,5 @@ __all__ = [
     "git_router",
     "files_router",
     "trinity_router",
-    "plans_router",
     "info_router",
 ]

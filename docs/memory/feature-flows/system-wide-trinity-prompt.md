@@ -341,7 +341,6 @@ This feature does not broadcast changes via WebSocket. Agents only receive the p
 ## Related Flows
 - **Upstream**: Admin authentication (auth0-authentication.md)
 - **Downstream**: Agent Lifecycle (agent-lifecycle.md) - Trinity injection at startup
-- **Related**: Workplan System (workplan-system.md) - Other Trinity injections
 
 ---
 

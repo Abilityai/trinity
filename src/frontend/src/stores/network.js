@@ -20,17 +20,6 @@ export const useNetworkStore = defineStore('network', () => {
   const contextStats = ref({}) // Map of agent name -> context stats
   const contextPollingInterval = ref(null) // Interval ID for context polling
   const agentRefreshInterval = ref(null) // Interval ID for agent list refresh
-  const planStats = ref({}) // Map of agent name -> plan stats
-  const aggregatePlanStats = ref({
-    total_plans: 0,
-    active_plans: 0,
-    completed_plans: 0,
-    total_tasks: 0,
-    completed_tasks: 0,
-    active_tasks: 0,
-    blocked_tasks: 0,
-    pending_tasks: 0
-  })
 
   // Replay mode state
   const isReplayMode = ref(false)
@@ -601,74 +590,6 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  // Fetch plan stats from backend (aggregate across all agents)
-  async function fetchPlanStats() {
-    try {
-      const response = await axios.get('/api/agents/plans/aggregate')
-      const data = response.data
-
-      // Update aggregate stats
-      aggregatePlanStats.value = {
-        total_plans: data.total_plans || 0,
-        active_plans: data.active_plans || 0,
-        completed_plans: data.completed_plans || 0,
-        total_tasks: data.total_tasks || 0,
-        completed_tasks: data.completed_tasks || 0,
-        active_tasks: data.active_tasks || 0,
-        blocked_tasks: 0, // Not tracked separately yet
-        pending_tasks: 0, // Not tracked separately yet
-        completion_rate: data.completion_rate || 0
-      }
-
-      // Update per-agent plan stats from agent_summaries
-      const newPlanStats = {}
-      if (data.agent_summaries) {
-        data.agent_summaries.forEach(agentData => {
-          const agentName = agentData.agent_name
-          const currentTaskName = agentData.current_task?.name || null
-          const totalTasks = agentData.total_tasks || 0
-          const completedTasks = agentData.completed_tasks || 0
-
-          newPlanStats[agentName] = {
-            activePlan: agentData.active_plans > 0,
-            totalPlans: agentData.total_plans || 0,
-            activeTasks: agentData.active_tasks || 0,
-            completedTasks: completedTasks,
-            totalTasks: totalTasks,
-            currentTask: currentTaskName,
-            taskProgress: totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0
-          }
-        })
-      }
-      planStats.value = newPlanStats
-
-      // Update node data with plan stats
-      nodes.value.forEach(node => {
-        const stats = newPlanStats[node.id]
-        if (stats) {
-          node.data = {
-            ...node.data,
-            activePlan: stats.activePlan,
-            currentTask: stats.currentTask,
-            taskProgress: stats.taskProgress,
-            totalPlans: stats.totalPlans,
-            totalTasks: stats.totalTasks,
-            completedTasks: stats.completedTasks
-          }
-        }
-      })
-
-      if (data.total_plans > 0) {
-        console.log('[Collaboration] Plan stats updated:', aggregatePlanStats.value)
-      }
-    } catch (error) {
-      // Don't log 404 errors as they're expected when no plans exist
-      if (error.response?.status !== 404) {
-        console.error('Failed to fetch plan stats:', error)
-      }
-    }
-  }
-
   // Start polling context stats every 5 seconds
   function startContextPolling() {
     if (contextPollingInterval.value) {
@@ -677,15 +598,13 @@ export const useNetworkStore = defineStore('network', () => {
 
     // Fetch immediately
     fetchContextStats()
-    fetchPlanStats()
 
     // Then poll every 5 seconds
     contextPollingInterval.value = setInterval(() => {
       fetchContextStats()
-      fetchPlanStats()
     }, 5000)
 
-    console.log('[Collaboration] Started context and plan polling (every 5s)')
+    console.log('[Collaboration] Started context polling (every 5s)')
   }
 
   // Stop polling context stats
@@ -963,8 +882,6 @@ export const useNetworkStore = defineStore('network', () => {
     timeRangeHours,
     isLoadingHistory,
     contextStats,
-    planStats,
-    aggregatePlanStats,
     // Replay state
     isReplayMode,
     isPlaying,
@@ -1002,7 +919,6 @@ export const useNetworkStore = defineStore('network', () => {
     resetNodePositions,
     onNodeDragStop,
     fetchContextStats,
-    fetchPlanStats,
     startContextPolling,
     stopContextPolling,
     startAgentRefresh,

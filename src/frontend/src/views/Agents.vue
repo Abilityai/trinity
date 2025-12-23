@@ -228,23 +228,6 @@ const getProgressBarColor = (agentName) => {
   return 'bg-green-500'
 }
 
-// Task progress helpers
-const hasActivePlan = (agentName) => {
-  const stats = agentsStore.planStats[agentName]
-  return stats?.activePlan || false
-}
-
-const getTaskProgress = (agentName) => {
-  const stats = agentsStore.planStats[agentName]
-  if (!stats) return ''
-  return `${stats.completedTasks}/${stats.totalTasks} tasks`
-}
-
-const getCurrentTask = (agentName) => {
-  const stats = agentsStore.planStats[agentName]
-  return stats?.currentTask || null
-}
-
 const startAgent = async (name) => {
   if (actionInProgress.value === name) return
   actionInProgress.value = name

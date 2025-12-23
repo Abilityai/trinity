@@ -404,7 +404,7 @@ volumes = {
 
 ### Trinity Meta-Prompt Volume (line 569-574)
 ```python
-# Mount Trinity meta-prompt for task DAG planning (Phase 9)
+# Mount Trinity meta-prompt for agent collaboration guidance
 container_meta_prompt_path = Path("/trinity-meta-prompt")
 host_meta_prompt_path = os.getenv("HOST_META_PROMPT_PATH", "./config/trinity-meta-prompt")
 if container_meta_prompt_path.exists():
@@ -648,4 +648,3 @@ fi
 - **Related**: Agent Sharing (ownership and access control)
 - **Related**: Git Sync (GitHub-native agents)
 - **Related**: Agent Scheduling (scheduled task management)
-- **Related**: Task DAG Planning (Trinity meta-prompt provides planning commands - Phase 9)

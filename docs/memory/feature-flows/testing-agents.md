@@ -35,7 +35,6 @@ As a Trinity developer, I want predictable test agents so that I can systematica
 |-------|------------|-------|----------|--------|
 | **test-echo** | `github:abilityai/test-agent-echo` | Basic chat, streaming | HIGH | PASSED |
 | **test-counter** | `github:abilityai/test-agent-counter` | File persistence, state | MEDIUM | PASSED |
-| **test-worker** | `github:abilityai/test-agent-worker` | Workplan system (Pillar I) | HIGH | PARTIAL |
 | **test-delegator** | `github:abilityai/test-agent-delegator` | Agent-to-agent (Pillar II) | HIGH | PASSED |
 | **test-scheduler** | `github:abilityai/test-agent-scheduler` | Cron execution | HIGH | Configured |
 | **test-queue** | `github:abilityai/test-agent-queue` | Execution queue, 429 | HIGH | Configured |
@@ -135,7 +134,6 @@ tests/
   test_agent_lifecycle.py        # Create, start, stop, delete agents
   test_agent_chat.py             # Chat with agents, streaming
   test_agent_files.py            # File browser API
-  test_agent_plans.py            # Workplan system
   test_agent_git.py              # Git sync operations
   test_agent_sharing.py          # Agent sharing/permissions
   test_agent_permissions.py      # Agent-to-agent permissions
@@ -155,18 +153,16 @@ tests/
     test_agent_info.py           # Info endpoint tests
     test_agent_chat_direct.py    # Direct chat tests
     test_agent_files_direct.py   # Direct file API tests
-    test_agent_plans_direct.py   # Direct workplan tests
 ```
 
 ### Local Repository Structure (Manual Testing Only)
 
-The 8 test agent repositories exist locally in `repositories/` for manual integration testing:
+The 7 test agent repositories exist locally in `repositories/` for manual integration testing:
 
 ```
 repositories/
   test-agent-echo/        # Basic chat, streaming
   test-agent-counter/     # File persistence, state
-  test-agent-worker/      # Workplan system (Pillar I)
   test-agent-delegator/   # Agent-to-agent (Pillar II)
   test-agent-scheduler/   # Cron execution (not in GitHub)
   test-agent-queue/       # Execution queue (not in GitHub)
@@ -216,20 +212,7 @@ Characters: [character count]
 - Context window growth
 - File browser API
 
-### 3. test-worker - Workplan System
-
-**Commands**: `create plan: [desc]`, `complete task: [id]`, `fail task: [id]`, `plan status`, `complete plan`
-
-**Tests**:
-- Workplan creation API
-- Task dependencies (blocked -> pending)
-- Plan completion/archiving
-- Dashboard visibility
-- Trinity command injection
-
-> **Note**: Workplan slash commands not yet implemented in GitHub repo CLAUDE.md
-
-### 4. test-delegator - Agent-to-Agent Communication
+### 3. test-delegator - Agent-to-Agent Communication
 
 **Commands**: `list agents`, `delegate to [agent]: [message]`, `ping [agent]`, `chain [a1] [a2]: [msg]`, `broadcast: [msg]`
 
@@ -311,17 +294,7 @@ Setup: test-queue
 3. Verify via GET /api/agents/test-queue/queue
 ```
 
-### Scenario 3: Workplan Lifecycle
-```
-Setup: test-worker
-
-1. "create plan: Integration Test" -> Plan created with 3 tasks
-2. Dashboard shows plan visibility
-3. "complete task: task-1" -> task-2 unblocks
-4. Complete remaining tasks -> Plan archives
-```
-
-### Scenario 4: Scheduled Delegation
+### Scenario 3: Scheduled Delegation
 ```
 Setup: test-delegator + test-counter
 
@@ -373,15 +346,6 @@ Setup: test-delegator + test-counter
 3. Send: "increment" -> Counter: 1
 4. Send: "add 10" -> Counter: 11
 5. **Verify**: File browser shows counter.txt
-
-### Test: Workplan Creation (PARTIAL)
-
-1. Create test-worker agent
-2. Send: "create plan: Test"
-3. **Verify**: Plans tab shows new plan with 3 tasks
-4. Dashboard shows plan in AgentNode
-
-> **Note**: Slash command parsing not yet in test-worker CLAUDE.md
 
 ### Test: Agent Collaboration (PASSED 2025-12-08)
 
@@ -440,7 +404,6 @@ test-agent-{name}/
 
 - **Testing Guide**: `docs/TESTING_GUIDE.md`
 - **Agent Lifecycle**: `docs/memory/feature-flows/agent-lifecycle.md`
-- **Workplan System**: `docs/memory/feature-flows/workplan-system.md`
 - **Agent Network**: `docs/memory/feature-flows/agent-network.md`
 - **Execution Queue**: `docs/memory/feature-flows/execution-queue.md`
 

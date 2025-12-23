@@ -90,21 +90,17 @@ Custom node component for each agent (updated 2025-12-19).
 - Lines 49-55: GitHub repo display (if from GitHub template)
 
 **Progress Bars**:
-- Lines 57-70: Context usage progress bar with percentage and color coding
-- Lines 72-102: Task DAG progress (always shown for consistent card height) with current task and completion bar
+- Lines 57-82: Context usage progress bar with percentage and color coding
 
 **Interaction**:
 - Lines 104-110: "View Details" button with `nodrag` class and **mt-auto** for bottom alignment
 - Lines 232-234: `viewDetails()` - Navigates to `/agents/:name` on button click
 
-**Computed Properties** (Lines 136-230):
+**Computed Properties** (Lines 136-200):
 - `activityState` (137-139): active, idle, or offline based on `data.activityState`
 - `statusDotColor` (159-164): Green (#10b981) for active/idle, gray (#9ca3af) for offline
 - `contextPercentDisplay` (187-190): Rounded context percentage
-- `progressBarColor` (197-203): Green/Yellow/Orange/Red based on context usage threshold
-- `hasActivePlan`, `currentTask`, `completedTasks`, `totalTasks`, `taskProgressPercent`, `taskProgressDisplay`: Task DAG stats (206-230)
-- `showProgressBar` (192-195): **Always returns `true`** for consistent card heights
-- `taskProgressDisplay` (227-230): Shows "—" when no tasks, "X/Y" when tasks exist
+- `progressBarColor` (192-197): Green/Yellow/Orange/Red based on context usage threshold
 
 ### State Management
 
@@ -128,9 +124,7 @@ Pinia store managing graph state and WebSocket communication. **Note**: Previous
 - `contextStats` (20) - Map of agent name -> context stats
 - `contextPollingInterval` (21) - Interval ID for context polling
 - `agentRefreshInterval` (22) - Interval ID for agent list refresh
-- `planStats` (23) - Map of agent name -> plan stats
-- `aggregatePlanStats` (24-33) - Aggregate plan stats across all agents
-- **Replay State** (35-42): `isReplayMode`, `isPlaying`, `replaySpeed`, `currentEventIndex`, `replayInterval`, `replayStartTime`, `replayElapsedMs`
+- **Replay State** (24-31): `isReplayMode`, `isPlaying`, `replaySpeed`, `currentEventIndex`, `replayInterval`, `replayStartTime`, `replayElapsedMs`
 
 **Computed** (Lines 44-89):
 - `activeCollaborationCount` (45-47) - Number of animated edges (filters `edge.animated === true`)
@@ -286,13 +280,12 @@ Updates node color when agent starts/stops.
 ##### handleAgentDeleted() (Lines 361-372)
 Removes node and all connected edges.
 
-##### fetchContextStats() / fetchPlanStats() (Lines 563-669)
+##### fetchContextStats() (Lines 563-591)
 - Fetches context stats from `/api/agents/context-stats`
-- Fetches plan stats from `/api/agents/plans/aggregate`
 - Updates node data with context percentage and activity state
 
-##### startContextPolling() / stopContextPolling() (Lines 671-697)
-- Polls every 5 seconds for context and plan stats
+##### startContextPolling() / stopContextPolling() (Lines 593-619)
+- Polls every 5 seconds for context stats
 - Automatically starts on dashboard mount, stops on unmount
 
 ##### startAgentRefresh() / stopAgentRefresh() (Lines 699-739)
@@ -985,19 +978,17 @@ async def get_agents_context_stats(current_user: User = Depends(get_current_user
 - `contextStats` (20): Map of agent name -> context stats object
 - `contextPollingInterval` (21): Interval ID for cleanup
 - `agentRefreshInterval` (22): Interval ID for agent list refresh
-- `planStats` (23): Map of agent name -> plan stats
 
-**Functions** (Lines 563-697):
+**Functions** (Lines 563-619):
 ```javascript
-fetchContextStats()        // Fetch stats from backend, update node data (563-601)
-fetchPlanStats()           // Fetch plan stats from backend (603-669)
-startContextPolling()      // Start 5-second interval polling (671-688)
-stopContextPolling()       // Clear interval on unmount (690-697)
+fetchContextStats()        // Fetch stats from backend, update node data (563-591)
+startContextPolling()      // Start 5-second interval polling (593-607)
+stopContextPolling()       // Clear interval on unmount (609-619)
 ```
 
 **Polling Strategy**:
 - Starts on dashboard mount
-- Polls every 5 seconds for context and plan stats
+- Polls every 5 seconds for context stats
 - Polls every 10 seconds for agent list refresh
 - Updates node data reactively
 - Stops on dashboard unmount
@@ -1010,7 +1001,6 @@ stopContextPolling()       // Clear interval on unmount (690-697)
 - Agent name in bold gray text (dark mode: white)
 - Activity state label below name
 - Context progress bar with percentage
-- Task progress bar (always shown for consistent height)
 - Status indicator dot (pulses when active)
 - "View Details" button at bottom
 
@@ -1023,11 +1013,11 @@ stopContextPolling()       // Clear interval on unmount (690-697)
 ```
 
 **Activity States**:
-| State | Label | Dot Color | Pulsing | Progress Bar |
-|-------|-------|-----------|---------|--------------|
-| Active | "Active" | Green (#10b981) | Yes | Visible |
-| Idle | "Idle" | Green (#10b981) | No | Visible |
-| Offline | "Offline" | Gray (#9ca3af) | No | Always visible (for consistent height) |
+| State | Label | Dot Color | Pulsing |
+|-------|-------|-----------|---------|
+| Active | "Active" | Green (#10b981) | Yes |
+| Idle | "Idle" | Green (#10b981) | No |
+| Offline | "Offline" | Gray (#9ca3af) | No |
 
 **Template Structure** (Lines 2-118):
 ```vue
@@ -1049,17 +1039,6 @@ stopContextPolling()       // Clear interval on unmount (690-697)
     </div>
     <div class="bg-gray-200 dark:bg-gray-700 rounded-full h-2">
       <div :class="progressBarColor" :style="{ width: contextPercentDisplay + '%' }"></div>
-    </div>
-  </div>
-
-  <!-- Task progress bar (always shown) -->
-  <div class="mb-3">
-    <div class="flex justify-between">
-      <span class="text-gray-500 dark:text-gray-400">Tasks</span>
-      <span class="text-gray-700 dark:text-gray-300">{{ taskProgressDisplay }}</span>
-    </div>
-    <div class="bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-      <div class="bg-purple-500" :style="{ width: taskProgressPercent + '%' }"></div>
     </div>
   </div>
 
@@ -1249,9 +1228,9 @@ INFO: 172.28.0.6:57454 - "GET /api/agents/context-stats HTTP/1.1" 200 OK        
 | Date | Changes |
 |------|---------|
 | 2025-12-19 | **Documentation Update**: Updated all line number references for Dashboard.vue, AgentNode.vue, network.js, agents.py, chat.py, and main.py. Added dark mode styling documentation. Verified store rename (collaborations.js to network.js). Updated file path references. |
+| 2025-12-23 | **Workplan removal**: Removed Task DAG progress display from AgentNode.vue. Plan stats removed from network.js store. |
 | 2025-12-09 | **Bug Fix - Agent Status Display**: Added initial `activityState` to node data in `convertAgentsToNodes()`. Running agents now show "Idle" immediately instead of "Offline" until first context-stats poll. |
-| 2025-12-07 | **Task progress bar consistency**: Removed `v-if="hasActivePlan"` condition from Task DAG Progress section. Now always shows Tasks progress bar for consistent card heights across all agents. Added `taskProgressDisplay` computed to show "—" when no tasks. |
-| 2025-12-07 | **AgentNode.vue fixes**: Added `flex flex-col` to card container for consistent layout. Changed `showProgressBar` computed to always return `true` for consistent card heights. Added `mt-auto` to "View Details" button to align at bottom. |
+| 2025-12-07 | **AgentNode.vue fixes**: Added `flex flex-col` to card container for consistent layout. Added `mt-auto` to "View Details" button to align at bottom. |
 | 2025-12-07 | **Major refactor**: Merged AgentNetwork.vue into Dashboard.vue. Dashboard is now the main landing page at `/`. Deleted AgentNetwork.vue. Updated NavBar (removed Network link). Renamed "communications" to "messages". Consolidated header into compact single row. Renamed store from collaborations.js to network.js. |
 | 2025-12-07 | Terminology refactor: Collaboration Dashboard -> Agent Network, collaborations -> communications |
 | 2025-12-02 | Activity Stream integration, context monitoring, UX fixes |

@@ -45,10 +45,10 @@ Before every commit:
 Unlike reactive chatbots ("System 1" AI), Deep Agents operate with deliberative reasoning ("System 2" AI): they decompose goals into task graphs, persist memory across sessions, delegate to specialized sub-agents, and recover from failures autonomously.
 
 Trinity implements the **Four Pillars of Deep Agency**:
-1. **Explicit Planning** — Workplans that persist outside the context window
-2. **Hierarchical Delegation** — Orchestrator-Worker pattern with context quarantine
-3. **Persistent Memory** — Virtual filesystems, memory folding, episodic memory
-4. **Extreme Context Engineering** — High-Order Prompts defining reasoning processes
+1. **Hierarchical Delegation** — Orchestrator-Worker pattern with context quarantine
+2. **Persistent Memory** — Virtual filesystems, vector databases, episodic memory
+3. **Extreme Context Engineering** — High-Order Prompts defining reasoning processes
+4. **Autonomous Operations** — Scheduling, monitoring, and self-healing capabilities
 
 Each agent runs as an isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 

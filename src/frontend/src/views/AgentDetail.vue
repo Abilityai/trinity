@@ -290,18 +290,6 @@
                   Executions
                 </button>
                 <button
-                  @click="activeTab = 'plans'"
-                  :class="[
-                    'px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap',
-                    activeTab === 'plans'
-                      ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                      : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600'
-                  ]"
-                  title="This agent's internal task breakdown"
-                >
-                  Workplan
-                </button>
-                <button
                   v-if="hasGitSync"
                   @click="activeTab = 'git'"
                   :class="[
@@ -928,11 +916,6 @@ HEYGEN_API_KEY=your_heygen_key
               <ExecutionsPanel :agent-name="agent.name" />
             </div>
 
-            <!-- Plans Tab Content -->
-            <div v-if="activeTab === 'plans'" class="p-6">
-              <WorkplanPanel :agent-name="agent.name" :agent-status="agent.status" />
-            </div>
-
             <!-- Git Tab Content -->
             <div v-if="activeTab === 'git'" class="p-6">
               <GitPanel :agent-name="agent.name" :agent-status="agent.status" />
@@ -1045,7 +1028,6 @@ import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import MetricsPanel from '../components/MetricsPanel.vue'
-import WorkplanPanel from '../components/WorkplanPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import PublicLinksPanel from '../components/PublicLinksPanel.vue'
 
