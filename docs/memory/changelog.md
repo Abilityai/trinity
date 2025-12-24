@@ -1,3 +1,34 @@
+### 2025-12-24 10:15:00
+🐛 **Test Suite Fixes - 11 Failures Resolved**
+
+Fixed 11 failing tests in `test_deploy_local.py` and `test_settings.py`.
+
+**Issue 1: Deploy-Local Filesystem (6 tests)**
+- **Root Cause**: `/agent-configs/templates/` was mounted read-only in docker-compose.yml
+- **Fix**: Changed `routers/agents.py` to detect read-only mounts using write test instead of `.exists()` check
+- **Files**: `src/backend/routers/agents.py` (lines 1014-1030)
+
+**Issue 2: API Keys Settings Route (2 tests)**
+- **Root Cause**: `GET /api/settings/api-keys` was matched by `/{key}` catch-all route (wrong order)
+- **Fix**: Moved API keys routes before the `/{key}` catch-all in `routers/settings.py`
+- **Files**: `src/backend/routers/settings.py` (route reordering)
+
+**Issue 3: Test Assertions (4 tests)**
+- **Root Cause**: Tests assumed `detail` is string, but backend returns dict `{error, code}`
+- **Fix**: Updated assertions to handle both string and dict responses
+- **Files**: `tests/test_deploy_local.py` (lines 110, 131, 373, 408)
+
+**Issue 4: Versioning Test Field**
+- **Root Cause**: Test checked non-existent `version_number` field
+- **Fix**: Changed to check correct fields: `new_version`, `base_name`
+- **Files**: `tests/test_deploy_local.py` (line 343)
+
+**Test Results**:
+- `test_deploy_local.py`: 14/14 passed (was 5/14)
+- `test_settings.py`: 35/35 passed (was 33/35)
+
+---
+
 ### 2025-12-23 21:35:00
 🐛 **Fleet Operations Schedule Resume Bug Fixed**
 

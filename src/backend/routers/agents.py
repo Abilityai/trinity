@@ -1012,9 +1012,21 @@ async def deploy_local_agent(
                 )
 
         # 9. Copy to templates directory
+        # Try /agent-configs/templates first, but check if writable (not just if exists)
+        # The read-only mount makes this path exist but not writable
         templates_dir = Path("/agent-configs/templates")
-        if not templates_dir.exists():
+
+        # Check if writable by attempting to create a test file
+        try:
+            test_file = templates_dir / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+        except (OSError, PermissionError):
+            # Fall back to local config path
             templates_dir = Path("./config/agent-templates")
+
+        if not templates_dir.exists():
+            templates_dir.mkdir(parents=True, exist_ok=True)
 
         dest_path = templates_dir / version_name
         if dest_path.exists():
