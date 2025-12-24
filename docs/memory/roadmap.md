@@ -42,8 +42,8 @@
 
 | Status | Item | Description | Priority |
 |--------|------|-------------|----------|
-| ✅ | **Agent Vector Memory (Chroma)** | Chroma DB + all-MiniLM-L6-v2 per agent (2025-12-13) | MEDIUM |
-| ✅ | **Chroma MCP Server** | Auto-inject chroma-mcp into agents for MCP-based vector ops (2025-12-13) | HIGH |
+| ❌ | ~~Agent Vector Memory (Chroma)~~ | REMOVED (2025-12-24) - Templates should define their own memory | ~~MEDIUM~~ |
+| ❌ | ~~Chroma MCP Server~~ | REMOVED (2025-12-24) - Platform should not inject agent capabilities | ~~HIGH~~ |
 | ⏳ | Memory Folding | Periodic context compression to summary files | HIGH |
 | ⏳ | Reasoning Chain Logs | Capture "why" decisions, not just tool calls | MEDIUM |
 | ⏳ | Cognitive Rollback | Git-based agent state restoration | MEDIUM |

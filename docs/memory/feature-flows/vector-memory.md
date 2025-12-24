@@ -1,13 +1,25 @@
 # Feature: Agent Vector Memory (Chroma + MCP)
 
-## Overview
+> **STATUS: ❌ REMOVED (2025-12-24)**
+>
+> This feature has been removed from the platform. Agents that need vector memory should include it in their templates.
+>
+> **Reason**: Development workflow parity - local dev should equal production. Platform-injected capabilities create mismatches between local Claude Code development and Trinity deployment.
+>
+> **Alternative**: Templates can add chromadb/sentence-transformers as dependencies and configure their own .mcp.json with a chroma server.
+>
+> This document is kept for historical reference only.
+
+---
+
+## Overview (HISTORICAL)
 
 Per-agent Chroma vector database with auto-configured MCP server for semantic memory storage and retrieval. Agents can use `mcp__chroma__*` tools directly without writing Python code.
 
 **Requirements**: 10.4 Agent Vector Memory + 10.5 Chroma MCP Server
-**Status**: ✅ Implemented (2025-12-13)
+**Status**: ❌ REMOVED (2025-12-24)
 **Priority**: Medium/High
-**Last Updated**: 2025-12-19
+**Last Updated**: 2025-12-24
 
 ## User Story
 

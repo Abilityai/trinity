@@ -196,7 +196,6 @@ class TrinityStatusResponse(BaseModel):
     meta_prompt_mounted: bool
     files: Dict[str, bool]
     directories: Dict[str, bool]
-    vector_memory: Dict[str, bool] = {}  # Vector memory injection status
     claude_md_has_trinity_section: bool
 
 

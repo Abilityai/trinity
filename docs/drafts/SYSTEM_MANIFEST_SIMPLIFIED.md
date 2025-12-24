@@ -368,10 +368,8 @@ governance:
   repo: github:YourOrg/governance
   mount_path: /home/developer/governance
 
-mcp_servers:
-  chroma:
-    command: chroma-mcp
-    args: ["--path", "/data/vectordb"]
+# NOTE: MCP servers must be included in agent templates, not system manifests
+# Chroma example removed - templates should define their own vector memory if needed
 
 hooks:
   on_deploy: "./scripts/post-deploy.sh"

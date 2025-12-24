@@ -823,51 +823,19 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
   - [ ] Horizontal scaling
 
 #### 10.4 Agent Vector Memory (Chroma)
-- **Status**: ✅ Implemented (2025-12-13)
-- **Priority**: Medium
-- **Description**: Per-agent Chroma vector database with pre-configured embeddings for semantic memory storage
-- **Architecture**:
-  - Chroma DB with persistent storage at `/home/developer/vector-store/`
-  - all-MiniLM-L6-v2 embedding model (384 dimensions, ~80MB)
-  - Model pre-loaded in base image (no download on first use)
-  - Documentation injected at `.trinity/vector-memory.md`
-- **Acceptance Criteria**:
-  - [x] Chroma and sentence-transformers installed in base image
-  - [x] Embedding model pre-cached at image build time
-  - [x] Vector store directory created during Trinity injection
-  - [x] Usage documentation copied to `.trinity/vector-memory.md`
-  - [x] CLAUDE.md updated with vector memory section
-  - [x] Status check includes vector memory state
-  - [x] Data persists across agent restarts
-  - [x] Isolated per agent (not shared by default)
-- **Usage**:
-  ```python
-  import chromadb
-  from chromadb.utils import embedding_functions
-
-  client = chromadb.PersistentClient(path="/home/developer/vector-store")
-  ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-  collection = client.get_or_create_collection("memory", embedding_function=ef)
-  ```
+- **Status**: ❌ REMOVED (2025-12-24)
+- **Reason**: Development workflow parity - agents should be self-contained. Templates that need vector memory should include it themselves.
+- **What was removed**:
+  - chromadb, sentence-transformers, chroma-mcp from base image (~800MB savings)
+  - Vector store directory creation during Trinity injection
+  - Chroma MCP config injection into .mcp.json
+  - vector-memory.md documentation file
+  - Vector memory section in injected CLAUDE.md
+- **Alternative**: Templates can include vector memory dependencies and configuration. See reference templates for examples.
 
 #### 10.5 Chroma MCP Server Integration
-- **Status**: ✅ Implemented (2025-12-13)
-- **Priority**: High
-- **Depends On**: 10.4 (Agent Vector Memory)
-- **Description**: Auto-configure official chroma-mcp server in agent containers for MCP-based vector operations
-- **Architecture**:
-  - chroma-mcp package installed in base image
-  - MCP server auto-injected into `.mcp.json` during Trinity injection
-  - Uses persistent client pointing to `/home/developer/vector-store/`
-  - 12 MCP tools available for collection and document operations
-- **Acceptance Criteria**:
-  - [x] `chroma-mcp` package installed in base image
-  - [x] MCP server config injected during Trinity injection
-  - [x] Agents can use `mcp__chroma__*` tools without setup
-  - [x] Data persists at `/home/developer/vector-store/`
-  - [x] Documentation updated with MCP tool examples
-  - [x] Backward compatible (Python API still works)
-  - [x] Status check includes chroma_mcp_configured field
+- **Status**: ❌ REMOVED (2025-12-24)
+- **Reason**: Removed along with 10.4 - platform should not inject agent capabilities
 
 #### 10.6 System-Wide Trinity Prompt
 - **Status**: ✅ Implemented (2025-12-14)

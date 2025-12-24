@@ -70,71 +70,16 @@ Before designing your multi-agent system, understand what Trinity provides **aut
 
 When an agent starts, Trinity calls `POST /api/trinity/inject` on the agent container. This:
 
-1. **Creates directories**: `.trinity/`, `.claude/commands/trinity/`, `plans/active/`, `plans/archive/`, `vector-store/`
+1. **Creates directories**: `.trinity/`
 2. **Copies documentation**: Platform docs to `.trinity/` directory
-3. **Injects MCP servers**: Adds Trinity and Chroma MCP to `.mcp.json`
-4. **Updates CLAUDE.md**: Appends planning commands, collaboration tools, and vector memory sections
+3. **Injects MCP servers**: Adds Trinity MCP to `.mcp.json`
+4. **Updates CLAUDE.md**: Appends collaboration tools section
 
 **What this means for you**: Don't document these features in your agent's CLAUDE.md. Trinity will inject them automatically. Focus your CLAUDE.md on domain-specific instructions.
 
 ### Per-Agent Infrastructure
 
-#### 1. Vector Database (Chroma) ⚡ RUNTIME INJECTION
-
-Every agent has a dedicated **Chroma vector database** for semantic memory storage.
-
-> **DO NOT** add vector memory documentation to your CLAUDE.md. Trinity injects this automatically including:
-> - `.trinity/vector-memory.md` (usage examples)
-> - Chroma MCP server config in `.mcp.json`
-> - Vector memory section appended to CLAUDE.md
-
-| Aspect | Details |
-|--------|---------|
-| **Location** | `/home/developer/vector-store/` |
-| **Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions, pre-loaded) |
-| **Persistence** | Survives agent restarts |
-| **Isolation** | Each agent has its own database |
-
-**Access Methods:**
-- **Python API** (direct):
-  ```python
-  import chromadb
-  from chromadb.utils import embedding_functions
-
-  client = chromadb.PersistentClient(path="/home/developer/vector-store")
-  ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-  collection = client.get_or_create_collection("memory", embedding_function=ef)
-
-  # Store
-  collection.add(documents=["Important context"], ids=["doc1"], metadatas=[{"type": "context"}])
-
-  # Query
-  results = collection.query(query_texts=["What do I know about X?"], n_results=5)
-  ```
-
-- **MCP Tools** (auto-injected):
-  ```
-  mcp__chroma__list_collections()
-  mcp__chroma__create_collection(name, metadata)
-  mcp__chroma__add_documents(collection, documents, ids, metadatas)
-  mcp__chroma__query_collection(collection, query_texts, n_results)
-  mcp__chroma__get_documents(collection, ids)
-  mcp__chroma__delete_documents(collection, ids)
-  mcp__chroma__update_documents(collection, ids, documents, metadatas)
-  mcp__chroma__peek_collection(collection, limit)
-  mcp__chroma__count_collection(collection)
-  mcp__chroma__delete_collection(name)
-  mcp__chroma__get_collection_info(name)
-  mcp__chroma__modify_collection(name, metadata)
-  ```
-
-**Multi-Agent Use Cases:**
-- Each agent builds domain-specific memory
-- Agents can query their own history ("Have I solved this before?")
-- Long-term learning across sessions
-- Semantic search over past interactions
-
-#### 2. Scheduling System (Autonomy)
+#### 1. Scheduling System (Autonomy)
 
 Trinity provides **platform-managed scheduling** for autonomous agent execution.
 
@@ -454,9 +399,7 @@ Bidirectional GitHub synchronization for agents from GitHub templates:
 
 | Capability | Scope | Access | Multi-Agent Benefit |
 |------------|-------|--------|---------------------|
-| **Vector DB** | Per-agent | Python API or MCP | Each agent has semantic memory |
 | **Scheduling** | Per-agent | UI or API | Coordinated autonomous execution |
-| **Workplans** | Per-agent | Slash commands | Persistent task tracking across context resets |
 | **Trinity MCP** | Cross-agent | MCP tools | Agent delegation and collaboration |
 | **Shared Folders** | Cross-agent | File system | Large data exchange, state sharing |
 | **Credentials** | Per-agent | Hot-reload API | Update secrets without restart |
@@ -472,14 +415,8 @@ Because Trinity automatically injects platform infrastructure, your agent templa
 
 | DO NOT Include | Reason |
 |----------------|--------|
-| Vector memory documentation in CLAUDE.md | Trinity injects `.trinity/vector-memory.md` and CLAUDE.md section |
-| Planning commands documentation in CLAUDE.md | Trinity injects `.claude/commands/trinity/` and CLAUDE.md section |
 | Trinity MCP server in `.mcp.json.template` | Trinity injects this with agent-scoped API key |
-| Chroma MCP server in `.mcp.json.template` | Trinity injects this pointing to `vector-store/` |
-| `plans/` directory | Trinity creates `plans/active/` and `plans/archive/` |
-| `vector-store/` directory | Trinity creates this |
 | `.trinity/` directory | Trinity creates and populates this |
-| `.claude/commands/trinity/` directory | Trinity creates and populates this |
 | Agent collaboration instructions | Trinity injects section about `mcp__trinity__*` tools |
 
 ### What TO Include in Your Agent Templates
@@ -500,13 +437,12 @@ Your templates should focus on **domain-specific content**:
 
 When designing your multi-agent system, consider:
 
-1. **Use Vector Memory for Learning** — Each agent can build up domain knowledge that persists
-2. **Use Scheduling for Autonomy** — Agents can run without human triggers
-3. **Use Workplans for Complex Tasks** — Don't rely on context window for multi-step work
-4. **Use Shared Folders for Data** — Large files, state, inventories
-5. **Use MCP Chat for Urgency** — Time-sensitive coordination, questions
-6. **Use Custom Metrics for Visibility** — Track domain-specific KPIs
-7. **Use Context Tracking** — Know when agents need session resets
+1. **Use Scheduling for Autonomy** — Agents can run without human triggers
+2. **Use Shared Folders for Data** — Large files, state, inventories
+3. **Use MCP Chat for Urgency** — Time-sensitive coordination, questions
+4. **Use Custom Metrics for Visibility** — Track domain-specific KPIs
+5. **Use Context Tracking** — Know when agents need session resets
+6. **Include Vector Memory in Templates** — If agents need semantic memory, include chromadb in your template
 
 ---
 
@@ -1258,9 +1194,6 @@ Every agent repository MUST include a `.gitignore` that excludes platform-inject
 ```gitignore
 # Trinity platform injection (DO NOT COMMIT)
 .trinity/
-.claude/commands/trinity/
-plans/
-vector-store/
 
 # Generated files (DO NOT COMMIT)
 .mcp.json
@@ -1274,8 +1207,7 @@ vector-store/
 **Why this matters:**
 - `.mcp.json` contains actual credentials (generated from template)
 - `.env` contains actual credentials
-- `.trinity/`, `plans/`, `vector-store/` are created by Trinity injection
-- `.claude/commands/trinity/` contains platform commands (not your custom commands)
+- `.trinity/` is created by Trinity injection
 - Committing these would either expose secrets or cause conflicts on next deploy
 
 ### System Documentation Repository (Optional)

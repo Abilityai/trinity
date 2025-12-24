@@ -186,7 +186,6 @@ my-agent/
 │
 ├── .trinity/                      # PLATFORM-MANAGED (injected at startup)
 │   ├── prompt.md                  # Trinity Meta-Prompt (injected)
-│   ├── vector-memory.md           # Chroma usage documentation
 │   └── version.json               # Injection version tracking
 │
 ├── .claude/
@@ -441,21 +440,16 @@ Trinity controls agent behavior through **runtime injection**. This ensures:
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| **Trinity Meta-Prompt** | `.trinity/prompt.md` + CLAUDE.md section | Planning instructions, collaboration protocols |
-| **Platform Commands** | `.claude/commands/trinity/` | `/trinity-plan-*` commands |
+| **Trinity Meta-Prompt** | `.trinity/prompt.md` + CLAUDE.md section | Collaboration protocols |
 | **Trinity MCP Config** | `.mcp.json` (merged) | Agent-to-agent collaboration tools |
-| **Chroma MCP Config** | `.mcp.json` (merged) | Vector memory tools |
 | **Credentials** | `.env`, `.mcp.json` | API keys, tokens |
-| **Vector Memory Docs** | `.trinity/vector-memory.md` | Chroma usage documentation |
 
 ### Injection Timing
 
 **On Agent Start:**
 1. Trinity Meta-Prompt injected/updated in `.trinity/` and CLAUDE.md
-2. Platform commands created in `.claude/commands/trinity/`
-3. MCP servers (Trinity, Chroma) injected into `.mcp.json`
-4. Credentials injected into `.env` and `.mcp.json`
-5. `plans/active/` and `plans/archive/` directories created
+2. Trinity MCP server injected into `.mcp.json`
+3. Credentials injected into `.env` and `.mcp.json`
 
 ### CLAUDE.md After Injection
 
@@ -709,15 +703,7 @@ Agents should periodically compress old context:
 1. At session end, review `session_notes/`
 2. Extract key learnings → append to `context.md`
 3. Archive verbose notes to `summaries/`
-4. Commit via `/trinity-commit` or Git sync
-
-### Vector Memory (Chroma)
-
-Each agent has access to a Chroma vector database for semantic memory:
-
-- **Location**: `/home/developer/vector-store/`
-- **Access**: Via `mcp__chroma__*` tools (auto-injected)
-- **Persistence**: Survives agent restarts
+4. Commit via Git sync
 
 ---
 
@@ -964,9 +950,10 @@ See **[Multi-Agent System Guide](MULTI_AGENT_SYSTEM_GUIDE.md)** for comprehensiv
 
 | Date | Changes |
 |------|---------|
+| 2025-12-24 | Removed Chroma MCP integration - templates should include their own vector memory if needed |
 | 2025-12-18 | Added Multi-Agent Systems section with System Manifest deployment reference |
 | 2025-12-14 | Consolidated from AGENT_TEMPLATE_SPEC.md and trinity-compatible-agent.md |
-| 2025-12-13 | Added shared folders and Chroma MCP integration |
+| 2025-12-13 | Added shared folders |
 | 2025-12-10 | Added custom metrics specification |
 | 2025-12-05 | Added Task DAG system (Pillar I) |
 

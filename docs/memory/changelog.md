@@ -1,3 +1,37 @@
+### 2025-12-24 12:30:00
+❌ **Removed Platform Chroma Vector Store Injection**
+
+Removed all platform-level vector memory injection for development workflow parity.
+
+**Reason**: Local dev should equal production. Platform-injected capabilities create mismatches between local Claude Code development and Trinity deployment. Templates should be self-contained.
+
+**What was removed**:
+- `chromadb`, `sentence-transformers`, `chroma-mcp` from base image (~800MB savings)
+- Vector store directory creation during Trinity injection
+- Chroma MCP config injection into agent .mcp.json
+- `vector-memory.md` documentation file from trinity-meta-prompt
+- Vector memory section in injected CLAUDE.md
+- `vector_memory` status field from Trinity status API
+- `VECTOR_STORE_DIR` constant from agent server config
+
+**Alternative**: Templates that need vector memory should include dependencies and configuration themselves. This ensures local development matches production exactly.
+
+**Files changed**:
+- `docker/base-image/Dockerfile` - Removed packages and model download
+- `docker/base-image/agent_server/config.py` - Removed VECTOR_STORE_DIR
+- `docker/base-image/agent_server/models.py` - Removed vector_memory field
+- `docker/base-image/agent_server/routers/trinity.py` - Removed injection logic
+- `config/trinity-meta-prompt/vector-memory.md` - Deleted
+- `config/trinity-meta-prompt/prompt.md` - Removed vector memory references
+- `docs/memory/requirements.md` - Updated 10.4, 10.5 to REMOVED
+- `docs/memory/feature-flows/vector-memory.md` - Marked as removed
+- `docs/memory/roadmap.md` - Updated Phase 10
+- `docs/MULTI_AGENT_SYSTEM_GUIDE.md` - Removed vector memory sections
+- `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` - Removed vector memory sections
+- `docs/requirements/CHROMA_MCP_SERVER.md` - Deleted
+
+---
+
 ### 2025-12-24 11:30:00
 🔧 **deploy_local_agent MCP Tool - Architecture Fix**
 

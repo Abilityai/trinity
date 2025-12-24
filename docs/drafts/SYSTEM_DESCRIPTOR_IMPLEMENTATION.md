@@ -126,7 +126,6 @@ Each agent container mounts the **entire system repo**, with workdir set to agen
 │
 ├── shared-out/                         # This agent's shared folder
 ├── shared-in/                          # Other agents' shared folders
-├── vector-store/                       # Chroma DB
 └── .trinity/                           # Platform-injected
 ```
 

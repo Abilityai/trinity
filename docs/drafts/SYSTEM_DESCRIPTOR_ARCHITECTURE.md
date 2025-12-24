@@ -401,12 +401,10 @@ Your sub-agents define HOW you do things:
    c. Set WORKDIR to agent's path (/home/developer/workspace/agents/{name}/)
    d. Inject platform files:
       - .trinity/prompt.md (Trinity Meta-Prompt)
-      - .trinity/vector-memory.md (Chroma docs)
-      - .claude/commands/trinity/* (platform commands)
    e. Inject credentials:
       - Generate .env from credential store
       - Generate .mcp.json from .mcp.json.template
-   f. Inject Trinity MCP and Chroma MCP into .mcp.json
+   f. Inject Trinity MCP into .mcp.json
    g. Configure capabilities per system.yaml
    h. Set up shared folder mounts per system.yaml
 4. Start orchestrator in interactive mode
@@ -435,11 +433,8 @@ Follows existing Trinity conventions (see `TRINITY_COMPATIBLE_AGENT_GUIDE.md`):
 │   ├── ruby/
 │   └── cornelius/
 │
-├── vector-store/                       # Chroma vector database
-│
 └── .trinity/                           # Platform-injected (per agent)
     ├── prompt.md
-    ├── vector-memory.md
     └── version.json
 ```
 

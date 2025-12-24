@@ -70,13 +70,7 @@ RUN python3 -m pip install --user --upgrade pip && \
         python-multipart \
         pyyaml \
         rich \
-        cryptography \
-        chromadb \
-        sentence-transformers \
-        chroma-mcp
-
-# Pre-download embedding model to cache in image (avoids download on first use)
-RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+        cryptography
 
 RUN mkdir -p /home/developer/.claude-agent
 
