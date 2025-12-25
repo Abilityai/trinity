@@ -225,9 +225,12 @@ class SystemAgentService:
             'trinity.platform': 'agent',
             'trinity.agent-name': SYSTEM_AGENT_NAME,
             'trinity.agent-type': agent_type,
+            'trinity.ssh-port': str(ssh_port),  # Required for port tracking
+            'trinity.cpu': str(resources.get('cpu', '4')),
+            'trinity.memory': resources.get('memory', '8g'),
+            'trinity.created': datetime.utcnow().isoformat(),
             'trinity.template': SYSTEM_AGENT_TEMPLATE,
             'trinity.is-system': 'true',  # Mark as system agent
-            'trinity.created-at': datetime.utcnow().isoformat()
         }
 
         # Create the container
