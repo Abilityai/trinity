@@ -22,7 +22,7 @@ elif _secret_key == "your-secret-key-change-in-production":
     print("         Generate with: openssl rand -hex 32")
 SECRET_KEY = _secret_key
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 
 # Service URLs
 AUDIT_URL = os.getenv("AUDIT_URL", "http://audit-logger:8001")

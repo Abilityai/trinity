@@ -1,3 +1,66 @@
+### 2025-12-26 12:15:00
+🔐 **Automatic Logout on Session Expiration**
+
+Fixed UX issue where expired JWT tokens resulted in empty interface instead of redirecting to login.
+
+**Problem**:
+- When JWT token expired, API calls failed with 401
+- Frontend showed empty interface (no agents, no data)
+- User remained on dashboard with broken state
+- Had to manually navigate to /login
+
+**Solution**:
+- Added axios response interceptor in `main.js`
+- Automatically detects 401 responses (expired/invalid token)
+- Clears auth state and redirects to login page
+- Console logs: "🔐 Session expired - redirecting to login"
+
+**Changes**:
+- `src/frontend/src/main.js`: Added axios interceptor for 401 handling
+
+**User Experience**:
+- Token expires → automatic redirect to login screen
+- Clear indication session has ended
+- No more confusing empty interface
+
+**Combined with previous fix**: 7-day token lifetime + automatic logout = smooth auth experience.
+
+---
+
+### 2025-12-26 12:00:00
+⏱️ **Extended JWT Token Lifetime**
+
+Increased JWT token expiration from 30 minutes to 7 days to reduce re-login frequency.
+
+**Changes**:
+- `src/backend/config.py`: Changed `ACCESS_TOKEN_EXPIRE_MINUTES` from 30 to 10080 (7 days)
+
+**Impact**:
+- Users stay logged in for 7 days instead of 30 minutes
+- No more frequent re-logins when walking away from browser
+- Still need to re-login after backend redeployments (expected behavior)
+
+**Note**: For even longer sessions, increase `ACCESS_TOKEN_EXPIRE_MINUTES` in config.py (e.g., 43200 = 30 days).
+
+---
+
+### 2025-12-26 11:30:00
+📊 **OpenTelemetry Enabled by Default**
+
+Changed OTEL_ENABLED default from `0` (disabled) to `1` (enabled). New Trinity installations will now have metrics export enabled out of the box.
+
+**Changes**:
+- `.env.example`: Default `OTEL_ENABLED=1`
+- `src/backend/routers/agents.py`: Default to enabled
+- `src/backend/routers/observability.py`: Default to enabled
+- `src/backend/routers/ops.py`: Default to enabled
+- `src/backend/services/system_agent_service.py`: Default to enabled
+- `docs/memory/feature-flows/opentelemetry-integration.md`: Updated documentation
+
+**Rationale**: OTel provides valuable cost and productivity insights. Having it on by default ensures users get observability from the start. Set `OTEL_ENABLED=0` to disable.
+
+---
+
 ### 2025-12-26 10:00:00
 🔐 **Per-Agent API Key Control**
 

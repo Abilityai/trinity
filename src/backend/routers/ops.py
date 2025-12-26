@@ -711,8 +711,8 @@ async def acknowledge_alert(
 # Cost & Observability (powered by OTel)
 # ============================================================================
 
-# Import OTel configuration from observability module
-OTEL_ENABLED = os.getenv("OTEL_ENABLED", "0") == "1"
+# Import OTel configuration from observability module (enabled by default)
+OTEL_ENABLED = os.getenv("OTEL_ENABLED", "1") == "1"
 OTEL_PROMETHEUS_ENDPOINT = os.getenv("OTEL_PROMETHEUS_ENDPOINT", "http://trinity-otel-collector:8889/metrics")
 
 

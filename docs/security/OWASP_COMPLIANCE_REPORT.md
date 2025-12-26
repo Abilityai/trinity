@@ -169,8 +169,9 @@ This report evaluates the Trinity Agent Orchestration Platform against the OWASP
 ### Strengths
 - Auth0 integration for OAuth2
 - JWT token-based authentication
-- Token expiration (30 minutes)
+- Token expiration (7 days, configurable)
 - OAuth state parameter validation
+- Automatic logout on token expiration (401 response)
 
 ### Issues Found
 

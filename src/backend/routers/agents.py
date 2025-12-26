@@ -530,9 +530,9 @@ async def create_agent_internal(
         'TEMPLATE_NAME': config.template if config.template else ''
     }
 
-    # OpenTelemetry Configuration (opt-in via OTEL_ENABLED)
+    # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export
-    if os.getenv('OTEL_ENABLED', '0') == '1':
+    if os.getenv('OTEL_ENABLED', '1') == '1':
         env_vars['CLAUDE_CODE_ENABLE_TELEMETRY'] = '1'
         env_vars['OTEL_METRICS_EXPORTER'] = os.getenv('OTEL_METRICS_EXPORTER', 'otlp')
         env_vars['OTEL_LOGS_EXPORTER'] = os.getenv('OTEL_LOGS_EXPORTER', 'otlp')

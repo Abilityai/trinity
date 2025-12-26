@@ -15,8 +15,8 @@ from dependencies import get_current_user
 
 router = APIRouter(prefix="/api/observability", tags=["observability"])
 
-# Configuration from environment
-OTEL_ENABLED = os.getenv("OTEL_ENABLED", "0") == "1"
+# Configuration from environment (enabled by default)
+OTEL_ENABLED = os.getenv("OTEL_ENABLED", "1") == "1"
 OTEL_PROMETHEUS_ENDPOINT = os.getenv("OTEL_PROMETHEUS_ENDPOINT", "http://trinity-otel-collector:8889/metrics")
 
 

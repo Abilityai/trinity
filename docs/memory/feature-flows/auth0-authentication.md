@@ -394,6 +394,35 @@ On successful login, App.vue connects to WebSocket for real-time updates.
 | Invalid/expired JWT | 401 | "Could not validate credentials" |
 | Auth0 API failure | 500 | "Auth0 token exchange failed: {error}" |
 
+### Automatic Logout on Token Expiration
+
+**Implementation** (`src/frontend/src/main.js:27-49`)
+
+Axios response interceptor automatically handles expired tokens:
+
+```javascript
+axios.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401) {
+      const currentPath = router.currentRoute.value.path
+      if (currentPath !== '/login' && currentPath !== '/setup') {
+        console.log('🔐 Session expired - redirecting to login')
+        authStore.logout()
+        router.push('/login')
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+```
+
+**Behavior**:
+- Any 401 response triggers automatic logout
+- User is redirected to login page
+- Auth state is cleared from localStorage
+- Prevents confusing empty interface when token expires
+
 ---
 
 ## Security Considerations
@@ -403,7 +432,7 @@ On successful login, App.vue connects to WebSocket for real-time updates.
 3. **Token Mode Claim**: JWTs include `mode` claim to distinguish dev/prod tokens
 4. **Session Invalidation**: Dev tokens are cleared if backend switches to prod mode
 5. **Domain Restriction**: Server-side validation ensures only allowed domain emails accepted
-6. **Token Expiry**: JWT expires in 30 minutes
+6. **Token Expiry**: JWT expires in 7 days (configurable via `ACCESS_TOKEN_EXPIRE_MINUTES` in `config.py`)
 7. **Cookie Security**: SameSite=Strict prevents CSRF
 8. **Audit Trail**: All authentication events logged
 

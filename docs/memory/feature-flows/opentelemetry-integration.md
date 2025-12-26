@@ -53,8 +53,8 @@ As a platform operator, I want agents to export standardized metrics so that I c
 
 ```bash
 # Enable OpenTelemetry metrics export from Claude Code agents
-# Set to 1 to enable, 0 to disable (default: disabled)
-OTEL_ENABLED=0
+# Set to 1 to enable, 0 to disable (default: enabled)
+OTEL_ENABLED=1
 
 # OTEL Collector endpoint (only used when OTEL_ENABLED=1)
 # Default points to Docker service name for in-network access
@@ -73,7 +73,7 @@ OTEL_METRIC_EXPORT_INTERVAL=60000
 
 | Backend Env Var | Agent Container Env Var | Default Value |
 |-----------------|------------------------|---------------|
-| `OTEL_ENABLED` | `CLAUDE_CODE_ENABLE_TELEMETRY` | `0` (disabled) |
+| `OTEL_ENABLED` | `CLAUDE_CODE_ENABLE_TELEMETRY` | `1` (enabled) |
 | `OTEL_METRICS_EXPORTER` | `OTEL_METRICS_EXPORTER` | `otlp` |
 | `OTEL_LOGS_EXPORTER` | `OTEL_LOGS_EXPORTER` | `otlp` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` |
@@ -89,9 +89,9 @@ OTEL_METRIC_EXPORT_INTERVAL=60000
 **File**: `src/backend/routers/agents.py` (lines 514-522)
 
 ```python
-# OpenTelemetry Configuration (opt-in via OTEL_ENABLED)
+# OpenTelemetry Configuration (enabled by default)
 # Claude Code has built-in OTel support - these vars enable metrics export
-if os.getenv('OTEL_ENABLED', '0') == '1':
+if os.getenv('OTEL_ENABLED', '1') == '1':
     env_vars['CLAUDE_CODE_ENABLE_TELEMETRY'] = '1'
     env_vars['OTEL_METRICS_EXPORTER'] = os.getenv('OTEL_METRICS_EXPORTER', 'otlp')
     env_vars['OTEL_LOGS_EXPORTER'] = os.getenv('OTEL_LOGS_EXPORTER', 'otlp')
@@ -722,7 +722,7 @@ onUnmounted(() => {
 
 ### Test 1: OTel Disabled State
 
-**Action**: Start with `OTEL_ENABLED=0` (default)
+**Action**: Start with `OTEL_ENABLED=0` (explicitly disabled)
 
 **Expected**:
 - No OTel stats in Dashboard header
