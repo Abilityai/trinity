@@ -111,7 +111,7 @@ class TestSystemAgentRestart:
     @pytest.mark.timeout(120)
     def test_restart_requires_admin(self, api_client: TrinityApiClient):
         """POST /api/system-agent/restart requires admin role."""
-        response = api_client.post("/api/system-agent/restart")
+        response = api_client.post("/api/system-agent/restart", timeout=90.0)
         # Should be 200 (success), 403 (not admin), or 404 (no system agent)
         assert_status_in(response, [200, 403, 404])
 
@@ -119,7 +119,7 @@ class TestSystemAgentRestart:
     @pytest.mark.timeout(120)
     def test_restart_returns_success_structure(self, api_client: TrinityApiClient):
         """Successful restart returns expected structure."""
-        response = api_client.post("/api/system-agent/restart")
+        response = api_client.post("/api/system-agent/restart", timeout=90.0)
 
         if response.status_code == 200:
             data = response.json()
@@ -131,7 +131,7 @@ class TestSystemAgentRestart:
     @pytest.mark.timeout(120)
     def test_restart_includes_status(self, api_client: TrinityApiClient):
         """Restart response includes final status."""
-        response = api_client.post("/api/system-agent/restart")
+        response = api_client.post("/api/system-agent/restart", timeout=90.0)
 
         if response.status_code == 200:
             data = response.json()
@@ -160,7 +160,7 @@ class TestSystemAgentReinitialize:
     @pytest.mark.timeout(180)
     def test_reinitialize_requires_admin(self, api_client: TrinityApiClient):
         """POST /api/system-agent/reinitialize requires admin role."""
-        response = api_client.post("/api/system-agent/reinitialize")
+        response = api_client.post("/api/system-agent/reinitialize", timeout=150.0)
         # Should be 200 (success), 403 (not admin), or 404 (no system agent)
         assert_status_in(response, [200, 403, 404])
 
@@ -168,7 +168,7 @@ class TestSystemAgentReinitialize:
     @pytest.mark.timeout(180)
     def test_reinitialize_returns_success_structure(self, api_client: TrinityApiClient):
         """Successful re-initialization returns expected structure."""
-        response = api_client.post("/api/system-agent/reinitialize")
+        response = api_client.post("/api/system-agent/reinitialize", timeout=150.0)
 
         if response.status_code == 200:
             data = response.json()
@@ -181,7 +181,7 @@ class TestSystemAgentReinitialize:
     @pytest.mark.timeout(180)
     def test_reinitialize_includes_steps(self, api_client: TrinityApiClient):
         """Re-initialization response includes completed steps."""
-        response = api_client.post("/api/system-agent/reinitialize")
+        response = api_client.post("/api/system-agent/reinitialize", timeout=150.0)
 
         if response.status_code == 200:
             data = response.json()
@@ -225,7 +225,7 @@ class TestSystemAgentIntegration:
             pytest.skip("System agent not running")
 
         # Perform restart
-        response = api_client.post("/api/system-agent/restart")
+        response = api_client.post("/api/system-agent/restart", timeout=90.0)
         if response.status_code == 403:
             pytest.skip("User not authorized for restart")
 

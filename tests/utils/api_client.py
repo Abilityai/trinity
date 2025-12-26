@@ -6,8 +6,12 @@ Provides a wrapper around httpx for making authenticated API requests.
 
 import httpx
 import os
+import time
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+
+# Token refresh threshold - refresh if token is older than this many seconds
+TOKEN_REFRESH_THRESHOLD_SECONDS = 25 * 60  # 25 minutes (tokens expire at 30)
 
 
 @dataclass
@@ -37,6 +41,7 @@ class TrinityApiClient:
     def __init__(self, config: ApiConfig):
         self.config = config
         self.token: Optional[str] = None
+        self._token_time: Optional[float] = None
         self._client = httpx.Client(
             base_url=config.base_url,
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -54,7 +59,16 @@ class TrinityApiClient:
         response.raise_for_status()
         data = response.json()
         self.token = data["access_token"]
+        self._token_time = time.time()
         return self.token
+
+    def _ensure_fresh_token(self) -> None:
+        """Re-authenticate if token is close to expiration."""
+        if self._token_time is None:
+            return
+        elapsed = time.time() - self._token_time
+        if elapsed > TOKEN_REFRESH_THRESHOLD_SECONDS:
+            self.authenticate()
 
     def _get_headers(self, auth: bool = True, mcp_auth: bool = False) -> Dict[str, str]:
         """Get request headers with optional authentication."""
@@ -73,6 +87,8 @@ class TrinityApiClient:
         **kwargs
     ) -> httpx.Response:
         """Make authenticated GET request."""
+        if auth:
+            self._ensure_fresh_token()
         return self._client.get(
             path,
             params=params,
@@ -90,6 +106,8 @@ class TrinityApiClient:
         **kwargs
     ) -> httpx.Response:
         """Make authenticated POST request."""
+        if auth:
+            self._ensure_fresh_token()
         request_timeout = timeout if timeout else self._client.timeout
         return self._client.post(
             path,
@@ -108,6 +126,8 @@ class TrinityApiClient:
         **kwargs
     ) -> httpx.Response:
         """Make authenticated PUT request."""
+        if auth:
+            self._ensure_fresh_token()
         return self._client.put(
             path,
             json=json,
@@ -122,6 +142,8 @@ class TrinityApiClient:
         **kwargs
     ) -> httpx.Response:
         """Make authenticated DELETE request."""
+        if auth:
+            self._ensure_fresh_token()
         return self._client.delete(
             path,
             headers=self._get_headers(auth),
