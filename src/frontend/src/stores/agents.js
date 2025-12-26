@@ -476,6 +476,25 @@ export const useAgentsStore = defineStore('agents', {
         headers: authStore.authHeader
       })
       return response.data.consumers || []
+    },
+
+    // API Key Settings (Per-agent authentication control)
+    async getAgentApiKeySetting(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/api-key-setting`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async updateAgentApiKeySetting(name, usePlatformKey) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/api-key-setting`, {
+        use_platform_api_key: usePlatformKey
+      }, {
+        headers: authStore.authHeader
+      })
+      return response.data
     }
   }
 })

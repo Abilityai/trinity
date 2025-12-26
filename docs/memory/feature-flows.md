@@ -34,7 +34,7 @@
 |------|----------|----------|-------------|
 | Authentication Mode System | High | [auth0-authentication.md](feature-flows/auth0-authentication.md) | **Runtime** dual-mode auth: dev (local login) + prod (Auth0 OAuth), JWT mode claims (Updated 2025-12-05) |
 | Agent Lifecycle | High | [agent-lifecycle.md](feature-flows/agent-lifecycle.md) | Create, start, stop, delete Docker containers (Updated 2025-12-19) |
-| **Agent Terminal** | High | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal for agents with Claude Code TUI, replaces Chat tab (Implemented 2025-12-25) |
+| **Agent Terminal** | High | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal for agents with Claude Code TUI, replaces Chat tab, includes per-agent API key toggle (Updated 2025-12-26) |
 | ~~Agent Chat~~ | ~~High~~ | ~~[agent-chat.md](feature-flows/agent-chat.md)~~ | ❌ DEPRECATED (2025-12-25) - Replaced by Agent Terminal for direct Claude Code interaction |
 | Credential Injection | High | [credential-injection.md](feature-flows/credential-injection.md) | Redis storage, hot-reload, OAuth2 flows (Updated 2025-12-19) |
 | Agent Scheduling | High | [scheduling.md](feature-flows/scheduling.md) | Cron-based automation, APScheduler, execution tracking |

@@ -222,17 +222,23 @@ async def start_agent_endpoint(agent_name: str, request: Request, current_user: 
     await log_audit_event(..., details={"trinity_injection": trinity_status})
 ```
 
-**Internal Start Function** (`src/backend/routers/agents.py:114-154`):
+**Internal Start Function** (`src/backend/routers/agents.py:126-167`):
 ```python
 async def start_agent_internal(agent_name: str) -> dict:
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Phase 9.11: Check if shared folder config requires container recreation
-    needs_recreation = not _check_shared_folder_mounts_match(container, agent_name)
+    # Check if container needs recreation for shared folders or API key settings
+    container.reload()
+    needs_recreation = (
+        not _check_shared_folder_mounts_match(container, agent_name) or
+        not _check_api_key_env_matches(container, agent_name)
+    )
+
     if needs_recreation:
-        await _recreate_container_with_shared_folders(agent_name, container, "system")
+        # Recreate container with updated config (shared folders, API key)
+        await _recreate_container_with_updated_config(agent_name, container, "system")
         container = get_agent_container(agent_name)
 
     container.start()
@@ -244,6 +250,10 @@ async def start_agent_internal(agent_name: str) -> dict:
         "trinity_injection": trinity_result.get("status", "unknown")
     }
 ```
+
+**Container Recreation Triggers:**
+- **Shared folder changes**: Mounts added/removed based on `shared_folder_config`
+- **API key setting changes**: `ANTHROPIC_API_KEY` added/removed based on `use_platform_api_key`
 
 **Trinity Meta-Prompt Injection Helper** (`src/backend/routers/agents.py:50-111`)
 ```python

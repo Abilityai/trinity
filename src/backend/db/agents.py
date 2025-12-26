@@ -289,3 +289,31 @@ class AgentOperations:
             cursor.execute("DELETE FROM agent_sharing WHERE agent_name = ?", (agent_name,))
             conn.commit()
             return cursor.rowcount
+
+    # =========================================================================
+    # Agent API Key Settings
+    # =========================================================================
+
+    def get_use_platform_api_key(self, agent_name: str) -> bool:
+        """Check if agent should use platform API key (default: True)."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COALESCE(use_platform_api_key, 1) as use_platform_api_key
+                FROM agent_ownership WHERE agent_name = ?
+            """, (agent_name,))
+            row = cursor.fetchone()
+            if row:
+                return bool(row["use_platform_api_key"])
+            return True  # Default to using platform key
+
+    def set_use_platform_api_key(self, agent_name: str, use_platform_key: bool) -> bool:
+        """Set whether agent should use platform API key."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_ownership SET use_platform_api_key = ?
+                WHERE agent_name = ?
+            """, (1 if use_platform_key else 0, agent_name))
+            conn.commit()
+            return cursor.rowcount > 0

@@ -405,12 +405,49 @@
                     v-else
                     class="flex items-center justify-center h-full text-gray-400"
                   >
-                    <div class="text-center">
+                    <div class="text-center max-w-md">
                       <svg class="w-12 h-12 mx-auto mb-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
                       <p class="text-lg font-medium mb-2">Agent is not running</p>
                       <p class="text-sm text-gray-500 mb-4">Start the agent to access the terminal</p>
+
+                      <!-- API Key Setting -->
+                      <div v-if="agent.can_share" class="mb-4 p-4 bg-gray-800 rounded-lg text-left">
+                        <div class="flex items-center justify-between mb-2">
+                          <span class="text-sm font-medium text-gray-300">Authentication</span>
+                          <span v-if="apiKeySetting.restart_required" class="text-xs text-yellow-400">Restart required</span>
+                        </div>
+                        <div class="space-y-2">
+                          <label class="flex items-center space-x-3 cursor-pointer">
+                            <input
+                              type="radio"
+                              :checked="apiKeySetting.use_platform_api_key"
+                              @change="updateApiKeySetting(true)"
+                              :disabled="apiKeySettingLoading"
+                              class="text-indigo-500 focus:ring-indigo-500"
+                            />
+                            <div>
+                              <span class="text-sm text-gray-200">Use Platform API Key</span>
+                              <p class="text-xs text-gray-500">Claude uses Trinity's configured Anthropic API key</p>
+                            </div>
+                          </label>
+                          <label class="flex items-center space-x-3 cursor-pointer">
+                            <input
+                              type="radio"
+                              :checked="!apiKeySetting.use_platform_api_key"
+                              @change="updateApiKeySetting(false)"
+                              :disabled="apiKeySettingLoading"
+                              class="text-indigo-500 focus:ring-indigo-500"
+                            />
+                            <div>
+                              <span class="text-sm text-gray-200">Authenticate in Terminal</span>
+                              <p class="text-xs text-gray-500">Run "claude login" after starting to use your own subscription</p>
+                            </div>
+                          </label>
+                        </div>
+                      </div>
+
                       <button
                         @click="startAgent"
                         :disabled="actionLoading"
@@ -1135,6 +1172,13 @@ const confirmDialog = reactive({
   variant: 'danger',
   onConfirm: () => {}
 })
+
+// API Key settings
+const apiKeySetting = ref({
+  use_platform_api_key: true,
+  restart_required: false
+})
+const apiKeySettingLoading = ref(false)
 const currentModel = ref('')  // Model selection: '', 'sonnet', 'opus', 'haiku', etc.
 const modelLoading = ref(false)
 let logsRefreshInterval = null
@@ -1310,6 +1354,7 @@ onMounted(async () => {
   await loadChatHistory()
   await loadCredentials()
   await loadSessionInfo()
+  await loadApiKeySetting()
   // Start stats, activity, and git polling if agent is running
   if (agent.value?.status === 'running') {
     startStatsPolling()
@@ -1384,6 +1429,33 @@ const stopAgent = async () => {
     showNotification(err.message || 'Failed to stop agent', 'error')
   } finally {
     actionLoading.value = false
+  }
+}
+
+// API Key Setting Methods
+const loadApiKeySetting = async () => {
+  if (!agent.value) return
+  try {
+    apiKeySetting.value = await agentsStore.getAgentApiKeySetting(agent.value.name)
+  } catch (err) {
+    console.error('Failed to load API key setting:', err)
+  }
+}
+
+const updateApiKeySetting = async (usePlatformKey) => {
+  if (apiKeySettingLoading.value) return
+  apiKeySettingLoading.value = true
+  try {
+    const result = await agentsStore.updateAgentApiKeySetting(agent.value.name, usePlatformKey)
+    apiKeySetting.value = {
+      use_platform_api_key: result.use_platform_api_key,
+      restart_required: result.restart_required
+    }
+    showNotification(result.message, 'success')
+  } catch (err) {
+    showNotification(err.message || 'Failed to update API key setting', 'error')
+  } finally {
+    apiKeySettingLoading.value = false
   }
 }
 

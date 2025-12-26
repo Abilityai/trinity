@@ -1267,6 +1267,36 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
   7. Close modal, verify session terminates cleanly
   8. Non-admin users should not see Terminal button
 
+#### 11.6 Per-Agent API Key Control
+
+- **Status**: Complete (2025-12-26)
+- **Priority**: High
+- **Description**: Allow agents to use either platform API key or user's own Claude subscription via terminal authentication
+- **Acceptance Criteria**:
+  - [x] Database: `use_platform_api_key` column in agent_ownership (default: true)
+  - [x] API endpoints: GET/PUT `/api/agents/{name}/api-key-setting`
+  - [x] Container recreation on start if setting changed (env var add/remove)
+  - [x] UI toggle in Terminal tab when agent is stopped
+  - [x] User can select "Authenticate in Terminal" to use own subscription
+  - [x] Agent starts without ANTHROPIC_API_KEY when using terminal auth
+  - [x] User runs `claude login` in terminal to authenticate
+- **Files**:
+  | File | Purpose |
+  |------|---------|
+  | `database.py` | Migration for use_platform_api_key column |
+  | `db/agents.py` | get_use_platform_api_key, set_use_platform_api_key methods |
+  | `routers/agents.py` | API endpoints, container recreation logic |
+  | `agents.js` | Store methods for API key setting |
+  | `AgentDetail.vue` | Radio toggle UI in Terminal tab |
+- **Testing**:
+  1. Create new agent, verify uses platform key by default
+  2. Go to Terminal tab when stopped
+  3. Select "Authenticate in Terminal", verify toast shows restart required
+  4. Start agent, open terminal
+  5. Run `claude login` or verify Claude prompts for auth
+  6. Restart agent, verify auth persists (stored in persistent volume)
+  7. Switch back to "Use Platform API Key", restart, verify platform key used
+
 ---
 
 ## Non-Functional Requirements

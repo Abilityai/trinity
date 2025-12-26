@@ -21,16 +21,40 @@ As a **user**, I want to access an interactive terminal for my agents directly f
 
 #### AgentDetail.vue (Parent)
 - **File**: `src/frontend/src/views/AgentDetail.vue`
-- **Terminal Tab**: Lines 354-425 - Terminal embedded in tab panel with fullscreen support
+- **Terminal Tab**: Lines 354-460 - Terminal embedded in tab panel with fullscreen support
 - **State**:
   - `isTerminalFullscreen` ref controls fullscreen mode
   - `terminalRef` ref for calling terminal methods
+  - `apiKeySetting` ref for API key authentication mode
+  - `apiKeySettingLoading` ref for loading state
 - **Event Handlers**:
   - `onTerminalConnected()` - Shows success notification
   - `onTerminalDisconnected()` - Shows info notification
   - `onTerminalError()` - Shows error notification
   - `toggleTerminalFullscreen()` - Toggles fullscreen mode, refits terminal
   - `handleTerminalKeydown()` - ESC key exits fullscreen
+  - `loadApiKeySetting()` - Fetches current API key setting
+  - `updateApiKeySetting(usePlatformKey)` - Updates API key setting
+
+**API Key Authentication Toggle** (Lines 415-449):
+When agent is stopped, the Terminal tab shows an authentication toggle:
+- **Use Platform API Key** (default): Agent uses Trinity's configured Anthropic API key
+- **Authenticate in Terminal**: No API key injected; user runs `claude login` in terminal
+
+```vue
+<div class="space-y-2">
+  <label>
+    <input type="radio" :checked="apiKeySetting.use_platform_api_key" @change="updateApiKeySetting(true)" />
+    Use Platform API Key
+  </label>
+  <label>
+    <input type="radio" :checked="!apiKeySetting.use_platform_api_key" @change="updateApiKeySetting(false)" />
+    Authenticate in Terminal
+  </label>
+</div>
+```
+
+Changing this setting requires agent restart. Container is recreated with/without `ANTHROPIC_API_KEY` env var.
 
 #### AgentTerminal.vue (Terminal Component)
 - **File**: `src/frontend/src/components/AgentTerminal.vue`
@@ -88,9 +112,43 @@ ws.onopen = () => {
 
 ## Backend Layer
 
+### API Key Setting Endpoints
+
+- **File**: `src/backend/routers/agents.py:2536-2617`
+
+#### GET `/api/agents/{agent_name}/api-key-setting`
+Returns current API key authentication setting for an agent.
+
+```python
+@router.get("/{agent_name}/api-key-setting")
+async def get_agent_api_key_setting(agent_name: str, ...) -> dict:
+    return {
+        "agent_name": agent_name,
+        "use_platform_api_key": True,  # or False
+        "restart_required": False,     # True if setting changed but not applied
+        "status": "running"            # Container status
+    }
+```
+
+#### PUT `/api/agents/{agent_name}/api-key-setting`
+Updates the API key setting. Only agent owner can modify.
+
+```python
+@router.put("/{agent_name}/api-key-setting")
+async def update_agent_api_key_setting(agent_name: str, body: dict, ...) -> dict:
+    # body: {"use_platform_api_key": true|false}
+    db.set_use_platform_api_key(agent_name, body["use_platform_api_key"])
+    return {
+        "status": "updated",
+        "use_platform_api_key": body["use_platform_api_key"],
+        "restart_required": True,
+        "message": "Setting updated. Restart the agent to apply changes."
+    }
+```
+
 ### WebSocket Endpoint
 
-- **File**: `src/backend/routers/agents.py:2500-2805`
+- **File**: `src/backend/routers/agents.py:2624-2900`
 - **Endpoint**: `@router.websocket("/{agent_name}/terminal")`
 - **Query Params**: `mode: str` (default: "claude") - Either "claude" or "bash"
 

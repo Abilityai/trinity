@@ -179,6 +179,17 @@ def _migrate_agent_ownership_system_flag(cursor, conn):
         conn.commit()
 
 
+def _migrate_agent_ownership_platform_key(cursor, conn):
+    """Add use_platform_api_key column to agent_ownership table for per-agent API key control."""
+    cursor.execute("PRAGMA table_info(agent_ownership)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "use_platform_api_key" not in columns:
+        print("Adding use_platform_api_key column to agent_ownership for per-agent API key control...")
+        cursor.execute("ALTER TABLE agent_ownership ADD COLUMN use_platform_api_key INTEGER DEFAULT 1")
+        conn.commit()
+
+
 def init_database():
     """Initialize the SQLite database with all required tables."""
     db_path = Path(DB_PATH)
@@ -208,6 +219,11 @@ def init_database():
         except Exception as e:
             print(f"Migration check (agent_ownership is_system): {e}")
 
+        try:
+            _migrate_agent_ownership_platform_key(cursor, conn)
+        except Exception as e:
+            print(f"Migration check (agent_ownership use_platform_api_key): {e}")
+
         # Users table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -233,6 +249,7 @@ def init_database():
                 owner_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 is_system INTEGER DEFAULT 0,
+                use_platform_api_key INTEGER DEFAULT 1,
                 FOREIGN KEY (owner_id) REFERENCES users(id)
             )
         """)
@@ -683,6 +700,16 @@ class DatabaseManager:
 
     def delete_agent_shares(self, agent_name: str):
         return self._agent_ops.delete_agent_shares(agent_name)
+
+    # =========================================================================
+    # Agent API Key Settings (delegated to db/agents.py)
+    # =========================================================================
+
+    def get_use_platform_api_key(self, agent_name: str):
+        return self._agent_ops.get_use_platform_api_key(agent_name)
+
+    def set_use_platform_api_key(self, agent_name: str, use_platform_key: bool):
+        return self._agent_ops.set_use_platform_api_key(agent_name, use_platform_key)
 
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)

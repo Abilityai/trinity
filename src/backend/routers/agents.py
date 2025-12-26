@@ -143,14 +143,17 @@ async def start_agent_internal(agent_name: str) -> dict:
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Phase 9.11: Check if shared folder config requires container recreation
+    # Check if container needs recreation for shared folders or API key settings
     container.reload()
-    needs_recreation = not _check_shared_folder_mounts_match(container, agent_name)
+    needs_recreation = (
+        not _check_shared_folder_mounts_match(container, agent_name) or
+        not _check_api_key_env_matches(container, agent_name)
+    )
 
     if needs_recreation:
-        # Recreate container with updated mounts
+        # Recreate container with updated config
         # Use system user for internal operations
-        await _recreate_container_with_shared_folders(agent_name, container, "system")
+        await _recreate_container_with_updated_config(agent_name, container, "system")
         container = get_agent_container(agent_name)
 
     container.start()
@@ -1246,9 +1249,10 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     return {"message": f"Agent {agent_name} deleted"}
 
 
-async def _recreate_container_with_shared_folders(agent_name: str, old_container, owner_username: str):
+async def _recreate_container_with_updated_config(agent_name: str, old_container, owner_username: str):
     """
-    Recreate an agent container with updated shared folder mounts.
+    Recreate an agent container with updated configuration.
+    Handles shared folder mounts and API key settings.
     Preserves the agent's workspace volume and other configuration.
     """
     # Extract configuration from old container
@@ -1259,6 +1263,15 @@ async def _recreate_container_with_shared_folders(agent_name: str, old_container
     image = old_config.get("Image", "trinity-agent:latest")
     env_vars = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in old_config.get("Env", []) if "=" in e}
     labels = old_config.get("Labels", {})
+
+    # Update ANTHROPIC_API_KEY based on current setting
+    use_platform_key = db.get_use_platform_api_key(agent_name)
+    if use_platform_key:
+        # Use platform API key
+        env_vars['ANTHROPIC_API_KEY'] = get_anthropic_api_key()
+    else:
+        # Remove platform key - user will auth in terminal
+        env_vars.pop('ANTHROPIC_API_KEY', None)
 
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
@@ -1356,7 +1369,7 @@ async def _recreate_container_with_shared_folders(agent_name: str, old_container
         cpu_count=int(cpu)
     )
 
-    print(f"Recreated container for agent {agent_name} with updated shared folder mounts")
+    print(f"Recreated container for agent {agent_name} with updated configuration")
     return new_container
 
 
@@ -1401,6 +1414,29 @@ def _check_shared_folder_mounts_match(container, agent_name: str) -> bool:
                 pass  # Volume doesn't exist yet, OK to skip
 
     return True
+
+
+def _check_api_key_env_matches(container, agent_name: str) -> bool:
+    """
+    Check if container's ANTHROPIC_API_KEY env var matches the current setting.
+    Returns True if env matches config, False if recreation needed.
+    """
+    use_platform_key = db.get_use_platform_api_key(agent_name)
+
+    # Get current env vars from container
+    env_list = container.attrs.get("Config", {}).get("Env", [])
+    env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+
+    has_api_key = "ANTHROPIC_API_KEY" in env_dict and env_dict["ANTHROPIC_API_KEY"]
+
+    if use_platform_key:
+        # Should have the platform key - check if it's current
+        expected_key = get_anthropic_api_key()
+        current_key = env_dict.get("ANTHROPIC_API_KEY", "")
+        return current_key == expected_key
+    else:
+        # Should NOT have the key
+        return not has_api_key
 
 
 @router.post("/{agent_name}/start")
@@ -2490,6 +2526,94 @@ async def get_folder_consumers(
         "source_agent": agent_name,
         "consumers": consumer_list,
         "count": len(consumer_list)
+    }
+
+
+# ============================================================================
+# API KEY SETTINGS
+# ============================================================================
+
+@router.get("/{agent_name}/api-key-setting")
+async def get_agent_api_key_setting(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the API key setting for an agent.
+
+    Returns whether the agent uses the platform API key or relies on
+    terminal-based authentication.
+    """
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    use_platform_key = db.get_use_platform_api_key(agent_name)
+
+    # Check if current container matches the setting
+    container.reload()
+    env_matches = _check_api_key_env_matches(container, agent_name)
+
+    return {
+        "agent_name": agent_name,
+        "use_platform_api_key": use_platform_key,
+        "restart_required": not env_matches,
+        "status": container.status
+    }
+
+
+@router.put("/{agent_name}/api-key-setting")
+async def update_agent_api_key_setting(
+    agent_name: str,
+    request: Request,
+    body: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the API key setting for an agent.
+
+    Body:
+    - use_platform_api_key: True to use Trinity's platform key, False to require terminal auth
+
+    Note: Changes require agent restart to take effect.
+    """
+    # Only owner can modify this setting
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only the owner can modify API key settings")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    use_platform_key = body.get("use_platform_api_key")
+    if use_platform_key is None:
+        raise HTTPException(status_code=400, detail="use_platform_api_key is required")
+
+    # Update setting
+    db.set_use_platform_api_key(agent_name, bool(use_platform_key))
+
+    await log_audit_event(
+        event_type="agent_settings",
+        action="update_api_key_setting",
+        user_id=current_user.username,
+        agent_name=agent_name,
+        ip_address=request.client.host if request.client else None,
+        result="success",
+        details={
+            "use_platform_api_key": use_platform_key
+        }
+    )
+
+    return {
+        "status": "updated",
+        "agent_name": agent_name,
+        "use_platform_api_key": use_platform_key,
+        "restart_required": True,
+        "message": "Setting updated. Restart the agent to apply changes."
     }
 
 

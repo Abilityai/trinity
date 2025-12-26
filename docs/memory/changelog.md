@@ -1,3 +1,31 @@
+### 2025-12-26 10:00:00
+🔐 **Per-Agent API Key Control**
+
+Added ability for agents to use either platform API key or user's own Claude subscription via terminal authentication.
+
+**Changes**:
+- Database: Added `use_platform_api_key` column to `agent_ownership` table (default: true)
+- Backend: Container recreation on start if API key setting changed
+- Backend: API endpoints `GET/PUT /api/agents/{name}/api-key-setting`
+- Frontend: Radio toggle in Terminal tab when agent is stopped
+- Agents can now run `claude login` in terminal to use personal subscription
+
+**User Flow**:
+1. Create agent (uses platform key by default)
+2. Go to Terminal tab when agent is stopped
+3. Select "Authenticate in Terminal" option
+4. Start agent → run `claude login` to authenticate
+5. Agent now uses user's subscription instead of platform key
+
+**Files changed**:
+- `src/backend/database.py` - Migration for new column
+- `src/backend/db/agents.py` - get/set methods for setting
+- `src/backend/routers/agents.py` - API endpoints, container recreation logic
+- `src/frontend/src/stores/agents.js` - Store methods
+- `src/frontend/src/views/AgentDetail.vue` - UI toggle
+
+---
+
 ### 2025-12-25 19:30:00
 ✨ **Agent Terminal: Replaced Chat with Terminal**
 
