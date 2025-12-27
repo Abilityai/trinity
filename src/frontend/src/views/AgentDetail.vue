@@ -980,10 +980,15 @@ HEYGEN_API_KEY=your_heygen_key
   </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick, defineComponent, h } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick, defineComponent, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAgentsStore } from '../stores/agents'
 import NavBar from '../components/NavBar.vue'
+
+// Component name for KeepAlive matching
+defineOptions({
+  name: 'AgentDetail'
+})
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import SchedulesPanel from '../components/SchedulesPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
@@ -1293,6 +1298,33 @@ async function loadAgent() {
   }
 }
 
+// Watch for route changes (when navigating to a different agent)
+watch(() => route.params.name, async (newName, oldName) => {
+  if (newName && newName !== oldName) {
+    // Stop polling for old agent
+    stopAllPolling()
+    // Disconnect terminal from old agent
+    if (terminalRef.value?.disconnect) {
+      terminalRef.value.disconnect()
+    }
+    // Load new agent data
+    await loadAgent()
+    await refreshLogs()
+    await loadCredentials()
+    await loadSessionInfo()
+    await loadApiKeySetting()
+    startAllPolling()
+    // Connect terminal to new agent if on terminal tab and agent is running
+    if (activeTab.value === 'terminal' && agent.value?.status === 'running') {
+      nextTick(() => {
+        if (terminalRef.value?.connect) {
+          terminalRef.value.connect()
+        }
+      })
+    }
+  }
+})
+
 // Watch agent status for stats, activity, and git polling
 watch(() => agent.value?.status, (newStatus) => {
   if (newStatus === 'running') {
@@ -1320,14 +1352,8 @@ watch(activeTab, (newTab) => {
   }
 })
 
-// Initialize on mount
-onMounted(async () => {
-  await loadAgent()
-  await refreshLogs()
-  await loadCredentials()
-  await loadSessionInfo()
-  await loadApiKeySetting()
-  // Start stats, activity, and git polling if agent is running
+// Start all polling (used on mount and activation)
+function startAllPolling() {
   if (agent.value?.status === 'running') {
     startStatsPolling()
     startActivityPolling()
@@ -1335,6 +1361,50 @@ onMounted(async () => {
       startGitStatusPolling()
     }
   }
+}
+
+// Stop all polling (used on deactivation and unmount)
+function stopAllPolling() {
+  stopStatsPolling()
+  stopActivityPolling()
+  stopGitStatusPolling()
+}
+
+// Initialize on mount
+onMounted(async () => {
+  await loadAgent()
+  await refreshLogs()
+  await loadCredentials()
+  await loadSessionInfo()
+  await loadApiKeySetting()
+  startAllPolling()
+})
+
+// onActivated fires when component is shown (after being cached by KeepAlive)
+onActivated(() => {
+  // Restart polling when returning to this view
+  startAllPolling()
+  // Refresh agent data
+  loadAgent()
+  // Refit terminal if on terminal tab
+  if (activeTab.value === 'terminal') {
+    nextTick(() => {
+      if (terminalRef.value?.fit) {
+        terminalRef.value.fit()
+      }
+    })
+  }
+})
+
+// onDeactivated fires when navigating away (component is cached, not destroyed)
+onDeactivated(() => {
+  // Stop polling when navigating away (but keep WebSocket connection alive)
+  stopAllPolling()
+})
+
+// onUnmounted fires when component is actually destroyed
+onUnmounted(() => {
+  stopAllPolling()
 })
 
 // Handle use case click from Info tab - switch to terminal tab

@@ -496,22 +496,22 @@ async def system_agent_terminal(
             """Read from Docker socket, send to WebSocket."""
             while True:
                 try:
-                    # Use select for non-blocking read with timeout
+                    # Use select for non-blocking read with short timeout for responsiveness
+                    # 5ms timeout provides good balance between CPU usage and latency
                     ready = await loop.run_in_executor(
                         None,
-                        lambda: select.select([docker_socket], [], [], 0.1)
+                        lambda: select.select([docker_socket], [], [], 0.005)
                     )
                     if ready[0]:
+                        # Larger buffer (16KB) to reduce read syscalls for large outputs
                         data = await loop.run_in_executor(
                             None,
-                            lambda: docker_socket.recv(4096)
+                            lambda: docker_socket.recv(16384)
                         )
                         if not data:
                             break
                         await websocket.send_bytes(data)
-                    else:
-                        # No data available, yield to other tasks
-                        await asyncio.sleep(0.01)
+                    # No extra sleep needed - select timeout handles pacing
                 except Exception as e:
                     logger.debug(f"Docker read error: {e}")
                     break

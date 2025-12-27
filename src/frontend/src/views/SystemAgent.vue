@@ -388,12 +388,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import axios from 'axios'
 import NavBar from '../components/NavBar.vue'
 import SystemAgentTerminal from '../components/SystemAgentTerminal.vue'
 import { useAuthStore } from '../stores/auth'
 const authStore = useAuthStore()
+
+// Component name for KeepAlive matching
+defineOptions({
+  name: 'SystemAgent'
+})
 
 // State
 const loading = ref(true)
@@ -719,7 +724,37 @@ function handleKeydown(event) {
   }
 }
 
-// Lifecycle
+// Start polling intervals
+function startPolling() {
+  // Start polling for fleet status
+  if (!pollingInterval) {
+    pollingInterval = setInterval(() => {
+      loadSystemAgent()
+      refreshFleetStatus()
+    }, 10000)
+  }
+
+  // Poll OTel metrics less frequently (every 30 seconds)
+  if (!otelPollingInterval) {
+    otelPollingInterval = setInterval(() => {
+      refreshOtelMetrics()
+    }, 30000)
+  }
+}
+
+// Stop polling intervals
+function stopPolling() {
+  if (pollingInterval) {
+    clearInterval(pollingInterval)
+    pollingInterval = null
+  }
+  if (otelPollingInterval) {
+    clearInterval(otelPollingInterval)
+    otelPollingInterval = null
+  }
+}
+
+// Lifecycle - onMounted fires once when first created
 onMounted(async () => {
   // Add ESC key listener for fullscreen
   window.addEventListener('keydown', handleKeydown)
@@ -736,27 +771,34 @@ onMounted(async () => {
   await refreshFleetStatus()
   await refreshOtelMetrics()
 
-  // Start polling for fleet status
-  pollingInterval = setInterval(() => {
-    loadSystemAgent()
-    refreshFleetStatus()
-  }, 10000)
-
-  // Poll OTel metrics less frequently (every 30 seconds)
-  otelPollingInterval = setInterval(() => {
-    refreshOtelMetrics()
-  }, 30000)
+  startPolling()
 })
 
+// onActivated fires when component is shown (after being cached by KeepAlive)
+onActivated(() => {
+  // Restart polling when returning to this view
+  startPolling()
+  // Refresh data when returning
+  loadSystemAgent()
+  refreshFleetStatus()
+  // Refit terminal if visible
+  nextTick(() => {
+    if (terminalRef.value?.fit) {
+      terminalRef.value.fit()
+    }
+  })
+})
+
+// onDeactivated fires when navigating away (component is cached, not destroyed)
+onDeactivated(() => {
+  // Stop polling when navigating away (but keep WebSocket connection alive)
+  stopPolling()
+})
+
+// onUnmounted fires when component is actually destroyed (e.g., logout)
 onUnmounted(() => {
   // Remove ESC key listener
   window.removeEventListener('keydown', handleKeydown)
-
-  if (pollingInterval) {
-    clearInterval(pollingInterval)
-  }
-  if (otelPollingInterval) {
-    clearInterval(otelPollingInterval)
-  }
+  stopPolling()
 })
 </script>

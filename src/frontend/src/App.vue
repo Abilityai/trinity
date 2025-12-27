@@ -1,6 +1,11 @@
 <template>
   <div id="app" class="min-h-screen bg-gray-100 dark:bg-gray-900">
-    <router-view />
+    <!-- KeepAlive preserves terminal WebSocket connections when navigating away -->
+    <router-view v-slot="{ Component }">
+      <KeepAlive :include="['SystemAgent', 'AgentDetail']">
+        <component :is="Component" />
+      </KeepAlive>
+    </router-view>
   </div>
 </template>
 

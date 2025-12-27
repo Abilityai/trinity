@@ -95,6 +95,8 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
+import { CanvasAddon } from '@xterm/addon-canvas'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps({
@@ -127,8 +129,11 @@ const errorMessage = ref('')
 // Terminal and WebSocket instances
 let terminal = null
 let fitAddon = null
+let webglAddon = null
+let canvasAddon = null
 let ws = null
 let resizeObserver = null
+let resizeTimeout = null
 
 // Computed
 const connectionStatusText = computed(() => ({
@@ -137,8 +142,75 @@ const connectionStatusText = computed(() => ({
   'disconnected': 'Disconnected'
 })[connectionStatus.value] || 'Disconnected')
 
+// Direct write - simpler and more reliable than batching
+function writeToTerminal(data) {
+  if (terminal) {
+    terminal.write(data)
+  }
+}
+
+// Debounced resize to avoid spamming server
+function debouncedResize() {
+  if (resizeTimeout) {
+    clearTimeout(resizeTimeout)
+  }
+  resizeTimeout = setTimeout(() => {
+    if (fitAddon && terminal) {
+      fitAddon.fit()
+      // Send resize event to server
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'resize',
+          cols: terminal.cols,
+          rows: terminal.rows
+        }))
+      }
+    }
+  }, 150)
+}
+
+// Load WebGL renderer with canvas fallback
+function loadRenderer() {
+  if (!terminal) return
+
+  try {
+    webglAddon = new WebglAddon()
+    webglAddon.onContextLoss(() => {
+      console.warn('WebGL context lost, falling back to canvas')
+      webglAddon?.dispose()
+      webglAddon = null
+      loadCanvasFallback()
+    })
+    terminal.loadAddon(webglAddon)
+    console.log('Terminal using WebGL renderer')
+  } catch (e) {
+    console.warn('WebGL not available, using canvas fallback:', e.message)
+    loadCanvasFallback()
+  }
+}
+
+function loadCanvasFallback() {
+  if (!terminal) return
+  try {
+    canvasAddon = new CanvasAddon()
+    terminal.loadAddon(canvasAddon)
+    console.log('Terminal using Canvas renderer')
+  } catch (e) {
+    console.warn('Canvas addon failed, using DOM renderer:', e.message)
+  }
+}
+
 // Initialize terminal
 function initTerminal() {
+  // Clean up existing instances
+  if (webglAddon) {
+    webglAddon.dispose()
+    webglAddon = null
+  }
+  if (canvasAddon) {
+    canvasAddon.dispose()
+    canvasAddon = null
+  }
   if (terminal) {
     terminal.dispose()
   }
@@ -171,7 +243,11 @@ function initTerminal() {
       brightWhite: '#e5e5e5'
     },
     allowProposedApi: true,
-    scrollback: 10000
+    scrollback: 10000,
+    // Performance optimizations
+    fastScrollModifier: 'alt',
+    fastScrollSensitivity: 5,
+    smoothScrollDuration: 0
   })
 
   fitAddon = new FitAddon()
@@ -179,6 +255,9 @@ function initTerminal() {
   terminal.loadAddon(new WebLinksAddon())
 
   terminal.open(terminalContainer.value)
+
+  // Load WebGL/Canvas renderer for GPU acceleration
+  loadRenderer()
 
   // Fit after a short delay to ensure container is fully rendered
   nextTick(() => {
@@ -194,23 +273,13 @@ function initTerminal() {
     }
   })
 
-  // Set up resize observer
+  // Set up resize observer with debouncing
   if (resizeObserver) {
     resizeObserver.disconnect()
   }
 
   resizeObserver = new ResizeObserver(() => {
-    if (fitAddon) {
-      fitAddon.fit()
-      // Send resize event to server
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: 'resize',
-          cols: terminal.cols,
-          rows: terminal.rows
-        }))
-      }
-    }
+    debouncedResize()
   })
   resizeObserver.observe(terminalContainer.value)
 }
@@ -258,7 +327,7 @@ function connect() {
     ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
         // Binary data - terminal output
-        terminal.write(new Uint8Array(event.data))
+        writeToTerminal(new Uint8Array(event.data))
       } else {
         // JSON control message
         try {
@@ -276,7 +345,7 @@ function connect() {
           }
         } catch (e) {
           // Not JSON, treat as text output
-          terminal.write(event.data)
+          writeToTerminal(event.data)
         }
       }
     }
@@ -354,15 +423,58 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // Close WebSocket first
   if (ws) {
-    ws.close()
+    try {
+      ws.close()
+    } catch (e) {
+      console.warn('Error closing WebSocket:', e)
+    }
     ws = null
   }
+
+  // Disconnect resize observer
   if (resizeObserver) {
-    resizeObserver.disconnect()
+    try {
+      resizeObserver.disconnect()
+    } catch (e) {
+      console.warn('Error disconnecting resize observer:', e)
+    }
+    resizeObserver = null
   }
+
+  if (resizeTimeout) {
+    clearTimeout(resizeTimeout)
+    resizeTimeout = null
+  }
+
+  // Dispose addons before terminal (order matters)
+  // Wrap in try-catch to prevent errors from blocking unmount
+  if (webglAddon) {
+    try {
+      webglAddon.dispose()
+    } catch (e) {
+      console.warn('Error disposing WebGL addon:', e)
+    }
+    webglAddon = null
+  }
+
+  if (canvasAddon) {
+    try {
+      canvasAddon.dispose()
+    } catch (e) {
+      console.warn('Error disposing Canvas addon:', e)
+    }
+    canvasAddon = null
+  }
+
+  // Dispose terminal last
   if (terminal) {
-    terminal.dispose()
+    try {
+      terminal.dispose()
+    } catch (e) {
+      console.warn('Error disposing terminal:', e)
+    }
     terminal = null
   }
 })
