@@ -19,10 +19,10 @@
 ## Overview
 
 You will create 8 agents, one per template:
-1. test-echo - Basic chat
+1. test-echo - Basic terminal commands
 2. test-counter - State persistence
-3. test-worker - Workplan system
-4. test-delegator - Agent-to-agent
+3. test-worker - Task delegation target
+4. test-delegator - Agent-to-agent communication
 5. test-scheduler - Scheduling
 6. test-queue - Execution queue
 7. test-files - File browser
@@ -248,7 +248,7 @@ Create agents in this order:
 | test-echo | github:abilityai/test-agent-echo | Basic chat, no special setup |
 | test-counter | github:abilityai/test-agent-counter | Stateful, file I/O |
 | test-delegator | github:abilityai/test-agent-delegator | Requires Trinity MCP injection |
-| test-worker | github:abilityai/test-agent-worker | Workplan system |
+| test-worker | github:abilityai/test-agent-worker | Task delegation target |
 | test-scheduler | github:abilityai/test-agent-scheduler | Scheduling system |
 | test-queue | github:abilityai/test-agent-queue | Concurrency queue |
 | test-files | github:abilityai/test-agent-files | File browser |

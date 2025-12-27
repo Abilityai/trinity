@@ -120,7 +120,7 @@ Template: github:abilityai/test-agent-echo
 test-echo: 5-15% (from Phase 3 + Phase 5 delegation)
 test-counter: 8-18% (from Phase 4 + Phase 5 delegation)
 test-delegator: 15-25% (from Phase 5 delegation operations)
-test-worker: 10-20% (from Phase 6 workplan execution)
+test-worker: 10-20% (from Phase 5 delegation target)
 test-scheduler: 12-22% (from Phase 7 schedule execution)
 test-queue: 15-25% (from Phase 8 queue processing)
 test-files: 10-20% (from Phase 9 file operations)
@@ -180,7 +180,7 @@ Step 2: Delegating to test-counter
   Response: Counter: 16 (was 11)
 
 Step 3: Delegating to test-worker
-  Response: Workplan created for coordination
+  Response: Task received and acknowledged
 
 All agents coordinated successfully
 ```

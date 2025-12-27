@@ -1,9 +1,9 @@
-# Phase 13: System Settings & Trinity Prompt
+# Phase 13: System Settings, Email Whitelist & Agent Controls
 
-> **Purpose**: Validate admin-only Settings page and Trinity Prompt injection into agents
-> **Duration**: ~15 minutes
+> **Purpose**: Validate admin-only Settings page, Trinity Prompt, Email Whitelist, and per-agent API key control
+> **Duration**: ~20 minutes
 > **Assumes**: Phase 1 PASSED (authentication working), Phase 2 PASSED (agents can be created)
-> **Output**: Settings CRUD verified, Trinity Prompt injected into agent CLAUDE.md
+> **Output**: Settings CRUD verified, Trinity Prompt injected, Email Whitelist working, API key toggle tested
 
 ---
 
@@ -194,7 +194,133 @@ Test ID: UPDATE-67890
 
 ---
 
-### Step 8: Test Markdown Content Support
+## Email Whitelist Testing (Req 12.4)
+
+### Step 8: Navigate to Email Whitelist Section
+
+**Action**:
+- In Settings page, scroll to "Email Whitelist" section
+- Verify section is visible
+
+**Expected**:
+- [ ] Section header shows "Email Whitelist"
+- [ ] Table displays existing whitelisted emails (if any)
+- [ ] "Add Email" input field visible
+- [ ] "Add" button visible
+
+---
+
+### Step 9: Add Email to Whitelist
+
+**Action**:
+- Enter email: `test@example.com`
+- Click "Add" button
+
+**Expected**:
+- [ ] Success message appears
+- [ ] Email appears in whitelist table
+- [ ] Table shows email, added date, and remove button
+
+**Verify via API**:
+```bash
+curl http://localhost:8000/api/settings/email-whitelist \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Expected Response**:
+```json
+{
+  "emails": ["test@example.com", ...]
+}
+```
+
+---
+
+### Step 10: Remove Email from Whitelist
+
+**Action**:
+- Click "Remove" button next to test email
+- Confirm action if prompted
+
+**Expected**:
+- [ ] Email removed from table
+- [ ] Success message appears
+
+---
+
+### Step 11: Test Duplicate Email Prevention
+
+**Action**:
+- Add email: `existing@example.com`
+- Try to add same email again
+
+**Expected**:
+- [ ] Error message: "Email already whitelisted"
+- [ ] Duplicate not added
+
+---
+
+## Per-Agent API Key Control (Req 11.7)
+
+### Step 12: Navigate to Agent Detail Settings
+
+**Action**:
+- Go to any running agent's detail page
+- Click on "Settings" tab (or find API key toggle in Terminal tab)
+
+**Expected**:
+- [ ] Settings panel/tab visible
+- [ ] "Allow Agent API Key" toggle visible
+- [ ] Toggle shows current state (default: ON)
+
+---
+
+### Step 13: Toggle API Key Setting
+
+**Action**:
+- Toggle "Allow Agent API Key" to OFF
+- Wait for save confirmation
+
+**Expected**:
+- [ ] Toggle updates to OFF state
+- [ ] Success message appears
+- [ ] Setting persists after page refresh
+
+**Verify via API**:
+```bash
+curl http://localhost:8000/api/agents/AGENT_NAME/api-key-setting \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Expected Response**:
+```json
+{
+  "agent_name": "AGENT_NAME",
+  "allow_agent_api_key": false
+}
+```
+
+---
+
+### Step 14: Verify API Key Behavior When Disabled
+
+**Action**:
+- With toggle OFF, check agent environment
+- Try to use agent API key
+
+**Expected**:
+- [ ] Agent's `ANTHROPIC_API_KEY` env var is empty or unset
+- [ ] Agent cannot make direct API calls
+- [ ] MCP proxy still works (if configured)
+
+**Reset**:
+- Toggle back to ON for normal operation
+
+---
+
+## Trinity Prompt Testing (Continued)
+
+### Step 15: Test Markdown Content Support
 
 **Action**:
 - Save a prompt with various Markdown elements:
@@ -281,6 +407,8 @@ Phase 13 is **PASSED** when:
 - ✅ Agent restart updates CLAUDE.md with new prompt
 - ✅ Clearing prompt removes Custom Instructions from CLAUDE.md
 - ✅ Markdown content preserved correctly
+- ✅ Email Whitelist: Add, remove, duplicate prevention work
+- ✅ Per-Agent API Key: Toggle works, setting persists
 - ✅ All operations logged for audit
 
 ---

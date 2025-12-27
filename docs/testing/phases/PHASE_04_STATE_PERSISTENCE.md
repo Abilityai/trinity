@@ -41,16 +41,16 @@
 
 **Expected**:
 - [ ] Agent detail page loads
-- [ ] Chat tab active
+- [ ] Terminal tab active (default)
 - [ ] Status: "Running" (green)
 - [ ] Context: 0% or previous value
-- [ ] No chat history (first time)
+- [ ] Terminal ready for input
 
 ---
 
 ### Step 2: Send "reset" Command
 **Action**:
-- Type: "reset"
+- In Terminal, type: "reset"
 - Press Enter
 - Wait 10-15 seconds for response
 
@@ -68,7 +68,7 @@ Counter: 0 (previous: X)
 - [ ] Response format matches above
 - [ ] Counter value is 0
 - [ ] "previous" value shown
-- [ ] Message appears in chat history
+- [ ] Output appears in terminal
 
 ---
 
@@ -86,7 +86,7 @@ Counter: 1 (previous: 0)
 **Verify**:
 - [ ] Counter incremented from 0 to 1
 - [ ] Previous value shown (0)
-- [ ] Message in chat history
+- [ ] Output in terminal
 
 ---
 
@@ -105,7 +105,7 @@ Counter: 11 (previous: 1)
 - [ ] Counter calculated: 1 + 10 = 11
 - [ ] Previous value shown (1)
 - [ ] Arithmetic correct
-- [ ] Message in chat history
+- [ ] Output in terminal
 
 ---
 
@@ -185,21 +185,21 @@ docker exec agent-test-counter cat /home/developer/workspace/counter.txt
 ---
 
 ### Step 8: State Persistence Across Commands
-**Action**: Review chat history
+**Action**: Review terminal output history
 
 **Expected - Complete Sequence**:
 ```
-User: reset
-Agent: Counter: 0 (previous: N/A - file created)
+$ reset
+Counter: 0 (previous: N/A - file created)
 
-User: increment
-Agent: Counter: 1 (previous: 0)
+$ increment
+Counter: 1 (previous: 0)
 
-User: add 10
-Agent: Counter: 11 (previous: 1)
+$ add 10
+Counter: 11 (previous: 1)
 
-User: get
-Agent: Counter: 11 (previous: 11)
+$ get
+Counter: 11 (previous: 11)
 ```
 
 **Verify**:

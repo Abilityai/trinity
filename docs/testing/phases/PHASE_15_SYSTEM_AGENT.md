@@ -120,8 +120,38 @@ docker ps | grep trinity-system  # Should still exist
 - [ ] Start/Restart button
 - [ ] Fleet Overview cards (Total, Running, Stopped, Issues)
 - [ ] Quick Actions section (Emergency Stop, Restart All, etc.)
-- [ ] Operations Console (chat interface)
+- [ ] **Web Terminal** - Full CLI interface for System Agent (Req 11.5)
 - [ ] Quick command buttons (/ops/status, /ops/health, etc.)
+
+---
+
+### Step 5a: Verify System Agent Web Terminal
+
+**Action**:
+- In System Agent page, locate the Terminal section
+- Verify terminal loads and is functional
+
+**Expected**:
+- [ ] Terminal displays system prompt
+- [ ] Terminal accepts keyboard input
+- [ ] Can run shell commands (ls, pwd, etc.)
+- [ ] Can run Claude Code commands
+- [ ] Terminal output displays correctly
+
+**Test Terminal Commands**:
+```bash
+# Test basic shell
+ls -la
+pwd
+
+# Test system ops commands
+/ops/status
+```
+
+**Expected**:
+- [ ] Commands execute successfully
+- [ ] Output displays in terminal window
+- [ ] History preserved during session
 
 ---
 
@@ -473,18 +503,19 @@ curl http://localhost:8000/api/settings/ops/config \
 ## Success Criteria
 
 Phase 15 is **PASSED** when:
-- System agent auto-deploys on backend startup
-- System agent status API returns correct state
-- System agent cannot be deleted via API
-- NavBar shows "System" link for admin users only
-- System Agent UI page loads with all components
-- Fleet status/health APIs return accurate data
-- Operations Console executes /ops/* commands
-- Quick Actions (Refresh, Pause/Resume, Restart All, Emergency Stop) work
-- System agent restart works
-- System agent reinitialize completes all 5 steps
-- System MCP scope bypasses permissions
-- SYSTEM badge visible in Dashboard
+- ✅ System agent auto-deploys on backend startup
+- ✅ System agent status API returns correct state
+- ✅ System agent cannot be deleted via API
+- ✅ NavBar shows "System" link for admin users only
+- ✅ System Agent UI page loads with all components
+- ✅ **Web Terminal functional** - Can run shell and ops commands (Req 11.5)
+- ✅ Fleet status/health APIs return accurate data
+- ✅ Operations Console executes /ops/* commands
+- ✅ Quick Actions (Refresh, Pause/Resume, Restart All, Emergency Stop) work
+- ✅ System agent restart works
+- ✅ System agent reinitialize completes all 5 steps
+- ✅ System MCP scope bypasses permissions
+- ✅ SYSTEM badge visible in Dashboard
 
 ---
 

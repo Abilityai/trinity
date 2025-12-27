@@ -1,6 +1,6 @@
 # Phase 1: Authentication & UI Readiness
 
-> **Purpose**: Validate authentication flow and browser login
+> **Purpose**: Validate authentication flows (Dev Mode + Email Auth) and browser login
 > **Duration**: ~5 minutes
 > **Assumes**: Phase 0 PASSED (services running, clean slate)
 > **Output**: Logged-in browser session, valid JWT token
@@ -18,6 +18,31 @@
 
 ---
 
+## Authentication Modes
+
+Trinity supports multiple authentication modes:
+
+| Mode | Description | Login Method |
+|------|-------------|--------------|
+| **Dev Mode** | Local development | Username/password (admin/PASSWORD) |
+| **Email Auth** | Email-based OTP | Email + 6-digit verification code |
+| **Auth0** | Production OAuth | Google/social login via Auth0 |
+
+**Check Current Mode**:
+```bash
+curl http://localhost:8000/api/auth/mode
+```
+
+**Expected Response**:
+```json
+{
+  "mode": "dev",          // or "email" or "auth0"
+  "dev_mode_enabled": true
+}
+```
+
+---
+
 ## Test Steps
 
 ### Step 1: Navigate to Login Page
@@ -26,13 +51,19 @@
 - Refresh page (Ctrl+F5) to clear any cached state
 - If already logged in, logout first
 
-**Expected**:
+**Expected** (Dev Mode):
 - [ ] Page loads
 - [ ] Login form visible
 - [ ] "Development Mode - Local authentication enabled" message shown
 - [ ] Username field visible
 - [ ] Password field visible
 - [ ] "Sign In" button visible
+
+**Expected** (Email Auth Mode):
+- [ ] Page loads
+- [ ] Email input field visible
+- [ ] "Send Code" or "Continue with Email" button visible
+- [ ] No username/password fields (email-only)
 
 **Verify**:
 - [ ] No console errors
@@ -58,8 +89,8 @@
 
 ---
 
-### Step 3: Successful Login
-**Action**:
+### Step 3: Successful Login (Dev Mode)
+**Action** (Dev Mode):
 - Clear form
 - Enter username: `admin`
 - Enter password: `YOUR_PASSWORD` (from `.env` ADMIN_PASSWORD)
@@ -77,6 +108,28 @@
 - [ ] No console errors during redirect
 - [ ] Page title shows "Trinity"
 - [ ] All nav items visible: Dashboard, Agents, Templates, Schedules (or similar)
+
+---
+
+### Step 3-ALT: Successful Login (Email Auth Mode)
+**Action** (Email Auth):
+- Enter email: `admin@your-domain.com` (whitelisted email)
+- Click "Send Code"
+- Wait for code email (check backend logs or inbox)
+- Enter 6-digit code received
+- Click "Verify"
+- Wait for page to load
+
+**Expected**:
+- [ ] Code sent message appears
+- [ ] Code input field shown
+- [ ] After verify: Redirects to dashboard
+- [ ] Navigation bar visible
+- [ ] Profile shows email address
+
+**Note**: Email auth requires:
+1. Email in whitelist (Settings → Email Whitelist)
+2. SMTP configured (or check backend logs for code in dev mode)
 
 ---
 

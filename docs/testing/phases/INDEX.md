@@ -23,11 +23,14 @@
 | 10 | Error Handling | 10 min | Phase 9 | Failure recovery tested | 🟢 |
 | 11 | Multi-Agent Dashboard | 10 min | Phase 10 | All features together | 🟢 |
 | 12 | Cleanup | 5 min | Any phase | All agents deleted | 🟢 |
-| 13 | System Settings | 15 min | Phase 1 | Trinity Prompt CRUD + injection | 🟢 |
+| 13 | System Settings | 20 min | Phase 1 | Trinity Prompt + Email Whitelist + API Keys | 🟢 |
 | 14 | OpenTelemetry | 15 min | Phase 1 | OTel metrics collection + UI display | 🟢 |
-| 15 | System Agent & Ops | 20 min | Phase 1, 14 | System agent, fleet ops, admin UI | 🟢 |
+| 15 | System Agent & Ops | 20 min | Phase 1, 14 | System agent, fleet ops, Web Terminal | 🟢 |
+| 16 | Web Terminal | 15 min | Phase 1, 2 | Terminal for all agents (Req 11.5) | 🟢 |
+| 17 | Email Authentication | 15 min | Phase 0 | Email OTP login flow (Req 12.4) | 🟢 |
+| 18 | GitHub Initialization | 15 min | Phase 1, 2 | Agent files synced to GitHub | 🟢 |
 
-**Total Time**: ~225 minutes (~3.75 hours) for full suite
+**Total Time**: ~270 minutes (~4.5 hours) for full suite
 
 ---
 
@@ -300,6 +303,7 @@ All phase files in: `docs/testing/phases/`
 ```
 docs/testing/phases/
 ├── INDEX.md (this file)
+├── README.md
 ├── PHASE_00_SETUP.md
 ├── PHASE_01_AUTHENTICATION.md
 ├── PHASE_02_AGENT_CREATION.md
@@ -314,7 +318,10 @@ docs/testing/phases/
 ├── PHASE_12_CLEANUP.md
 ├── PHASE_13_SETTINGS.md
 ├── PHASE_14_OPENTELEMETRY.md
-└── PHASE_15_SYSTEM_AGENT.md
+├── PHASE_15_SYSTEM_AGENT.md
+├── PHASE_16_WEB_TERMINAL.md
+├── PHASE_17_EMAIL_AUTHENTICATION.md
+└── PHASE_18_GITHUB_INITIALIZATION.md
 ```
 
 ---
@@ -355,6 +362,13 @@ Phase X+1: Name
 
 | Date | Changes |
 |------|---------|
+| 2025-12-26 | Added Phase 18: GitHub Repository Initialization |
+| 2025-12-26 | Added Phase 17: Email-Based Authentication (Req 12.4) |
+| 2025-12-26 | Added Phase 16: Web Terminal Testing (Req 11.5) |
+| 2025-12-26 | Updated Phase 13: Added Email Whitelist + Per-Agent API Key (Req 11.7) |
+| 2025-12-26 | Updated Phases 3, 4: Chat tab replaced by Terminal tab |
+| 2025-12-26 | Updated Phase 1: Added email auth mode documentation |
+| 2025-12-26 | Updated Phase 15: Added Web Terminal testing for System Agent |
 | 2025-12-21 | Added Phase 14: OpenTelemetry Integration (Req 10.8) |
 | 2025-12-21 | Added Phase 15: System Agent & Ops (Req 11.1, 11.2) |
 | 2025-12-14 | Added Phase 13: System Settings for Trinity Prompt (Req 10.6) |
@@ -382,5 +396,5 @@ python3 docs/testing/run_test_phases.py --all
 
 ---
 
-**All Phases Ready**: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 (16 total)
-**Last Updated**: 2025-12-21
+**All Phases Ready**: 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 (18 total)
+**Last Updated**: 2025-12-26

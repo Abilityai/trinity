@@ -2,7 +2,7 @@
 
 > **Purpose**: Validate schedule creation, execution, and autonomous agent behavior
 > **Duration**: ~15 minutes
-> **Assumes**: Phase 6 PASSED (workplan system working, test-scheduler running)
+> **Assumes**: Phase 5 PASSED (test-scheduler running)
 > **Output**: Scheduling system verified with execution history
 
 ---
@@ -10,7 +10,7 @@
 ## Background
 
 **Autonomous Execution**:
-- Agents execute scheduled workplans without user interaction
+- Agents execute scheduled tasks without user interaction
 - Execution history tracked with timestamps
 - Failed schedules can be retried automatically
 - Context grows with each autonomous execution
@@ -27,15 +27,15 @@
 
 **Expected**:
 - [ ] Agent detail page loads
-- [ ] Chat tab active
+- [ ] Terminal tab active (default)
 - [ ] Status: "Running" (green)
 - [ ] Context: 0% (fresh agent)
 
 ---
 
-### Step 2: Create Scheduled Workplan
+### Step 2: Create Scheduled Task
 **Action**:
-- Type: "schedule daily at 2:00 PM: check system health, generate report, send alerts"
+- In Terminal, type: "schedule daily at 2:00 PM: check system health, generate report, send alerts"
 - Press Enter
 - **Wait 15 seconds**
 
@@ -44,7 +44,7 @@
 Schedule created successfully
 Schedule ID: sched-[uuid]
 Trigger: Daily at 2:00 PM
-Workplan: Check system health, generate report, send alerts
+Task: Check system health, generate report, send alerts
 Status: active
 Next execution: [tomorrow at 2:00 PM]
 ```
@@ -52,7 +52,7 @@ Next execution: [tomorrow at 2:00 PM]
 **Verify**:
 - [ ] Schedule created with ID
 - [ ] Trigger time correctly parsed
-- [ ] Workplan embedded
+- [ ] Task description stored
 - [ ] Status: active (not pending)
 - [ ] Next execution time shown
 
@@ -69,7 +69,7 @@ Next execution: [tomorrow at 2:00 PM]
 Schedule created successfully
 Schedule ID: sched-[uuid]
 Trigger: One-time at [time in 5 minutes]
-Workplan: run test suite
+Task: run test suite
 Status: pending
 Next execution: [in 5 minutes]
 ```

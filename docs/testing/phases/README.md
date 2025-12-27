@@ -74,10 +74,12 @@ Context % MUST increase as messages are sent:
 - ✅ If increasing: Bug fixed, continue testing
 - ❌ If stuck at 0%: Critical bug exists, document and continue
 
-### Task Progress (IMPORTANT)
-Task indicator should show actual task name:
-- ✅ If shows "Task 1/5": Working correctly
-- ❌ If stuck at "—": Known issue, check Plans tab
+### Terminal Tab (Replaces Chat)
+All agents now use the Web Terminal for interaction:
+- Terminal tab is default on agent detail pages
+- Full CLI access to agent containers
+- Supports shell commands and Claude Code
+- Per-agent API key toggle available
 
 ---
 
@@ -101,6 +103,12 @@ All files in `docs/testing/phases/`:
 | **PHASE_10_ERROR_HANDLING.md** | Failures, recovery, cascading |
 | **PHASE_11_MULTI_AGENT_DASHBOARD.md** | Dashboard with 8 agents |
 | **PHASE_12_CLEANUP.md** | Delete all agents, clean slate |
+| **PHASE_13_SETTINGS.md** | Trinity Prompt, Email Whitelist, API Keys |
+| **PHASE_14_OPENTELEMETRY.md** | OTel metrics, Observability UI |
+| **PHASE_15_SYSTEM_AGENT.md** | System Agent, Fleet Ops, Admin UI |
+| **PHASE_16_WEB_TERMINAL.md** | Browser CLI for all agents (Req 11.5) |
+| **PHASE_17_EMAIL_AUTHENTICATION.md** | Email OTP login flow (Req 12.4) |
+| **PHASE_18_GITHUB_INITIALIZATION.md** | GitHub repo sync for agents |
 
 ---
 
