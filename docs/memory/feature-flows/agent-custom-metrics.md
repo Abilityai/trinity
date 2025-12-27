@@ -1,9 +1,11 @@
 # Agent Custom Metrics - Feature Flow
 
+> **Updated**: 2025-12-27 - Refactored to service layer architecture. Metrics logic moved to `services/agent_service/metrics.py`.
+
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2025-12-19
+**Last Updated**: 2025-12-27
 
 ## Overview
 
@@ -126,13 +128,33 @@ Same as above, plus:
 
 ## Key Files
 
-| Component | File | Line | Purpose |
-|-----------|------|------|---------|
-| Agent Server | `docker/base-image/agent_server/routers/info.py` | 161 | GET /api/metrics endpoint |
-| Backend | `src/backend/routers/agents.py` | 2227 | GET /api/agents/{name}/metrics proxy |
-| Frontend | `src/frontend/src/components/MetricsPanel.vue` | 1 | Metrics display component (350 lines) |
-| Frontend | `src/frontend/src/views/AgentDetail.vue` | 342 | Metrics tab content integration |
-| Store | `src/frontend/src/stores/agents.js` | 439 | getAgentMetrics action |
+| Component | File | Purpose |
+|-----------|------|---------|
+| Agent Server | `docker/base-image/agent_server/routers/info.py:161` | GET /api/metrics endpoint |
+| Router | `src/backend/routers/agents.py:689-696` | GET /api/agents/{name}/metrics endpoint |
+| Service | `src/backend/services/agent_service/metrics.py` (92 lines) | Metrics proxy logic |
+| Frontend | `src/frontend/src/components/MetricsPanel.vue` | Metrics display component (350 lines) |
+| Frontend | `src/frontend/src/views/AgentDetail.vue:342` | Metrics tab content integration |
+| Store | `src/frontend/src/stores/agents.js:439` | getAgentMetrics action |
+
+### Backend Architecture
+
+```python
+# Router (agents.py:689-696)
+@router.get("/{agent_name}/metrics")
+async def get_agent_metrics(agent_name: str, request: Request, current_user: User = Depends(get_current_user)):
+    """Get agent custom metrics."""
+    return await get_agent_metrics_logic(agent_name, current_user)
+```
+
+```python
+# Service (metrics.py:18-92)
+async def get_agent_metrics_logic(agent_name: str, current_user: User) -> dict:
+    """Get agent custom metrics from agent's internal API."""
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, ...)
+    # ... proxy to agent-server
+```
 
 ## Test Agents with Metrics
 

@@ -1,5 +1,7 @@
 # Feature: Local Agent Deployment via MCP
 
+> **Updated**: 2025-12-27 - Refactored to service layer architecture. Deploy logic moved to `services/agent_service/deploy.py`.
+
 ## Overview
 
 Deploy Trinity-compatible local Claude Code agents to a remote Trinity platform with a single MCP command. The **local agent** (Claude Code on your machine) packages the directory into a tar.gz archive and sends it to the remote Trinity backend for deployment.
@@ -105,9 +107,33 @@ The agent then calls `deploy_local_agent` with:
 
 ## Backend Layer
 
+### Architecture (Post-Refactoring)
+
+The local agent deployment uses a **thin router + service layer** architecture:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Router | `src/backend/routers/agents.py:191-204` | Endpoint definition |
+| Service | `src/backend/services/agent_service/deploy.py` (306 lines) | Deployment business logic |
+
 ### Endpoint: POST /api/agents/deploy-local
 
-**Location**: `src/backend/routers/agents.py:856`
+**Router**: `src/backend/routers/agents.py:191-204`
+**Service**: `src/backend/services/agent_service/deploy.py:40-307`
+
+```python
+# Router
+@router.post("/deploy-local")
+async def deploy_local_agent(body: DeployLocalRequest, request: Request, current_user: User = Depends(get_current_user)):
+    """Deploy a Trinity-compatible local agent."""
+    return await deploy_local_agent_logic(
+        body=body,
+        current_user=current_user,
+        request=request,
+        create_agent_fn=create_agent_internal,
+        credential_manager=credential_manager
+    )
+```
 
 **Request Model** (`src/backend/models.py`):
 ```python
@@ -129,40 +155,40 @@ class DeployLocalResponse(BaseModel):
     code: Optional[str]                       # Error code
 ```
 
-### Deployment Flow
+### Deployment Flow (`deploy.py:40-307`)
 
-1. **Decode & Validate**
+1. **Decode & Validate** (lines 70-99)
    - Decode base64 archive
    - Check size limit (50MB max)
    - Check credentials count (100 max)
 
-2. **Extract Archive**
+2. **Extract Archive** (lines 101-134)
    - Extract to temp directory
    - Security: Check for path traversal (`..` in paths)
    - Check file count (1000 max)
 
-3. **Trinity-Compatible Validation**
+3. **Trinity-Compatible Validation** (lines 143-152)
    - `is_trinity_compatible()` in `services/template_service.py`
    - Requires template.yaml with `name` and `resources` fields
 
-4. **Version Handling**
-   - `get_next_version_name()` finds next available version
-   - Pattern: `my-agent` → `my-agent-2` → `my-agent-3`
+4. **Version Handling** (lines 166-181)
+   - `get_next_version_name()` in `helpers.py` finds next available version
+   - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running
 
-5. **Credential Import**
+5. **Credential Import** (lines 183-194)
    - `import_credential_with_conflict_resolution()` in `credentials.py`
    - Same name + same value = reuse
    - Same name + different value = rename with suffix (`_2`, `_3`)
    - New name = create
 
-6. **Template Copy**
+6. **Template Copy** (lines 196-218)
    - Copy to `config/agent-templates/{version_name}/`
 
-7. **Agent Creation**
-   - Call `create_agent_internal()` with local template
+7. **Agent Creation** (lines 220-233)
+   - Call `create_agent_fn()` (injected `create_agent_internal`) with local template
 
-8. **Credential Hot-Reload**
+8. **Credential Hot-Reload** (lines 235-251)
    - POST credentials to agent's internal API
    - Agent writes `.env` and regenerates `.mcp.json`
 
@@ -350,5 +376,6 @@ rm -f "$ARCHIVE"
 ---
 
 **Implemented**: 2025-12-21
+**Updated**: 2025-12-27 - Service layer refactoring: Deploy logic moved to `services/agent_service/deploy.py`
 **Updated**: 2025-12-24 - Changed from local path to archive-based deployment
-**Status**: ✅ Working
+**Status**: Working

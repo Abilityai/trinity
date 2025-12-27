@@ -1,5 +1,7 @@
 # Feature: Agent-to-Agent Permissions System
 
+> **Updated**: 2025-12-27 - Refactored to service layer architecture. Permission logic moved to `services/agent_service/permissions.py`.
+
 ## Overview
 
 Fine-grained permission control for agent-to-agent communication. Allows owners to specify which agents their agents can collaborate with via Trinity MCP tools (`list_agents`, `chat_with_agent`). Enforced at the MCP server layer.
@@ -7,7 +9,7 @@ Fine-grained permission control for agent-to-agent communication. Allows owners 
 **Requirement**: 9.10 - Agent-to-Agent Collaboration Permissions
 **Phase**: 9.10
 **Implemented**: 2025-12-10
-**Last Updated**: 2025-12-19
+**Last Updated**: 2025-12-27
 
 ## User Story
 
@@ -129,11 +131,22 @@ const allowNoAgents = () => {
 
 ## Backend Layer
 
+### Architecture (Post-Refactoring)
+
+The permissions feature uses a **thin router + service layer** architecture:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Router | `src/backend/routers/agents.py:642-682` | Endpoint definitions |
+| Service | `src/backend/services/agent_service/permissions.py` (197 lines) | Permission business logic |
+
 ### Endpoint: GET /api/agents/{name}/permissions
 
-**File**: `src/backend/routers/agents.py:2037-2087`
+**Router**: `src/backend/routers/agents.py:642-649`
+**Service**: `src/backend/services/agent_service/permissions.py:19-67`
 
 ```python
+# Router (agents.py:642-649)
 @router.get("/{agent_name}/permissions")
 async def get_agent_permissions(
     agent_name: str,
@@ -141,9 +154,15 @@ async def get_agent_permissions(
     current_user: User = Depends(get_current_user)
 ):
     """Get permissions for an agent."""
-    # Check access
+    return await get_agent_permissions_logic(agent_name, current_user)
+```
+
+```python
+# Service (permissions.py:19-67)
+async def get_agent_permissions_logic(agent_name: str, current_user: User) -> dict:
+    """Get permissions for an agent."""
     if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403)
+        raise HTTPException(status_code=403, detail="...")
 
     # Get permitted agents
     permitted_list = db.get_permitted_agents(agent_name)
@@ -171,16 +190,17 @@ async def get_agent_permissions(
 
 ### Endpoint: PUT /api/agents/{name}/permissions
 
-**File**: `src/backend/routers/agents.py:2090-2138`
+**Router**: `src/backend/routers/agents.py:652-660`
+**Service**: `src/backend/services/agent_service/permissions.py:70-117`
 
 ```python
-@router.put("/{agent_name}/permissions")
-async def set_agent_permissions(
+# Service (permissions.py:70-117)
+async def set_agent_permissions_logic(
     agent_name: str,
-    request: Request,
     body: dict,
-    current_user: User = Depends(get_current_user)
-):
+    current_user: User,
+    request: Request
+) -> dict:
     """Set permissions for an agent (full replacement)."""
     # Only owner or admin
     if not db.can_user_share_agent(current_user.username, agent_name):
@@ -196,26 +216,22 @@ async def set_agent_permissions(
     # Set permissions (replaces all existing)
     db.set_agent_permissions(agent_name, permitted_agents, current_user.username)
 
-    await log_audit_event(
-        event_type="agent_permissions",
-        action="set_permissions",
-        user_id=current_user.username,
-        agent_name=agent_name,
-        details={"permitted_count": len(permitted_agents)}
-    )
+    await log_audit_event(...)
 
     return {"status": "updated", "permitted_count": len(permitted_agents)}
 ```
 
 ### Endpoint: POST /api/agents/{name}/permissions/{target}
 
-**File**: `src/backend/routers/agents.py:2141-2183`
+**Router**: `src/backend/routers/agents.py:663-671`
+**Service**: `src/backend/services/agent_service/permissions.py:120-161`
 
 Adds a single permission. Returns `{status: "added"}` or `{status: "already_exists"}`.
 
 ### Endpoint: DELETE /api/agents/{name}/permissions/{target}
 
-**File**: `src/backend/routers/agents.py:2186-2220`
+**Router**: `src/backend/routers/agents.py:674-682`
+**Service**: `src/backend/services/agent_service/permissions.py:164-197`
 
 Removes a single permission. Returns `{status: "removed"}` or `{status: "not_found"}`.
 
@@ -400,28 +416,28 @@ Use `list_agents` to discover your available collaborators.
 
 ### Agent Creation
 
-**File**: `src/backend/routers/agents.py:668-675`
+**File**: `src/backend/services/agent_service/crud.py:391-397`
 
 ```python
 # Phase 9.10: Grant default permissions (Option B - same-owner agents)
 try:
     permissions_count = db.grant_default_permissions(config.name, current_user.username)
     if permissions_count > 0:
-        print(f"Granted {permissions_count} default permissions for agent {config.name}")
+        logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
 except Exception as e:
-    print(f"Warning: Failed to grant default permissions for {config.name}: {e}")
+    logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
 ```
 
 ### Agent Deletion
 
-**File**: `src/backend/routers/agents.py:782-786`
+**File**: `src/backend/routers/agents.py:274-278`
 
 ```python
-# Phase 9.10: Delete agent permissions (both as source and target)
+# Delete agent permissions
 try:
     db.delete_agent_permissions(agent_name)
 except Exception as e:
-    print(f"Warning: Failed to delete permissions for agent {agent_name}: {e}")
+    logger.warning(f"Failed to delete permissions for agent {agent_name}: {e}")
 ```
 
 ---

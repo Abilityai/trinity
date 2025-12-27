@@ -1,5 +1,7 @@
 # Feature: File Browser (Tree Structure)
 
+> **Updated**: 2025-12-27 - Refactored to service layer architecture. File operations moved to `services/agent_service/files.py`.
+
 ## Overview
 Users can browse and download files from agent workspaces through the Trinity web UI without requiring SSH access. The feature displays files in a **hierarchical tree structure** similar to macOS Finder, with expandable/collapsible folders. Users can navigate folder hierarchies, search files, and download individual files.
 
@@ -217,11 +219,21 @@ async downloadAgentFile(name, filePath) {
 
 ## Backend Layer
 
+### Architecture (Post-Refactoring)
+
+The file browser feature uses a **thin router + service layer** architecture:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Router | `src/backend/routers/agents.py:547-566` | Endpoint definitions |
+| Service | `src/backend/services/agent_service/files.py` (137 lines) | File listing and download logic |
+
 ### Endpoints
 
-**File**: `/Users/eugene/Dropbox/Coding/N8N_Main_repos/project_trinity/src/backend/routers/agents.py`
+#### GET /api/agents/{agent_name}/files
 
-#### GET /api/agents/{agent_name}/files (Line 734-794)
+**Router**: `src/backend/routers/agents.py:547-555`
+**Service**: `src/backend/services/agent_service/files.py:20-77`
 
 **Purpose**: List all files in agent workspace as hierarchical tree structure
 
@@ -229,7 +241,7 @@ async downloadAgentFile(name, filePath) {
 - `agent_name` (path) - Agent identifier
 - `path` (query, optional) - Directory path (default: `/home/developer`)
 
-**Business Logic**:
+**Business Logic** (in `list_agent_files_logic()`):
 1. Check user authentication (`get_current_user` dependency)
 2. Verify user has access to agent (`db.can_user_access_agent()`)
 3. Get agent container (`get_agent_container()`)
@@ -286,7 +298,10 @@ await log_audit_event(
 )
 ```
 
-#### GET /api/agents/{agent_name}/files/download (Line 797-858)
+#### GET /api/agents/{agent_name}/files/download
+
+**Router**: `src/backend/routers/agents.py:558-566`
+**Service**: `src/backend/services/agent_service/files.py:80-137`
 
 **Purpose**: Download file content from agent workspace
 
@@ -294,7 +309,7 @@ await log_audit_event(
 - `agent_name` (path) - Agent identifier
 - `path` (query, required) - File path relative to workspace
 
-**Business Logic**:
+**Business Logic** (in `download_agent_file_logic()`):
 1. Check user authentication
 2. Verify user has access to agent
 3. Get agent container
@@ -741,6 +756,7 @@ Working - Feature tested and operational as of 2025-12-01
 
 ## Changelog
 
+- **2025-12-27**: **Service layer refactoring**: File operations moved to `services/agent_service/files.py`. Router reduced to thin endpoint definitions.
 - **2025-12-06**: Updated agent-server references to new modular structure (`agent_server/routers/files.py`)
 - **2025-12-06**: Updated line numbers for files endpoints (15-140 in modular file vs 1701-1842 in old monolithic)
 

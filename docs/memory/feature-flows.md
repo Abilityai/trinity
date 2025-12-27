@@ -3,6 +3,11 @@
 > **Purpose**: Maps features to detailed vertical slice documentation.
 > Each flow documents the complete path from UI → API → Database → Side Effects.
 
+> **Updated (2025-12-27)**: **Service Layer Refactoring** - All agent-related feature flows updated:
+> - `routers/agents.py` reduced from 2928 to 786 lines (thin router layer)
+> - Business logic extracted into 12 service modules in `services/agent_service/`
+> - Updated flows: agent-lifecycle, agent-terminal, agent-permissions, agent-shared-folders, file-browser, agent-custom-metrics, execution-queue, local-agent-deploy
+
 > **Updated (2025-12-26)**: Feature flows audit completed:
 > - **Task DAG Removal**: ✅ All references cleaned up, Agents.vue bug fixed (2025-12-23 Req 9.8 deletion)
 > - **GitHub Initialization**: ✅ Four critical bugs fixed - smart directory detection, orphaned record cleanup, agent files pushed (2025-12-26)
@@ -39,8 +44,8 @@
 | Flow | Priority | Document | Description |
 |------|----------|----------|-------------|
 | Authentication Mode System | High | [auth0-authentication.md](feature-flows/auth0-authentication.md) | **Runtime** dual-mode auth: dev (local login) + prod (Auth0 OAuth), JWT mode claims (Updated 2025-12-05) |
-| Agent Lifecycle | High | [agent-lifecycle.md](feature-flows/agent-lifecycle.md) | Create, start, stop, delete Docker containers (Updated 2025-12-19) |
-| **Agent Terminal** | High | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal for agents with Claude Code TUI, replaces Chat tab, includes **per-agent API key control** (Req 11.7) - owner can choose platform key vs terminal auth (Updated 2025-12-26) |
+| Agent Lifecycle | High | [agent-lifecycle.md](feature-flows/agent-lifecycle.md) | Create, start, stop, delete Docker containers - **service layer: lifecycle.py, crud.py** (Updated 2025-12-27) |
+| **Agent Terminal** | High | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal - **service layer: terminal.py, api_key.py** - includes per-agent API key control (Req 11.7) (Updated 2025-12-27) |
 | ~~Agent Chat~~ | ~~High~~ | ~~[agent-chat.md](feature-flows/agent-chat.md)~~ | ❌ DEPRECATED (2025-12-25) - Replaced by Agent Terminal for direct Claude Code interaction |
 | Credential Injection | High | [credential-injection.md](feature-flows/credential-injection.md) | Redis storage, hot-reload, OAuth2 flows (Updated 2025-12-19) |
 | Agent Scheduling | High | [scheduling.md](feature-flows/scheduling.md) | Cron-based automation, APScheduler, execution tracking |
@@ -54,17 +59,17 @@
 | Agent Info Display | Medium | [agent-info-display.md](feature-flows/agent-info-display.md) | Template metadata display in Info tab (Req 9.3) |
 | Agent-to-Agent Collaboration | High | [agent-to-agent-collaboration.md](feature-flows/agent-to-agent-collaboration.md) | Inter-agent communication via Trinity MCP (Implemented 2025-11-29) |
 | Persistent Chat Tracking | High | [persistent-chat-tracking.md](feature-flows/persistent-chat-tracking.md) | Database-backed chat persistence with full observability (Implemented 2025-12-01) |
-| File Browser | Medium | [file-browser.md](feature-flows/file-browser.md) | Browse and download workspace files via web UI (Implemented 2025-12-01) |
+| File Browser | Medium | [file-browser.md](feature-flows/file-browser.md) | Browse and download workspace files - **service layer: files.py** (Updated 2025-12-27) |
 | Agent Network (Dashboard) | High | [agent-network.md](feature-flows/agent-network.md) | Real-time visual graph showing agents and messages - **now integrated into Dashboard.vue at `/`** (Updated 2025-12-19) |
 | Agent Network Replay Mode | High | [agent-network-replay-mode.md](feature-flows/agent-network-replay-mode.md) | Time-compressed replay of historical messages with VCR controls and timeline scrubbing - **now in Dashboard.vue** (Updated 2025-12-19) |
 | Unified Activity Stream | High | [activity-stream.md](feature-flows/activity-stream.md) | Centralized persistent activity tracking with WebSocket broadcasting (Implemented 2025-12-02, Req 9.7) |
 | Activity Stream Collaboration Tracking | High | [activity-stream-collaboration-tracking.md](feature-flows/activity-stream-collaboration-tracking.md) | Complete vertical slice: MCP → Database → Dashboard visualization (Implemented 2025-12-02, Req 9.7) |
-| **Execution Queue** | Critical | [execution-queue.md](feature-flows/execution-queue.md) | Parallel execution prevention via Redis-backed queue. Serializes User Chat, Scheduler, and MCP requests with 429 handling and defense-in-depth (Implemented 2025-12-06) |
+| **Execution Queue** | Critical | [execution-queue.md](feature-flows/execution-queue.md) | Parallel execution prevention via Redis queue - **service layer: queue.py** (Updated 2025-12-27) |
 | **Agents Page UI Improvements** | Medium | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md) | Activity indicators, context stats, task progress, sorting - reusing Collaboration Dashboard APIs (Implemented 2025-12-07, Updated 2025-12-19) |
 | **Testing Agents Suite** | High | [testing-agents.md](feature-flows/testing-agents.md) | Automated pytest suite (179/179 passing) + 8 local test agents for manual verification - agent-server refactored to modular package (Updated 2025-12-19) |
-| **Agent Custom Metrics** | High | [agent-custom-metrics.md](feature-flows/agent-custom-metrics.md) | Agent-defined custom metrics in template.yaml displayed in UI - 6 metric types with auto-refresh (Implemented 2025-12-10, Req 9.9) (Updated 2025-12-19) |
-| **Agent-to-Agent Permissions** | High | [agent-permissions.md](feature-flows/agent-permissions.md) | Fine-grained control over which agents can communicate with each other via MCP tools (Implemented 2025-12-10, Updated 2025-12-19, Req 9.10) |
-| **Agent Shared Folders** | High | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File-based collaboration via shared Docker volumes mounted at `/home/developer/shared-out` and `/home/developer/shared-in/{agent}` (Implemented 2025-12-13, Updated 2025-12-19, Req 9.11) |
+| **Agent Custom Metrics** | High | [agent-custom-metrics.md](feature-flows/agent-custom-metrics.md) | Agent-defined custom metrics - **service layer: metrics.py** (Updated 2025-12-27) |
+| **Agent-to-Agent Permissions** | High | [agent-permissions.md](feature-flows/agent-permissions.md) | Agent communication permissions - **service layer: permissions.py** (Updated 2025-12-27) |
+| **Agent Shared Folders** | High | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File collaboration via shared volumes - **service layer: folders.py** (Updated 2025-12-27) |
 | ~~Agent Vector Memory~~ | ~~Medium~~ | ~~[vector-memory.md](feature-flows/vector-memory.md)~~ | ❌ REMOVED (2025-12-24) - Templates should define their own memory. Platform should not inject agent capabilities. |
 | **System-Wide Trinity Prompt** | High | [system-wide-trinity-prompt.md](feature-flows/system-wide-trinity-prompt.md) | Admin-configurable custom instructions injected into all agents' CLAUDE.md at startup (Updated 2025-12-19) |
 | **Dark Mode / Theme Switching** | Low | [dark-mode-theme.md](feature-flows/dark-mode-theme.md) | Client-side theme system with Light/Dark/System modes, localStorage persistence, Tailwind class strategy (Implemented 2025-12-14) |
@@ -72,7 +77,7 @@
 | **OpenTelemetry Integration** | Medium | [opentelemetry-integration.md](feature-flows/opentelemetry-integration.md) | OTel metrics export from Claude Code agents to Prometheus via OTEL Collector - cost, tokens, productivity metrics with Dashboard UI (Phase 2.5 UI completed 2025-12-20) |
 | **Internal System Agent** | High | [internal-system-agent.md](feature-flows/internal-system-agent.md) | Platform operations manager (trinity-system) with fleet ops API, health monitoring, schedule control, and emergency stop. Ops-only scope. **2025-12-21**: OTel access fix, 5-step reinitialize, Cost Monitoring flow (Req 11.1, 11.2) |
 | **System Agent UI** | High | [system-agent-ui.md](feature-flows/system-agent-ui.md) | Admin-only `/system-agent` page with fleet overview cards, quick actions (Emergency Stop, Restart All, Pause/Resume Schedules), and Operations Console chat interface (Req 11.3 - Created 2025-12-20) |
-| **Local Agent Deployment** | High | [local-agent-deploy.md](feature-flows/local-agent-deploy.md) | Deploy Trinity-compatible local agents via MCP tool - packages directory, auto-imports credentials, versioned deployment (Implemented 2025-12-21) |
+| **Local Agent Deployment** | High | [local-agent-deploy.md](feature-flows/local-agent-deploy.md) | Deploy local agents via MCP - **service layer: deploy.py** (Updated 2025-12-27) |
 | **Parallel Headless Execution** | High | [parallel-headless-execution.md](feature-flows/parallel-headless-execution.md) | Stateless parallel task execution via `POST /task` endpoint - bypasses queue, enables orchestrator-worker patterns (Implemented 2025-12-22, Req 12.1) |
 | **Public Agent Links** | Medium | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links for unauthenticated agent access with optional email verification, usage tracking, and rate limiting (Implemented 2025-12-22, Req 12.2) |
 | **First-Time Setup** | High | [first-time-setup.md](feature-flows/first-time-setup.md) | Admin password wizard on fresh install, bcrypt hashing, API key configuration in Settings, login block until setup complete (Implemented 2025-12-23, Req 11.4 / Phase 12.3) |

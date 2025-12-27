@@ -1,5 +1,7 @@
 # Feature: Web Terminal for Agents
 
+> **Updated**: 2025-12-27 - Refactored to service layer architecture. Terminal session management moved to `services/agent_service/terminal.py`.
+
 ## Overview
 
 Browser-based interactive terminal for any agent using xterm.js with full Claude Code TUI support. The terminal replaces the chat tab on the Agent Detail page and provides direct terminal access to agent containers via WebSocket-based PTY forwarding. **Includes per-agent API key control** (Req 11.7) allowing owners to choose between platform API key or terminal-based authentication.
@@ -133,9 +135,20 @@ ws.onopen = () => {
 
 ## Backend Layer
 
+### Architecture (Post-Refactoring)
+
+The terminal feature uses a **thin router + service layer** architecture:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Router | `src/backend/routers/agents.py:773-785` | WebSocket endpoint definition |
+| Service | `src/backend/services/agent_service/terminal.py` (346 lines) | Session management, PTY handling |
+| Service | `src/backend/services/agent_service/api_key.py` (97 lines) | API key setting logic |
+
 ### API Key Setting Endpoints
 
-- **File**: `src/backend/routers/agents.py:2536-2617`
+- **Router**: `src/backend/routers/agents.py:748-766`
+- **Service**: `src/backend/services/agent_service/api_key.py`
 
 #### GET `/api/agents/{agent_name}/api-key-setting`
 Returns current API key authentication setting for an agent.
@@ -237,11 +250,47 @@ async def update_agent_api_key_setting(agent_name: str, body: dict, ...) -> dict
 
 ### WebSocket Endpoint
 
-- **File**: `src/backend/routers/agents.py:2624-2900`
-- **Endpoint**: `@router.websocket("/{agent_name}/terminal")`
+- **Router**: `src/backend/routers/agents.py:773-785`
+- **Service**: `src/backend/services/agent_service/terminal.py`
 - **Query Params**: `mode: str` (default: "claude") - Either "claude" or "bash"
 
-### Authentication Flow
+```python
+@router.websocket("/{agent_name}/terminal")
+async def agent_terminal(
+    websocket: WebSocket,
+    agent_name: str,
+    mode: str = Query(default="claude")
+):
+    """Interactive terminal WebSocket for any agent."""
+    await _terminal_manager.handle_terminal_session(
+        websocket=websocket,
+        agent_name=agent_name,
+        mode=mode,
+        decode_token_fn=decode_token
+    )
+```
+
+### TerminalSessionManager Class (`services/agent_service/terminal.py:22-346`)
+
+The terminal session management is encapsulated in the `TerminalSessionManager` class:
+
+```python
+class TerminalSessionManager:
+    """
+    Manages terminal sessions for agents.
+    Limits sessions to 1 per user per agent and handles stale session cleanup.
+    """
+    def __init__(self):
+        self._active_sessions: dict = {}  # (user_id, agent_name) -> session_info
+        self._lock = threading.Lock()
+```
+
+**Key Methods:**
+- `_check_and_register_session()` (line 34-51): Check/register session with 5-minute timeout
+- `_unregister_session()` (line 53-57): Remove session from tracking
+- `handle_terminal_session()` (line 59-346): Main WebSocket handler
+
+### Authentication Flow (terminal.py:83-147)
 
 ```python
 # Step 1: Wait for auth message (10 second timeout)
@@ -255,7 +304,7 @@ if auth_data.get("type") != "auth":
 token = auth_data.get("token")
 
 # Step 2: Decode and validate JWT
-user = decode_token(token)  # From dependencies.py
+user = decode_token_fn(token)
 
 # Step 3: Check access to agent
 if not db.can_user_access_agent(user_email, agent_name) and user_role != "admin":
@@ -263,29 +312,26 @@ if not db.can_user_access_agent(user_email, agent_name) and user_role != "admin"
     return
 ```
 
-### Session Limiting
+### Session Limiting (terminal.py:34-57)
 
 ```python
-# Track active sessions (1 per user per agent, 5-minute stale cleanup)
-_active_terminal_sessions: dict = {}  # (user_id, agent_name) -> session_info
-_terminal_lock = threading.Lock()
-SESSION_TIMEOUT_SECONDS = 300
-
-with _terminal_lock:
+def _check_and_register_session(self, user_email: str, agent_name: str, timeout_seconds: int = 300) -> bool:
+    """Check if a session can be created and register it. Returns True if registered."""
     session_key = (user_email, agent_name)
-    if session_key in _active_terminal_sessions:
-        session_info = _active_terminal_sessions[session_key]
-        session_age = (datetime.utcnow() - session_info["started_at"]).total_seconds()
-        if session_age < SESSION_TIMEOUT_SECONDS:
-            # Reject: existing active session
-            return
-        else:
-            # Clean up stale session
-            logger.warning(f"Cleaning up stale session for {user_email}@{agent_name}")
-    _active_terminal_sessions[session_key] = {"started_at": datetime.utcnow()}
+    with self._lock:
+        if session_key in self._active_sessions:
+            session_info = self._active_sessions[session_key]
+            session_age = (datetime.utcnow() - session_info["started_at"]).total_seconds()
+            if session_age < timeout_seconds:
+                return False  # Session limit reached
+            else:
+                # Stale session, clean it up
+                logger.warning(f"Cleaning up stale session for {user_email}@{agent_name}")
+        self._active_sessions[session_key] = {"started_at": datetime.utcnow()}
+        return True
 ```
 
-### Docker Exec Creation
+### Docker Exec Creation (terminal.py:193-215)
 
 ```python
 # Build command based on mode
@@ -613,6 +659,7 @@ No cleanup required - sessions terminate automatically on disconnect.
 
 | Date | Change |
 |------|--------|
+| 2025-12-27 | **Service layer refactoring**: Terminal session management moved to `services/agent_service/terminal.py`. API key logic moved to `api_key.py`. Router reduced to thin endpoint definitions. |
 | 2025-12-25 | Initial implementation - replaced Chat tab with Terminal tab |
 | 2025-12-25 | Added fullscreen toggle with ESC key to exit |
 | 2025-12-26 | Added per-agent API key control (Req 11.7) - owner can choose platform key vs terminal auth |

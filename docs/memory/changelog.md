@@ -1,3 +1,71 @@
+### 2025-12-27 12:15:00
+📝 **Updated Feature Flow Documentation for Service Layer Refactoring**
+
+Updated all feature flows affected by the agents.py refactoring to reflect new file paths and module locations.
+
+**Updated Flows** (8 documents):
+- `agent-lifecycle.md` - References to lifecycle.py, crud.py, helpers.py
+- `agent-terminal.md` - References to terminal.py, api_key.py
+- `agent-permissions.md` - References to permissions.py
+- `agent-shared-folders.md` - References to folders.py, helpers.py
+- `file-browser.md` - References to files.py
+- `agent-custom-metrics.md` - References to metrics.py
+- `execution-queue.md` - References to queue.py
+- `local-agent-deploy.md` - References to deploy.py
+
+**Each Updated Flow Includes**:
+- "Updated 2025-12-27" note at top explaining refactoring
+- Architecture table showing Router vs Service layer split
+- Correct file paths and line numbers
+- Revision history entry
+
+**Index Updated**:
+- `feature-flows.md` - Added refactoring summary and updated all affected flow entries
+
+---
+
+### 2025-12-27 10:30:00
+🔧 **Refactored agents.py Router (2928 → 785 lines)**
+
+Major non-breaking refactoring of `routers/agents.py` to improve maintainability. Business logic extracted to dedicated service modules while preserving all API signatures and external interfaces.
+
+**Before**: Single 2,928-line file handling 25+ endpoints and 15 distinct concerns
+**After**: 785-line thin router + 12 focused service modules (~2,735 lines total)
+
+**New Service Module Structure** (`services/agent_service/`):
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| helpers.py | 233 | Shared utilities (get_accessible_agents, versioning) |
+| lifecycle.py | 251 | Agent start/stop, Trinity injection |
+| crud.py | 447 | Agent creation logic |
+| deploy.py | 306 | Local agent deployment via MCP |
+| terminal.py | 345 | WebSocket PTY terminal handling |
+| permissions.py | 197 | Agent-to-agent permissions |
+| folders.py | 231 | Shared folder configuration |
+| files.py | 137 | File browser proxy |
+| queue.py | 124 | Execution queue operations |
+| metrics.py | 92 | Custom metrics proxy |
+| stats.py | 162 | Container/context statistics |
+| api_key.py | 97 | API key settings |
+
+**Preserved Interfaces** (no changes needed in consuming modules):
+- `main.py`: `router`, `set_websocket_manager`, `inject_trinity_meta_prompt`
+- `systems.py`: `create_agent_internal`, `get_accessible_agents`, `start_agent_internal`
+- `activities.py`: `get_accessible_agents`
+- `system_service.py`: `start_agent_internal`
+
+**Testing**:
+- All 24 agent lifecycle tests pass
+- All 56 permissions/folders/api_key tests pass
+- All systems integration tests pass
+
+**Files Changed**:
+- Backend: `routers/agents.py` - Refactored to thin wrapper (2928 → 785 lines)
+- Backend: `services/agent_service/__init__.py` - New module exports
+- Backend: `services/agent_service/*.py` - 12 new focused modules
+
+---
+
 ### 2025-12-26 18:30:00
 🐛 **Fixed Email Whitelist 404 Error**
 
