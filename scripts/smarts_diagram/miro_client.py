@@ -115,6 +115,32 @@ class MiroClient:
         except requests.RequestException as e:
             raise MiroClientError(f"Request failed: {e}") from e
 
+    def create_board(
+        self,
+        name: str,
+        description: str = "",
+        team_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a new Miro board.
+
+        Args:
+            name: Board name
+            description: Board description
+            team_id: Team ID to create board in (optional)
+
+        Returns:
+            Created board data including 'id'
+        """
+        data: dict[str, Any] = {
+            "name": name,
+            "description": description,
+        }
+
+        if team_id:
+            data["teamId"] = team_id
+
+        return self._request("POST", "/boards", data)
+
     def get_board(self, board_id: str | None = None) -> dict[str, Any]:
         """Get board information.
 

@@ -660,12 +660,16 @@ def update_miro_flow_diagram(
 
     Args:
         flow: The analysis flow to visualize
-        board_id: Miro board ID (uses MIRO_BOARD_ID env var if not provided)
+        board_id: Miro board ID (uses MIRO_FLOW_BOARD_ID or MIRO_BOARD_ID env var if not provided)
         clear_first: Whether to clear existing items first
 
     Returns:
         Summary of created items
     """
+    # Prefer MIRO_FLOW_BOARD_ID for flows, fall back to MIRO_BOARD_ID
+    if board_id is None:
+        board_id = os.getenv("MIRO_FLOW_BOARD_ID") or os.getenv("MIRO_BOARD_ID")
+
     diagram_data = generate_flow_diagram(flow)
 
     client = MiroClient(board_id=board_id)
@@ -709,7 +713,8 @@ Environment variables:
   SUPABASE_URL         Supabase project URL
   SUPABASE_ANON_KEY    Supabase anon/service key
   MIRO_ACCESS_TOKEN    Miro access token
-  MIRO_BOARD_ID        Miro board ID
+  MIRO_FLOW_BOARD_ID   Miro board ID for flows (preferred)
+  MIRO_BOARD_ID        Fallback Miro board ID
 """,
     )
 
@@ -728,7 +733,7 @@ Environment variables:
     parser.add_argument(
         "--board-id",
         "-b",
-        help="Miro board ID (default: MIRO_BOARD_ID env var)",
+        help="Miro board ID (default: MIRO_FLOW_BOARD_ID or MIRO_BOARD_ID env var)",
     )
     parser.add_argument(
         "--no-clear",
