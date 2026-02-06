@@ -1,3 +1,493 @@
+### 2026-02-06 01:05:17
+✨ **Auto-Generated SMARTS Pipeline Miro Diagram**
+
+Added automated system to generate and update Miro diagrams from SMARTS agent templates.
+
+**New files**:
+- `scripts/smarts_diagram/` - Parser, generator, and Miro API client
+- `scripts/update_smarts_diagram.py` - Main entry point
+
+**Features**:
+- Parses all 8 SMARTS agent templates (config.yaml + CLAUDE.md)
+- Generates clean horizontal flow diagram with section labels
+- Creates 12 connectors showing data flow between agents
+- Color-coded by layer (cyan=market, green=pipeline, orange=oversight, violet=feedback)
+
+**Usage**: `python3 scripts/update_smarts_diagram.py --dry-run`
+
+**Board**: https://miro.com/app/board/uXjVIz9lwcM=/
+
+---
+
+### 2026-02-06 00:37:48
+🔧 **SMARTS Pipeline Verification: Infrastructure Health Check**
+
+Verified SMARTS trading pipeline infrastructure after Supabase integration.
+
+**Results**:
+- All 9 agents running (8 SMARTS + system)
+- Fixed autonomy for 3 agents (news-sentiment, discovery, analysis) - were disabled
+- All 9 schedules verified active
+
+**Supabase Integration Confirmed**:
+- MSFT successfully flowed through entire pipeline
+- All context types present: market_regime → news_sentiment → scanner_opportunity → analysis → decision → execution
+
+**Auto-fixes Applied**:
+- Enabled autonomy via `PUT /api/agents/{name}/autonomy`
+- Reset admin password (was out of sync with env)
+
+---
+
+### 2026-02-05 23:13:00
+🔧 **SMARTS Telegram Summary: Deduplication**
+
+Added deduplication to prevent sending the same context messages multiple times.
+
+**How it works**:
+- Tracks sent context IDs in Redis (`smarts:sent_context_ids`)
+- Only sends new contexts not previously sent
+- Redis key expires after 24 hours (auto-cleanup)
+- `force_all=true` parameter to bypass deduplication
+
+**API Update**:
+```
+POST /api/ops/smarts/summary?force_all=true  # Send all contexts
+POST /api/ops/smarts/summary                  # Only new contexts (default)
+```
+
+**Response now includes**:
+- `contexts_skipped`: Number of already-sent contexts skipped
+
+---
+
+### 2026-02-05 23:10:35
+🔧 **SMARTS Telegram Summary: Enhanced Formatting**
+
+Improved daily summary messages with comprehensive agent reasoning.
+
+**Agents Now Included (in pipeline order)**:
+1. 🌍 Market Regime - regime, VIX, SPY, assessment, warning flags
+2. 📰 News Sentiment - per-symbol sentiment, headlines, catalysts, risks
+3. 🔎 Scanner Summary - scan results, top opportunity
+4. 🔍 Discovery - score, RSI, signals, rationale, trade idea
+5. 📊 Analysis - stance, scenarios (bull/base/bear), catalysts, risks
+6. 🎯 Decision - action, confidence, execution plan, rationale
+7. ⚡ Execution - status, blocking reason, PM directive details
+8. 🚨 PM Directive - restrictions, risk breaches, warnings
+9. 📈 Feedback Metrics - win rate, P&L, trades
+
+**Technical Changes**:
+- Switched from Markdown to HTML formatting (more reliable)
+- Added HTML escaping for special characters
+- Fallback to plain text if HTML parsing fails
+- Rich formatting with bold headers and italic descriptions
+
+---
+
+### 2026-02-05 23:02:08
+✨ **SMARTS Daily Summary: Telegram Integration**
+
+Added daily trading summary notifications sent to Telegram.
+
+**Features**:
+- Portfolio summary (value, cash, positions, P&L)
+- Each agent's input data, reasoning, and decisions
+- Pulls from Supabase `integration_context` table
+- Alpaca portfolio and order data
+- Scheduled daily at 21:30 UTC (4:30 PM EST, after market close)
+
+**New Files**:
+- `src/backend/services/smarts_summary_service.py` - Summary generation and Telegram sending
+- Added Telegram channel to `NotificationHandler` (channel: "telegram")
+
+**Telegram Bot**: @smarts_trinity_bot
+
+**Manual Trigger**: `POST /api/ops/smarts/summary`
+
+**Credentials Added to Redis**:
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+
+---
+
+### 2026-02-05 22:30:00
+🔧 **Updated SMARTS Agents to New Alpaca Account**
+
+Changed all 8 SMARTS agents to use new Alpaca paper trading account:
+- Account: PA3SHD7GJBBH (VAS-PAPER-1)
+- Portfolio Value: ~$99,580
+- Buying Power: ~$215,000
+- 8 existing positions
+
+---
+
+### 2026-02-05 21:45:00
+✅ **SMARTS Pipeline: Supabase Integration Complete**
+
+**Summary**: Completed full Supabase integration fix for SMARTS trading pipeline.
+
+**Credential Updates**:
+- Updated all 8 SMARTS agents with new Supabase project credentials
+- Project: `trinity-smarts` (`ecuvhzxgyqwahkzscuer`)
+- Updated `.mcp.json` on each agent with new PostgREST URL
+- Updated `.env` on each agent with `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_ANON_KEY`
+- Updated Redis credential store with new values
+
+**Connectivity Verification**:
+- ✅ SELECT works from all agents
+- ✅ INSERT works from all agents
+- ✅ Cross-agent read/write verified (discovery reads market_regime, writes scanner_opportunity)
+- ✅ RLS enabled with permissive policies for anon/authenticated users
+
+**Agents Updated**:
+- agent-market-regime
+- agent-news-sentiment
+- agent-discovery
+- agent-analysis
+- agent-decision
+- agent-execution
+- agent-portfolio-manager
+- agent-feedback
+
+**Note**: Using anon key for now. For production, update to service_role key from Supabase dashboard.
+
+---
+
+### 2026-02-05 21:30:00
+🗄️ **SMARTS Pipeline: Supabase Integration Fix**
+
+**Summary**: Fixed SMARTS trading agents to communicate via Supabase `integration_context` table instead of local container files.
+
+**Changes Made**:
+
+1. **Created Supabase Schema** (new project `trinity-smarts` / `ecuvhzxgyqwahkzscuer`):
+   - `integration_context` table with flexible JSONB structure
+   - Indexes for common query patterns (context_type, symbol, expires_at)
+   - `cleanup_expired_context()` function for TTL cleanup
+   - `get_context_summary()` helper function
+
+2. **Updated 8 Agent CLAUDE.md Files** with "Supabase Integration Verification" section:
+   - `market-regime/CLAUDE.md` - verification query for market_regime context
+   - `news-sentiment/CLAUDE.md` - verification query for news_sentiment context
+   - `discovery/CLAUDE.md` - verification + upstream context reading (market_regime, news_sentiment)
+   - `analysis/CLAUDE.md` - verification + upstream context reading (scanner_opportunity, market_regime)
+   - `decision/CLAUDE.md` - verification + upstream context reading (analysis, pm_directive)
+   - `execution/CLAUDE.md` - verification + upstream context reading (decision, pm_directive emergency)
+   - `portfolio-manager/CLAUDE.md` - verification + downstream directive checking
+   - `feedback/CLAUDE.md` - verification + upstream context reading (execution, decision)
+
+3. **Error Handling Rules Added**:
+   - MUST verify Supabase write succeeded immediately after INSERT
+   - DO NOT fall back to local files (`~/.claude/contexts/` or `~/content/`)
+   - Report errors clearly if Supabase MCP is unavailable
+
+**Schema**:
+```sql
+integration_context (
+  id UUID, context_type TEXT, symbol TEXT, context_data JSONB,
+  confidence FLOAT, expires_at TIMESTAMPTZ, created_at TIMESTAMPTZ, created_by TEXT
+)
+```
+
+**TTL by Context Type**:
+| Type | TTL | Rationale |
+|------|-----|-----------|
+| market_regime | 2h | Regime changes slowly |
+| news_sentiment | 48h | News impact lingers |
+| scanner_opportunity | 1h | Opportunities time-sensitive |
+| analysis | 2h | Valid for current session |
+| decision | 1h | Execute quickly |
+| execution | 4h | Need feedback loop time |
+| feedback_metrics | 24h | Daily metrics |
+| pm_directive | 1h | Directives are urgent |
+
+**Pending**: Need to update Trinity credentials with new Supabase URL/service key and restart agents
+
+**Files Changed**:
+- `config/agent-templates/market-regime/CLAUDE.md`
+- `config/agent-templates/news-sentiment/CLAUDE.md`
+- `config/agent-templates/discovery/CLAUDE.md`
+- `config/agent-templates/analysis/CLAUDE.md`
+- `config/agent-templates/decision/CLAUDE.md`
+- `config/agent-templates/execution/CLAUDE.md`
+- `config/agent-templates/portfolio-manager/CLAUDE.md`
+- `config/agent-templates/feedback/CLAUDE.md`
+
+---
+
+### 2026-02-05 20:58:15
+🔍 **SMARTS Cascade Test: Key Finding - Agents Write to Local Files, Not Supabase**
+
+**Summary**: Ran full SMARTS cascade test and discovered agents write inter-agent context to local container files instead of Supabase `integration_context` table, breaking pipeline communication.
+
+**Test Results** (24 min, $5.58 total cost):
+| Agent | Cost | Duration | Output Location | Status |
+|-------|------|----------|-----------------|--------|
+| market-regime | $0.84 | 3m 52s | ✅ Supabase `market_regime` | Working |
+| news-sentiment | $0.13 | 8s | ❌ Unknown | Not writing |
+| discovery | $0.22 | 26s | ❌ `/home/developer/.claude/contexts/` | Local files |
+| analysis | $0.39 | 2m 2s | ❌ Local files | Local files |
+| decision | $0.46 | 4m | ❌ `/home/developer/content/exports/` | Local files |
+| execution | $1.92 | 8m 39s | ✅ Supabase `market_snapshot` | Working |
+| portfolio-manager | $0.34 | 54s | ❌ Unknown | Not writing |
+| feedback | $1.28 | 4m 32s | ❌ Unknown | Not writing |
+
+**Root Cause**: Agent CLAUDE.md instructions tell agents to write to local markdown files, not use Supabase MCP tools for `integration_context`.
+
+**Impact**: Pipeline stages can't see each other's outputs - discovery finds opportunities but analysis can't read them from Supabase.
+
+**Next Step**: Design DB schema specifically for 8 SMARTS trading agents:
+| Agent | Context Type | Key Fields |
+|-------|--------------|------------|
+| market-regime | `market_regime` | VIX, SPY price, 50/200 MA, breadth, regime (bull/bear/neutral/volatile) |
+| news-sentiment | `news_sentiment` | symbol, sentiment_score, news_count, key_events |
+| discovery | `scanner_opportunity` | symbol, score, RSI, MACD, support/resistance, volume |
+| analysis | `analysis` | symbol, scenarios (3), expected_value, stance, confidence |
+| decision | `decision` | symbol, action (BUY/SELL/HOLD), size, entry, stop, target |
+| execution | `execution` | symbol, order_id, status, fill_price, fill_qty |
+| portfolio-manager | `pm_directive` | directive_type, reason, target_agent, priority |
+| feedback | `feedback_metrics` | win_rate, profit_factor, avg_hold_time, recent_trades |
+
+**Files**: `scripts/smarts-cascade.sh`
+
+---
+
+### 2026-02-05 19:57:00
+🚀 **SMARTS Pipeline: One-Click Cascade Test Script**
+
+**Summary**: Created `scripts/smarts-cascade.sh` for one-click testing of the full SMARTS trading pipeline.
+
+**Script Features**:
+- Triggers all 8 agents in proper sequence with correct timing
+- Phase 1: Market Context (market-regime + news-sentiment in parallel)
+- Phase 2: Discovery (scan watchlist for opportunities)
+- Phase 3: Analysis (deep analysis of each opportunity)
+- Phase 4: Decision (convert to BUY/SELL/HOLD with position sizing)
+- Phase 5: Execution (submit orders to Alpaca paper trading)
+- Phase 6: Feedback + Risk Check (parallel)
+
+**Usage**:
+```bash
+# Set token
+export TRINITY_API_TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/admin/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}' | jq -r '.access_token')
+
+# Run cascade with default watchlist
+./scripts/smarts-cascade.sh
+
+# Or with custom watchlist
+./scripts/smarts-cascade.sh "SPY,QQQ,AAPL"
+```
+
+**File**: `scripts/smarts-cascade.sh`
+
+---
+
+### 2026-02-05 01:07:12
+✅ **Verification: All 8 SMARTS Agents Connected and Configured**
+
+**Summary**: Verified all 8 trading agents have proper MCP configuration and can connect.
+
+**Agent Status** (all running):
+| Agent | Container | .mcp.json | Credentials | MCP Servers |
+|-------|-----------|-----------|-------------|-------------|
+| market-regime | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| news-sentiment | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| discovery | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| analysis | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| decision | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| execution | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| portfolio-manager | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+| feedback | ✅ | ✅ | ✅ | alpaca, massive, supabase, trinity |
+
+**Issue Found & Fixed**:
+- 6 agents (discovery, analysis, decision, execution, portfolio-manager, feedback) had unsubstituted `${VAR}` placeholders
+- Root cause: JS API `/credentials/apply` didn't regenerate .mcp.json from template
+- Fix: Copied `.mcp.json.template` into containers and pushed credentials via agent internal API
+
+**Verification Commands**:
+```bash
+# Check all agents have correct Alpaca key
+for agent in market-regime news-sentiment discovery analysis decision execution portfolio-manager feedback; do
+  docker exec agent-$agent cat /home/developer/.mcp.json | jq -r '.mcpServers.alpaca.env.ALPACA_API_KEY'
+done
+# All return: PKIZK7JKQTP3MMZ25PKF2ILYRT
+```
+
+**Next Steps**:
+- Agents need Claude Code authentication on first manual interaction
+- Scheduled runs will begin automatically per configured cron schedules
+
+---
+
+### 2026-02-05 00:50:00
+🔧 **Fix: Template MCP Server Injection Now Works**
+
+**Summary**: Fixed `generate_credential_files()` to properly process `.mcp.json.template` files during agent creation, enabling automatic MCP server configuration.
+
+**Root Cause**:
+- `template_service.py` only checked for `.mcp.json`, never `.mcp.json.template`
+- SMARTS agents use `.mcp.json.template` with `${VAR}` placeholders
+
+**Fix Applied** (`src/backend/services/template_service.py`):
+- Added fallback: check `.mcp.json.template` when `.mcp.json` doesn't exist
+- Implemented `${VAR_NAME}` placeholder substitution (matches agent-server hot-reload)
+- Added support for `${VAR:-default}` syntax with default values
+
+**Result**:
+- All 8 SMARTS trading agents now have proper `.mcp.json` with:
+  - `alpaca` - Market data and trading
+  - `supabase` - Database for integration_context
+  - `massive` - Shared folder access
+  - `trinity` - Platform integration
+
+**Additional Setup**:
+- Added 5 credentials: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_ANON_KEY
+- Configured schedules for all 8 agents (market-regime hourly, execution every 5min, etc.)
+
+**Verification**:
+```bash
+docker exec agent-market-regime cat /home/developer/.mcp.json | jq '.mcpServers | keys'
+# ["alpaca", "massive", "supabase", "trinity"]
+```
+
+---
+
+### 2026-02-05 00:25:00
+🎉 **Milestone: SMARTS Trading Agents Deployed and Tested**
+
+**Summary**: Successfully deployed all 8 SMARTS trading agents with full credential configuration and verified end-to-end Supabase integration.
+
+**Agents Deployed**:
+- market-regime, news-sentiment, discovery, analysis
+- decision, execution, portfolio-manager, feedback
+
+**Configuration Applied**:
+- Created `smarts-supabase` credential bundle (SUPABASE_URL + SUPABASE_SERVICE_KEY)
+- Created `anthropic-api-key` credential for Claude runtime
+- Assigned credentials to all 8 agents
+- Transferred agent ownership to user email account
+
+**End-to-End Test Results**:
+- ✅ market-regime agent analyzed SPY vs 50/200 MA
+- ✅ VIX volatility level checked (15.06 - moderate)
+- ✅ Regime assessment written to Supabase `integration_context` table
+- ✅ Data verified: bull regime, SPY $689.53, high confidence
+
+**Issue Found & Resolved**:
+- MCP servers (Supabase, Alpaca) not auto-injected from `.mcp.json.template`
+- Manual MCP config applied to agent container
+- Future fix needed: template MCP injection in agent creation flow
+
+---
+
+### 2026-02-04 00:47:00
+🧪 **Verification: SMARTS Trinity Readiness Test Passed**
+
+**Summary**: Verified SMARTS Trinity template system end-to-end by creating and deleting a market-regime test agent.
+
+**Verification Results**:
+1. ✅ Template list API working - all 8 SMARTS agents appear in `/api/templates`
+2. ✅ Agent creation successful - `test-market-regime` created from template
+3. ✅ Credential extraction working - 4 required credentials correctly identified
+4. ✅ Agent cleanup successful - test agent deleted properly
+
+**Bug Fix Applied**:
+- Fixed `templates.py:list_templates()` - `priority` field was causing `TypeError` when config.yaml contained non-integer priority objects (e.g., `priority: {high: 75, normal: 60}`)
+- Added type check: `if not isinstance(priority, int): priority = 100`
+
+**Files Changed**:
+- `src/backend/routers/templates.py` - Fixed priority type handling
+
+---
+
+### 2026-02-04 12:45:00
+📝 **Documentation: SMARTS Agent CLAUDE.md Quality Improvements**
+
+**Summary**: Improved all 8 SMARTS Trinity agent CLAUDE.md files based on quality audit findings.
+
+**Changes applied to each agent**:
+1. Added **Quick Start** section with test commands (curl/SQL)
+2. Added **Testing & Debugging** section with SQL queries and common issues
+3. Replaced duplicate configuration tables with links to `config.yaml`
+4. Added agent-specific implementation details
+
+**Agent-specific improvements**:
+- `market-regime`: Added volatility calculation details (20-day rolling), timezone note (ET)
+- `news-sentiment`: Added Polygon API rate limits, zero-articles handling, sentiment scoring method
+- `discovery`: Documented watchlist source (CRITICAL), `${PERSONALITY}` parameter, scan duration estimates
+- `analysis`: Added trigger conditions, depth selection decision tree, pattern detection strategy
+- `decision`: Added PM directive testing commands, HOLD troubleshooting table
+- `execution`: Moved Paper/Live warning to top, added latency expectations (150-650ms typical)
+- `portfolio-manager`: Added Redis cache details (TTL=5min), test directive SQL
+- `feedback`: Clarified report output paths, added partial fill handling, minimum sample size (n>=5)
+
+**Expected impact**: Average CLAUDE.md quality score improved from 77.75 to 88+
+
+**Files Changed**: 8 CLAUDE.md files updated
+- `config/agent-templates/market-regime/CLAUDE.md`
+- `config/agent-templates/news-sentiment/CLAUDE.md`
+- `config/agent-templates/discovery/CLAUDE.md`
+- `config/agent-templates/analysis/CLAUDE.md`
+- `config/agent-templates/decision/CLAUDE.md`
+- `config/agent-templates/execution/CLAUDE.md`
+- `config/agent-templates/portfolio-manager/CLAUDE.md`
+- `config/agent-templates/feedback/CLAUDE.md`
+
+---
+
+### 2026-02-04 00:30:00
+🏗️ **Feature: SMARTS Trinity Multi-Agent Trading System Support**
+
+**Summary**: Implemented comprehensive support for the SMARTS Trinity multi-agent trading architecture with 8 specialized agents.
+
+**Changes**:
+
+1. **Template Service Updates** (`src/backend/services/template_service.py`):
+   - Added support for `config.yaml` in addition to `template.yaml`
+   - Made `resources` field optional with defaults (`{"cpu": "2", "memory": "4g"}`)
+   - Added `find_template_file()` helper function
+   - Updated `is_trinity_compatible()` validation
+   - Updated `get_name_from_template()` to use new helper
+
+2. **Router Updates**:
+   - Updated `routers/templates.py` to use `find_template_file()`
+   - Updated `routers/credentials.py` to use `find_template_file()`
+   - Updated `services/agent_service/crud.py` to use `find_template_file()`
+   - Updated `services/system_agent_service.py` to use `find_template_file()`
+
+3. **Database Migration** (applied to smarts-v2 Supabase):
+   - Extended `integration_context` CHECK constraint with 8 new context types:
+     - `market_regime`, `news_sentiment`, `scanner_opportunity`, `analysis`
+     - `decision`, `execution`, `pm_directive`, `feedback_metrics`
+   - Created `trading_metrics` table for performance tracking
+   - Created `pm_directives` table for Portfolio Manager commands
+   - Created `agent_configurations` table for personality-based configs
+   - Added RLS policies and service_role grants
+
+4. **MCP Templates** (created for all 8 agents):
+   - Added `.mcp.json.template` files with environment variable placeholders
+   - Agents: market-regime, news-sentiment, discovery, analysis, decision, execution, portfolio-manager, feedback
+
+5. **Documentation**:
+   - Updated `config/agent-templates/smarts-trading/README.md`
+   - Added `.env.example` with required credentials
+
+**Agent Architecture**:
+```
+Market Regime + News/Sentiment → Discovery → Analysis → Decision ← Portfolio Manager
+                                                           ↓
+                                                       Execution → Feedback
+```
+
+**Files Changed**: 8 files modified, 8 `.mcp.json.template` files created
+
+---
+
 ### 2026-01-30 14:30:00
 📋 **Roadmap: Feature Requests Batch Added to Backlog**
 

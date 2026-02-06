@@ -515,6 +515,19 @@ PENDING → RUNNING → COMPLETED
 - `process_failed` - Execution failed
 - `approval_required` - Human approval needed
 
+### Operations (NEW: 2026-02-05)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/ops/fleet/status` | Get status of all agents |
+| POST | `/api/ops/fleet/start` | Start all agents |
+| POST | `/api/ops/fleet/stop` | Stop all agents |
+| POST | `/api/ops/smarts/summary` | Send SMARTS trading summary to Telegram |
+| GET | `/api/ops/smarts/test-telegram` | Test Telegram bot connection |
+
+**SMARTS Summary Parameters:**
+- `force_all` (bool): Send all contexts even if already sent (default: false)
+
 ---
 
 ## Database Schema
