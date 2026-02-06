@@ -49,6 +49,14 @@ Update project documentation after making changes.
    - Task completed (mark with ✅ and timestamp)
    - New tasks discovered (add to appropriate phase)
 
+8. Update SMARTS pipeline diagram (if SMARTS agents changed):
+   ```bash
+   python scripts/update_smarts_diagram.py
+   ```
+   - This auto-updates the Miro board with current architecture
+   - Requires MIRO_ACCESS_TOKEN and MIRO_BOARD_ID environment variables
+   - Use `--dry-run` to test without updating Miro
+
 ## Format for Changelog Entry
 
 ```markdown
