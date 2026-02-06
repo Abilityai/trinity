@@ -225,22 +225,22 @@ def format_market_regime_content(data: dict[str, Any], created_at: datetime) -> 
     lines = [
         "<b>🌍 MARKET REGIME</b>",
         f"<i>{format_timestamp(created_at)}</i>",
-        "",
+        "<br>",
         f"<b>Regime:</b> {regime}",
         f"<b>VIX:</b> {vix}",
         f"<b>SPY:</b> ${spy}",
-        "",
+        "<br>",
         "<b>Assessment:</b>",
         description,
     ]
 
     if warnings:
-        lines.append("")
+        lines.append("<br>")
         lines.append("<b>Warnings:</b>")
         for w in warnings:
             lines.append(f"• {w}")
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_news_sentiment_content(data: dict[str, Any], created_at: datetime, symbol: str) -> str:
@@ -254,19 +254,19 @@ def format_news_sentiment_content(data: dict[str, Any], created_at: datetime, sy
     lines = [
         "<b>📰 NEWS SENTIMENT</b>",
         f"<i>{format_timestamp(created_at)} | {symbol}</i>",
-        "",
+        "<br>",
         f"<b>Sentiment:</b> {sentiment} ({direction})",
         f"<b>Score:</b> {score:.2f}",
         f"<b>Theme:</b> {theme}",
     ]
 
     if factors:
-        lines.append("")
+        lines.append("<br>")
         lines.append("<b>Key Factors:</b>")
         for f in factors:
             lines.append(f"• {f}")
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_scanner_content(data: dict[str, Any], created_at: datetime, symbol: str) -> str:
@@ -284,22 +284,23 @@ def format_scanner_content(data: dict[str, Any], created_at: datetime, symbol: s
     lines = [
         "<b>🔍 DISCOVERY</b>",
         f"<i>{format_timestamp(created_at)} | {symbol}</i>",
-        "",
+        "<br>",
         f"<b>Score:</b> {score}/100",
         f"<b>Price:</b> ${price} ({change:+.2f}%)",
         f"<b>RSI:</b> {rsi}",
         f"<b>Setup:</b> {setup}",
-        "",
-        f"<b>Signals:</b> {', '.join(signals[:4])}",
-        "",
+        "<br>",
+        "<b>Signals:</b>",
+        ", ".join(signals[:4]),
+        "<br>",
         "<b>Rationale:</b>",
         rationale,
-        "",
+        "<br>",
         "<b>Trade Idea:</b>",
         trade_idea,
     ]
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_analysis_content(data: dict[str, Any], created_at: datetime, symbol: str) -> str:
@@ -326,34 +327,35 @@ def format_analysis_content(data: dict[str, Any], created_at: datetime, symbol: 
     lines = [
         "<b>📊 ANALYSIS</b>",
         f"<i>{format_timestamp(created_at)} | {symbol}</i>",
-        "",
+        "<br>",
         f"<b>Stance:</b> {stance}",
         f"<b>Confidence:</b> {confidence}",
         f"<b>Expected Value:</b> {ev_pct:.2f}%",
         f"<b>Price:</b> ${price}",
-        "",
+        "<br>",
         "<b>Scenarios:</b>",
         f"📈 Optimistic: ${optimistic.get('price_target', 'N/A')} ({int(optimistic.get('probability', 0)*100)}%)",
         f"➡️ Base: ${base.get('price_target', 'N/A')} ({int(base.get('probability', 0)*100)}%)",
         f"📉 Pessimistic: ${pessimistic.get('price_target', 'N/A')} ({int(pessimistic.get('probability', 0)*100)}%)",
-        "",
+        "<br>",
         f"<b>Action:</b> {action}",
         f"<b>Entry:</b> ${entry} | <b>Stop:</b> ${stop}",
         f"<b>Targets:</b> {', '.join([f'${t}' for t in targets[:3]])}",
     ]
 
     if catalysts:
-        lines.append("")
+        lines.append("<br>")
         lines.append("<b>Catalysts:</b>")
         for c in catalysts:
             lines.append(f"✅ {c}")
 
     if risks:
+        lines.append("<br>")
         lines.append("<b>Risks:</b>")
         for r in risks:
             lines.append(f"⚠️ {r}")
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_decision_content(data: dict[str, Any], created_at: datetime, symbol: str) -> str:
@@ -381,26 +383,26 @@ def format_decision_content(data: dict[str, Any], created_at: datetime, symbol: 
     lines = [
         "<b>🎯 DECISION</b>",
         f"<i>{format_timestamp(created_at)} | {symbol}</i>",
-        "",
+        "<br>",
         f"<b>ACTION: {action}</b>",
         f"<b>Confidence:</b> {confidence}",
         f"<b>Urgency:</b> {urgency}",
-        "",
+        "<br>",
         f"<b>Current Position:</b> {existing_pos}",
         f"<b>Current P&L:</b> ${current_pnl:+,.2f}",
-        "",
+        "<br>",
         "<b>Execution Plan:</b>",
         f"1. {step1.get('action', 'N/A')} - {step1.get('quantity', 'N/A')} shares",
         f"2. {step2.get('action', 'N/A')} @ ${step2.get('limit_price', 'N/A')}",
-        "",
+        "<br>",
         f"<b>Expected Value:</b> ${combined_ev:,.2f}",
         f"<b>Stop Loss:</b> ${stop_loss}",
-        "",
+        "<br>",
         "<b>Rationale:</b>",
         rationale,
     ]
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_execution_content(data: dict[str, Any], created_at: datetime, symbol: str) -> str:
@@ -424,11 +426,11 @@ def format_execution_content(data: dict[str, Any], created_at: datetime, symbol:
     lines = [
         "<b>⚡ EXECUTION</b>",
         f"<i>{format_timestamp(created_at)} | {symbol}</i>",
-        "",
+        "<br>",
         f"<b>STATUS: {status}</b>",
         f"<b>Intended Action:</b> {action}",
         f"<b>Blocking Reason:</b> {blocking_reason}",
-        "",
+        "<br>",
         "<b>Blocked Steps:</b>",
     ]
 
@@ -440,18 +442,18 @@ def format_execution_content(data: dict[str, Any], created_at: datetime, symbol:
 
     lines.extend(
         [
-            "",
+            "<br>",
             f"<b>PM Directive:</b> {pm_status}",
             f"<b>Restrictions:</b> {', '.join(restrictions[:3]) if restrictions else 'None'}",
-            "",
+            "<br>",
             f"<b>Opportunity Cost:</b> ${opportunity_cost:,.2f}",
-            "",
+            "<br>",
             "<b>Compliance:</b>",
             compliance,
         ]
     )
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_pm_directive_content(data: dict[str, Any], created_at: datetime) -> str:
@@ -469,12 +471,12 @@ def format_pm_directive_content(data: dict[str, Any], created_at: datetime) -> s
     lines = [
         "<b>🚨 PM DIRECTIVE</b>",
         f"<i>{format_timestamp(created_at)}</i>",
-        "",
+        "<br>",
         f"<b>Status:</b> {status}",
         f"<b>Expires:</b> {expires}",
         f"<b>Portfolio:</b> ${portfolio_value:,.2f}",
         f"<b>Leverage:</b> {leverage:.2f}x",
-        "",
+        "<br>",
         "<b>Restrictions:</b>",
     ]
 
@@ -485,18 +487,18 @@ def format_pm_directive_content(data: dict[str, Any], created_at: datetime) -> s
         lines.append("• None")
 
     if breaches:
-        lines.append("")
+        lines.append("<br>")
         lines.append("<b>Breaches:</b>")
         for b in breaches[:2]:
             lines.append(f"⚠️ {b.get('type', 'N/A')} ({b.get('severity', 'N/A')})")
 
     if warnings:
-        lines.append("")
+        lines.append("<br>")
         lines.append("<b>Warnings:</b>")
         for w in warnings[:2]:
             lines.append(f"⚠️ {w.get('type', 'N/A')}")
 
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 def format_context_content(ctx: FlowContext) -> str:
@@ -516,7 +518,7 @@ def format_context_content(ctx: FlowContext) -> str:
         return formatter()
 
     # Generic fallback
-    return f"<b>{ctx.context_type.upper()}</b>\n<i>{format_timestamp(ctx.created_at)}</i>\n\nData keys: {', '.join(list(ctx.data.keys())[:8])}"
+    return f"<b>{ctx.context_type.upper()}</b><br><i>{format_timestamp(ctx.created_at)}</i><br><br>Data keys: {', '.join(list(ctx.data.keys())[:8])}"
 
 
 def generate_flow_diagram(flow: AnalysisFlow) -> dict[str, Any]:
