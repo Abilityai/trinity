@@ -74,6 +74,8 @@ class NotificationHandler(StepHandler):
 
         if channel == "slack":
             return await self._send_slack(config, message, eval_context)
+        elif channel == "telegram":
+            return await self._send_telegram(config, message, eval_context)
         elif channel == "email":
             return await self._send_email(config, message, eval_context)
         elif channel == "webhook":
@@ -195,6 +197,105 @@ class NotificationHandler(StepHandler):
             return StepResult.fail(
                 f"Failed to send Slack notification: {str(e)}",
                 error_code="SLACK_ERROR",
+            )
+
+    async def _send_telegram(
+        self,
+        config: NotificationConfig,
+        message: str,
+        context: EvaluationContext,
+    ) -> StepResult:
+        """
+        Send notification to Telegram via Bot API.
+
+        The bot_token and chat_id can be direct values or reference environment variables.
+        """
+        bot_token = config.bot_token
+        chat_id = config.chat_id
+
+        # Try environment variables if not specified
+        if not bot_token:
+            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not chat_id:
+            chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+        if not bot_token:
+            return StepResult.fail(
+                "Telegram bot token not configured. Set bot_token in step or TELEGRAM_BOT_TOKEN env var.",
+                error_code="MISSING_BOT_TOKEN",
+            )
+
+        if not chat_id:
+            return StepResult.fail(
+                "Telegram chat ID not configured. Set chat_id in step or TELEGRAM_CHAT_ID env var.",
+                error_code="MISSING_CHAT_ID",
+            )
+
+        # Resolve env var references (e.g., "${TELEGRAM_BOT_TOKEN}")
+        if bot_token.startswith("${") and bot_token.endswith("}"):
+            env_var = bot_token[2:-1]
+            bot_token = os.environ.get(env_var)
+            if not bot_token:
+                return StepResult.fail(
+                    f"Environment variable {env_var} not set",
+                    error_code="MISSING_ENV_VAR",
+                )
+
+        if chat_id.startswith("${") and chat_id.endswith("}"):
+            env_var = chat_id[2:-1]
+            chat_id = os.environ.get(env_var)
+            if not chat_id:
+                return StepResult.fail(
+                    f"Environment variable {env_var} not set",
+                    error_code="MISSING_ENV_VAR",
+                )
+
+        # Telegram API URL
+        api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+        # Prepare payload - Telegram supports Markdown and HTML
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    api_url,
+                    json=payload,
+                    timeout=30.0,
+                )
+
+                response_data = response.json()
+
+                if response.status_code == 200 and response_data.get("ok"):
+                    logger.info("Telegram notification sent successfully")
+                    return StepResult.ok({
+                        "channel": "telegram",
+                        "status": "sent",
+                        "message_id": response_data.get("result", {}).get("message_id"),
+                        "message_preview": message[:200],
+                    })
+                else:
+                    error_desc = response_data.get("description", "Unknown error")
+                    logger.error(f"Telegram API failed: {error_desc}")
+                    return StepResult.fail(
+                        f"Telegram API error: {error_desc}",
+                        error_code="TELEGRAM_ERROR",
+                    )
+
+        except httpx.TimeoutException:
+            return StepResult.fail(
+                "Telegram API timed out",
+                error_code="TELEGRAM_TIMEOUT",
+            )
+        except Exception as e:
+            logger.exception(f"Failed to send Telegram notification: {e}")
+            return StepResult.fail(
+                f"Failed to send Telegram notification: {str(e)}",
+                error_code="TELEGRAM_ERROR",
             )
 
     async def _send_email(
