@@ -1,0 +1,104 @@
+# News/Sentiment Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: news-sentiment
+version: "1.0.0"
+description: Analyzes news, earnings, and sentiment for trading symbols
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For integration_context writes
+  - polygon    # For news API (if available)
+  - massive    # For shared folder access
+
+# Schedule configuration
+schedule:
+  - name: regular-sentiment-scan
+    cron: "*/30 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Scan news and sentiment for watchlist symbols"
+
+  - name: pre-market-scan
+    cron: "30 8 * * 1-5"
+    timezone: America/New_York
+    message: "Pre-market news scan for overnight developments"
+
+# Output configuration
+output:
+  context_type: news_sentiment
+  table: integration_context
+  ttl_hours: 1  # News sentiment expires quickly
+
+# News sources
+sources:
+  primary:
+    - polygon_news    # Polygon.io news API
+  secondary:
+    - earnings_calendar  # Earnings dates
+    # - reddit_wsb      # Future: Reddit sentiment
+    # - twitter         # Future: Twitter/X sentiment
+
+# Filtering
+filters:
+  min_relevance: 0.5
+  recency_hours: 48
+  max_news_per_symbol: 10
+  exclude_noise: true
+  noise_keywords:
+    - "sponsored"
+    - "advertisement"
+    - "promoted"
+
+# Earnings configuration
+earnings:
+  buffer_days: 3           # Avoid entries X days before earnings
+  caution_days: 7          # Caution zone starts X days before
+  expected_move_source: "options_iv"
+
+# Sentiment scoring weights
+sentiment_weights:
+  news_headlines: 0.6
+  earnings_context: 0.3
+  material_events: 0.1
+
+# Impact classification
+impact_keywords:
+  high:
+    - "earnings"
+    - "merger"
+    - "acquisition"
+    - "ceo"
+    - "guidance"
+    - "fda"
+    - "regulatory"
+  medium:
+    - "upgrade"
+    - "downgrade"
+    - "contract"
+    - "expansion"
+  low:
+    - "industry"
+    - "market"
+    - "sector"
+
+# Alert thresholds
+alerts:
+  high_impact_news:
+    enabled: true
+    targets:
+      - discovery
+      - analysis
+    priority: normal
+
+  earnings_warning:
+    enabled: true
+    targets:
+      - decision
+    priority: high
+
+# Logging
+logging:
+  level: INFO
+  include_headlines: true
+  include_reasoning: true

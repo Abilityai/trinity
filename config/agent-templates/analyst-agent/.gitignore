@@ -1,0 +1,14 @@
+# Secrets - NEVER commit
+.env
+.mcp.json
+
+# Platform-managed directories
+.trinity/
+.claude/commands/trinity/
+
+# Large generated content
+content/
+
+# OS files
+.DS_Store
+Thumbs.db

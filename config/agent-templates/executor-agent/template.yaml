@@ -1,0 +1,60 @@
+name: executor-agent
+display_name: SMARTS Executor Agent
+description: Trade execution agent. Executes trading decisions by submitting orders to Alpaca. Handles bracket orders, position management, and execution tracking.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: trade-executor
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - order-execution
+  - bracket-orders
+  - position-management
+  - execution-tracking
+  - error-handling
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /execute
+    description: Execute a pending decision
+    arguments: "<decision_id>"
+  - name: /execute-pending
+    description: Execute all pending decisions
+  - name: /positions
+    description: Show current positions
+  - name: /orders
+    description: Show recent orders
+
+metrics:
+  - name: trades_executed
+    type: counter
+    label: "Executed"
+    description: "Trades successfully executed"
+  - name: trades_failed
+    type: counter
+    label: "Failed"
+    description: "Trade execution failures"
+  - name: total_volume
+    type: counter
+    label: "Volume"
+    description: "Total shares traded"

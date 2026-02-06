@@ -1,0 +1,90 @@
+# Execution Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: execution
+version: "1.0.0"
+description: Validates and executes trading decisions via Alpaca
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For context read/write
+  - alpaca     # For order submission
+  - massive    # For shared folder access
+
+# Schedule configuration (mostly on-demand)
+schedule:
+  - name: queue-check
+    cron: "*/5 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Check for pending decisions to execute"
+
+  - name: fill-monitor
+    cron: "* * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Monitor open orders for fills"
+
+# Output configuration
+output:
+  context_type: execution
+  table: integration_context
+  ttl_hours: 1
+  update_table: trading_evaluations
+
+# Validation configuration
+validation:
+  sanity_check: true
+  budget_check: true
+  pm_check: true
+
+# Order defaults
+orders:
+  default_type: market
+  time_in_force: day
+  order_class: bracket
+
+# Retry configuration
+retry:
+  max_attempts: 2
+  delay_seconds: 5
+  retryable_errors:
+    - rate_limit
+    - timeout
+    - connection_error
+
+# Fill monitoring
+fill_monitoring:
+  poll_interval_seconds: 10
+  max_poll_time_seconds: 60
+  terminal_states:
+    - filled
+    - canceled
+    - rejected
+    - expired
+
+# Slippage tracking
+slippage:
+  warn_threshold_pct: 0.1
+  alert_threshold_pct: 0.5
+
+# PM emergency handling
+emergency:
+  blocking_directives:
+    - halt_trading
+    - block_new_entries
+    - emergency_liquidate
+  acknowledge_required: true
+
+# Alpaca-specific settings
+alpaca:
+  use_paper: true  # Override from environment
+  extended_hours: false
+  client_order_id_prefix: "smarts"
+
+# Logging
+logging:
+  level: INFO
+  include_order_details: true
+  include_slippage: true
+  mask_account_info: true

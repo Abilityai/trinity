@@ -1,0 +1,55 @@
+name: synthesis-agent
+display_name: SMARTS Synthesis Agent
+description: Decision synthesis agent. Combines all specialist analyses into final trading decisions with order specifications. The only agent that outputs actionable trading decisions.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: decision-synthesizer
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - consensus-evaluation
+  - decision-synthesis
+  - order-generation
+  - position-sizing
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /synthesize
+    description: Synthesize decision for a symbol
+    arguments: "<symbol>"
+  - name: /pending-decisions
+    description: List pending decisions awaiting execution
+
+metrics:
+  - name: decisions_made
+    type: counter
+    label: "Decisions"
+    description: "Trading decisions generated"
+  - name: buy_decisions
+    type: counter
+    label: "Buy"
+    description: "Buy decisions made"
+  - name: hold_decisions
+    type: counter
+    label: "Hold"
+    description: "Hold decisions made"

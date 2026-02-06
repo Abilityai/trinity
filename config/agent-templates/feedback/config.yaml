@@ -1,0 +1,130 @@
+# Feedback Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: feedback
+version: "1.0.0"
+description: Tracks outcomes, calculates metrics, generates reports
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For trade history, metrics writes
+  - alpaca     # For position monitoring
+  - massive    # For report files
+
+# Schedule configuration
+schedule:
+  - name: position-check
+    cron: "*/5 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Check for position exits and record outcomes"
+
+  - name: metrics-update
+    cron: "0 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Calculate and update trading metrics"
+
+  - name: daily-report
+    cron: "30 16 * * 1-5"
+    timezone: America/New_York
+    message: "Generate daily trading report"
+
+  - name: weekly-report
+    cron: "0 9 * * 6"
+    timezone: America/New_York
+    message: "Generate weekly trading report"
+
+  - name: monthly-report
+    cron: "0 9 1 * *"
+    timezone: America/New_York
+    message: "Generate monthly trading report"
+
+# Output configuration
+output:
+  context_type: feedback_metrics
+  table: integration_context
+  ttl_hours: 24
+  persist_metrics_to: trading_metrics
+  update_trades_in: trading_evaluations
+
+# Tracking configuration
+tracking:
+  position_check_interval_minutes: 5
+  metrics_update_interval: hourly
+
+# Metrics to calculate
+metrics:
+  core:
+    - win_rate
+    - total_pnl_dollars
+    - total_pnl_pct
+    - avg_pnl_per_trade
+    - best_trade_pnl
+    - worst_trade_pnl
+    - avg_holding_hours
+
+  advanced:
+    - sharpe_ratio
+    - profit_factor
+    - max_drawdown
+    - avg_time_to_tp
+    - avg_time_to_sl
+
+# Pattern analysis
+patterns:
+  by_symbol: true
+  by_setup_type: true
+  by_time_of_day: true
+  by_day_of_week: true
+  by_market_regime: true
+
+# Report configuration
+reports:
+  daily:
+    enabled: true
+    format: markdown
+    destination: "/shared-out/reports/daily/"
+    filename_pattern: "{date}.md"
+
+  weekly:
+    enabled: true
+    format: markdown
+    destination: "/shared-out/reports/weekly/"
+    filename_pattern: "week_{week_number}.md"
+
+  monthly:
+    enabled: true
+    format: markdown
+    destination: "/shared-out/reports/monthly/"
+    filename_pattern: "{year}-{month}.md"
+
+# Insight generation
+insights:
+  enabled: true
+  min_trades_for_patterns: 5
+  categories:
+    - setup_performance
+    - timing_patterns
+    - regime_patterns
+    - symbol_patterns
+
+# Learning flags
+learning:
+  identify_patterns: true
+  suggest_adjustments: true
+  auto_tune: false  # Manual tuning for now
+
+# Exit reason detection
+exit_reasons:
+  - take_profit
+  - stop_loss
+  - manual_close
+  - time_stop
+  - unknown
+
+# Logging
+logging:
+  level: INFO
+  include_trade_details: true
+  include_insights: true

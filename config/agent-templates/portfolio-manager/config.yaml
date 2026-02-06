@@ -1,0 +1,130 @@
+# Portfolio Manager Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: portfolio-manager
+version: "1.0.0"
+description: Portfolio oversight with emergency intervention capability
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For directive writes
+  - alpaca     # For portfolio monitoring
+  - massive    # For shared folder access
+
+# Schedule configuration
+schedule:
+  - name: portfolio-check
+    cron: "*/5 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Monitor portfolio health and check risk triggers"
+
+  - name: vix-check
+    cron: "*/15 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Check VIX level for volatility triggers"
+
+  - name: directive-cleanup
+    cron: "0 * * * *"
+    timezone: America/New_York
+    message: "Clean up expired directives"
+
+# Output configuration
+output:
+  context_type: pm_directive
+  table: integration_context
+  ttl_hours: 1
+  persist_to: pm_directives
+
+# Operating mode
+mode: emergency_only  # emergency_only | advisory | active
+
+# Emergency triggers
+emergency_triggers:
+  daily_loss:
+    threshold_pct: 12.0
+    warning_pct: 10.0
+    action: halt_trading
+    warning_action: block_new_entries
+
+  position_loss:
+    threshold_pct: 8.0
+    warning_pct: 6.0
+    action: close_position
+    warning_action: null  # Just log
+
+  correlation:
+    threshold: 0.85
+    action: block_new_entries
+
+  vix_extreme:
+    threshold: 35
+    action: adjust_risk
+    parameters:
+      position_size_multiplier: 0.5
+
+  drawdown:
+    threshold_pct: 15.0
+    action: halt_trading
+
+# Directive types
+directive_types:
+  - block_new_entries
+  - close_position
+  - reduce_position
+  - halt_trading
+  - resume_trading
+  - adjust_risk
+  - emergency_liquidate
+
+# Priority levels
+priority:
+  emergency:
+    mcp_alert: true
+    targets: all
+  high:
+    mcp_alert: true
+    targets: affected
+  normal:
+    mcp_alert: false
+  low:
+    mcp_alert: false
+
+# Risk level thresholds
+risk_levels:
+  low:
+    daily_loss_max_pct: 3.0
+    position_loss_max_pct: 3.0
+  normal:
+    daily_loss_max_pct: 6.0
+    position_loss_max_pct: 5.0
+  elevated:
+    daily_loss_max_pct: 10.0
+    position_loss_max_pct: 7.0
+  high:
+    daily_loss_max_pct: 12.0
+    position_loss_max_pct: 8.0
+  critical:
+    daily_loss_min_pct: 12.0
+    position_loss_min_pct: 8.0
+
+# Directive lifecycle
+lifecycle:
+  default_valid_hours: 4
+  auto_expire: true
+  require_acknowledgment: true
+
+# MCP alerts
+alerts:
+  enabled: true
+  targets:
+    - decision
+    - execution
+  format: "EMERGENCY: {directive_type}\nReason: {reason}\nTarget: {target}"
+
+# Logging
+logging:
+  level: INFO
+  include_portfolio_state: true
+  include_trigger_details: true

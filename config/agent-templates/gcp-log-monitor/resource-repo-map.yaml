@@ -1,0 +1,87 @@
+# Resource to Repository Mapping
+# Maps GCP resources to their source code repositories for investigation
+
+# GCP Project being monitored
+gcp_project: your-gcp-project-id
+
+# Default repository when no specific mapping exists
+default_repo: your-org/monorepo
+
+# GitHub repository where issues should be created
+github_issues_repo: your-org/ops-incidents
+
+# Default labels for created issues
+default_labels:
+  - ops
+  - automated
+  - gcp-log-monitor
+
+# Priority labels based on severity
+severity_labels:
+  critical: P0
+  high: P1
+  medium: P2
+  low: P3
+
+# Resource type mappings
+# Format: resource_type/resource_name -> repository
+mappings:
+  # Cloud Run services
+  cloud_run:
+    api-server: your-org/api-server
+    web-frontend: your-org/web-frontend
+    worker-service: your-org/worker-service
+    # Pattern matching (prefix-based)
+    "data-*": your-org/data-services
+    "ml-*": your-org/ml-platform
+
+  # Compute Engine instances
+  compute_engine:
+    bastion-host: your-org/infrastructure
+    build-server: your-org/ci-cd
+    # VMs following naming convention
+    "web-*": your-org/web-frontend
+    "api-*": your-org/api-server
+
+  # GKE workloads
+  gke:
+    # Format: cluster/namespace/workload
+    "prod-cluster/default/*": your-org/kubernetes-apps
+    "prod-cluster/monitoring/*": your-org/monitoring-stack
+    "prod-cluster/*/payment-*": your-org/payment-service
+
+  # Cloud Functions
+  cloud_function:
+    process-upload: your-org/file-processor
+    send-notification: your-org/notification-service
+    "webhook-*": your-org/webhooks
+
+  # Cloud SQL
+  cloud_sql:
+    main-database: your-org/database-schemas
+    analytics-db: your-org/analytics
+
+  # Pub/Sub
+  pubsub:
+    events-topic: your-org/event-system
+    "queue-*": your-org/queue-workers
+
+# Environments to monitor (empty = all, or list specific ones)
+monitored_environments:
+  - production
+  # - staging  # Uncomment to include staging
+
+# Resource name patterns to always ignore
+ignore_resources:
+  - "*-test-*"
+  - "*-dev-*"
+  - "*-sandbox-*"
+  - "load-test-*"
+
+# Time windows to reduce alerting (maintenance windows, deployments)
+# Format: cron expression for start, duration in minutes
+quiet_windows: []
+  # Example:
+  # - cron: "0 2 * * 0"  # Sunday 2 AM
+  #   duration: 120       # 2 hours
+  #   reason: "Weekly maintenance"

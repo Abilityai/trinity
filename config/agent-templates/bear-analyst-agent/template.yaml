@@ -1,0 +1,42 @@
+name: bear-analyst-agent
+display_name: SMARTS Bear Analyst Agent
+description: Downside scenario analysis agent. Analyzes bearish scenarios and identifies risk factors that could drive price decline. Part of multi-perspective decision framework.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: specialist-analyst
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - downside-analysis
+  - risk-identification
+  - scenario-modeling
+  - probability-assessment
+
+mcp_servers:
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /analyze-downside
+    description: Analyze downside scenarios for a mental picture
+    arguments: "<mental_picture_id>"
+
+metrics:
+  - name: analyses_completed
+    type: counter
+    label: "Analyses"
+    description: "Downside analyses completed"
+  - name: average_confidence
+    type: gauge
+    label: "Avg Confidence"
+    description: "Average bearish confidence"

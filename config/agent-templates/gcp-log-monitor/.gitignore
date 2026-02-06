@@ -1,0 +1,29 @@
+# Environment files with secrets
+.env
+*.env.local
+
+# GCP service account keys
+*.json
+!memory/baseline.json
+gcp-sa-key.json
+
+# Cloned repositories during investigation
+/tmp/
+/repos/
+
+# MCP generated files
+.mcp.json
+
+# Log files
+*.log
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

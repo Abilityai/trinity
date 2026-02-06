@@ -1,0 +1,426 @@
+# SMARTS Trinity System Manifest
+# Multi-Agent Trading System for Trinity Deployment
+# Version: 1.0.0
+
+name: smarts-trinity
+version: "1.0.0"
+description: |
+  SMARTS multi-agent trading system deployed on Trinity.
+  8 specialized agents working together: Market Regime, News/Sentiment,
+  Discovery, Analysis, Decision, Execution, Portfolio Manager, Feedback.
+
+# =============================================================================
+# GLOBAL CONFIGURATION
+# =============================================================================
+
+global:
+  timezone: America/New_York
+  market_hours:
+    open: "09:30"
+    close: "16:00"
+    pre_market: "04:00"
+    after_hours: "20:00"
+
+  trading:
+    mode: paper  # paper | live
+    broker: alpaca
+
+  database:
+    provider: supabase
+    project_id: ${SUPABASE_PROJECT_ID}
+
+  logging:
+    level: INFO
+    format: json
+
+# =============================================================================
+# MCP SERVER CONFIGURATION
+# =============================================================================
+
+mcp_servers:
+  supabase:
+    type: supabase
+    config:
+      url: ${SUPABASE_URL}
+      key: ${SUPABASE_SERVICE_KEY}
+
+  alpaca:
+    type: alpaca
+    config:
+      api_key: ${ALPACA_API_KEY}
+      secret_key: ${ALPACA_SECRET_KEY}
+      base_url: ${ALPACA_BASE_URL}
+      paper: true
+
+  massive:
+    type: filesystem
+    config:
+      base_path: /shared
+
+# =============================================================================
+# AGENT DEFINITIONS
+# =============================================================================
+
+agents:
+  # ---------------------------------------------------------------------------
+  # MARKET CONTEXT LAYER
+  # ---------------------------------------------------------------------------
+
+  market-regime:
+    template: local:market-regime
+    description: Detects market conditions (bull/bear/neutral/volatile)
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: hourly-regime-check
+        cron: "0 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Check market regime: SPY trend, VIX level, breadth indicators"
+      - name: pre-market-check
+        cron: "0 9 * * 1-5"
+        timezone: America/New_York
+        message: "Pre-market regime assessment"
+    alerts:
+      regime_change:
+        enabled: true
+        targets: [discovery, analysis, decision, execution]
+        priority: high
+
+  news-sentiment:
+    template: local:news-sentiment
+    description: Analyzes news, earnings, and sentiment
+    mcp_servers:
+      - supabase
+      - massive
+    schedules:
+      - name: regular-sentiment-scan
+        cron: "*/30 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Scan news and sentiment for watchlist symbols"
+      - name: pre-market-scan
+        cron: "30 8 * * 1-5"
+        timezone: America/New_York
+        message: "Pre-market news scan"
+
+  # ---------------------------------------------------------------------------
+  # OPPORTUNITY LAYER
+  # ---------------------------------------------------------------------------
+
+  discovery:
+    template: local:discovery
+    description: Finds trading opportunities from technical setups
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: regular-scan
+        cron: "5,20,35,50 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Scan watchlist for opportunities. Personality: ${PERSONALITY}"
+      - name: opening-bell-scan
+        cron: "35 9 * * 1-5"
+        timezone: America/New_York
+        message: "Opening bell scan"
+      - name: power-hour-scan
+        cron: "0 15 * * 1-5"
+        timezone: America/New_York
+        message: "Power hour scan"
+    depends_on:
+      - market-regime
+      - news-sentiment
+    alerts:
+      hot_opportunity:
+        enabled: true
+        min_score: 75
+        targets: [analysis, decision]
+        priority: high
+
+  analysis:
+    template: local:analysis
+    description: Provides comprehensive analysis of opportunities
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: regular-analysis
+        cron: "10,25,40,55 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Analyze pending scanner opportunities"
+      - name: pre-decision-analysis
+        cron: "12,42 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Pre-decision analysis run"
+    depends_on:
+      - discovery
+      - market-regime
+      - news-sentiment
+
+  # ---------------------------------------------------------------------------
+  # DECISION LAYER
+  # ---------------------------------------------------------------------------
+
+  decision:
+    template: local:decision
+    description: Makes final trading decisions with position sizing
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: regular-decisions
+        cron: "15,45 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Make trading decisions from analyzed opportunities"
+    depends_on:
+      - analysis
+      - market-regime
+      - portfolio-manager
+    config:
+      personality: balanced  # Override per agent instance
+
+  execution:
+    template: local:execution
+    description: Validates and executes orders via Alpaca
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: queue-check
+        cron: "*/5 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Check for pending decisions to execute"
+      - name: fill-monitor
+        cron: "* * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Monitor open orders for fills"
+    depends_on:
+      - decision
+      - portfolio-manager
+
+  # ---------------------------------------------------------------------------
+  # OVERSIGHT LAYER
+  # ---------------------------------------------------------------------------
+
+  portfolio-manager:
+    template: local:portfolio-manager
+    description: Portfolio oversight with emergency intervention
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: portfolio-check
+        cron: "*/5 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Monitor portfolio health and risk triggers"
+      - name: vix-check
+        cron: "*/15 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Check VIX for volatility triggers"
+      - name: directive-cleanup
+        cron: "0 * * * *"
+        timezone: America/New_York
+        message: "Clean up expired directives"
+    config:
+      mode: emergency_only
+    alerts:
+      emergency:
+        enabled: true
+        targets: [decision, execution]
+        priority: emergency
+
+  feedback:
+    template: local:feedback
+    description: Tracks outcomes, calculates metrics, generates reports
+    mcp_servers:
+      - supabase
+      - alpaca
+      - massive
+    schedules:
+      - name: position-check
+        cron: "*/5 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Check for position exits"
+      - name: metrics-update
+        cron: "0 * * * *"
+        timezone: America/New_York
+        market_hours_only: true
+        message: "Update trading metrics"
+      - name: daily-report
+        cron: "30 16 * * 1-5"
+        timezone: America/New_York
+        message: "Generate daily report"
+      - name: weekly-report
+        cron: "0 9 * * 6"
+        timezone: America/New_York
+        message: "Generate weekly report"
+
+# =============================================================================
+# COMMUNICATION PATTERNS
+# =============================================================================
+
+communication:
+  # Primary state storage via Supabase
+  state:
+    table: integration_context
+    ttl_default_hours: 2
+
+  # Urgent coordination via MCP
+  urgent:
+    channel: mcp
+    patterns:
+      - name: regime_change
+        from: market-regime
+        to: [discovery, analysis, decision, execution]
+        priority: high
+
+      - name: hot_opportunity
+        from: discovery
+        to: [analysis, decision]
+        priority: high
+
+      - name: emergency_stop
+        from: portfolio-manager
+        to: [decision, execution]
+        priority: emergency
+
+  # Reports via shared folders
+  files:
+    base_path: /shared-out
+    patterns:
+      - type: daily_report
+        path: /reports/daily/{date}.md
+      - type: weekly_report
+        path: /reports/weekly/week_{week}.md
+      - type: metrics
+        path: /metrics/performance.json
+
+# =============================================================================
+# PIPELINE FLOW
+# =============================================================================
+
+pipeline:
+  # Visual representation of agent flow
+  diagram: |
+    ┌──────────────┐   ┌──────────────┐
+    │   Market     │   │   News/      │
+    │   Regime     │   │  Sentiment   │
+    └──────┬───────┘   └──────┬───────┘
+           │                  │
+           └────────┬─────────┘
+                    ▼
+           ┌──────────────┐
+           │   Discovery  │
+           │   (Scanner)  │
+           └──────┬───────┘
+                  ▼
+           ┌──────────────┐
+           │   Analysis   │
+           └──────┬───────┘
+                  ▼
+           ┌──────────────┐   ┌──────────────┐
+           │   Decision   │◄──│   Portfolio  │
+           │    Maker     │   │   Manager    │
+           └──────┬───────┘   └──────────────┘
+                  ▼
+           ┌──────────────┐
+           │  Execution   │
+           └──────┬───────┘
+                  ▼
+           ┌──────────────┐
+           │   Feedback   │
+           └──────────────┘
+
+# =============================================================================
+# PERSONALITY CONFIGURATIONS
+# =============================================================================
+
+personalities:
+  conservative:
+    description: Low risk tolerance, strict criteria
+    config:
+      max_position_pct: 2.5
+      risk_reward_min: "1:4"
+      max_daily_trades: 5
+      min_confidence_buy: 0.70
+      rsi_oversold: 25
+
+  balanced:
+    description: Moderate risk, balanced approach
+    config:
+      max_position_pct: 3.0
+      risk_reward_min: "1:3"
+      max_daily_trades: 10
+      min_confidence_buy: 0.60
+      rsi_oversold: 30
+
+  aggressive:
+    description: Higher risk tolerance, more trades
+    config:
+      max_position_pct: 5.0
+      risk_reward_min: "1:2"
+      max_daily_trades: 20
+      min_confidence_buy: 0.50
+      rsi_oversold: 35
+
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+
+environment:
+  required:
+    - SUPABASE_URL
+    - SUPABASE_SERVICE_KEY
+    - SUPABASE_PROJECT_ID
+    - ALPACA_API_KEY
+    - ALPACA_SECRET_KEY
+    - ALPACA_BASE_URL
+
+  optional:
+    - PERSONALITY  # Default: balanced
+    - TRADING_MODE  # Default: paper
+    - LOG_LEVEL  # Default: INFO
+
+# =============================================================================
+# DEPLOYMENT NOTES
+# =============================================================================
+
+deployment:
+  notes: |
+    1. Apply database migration first:
+       infra/db/migrations/20260203_create_trinity_agent_tables.sql
+
+    2. Set environment variables in Trinity
+
+    3. Deploy agents using Trinity CLI:
+       trinity deploy --manifest config/agent-templates/system.yaml
+
+    4. Monitor via:
+       - Supabase dashboard (integration_context, trading_evaluations)
+       - Trinity agent logs
+       - Shared folder reports
+
+  health_checks:
+    - name: supabase_connection
+      endpoint: ${SUPABASE_URL}/rest/v1/
+      interval: 60
+
+    - name: alpaca_connection
+      endpoint: ${ALPACA_BASE_URL}/v2/account
+      interval: 60

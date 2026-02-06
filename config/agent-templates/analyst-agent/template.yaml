@@ -1,0 +1,64 @@
+name: analyst-agent
+display_name: SMARTS Analyst Agent
+description: Mental picture generation agent. Creates comprehensive technical and fundamental analysis for trading symbols. Outputs structured analysis for downstream specialist agents.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: market-analyst
+
+resources:
+  cpu: "2"
+  memory: "4g"
+
+capabilities:
+  - technical-analysis
+  - fundamental-analysis
+  - news-sentiment
+  - scenario-modeling
+  - mental-picture-generation
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+  - name: massive
+    command: npx
+    args: ["-y", "@anthropic/massive-mcp"]
+    env:
+      MASSIVE_API_KEY: "${MASSIVE_API_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /analyze
+    description: Generate mental picture for a symbol
+    arguments: "<symbol>"
+  - name: /analyze-opportunities
+    description: Analyze all scanner opportunities
+  - name: /recent
+    description: Show recent mental pictures generated
+
+metrics:
+  - name: mental_pictures_generated
+    type: counter
+    label: "Generated"
+    description: "Mental pictures created"
+  - name: average_confidence
+    type: gauge
+    label: "Avg Confidence"
+    description: "Average confidence score"
+  - name: positive_stance_pct
+    type: gauge
+    label: "Positive %"
+    description: "Percentage of positive stance analyses"

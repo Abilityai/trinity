@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "alpaca": {
+      "command": "uvx",
+      "args": ["alpaca-mcp-server", "serve"],
+      "env": {
+        "ALPACA_API_KEY": "${ALPACA_API_KEY}",
+        "ALPACA_SECRET_KEY": "${ALPACA_SECRET_KEY}"
+      }
+    },
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-postgrest@latest",
+        "--apiUrl", "${SUPABASE_URL}/rest/v1",
+        "--apiKey", "${SUPABASE_SERVICE_KEY}",
+        "--schema", "public"
+      ]
+    },
+    "massive": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/massive-mcp"],
+      "env": {
+        "MASSIVE_FOLDER": "${MASSIVE_FOLDER:-/shared}"
+      }
+    }
+  }
+}

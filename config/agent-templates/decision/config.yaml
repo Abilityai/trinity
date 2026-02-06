@@ -1,0 +1,103 @@
+# Decision Maker Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: decision
+version: "1.0.0"
+description: Makes final trading decisions with position sizing
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For context read/write
+  - alpaca     # For portfolio state
+  - massive    # For shared folder access
+
+# Schedule configuration
+schedule:
+  - name: regular-decisions
+    cron: "15,45 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Make trading decisions from analyzed opportunities"
+
+# Output configuration
+output:
+  context_type: decision
+  table: integration_context
+  ttl_hours: 1
+  persist_to: trading_evaluations
+
+# Personality-based thresholds
+personality:
+  default: balanced
+
+  conservative:
+    min_confidence_buy: 0.70
+    min_confidence_sell: 0.70
+    max_position_pct: 2.5
+    risk_reward_min: "1:4"
+    max_daily_trades: 5
+    allow_shorting: false
+    allow_conflicting_signals: false
+
+  balanced:
+    min_confidence_buy: 0.60
+    min_confidence_sell: 0.60
+    max_position_pct: 3.0
+    risk_reward_min: "1:3"
+    max_daily_trades: 10
+    allow_shorting: false
+    allow_conflicting_signals: false
+
+  aggressive:
+    min_confidence_buy: 0.50
+    min_confidence_sell: 0.50
+    max_position_pct: 5.0
+    risk_reward_min: "1:2"
+    max_daily_trades: 20
+    allow_shorting: true
+    allow_conflicting_signals: true
+
+# Position sizing
+position_sizing:
+  method: risk_based  # risk_based, volatility_adjusted, fixed_pct
+  max_risk_per_trade_pct: 1.0  # Max 1% portfolio at risk per trade
+  atr_multiplier: 2.0  # For volatility-adjusted sizing
+
+# Regime multipliers
+regime_multipliers:
+  bull: 1.0
+  neutral: 0.8
+  bear: 0.5
+  volatile: 0.25
+
+# Order construction
+orders:
+  default_type: market
+  time_in_force: day
+  require_tp_sl: true
+  order_class: bracket
+
+# Safety checks
+safety:
+  sanity_check: true
+  budget_check: true
+  rr_check: true
+  pm_check: true
+  daily_trade_limit_check: true
+
+# PM directive types
+pm_directives:
+  blocking:
+    - block_new_entries
+    - halt_trading
+    - close_position
+  non_blocking:
+    - adjust_risk
+    - reduce_position
+
+# Logging
+logging:
+  level: INFO
+  include_reasoning: true
+  include_orders: true
+  include_portfolio_context: true

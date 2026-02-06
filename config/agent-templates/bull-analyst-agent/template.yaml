@@ -1,0 +1,42 @@
+name: bull-analyst-agent
+display_name: SMARTS Bull Analyst Agent
+description: Upside scenario analysis agent. Analyzes bullish scenarios and identifies factors that could drive price appreciation. Part of multi-perspective decision framework.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: specialist-analyst
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - upside-analysis
+  - scenario-modeling
+  - probability-assessment
+  - catalyst-identification
+
+mcp_servers:
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /analyze-upside
+    description: Analyze upside scenarios for a mental picture
+    arguments: "<mental_picture_id>"
+
+metrics:
+  - name: analyses_completed
+    type: counter
+    label: "Analyses"
+    description: "Upside analyses completed"
+  - name: average_confidence
+    type: gauge
+    label: "Avg Confidence"
+    description: "Average bullish confidence"

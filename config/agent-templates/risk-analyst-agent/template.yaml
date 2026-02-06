@@ -1,0 +1,51 @@
+name: risk-analyst-agent
+display_name: SMARTS Risk Analyst Agent
+description: Comprehensive risk assessment agent. Analyzes portfolio-level risks, tail risks, correlation, and position sizing frameworks. Part of multi-perspective decision framework.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: specialist-analyst
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - risk-assessment
+  - portfolio-analysis
+  - tail-risk-identification
+  - position-sizing-frameworks
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /assess-risk
+    description: Assess risk for a mental picture
+    arguments: "<mental_picture_id>"
+  - name: /portfolio-risk
+    description: Assess overall portfolio risk
+
+metrics:
+  - name: analyses_completed
+    type: counter
+    label: "Analyses"
+    description: "Risk analyses completed"
+  - name: high_risk_warnings
+    type: counter
+    label: "High Risk"
+    description: "High risk situations identified"

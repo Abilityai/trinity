@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Remember: Calculate RSI and MACD using your mathematical reasoning from the price bars data. Do not create script files.'",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,162 @@
+# Analysis Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: analysis
+version: "1.0.0"
+description: Provides comprehensive analysis of scanner opportunities
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For context read/write
+  - alpaca     # For detailed market data
+  - massive    # For shared folder access
+
+# Schedule configuration
+schedule:
+  - name: regular-analysis
+    cron: "10,25,40,55 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Analyze pending scanner opportunities"
+
+  - name: pre-decision-analysis
+    cron: "12,42 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Pre-decision analysis run - ensure all opportunities analyzed"
+
+# Output configuration
+output:
+  context_type: analysis
+  table: integration_context
+  ttl_hours: 2  # Analysis valid for 2 hours
+
+# Analysis depth settings
+depth:
+  default: thorough
+  levels:
+    quick:
+      time_limit_seconds: 30
+      features:
+        - basic_technicals
+        - three_scenarios
+    thorough:
+      time_limit_seconds: 120
+      features:
+        - basic_technicals
+        - three_scenarios
+        - volume_analysis
+        - pattern_detection
+        - support_resistance
+    comprehensive:
+      time_limit_seconds: 300
+      features:
+        - basic_technicals
+        - three_scenarios
+        - volume_analysis
+        - pattern_detection
+        - support_resistance
+        - sector_context
+        - correlation_analysis
+
+# Scenario modeling
+scenarios:
+  count: 3
+  names:
+    - optimistic
+    - base
+    - pessimistic
+
+  # Probability constraints
+  min_probability: 0.10
+  max_probability: 0.60
+
+  # Regime adjustments
+  regime_adjustments:
+    bull:
+      optimistic: 0.05
+      pessimistic: -0.05
+    bear:
+      optimistic: -0.10
+      pessimistic: 0.10
+    volatile:
+      optimistic: -0.05
+      pessimistic: 0.05
+
+# Time horizon
+time_horizon:
+  default_days: 5
+  min_days: 1
+  max_days: 20
+
+# Stance determination
+stance_thresholds:
+  bullish:
+    min_ev_pct: 1.0
+    min_confidence: 0.55
+  bearish:
+    max_ev_pct: -1.0
+    min_confidence: 0.55
+  neutral:
+    ev_range: [-1.0, 1.0]
+
+# Recommendation mapping
+recommendations:
+  strong_buy:
+    stance: bullish
+    min_confidence: 0.75
+  consider_buy:
+    stance: bullish
+    min_confidence: 0.55
+  watch:
+    stance: bullish
+    max_confidence: 0.55
+  hold:
+    stance: neutral
+  consider_sell:
+    stance: bearish
+    min_confidence: 0.55
+  strong_sell:
+    stance: bearish
+    min_confidence: 0.75
+
+# Risk factor categories
+risk_categories:
+  - market
+  - company
+  - technical
+  - external
+
+# Catalyst types
+catalyst_types:
+  - earnings
+  - product
+  - guidance
+  - technical
+  - sentiment
+
+# Technical analysis
+technical:
+  support_resistance:
+    lookback_days: 60
+    level_count: 3
+
+  patterns:
+    - ascending_triangle
+    - descending_triangle
+    - double_bottom
+    - double_top
+    - head_and_shoulders
+    - cup_and_handle
+
+  indicators:
+    - obv
+    - rsi_divergence
+    - macd_histogram
+
+# Logging
+logging:
+  level: INFO
+  include_scenarios: true
+  include_reasoning: true
+  include_risk_factors: true

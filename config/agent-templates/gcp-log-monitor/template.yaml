@@ -1,0 +1,112 @@
+# GCP Log Monitor Agent Template
+# Monitors GCP logs, identifies unusual patterns, creates GitHub issues
+
+name: gcp-log-monitor
+display_name: GCP Log Monitor
+description: |
+  SRE assistant that monitors GCP logs across a project, identifies unusual patterns
+  using AI reasoning, and creates rich GitHub issues with code analysis.
+type: ops-monitoring
+version: "1.0.0"
+
+# Resource allocation
+resources:
+  cpu: "0.5"
+  memory: "512Mi"
+  disk: "2Gi"
+
+# Agent capabilities
+capabilities:
+  - log-monitoring
+  - code-analysis
+  - issue-creation
+  - pattern-learning
+
+# Required tools (installed in container)
+tools:
+  - name: gcloud
+    description: Google Cloud CLI for log queries
+    install: |
+      curl -sSL https://sdk.cloud.google.com | bash
+      exec -l $SHELL
+  - name: gh
+    description: GitHub CLI for issue operations
+    install: |
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+      sudo apt update && sudo apt install gh -y
+  - name: jq
+    description: JSON processor for parsing log data
+    install: apt-get install -y jq
+
+# Scheduled execution
+schedule:
+  enabled: true
+  cron: "*/15 * * * *"  # Every 15 minutes
+  task: |
+    Run a log monitoring cycle:
+    1. Query GCP logs for the last 15 minutes
+    2. Compare against baseline patterns
+    3. Identify any unusual errors or patterns
+    4. For significant issues, investigate and create GitHub issues
+    5. Update baseline with any new normal patterns learned
+
+# Environment variables (from .env)
+environment:
+  - GCP_PROJECT_ID
+  - GOOGLE_APPLICATION_CREDENTIALS
+  - GITHUB_TOKEN
+  - GITHUB_ISSUES_REPO
+
+# Credentials schema (empty - uses env vars directly)
+credentials: {}
+
+# Slash commands available to the agent
+slash_commands:
+  - name: /check-logs
+    description: Immediately scan GCP logs and report findings
+  - name: /investigate
+    description: Deep-dive investigation into a specific resource or error
+    arguments: "<resource-name|error-pattern>"
+  - name: /status
+    description: Report agent status, last run, and health metrics
+  - name: /baseline
+    description: View or modify baseline patterns
+    arguments: "[show|add|remove] [pattern]"
+  - name: /recent-issues
+    description: List recently created GitHub issues
+
+# Metrics tracked by this agent
+metrics:
+  - name: errors_detected
+    type: counter
+    label: "Errors"
+    description: "Total errors detected in logs"
+  - name: issues_created
+    type: counter
+    label: "Issues"
+    description: "GitHub issues created"
+  - name: patterns_learned
+    type: gauge
+    label: "Patterns"
+    description: "Baseline patterns learned"
+  - name: last_check_time
+    type: gauge
+    label: "Last Check"
+    description: "Timestamp of last log check"
+
+# Files to include in agent workspace
+files:
+  - CLAUDE.md
+  - resource-repo-map.yaml
+  - memory/baseline.json
+
+# MCP servers (optional - using CLI tools instead)
+mcp_servers: []
+# Uncomment to use GitHub MCP server instead of gh CLI:
+# mcp_servers:
+#   - name: github
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"

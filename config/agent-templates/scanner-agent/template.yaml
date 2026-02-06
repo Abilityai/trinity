@@ -1,0 +1,65 @@
+name: scanner-agent
+display_name: SMARTS Scanner Agent
+description: Market opportunity identification agent. Scans watchlists for trading setups using RSI, MACD, and volume analysis. Writes opportunities to shared Supabase database for downstream analysis.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: market-scanner
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - market-scanning
+  - technical-analysis
+  - opportunity-identification
+  - watchlist-management
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+  - name: massive
+    command: npx
+    args: ["-y", "@anthropic/massive-mcp"]
+    env:
+      MASSIVE_API_KEY: "${MASSIVE_API_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /scan
+    description: Run market scan for all active agents
+  - name: /scan-symbol
+    description: Scan a specific symbol
+    arguments: "<symbol>"
+  - name: /opportunities
+    description: List current opportunities in database
+  - name: /watchlists
+    description: Show configured watchlists
+
+metrics:
+  - name: symbols_scanned
+    type: counter
+    label: "Scanned"
+    description: "Total symbols scanned"
+  - name: opportunities_found
+    type: counter
+    label: "Opportunities"
+    description: "Trading opportunities identified"
+  - name: last_scan_time
+    type: gauge
+    label: "Last Scan"
+    description: "Timestamp of last scan"

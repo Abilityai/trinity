@@ -1,0 +1,104 @@
+# Market Regime Agent Configuration
+# Part of SMARTS Trinity trading system
+
+name: market-regime
+version: "1.0.0"
+description: Detects market conditions and publishes regime signals
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For integration_context writes
+  - alpaca     # For market data
+  - massive    # For shared folder access (reports)
+
+# Schedule configuration
+schedule:
+  - name: hourly-regime-check
+    cron: "0 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Check market regime: SPY trend, VIX level, breadth indicators"
+
+  - name: pre-market-check
+    cron: "0 9 * * 1-5"
+    timezone: America/New_York
+    message: "Pre-market regime assessment for trading day setup"
+
+# Output configuration
+output:
+  context_type: market_regime
+  table: integration_context
+  ttl_hours: 2  # Regime context valid for 2 hours
+
+# Indicators to analyze
+indicators:
+  primary:
+    - spy_trend       # SPY vs 50/200 MA
+    - vix_level       # Current VIX
+  secondary:
+    - advance_decline # Market breadth
+    - sector_rotation # Defensive vs cyclical
+
+# Thresholds
+thresholds:
+  vix:
+    low: 15
+    normal: 20
+    high: 25
+    extreme: 35
+  trend:
+    bullish: 0.6
+    bearish: -0.6
+  breadth:
+    strong: 1.5
+    weak: 0.7
+
+# Regime definitions
+regimes:
+  bull:
+    conditions:
+      - spy_above_50ma: true
+      - spy_above_200ma: true
+      - vix_below: 20
+    recommendations:
+      position_size_multiplier: 1.0
+      risk_tolerance_adjustment: 0.0
+
+  bear:
+    conditions:
+      - spy_above_50ma: false
+      - spy_above_200ma: false
+      - vix_above: 25
+    recommendations:
+      position_size_multiplier: 0.5
+      risk_tolerance_adjustment: -0.1
+
+  neutral:
+    conditions:
+      - mixed_signals: true
+    recommendations:
+      position_size_multiplier: 0.8
+      risk_tolerance_adjustment: 0.0
+
+  volatile:
+    conditions:
+      - vix_above: 30
+    recommendations:
+      position_size_multiplier: 0.25
+      risk_tolerance_adjustment: -0.2
+
+# Alert configuration
+alerts:
+  regime_change:
+    enabled: true
+    targets:
+      - discovery
+      - analysis
+      - decision
+      - execution
+    priority: high
+
+# Logging
+logging:
+  level: INFO
+  include_reasoning: true

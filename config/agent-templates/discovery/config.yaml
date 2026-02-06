@@ -1,0 +1,170 @@
+# Discovery Agent (Scanner) Configuration
+# Part of SMARTS Trinity trading system
+
+name: discovery
+version: "1.0.0"
+description: Finds trading opportunities based on technical setups
+
+# MCP Servers required
+mcp_servers:
+  - supabase   # For context read/write
+  - alpaca     # For market data
+  - massive    # For shared folder access
+
+# Schedule configuration
+schedule:
+  - name: regular-scan
+    cron: "5,20,35,50 * * * *"
+    timezone: America/New_York
+    market_hours_only: true
+    message: "Scan watchlist for trading opportunities. Personality: ${PERSONALITY}"
+
+  - name: opening-bell-scan
+    cron: "35 9 * * 1-5"
+    timezone: America/New_York
+    message: "Opening bell scan - 5 minutes after market open"
+
+  - name: power-hour-scan
+    cron: "0 15 * * 1-5"
+    timezone: America/New_York
+    message: "Power hour scan for final trading opportunities"
+
+# Output configuration
+output:
+  context_type: scanner_opportunity
+  table: integration_context
+  ttl_hours: 1  # Opportunities expire after 1 hour
+
+# Setup types to detect
+setups:
+  oversold_bounce:
+    enabled: true
+    priority: high
+    requirements:
+      rsi_below: 30
+      macd_turning_positive: true
+      volume_above: 1.5
+
+  breakout:
+    enabled: true
+    priority: high
+    requirements:
+      price_above_resistance: true
+      volume_above: 2.0
+      macd_positive: true
+
+  trend_continuation:
+    enabled: true
+    priority: normal
+    requirements:
+      price_above_ma20: true
+      price_above_ma50: true
+      rsi_range: [40, 60]
+
+  mean_reversion:
+    enabled: true
+    priority: normal
+    requirements:
+      std_deviation: 2.0
+      rsi_extreme: true
+
+# Personality-based thresholds
+personality_thresholds:
+  conservative:
+    rsi_oversold: 25
+    rsi_overbought: 75
+    min_confidence: 0.65
+    volume_threshold: 2.0
+    max_opportunities: 3
+
+  balanced:
+    rsi_oversold: 30
+    rsi_overbought: 70
+    min_confidence: 0.55
+    volume_threshold: 1.5
+    max_opportunities: 5
+
+  aggressive:
+    rsi_oversold: 35
+    rsi_overbought: 65
+    min_confidence: 0.45
+    volume_threshold: 1.2
+    max_opportunities: 10
+
+# Regime adjustments
+regime_adjustments:
+  bear_market:
+    raise_confidence_threshold: 0.10
+    require_volume_confirmation: true
+    prefer_setups:
+      - mean_reversion
+    avoid_setups:
+      - breakout
+
+  volatile:
+    reduce_position_size: 0.5
+    widen_stop_multiplier: 1.5
+    require_support_level: true
+    avoid_setups:
+      - breakout
+
+  bull:
+    position_size_multiplier: 1.0
+    all_setups_enabled: true
+
+# Scoring weights
+scoring:
+  base_score: 50
+  factors:
+    rsi_oversold: 10
+    macd_bullish_crossover: 10
+    volume_spike: 5
+    price_near_support: 5
+    bull_regime: 10
+    positive_sentiment: 5
+    no_earnings_risk: 5
+  penalties:
+    bear_regime: -15
+    negative_sentiment: -10
+    earnings_imminent: -20
+    mixed_signals: -10
+
+# Priority thresholds
+priority:
+  high: 75
+  normal: 60
+  low: 45
+  skip: 44
+
+# Alert configuration
+alerts:
+  hot_opportunity:
+    enabled: true
+    min_score: 75
+    targets:
+      - analysis
+      - decision
+    priority: high
+
+# Technical indicators
+indicators:
+  rsi:
+    period: 14
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  moving_averages:
+    - 20
+    - 50
+    - 200
+  atr:
+    period: 14
+  volume:
+    period: 20
+
+# Logging
+logging:
+  level: INFO
+  include_all_symbols: false
+  include_opportunities_only: true

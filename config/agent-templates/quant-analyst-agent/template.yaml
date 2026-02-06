@@ -1,0 +1,50 @@
+name: quant-analyst-agent
+display_name: SMARTS Quant Analyst Agent
+description: Quantitative analysis agent. Calculates expected value, Sharpe ratio, risk/reward metrics, and position sizing frameworks. Synthesizes all scenario analyses into mathematical expectations.
+version: "1.0.0"
+author: SMARTS Trading System
+
+type: specialist-analyst
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - quantitative-analysis
+  - expected-value-calculation
+  - risk-metrics
+  - position-sizing-frameworks
+  - sensitivity-analysis
+
+mcp_servers:
+  - name: alpaca
+    command: uvx
+    args: ["alpaca-mcp-server", "serve"]
+    env:
+      ALPACA_API_KEY: "${ALPACA_API_KEY}"
+      ALPACA_SECRET_KEY: "${ALPACA_SECRET_KEY}"
+
+  - name: supabase
+    command: npx
+    args: ["-y", "@supabase/mcp-server"]
+    env:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_KEY: "${SUPABASE_KEY}"
+
+credentials: {}
+
+slash_commands:
+  - name: /calculate
+    description: Calculate quant metrics for a symbol
+    arguments: "<symbol>"
+
+metrics:
+  - name: analyses_completed
+    type: counter
+    label: "Analyses"
+    description: "Quant analyses completed"
+  - name: average_ev
+    type: gauge
+    label: "Avg EV"
+    description: "Average expected value across analyses"
