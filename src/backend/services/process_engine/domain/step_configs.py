@@ -168,15 +168,19 @@ class NotificationConfig:
     Configuration for notification step type.
 
     Defines notification channel, recipients, and message template.
-    Supports Slack webhooks and email (email requires SMTP config).
+    Supports Slack webhooks, Telegram, email (email requires SMTP config).
 
     Reference: BACKLOG_CORE.md - E14-01
     """
-    channel: str = "slack"  # slack, email, webhook
+    channel: str = "slack"  # slack, telegram, email, webhook
     message: str = ""  # Message template with {{...}} substitution
 
     # Slack-specific
     webhook_url: Optional[str] = None  # Slack webhook URL (can use env var)
+
+    # Telegram-specific
+    bot_token: Optional[str] = None  # Telegram bot token (can use env var)
+    chat_id: Optional[str] = None  # Telegram chat ID (can use env var)
 
     # Email-specific
     recipients: list[str] = field(default_factory=list)  # Email addresses
@@ -192,6 +196,8 @@ class NotificationConfig:
             channel=data.get("channel", "slack"),
             message=data.get("message", data.get("template", "")),
             webhook_url=data.get("webhook_url"),
+            bot_token=data.get("bot_token"),
+            chat_id=data.get("chat_id"),
             recipients=data.get("recipients", []),
             subject=data.get("subject", ""),
             url=data.get("url"),
@@ -205,6 +211,10 @@ class NotificationConfig:
         }
         if self.webhook_url:
             result["webhook_url"] = self.webhook_url
+        if self.bot_token:
+            result["bot_token"] = self.bot_token
+        if self.chat_id:
+            result["chat_id"] = self.chat_id
         if self.recipients:
             result["recipients"] = self.recipients
         if self.subject:
