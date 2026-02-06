@@ -23,6 +23,7 @@ from services.docker_service import (
 from credentials import CredentialManager
 from services.settings_service import get_anthropic_api_key
 from services.agent_service.lifecycle import FULL_CAPABILITIES
+from services.template_service import find_template_file, DEFAULT_RESOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -145,17 +146,17 @@ class SystemAgentService:
 
         template_name = SYSTEM_AGENT_TEMPLATE.replace("local:", "")
         template_path = templates_dir / template_name
-        template_yaml = template_path / "template.yaml"
+        template_yaml = find_template_file(template_path)
 
-        if not template_yaml.exists():
-            raise FileNotFoundError(f"System agent template not found: {template_yaml}")
+        if not template_yaml:
+            raise FileNotFoundError(f"System agent template not found in: {template_path}")
 
         with open(template_yaml) as f:
             template_data = yaml.safe_load(f)
 
         # Get configuration from template
         agent_type = template_data.get("type", SYSTEM_AGENT_TYPE)
-        resources = template_data.get("resources", {"cpu": "4", "memory": "8g"})
+        resources = template_data.get("resources", DEFAULT_RESOURCES)
         mcp_servers = template_data.get("mcp_servers", [])
 
         # Get next available port

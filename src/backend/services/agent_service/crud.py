@@ -24,6 +24,7 @@ from services.docker_service import (
 from services.template_service import (
     get_github_template,
     generate_credential_files,
+    find_template_file,
 )
 from services import git_service
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities
@@ -150,9 +151,9 @@ async def create_agent_internal(
                 templates_dir = Path("./config/agent-templates")
 
             template_path = templates_dir / template_name
-            template_yaml = template_path / "template.yaml"
+            template_yaml = find_template_file(template_path)
 
-            if template_yaml.exists():
+            if template_yaml:
                 try:
                     with open(template_yaml) as f:
                         template_data = yaml.safe_load(f)

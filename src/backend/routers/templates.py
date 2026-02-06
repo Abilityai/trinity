@@ -11,6 +11,8 @@ from dependencies import get_current_user
 from services.template_service import (
     get_github_template,
     extract_agent_credentials,
+    find_template_file,
+    DEFAULT_RESOURCES,
 )
 
 router = APIRouter(prefix="/api/templates", tags=["templates"])
@@ -33,23 +35,28 @@ async def list_templates(current_user: User = Depends(get_current_user)):
     if templates_dir.exists():
         for template_path in templates_dir.iterdir():
             if template_path.is_dir():
-                template_yaml = template_path / "template.yaml"
-                if template_yaml.exists():
+                template_yaml = find_template_file(template_path)
+                if template_yaml:
                     try:
                         with open(template_yaml) as f:
                             template_data = yaml.safe_load(f)
 
                         creds_info = extract_agent_credentials(template_path)
 
+                        # Get priority - must be an integer, default to 100
+                        priority = template_data.get("template_priority", template_data.get("priority", 100))
+                        if not isinstance(priority, int):
+                            priority = 100  # Use default if priority is not an integer
+
                         templates.append({
                             "id": f"local:{template_path.name}",
                             "display_name": template_data.get("display_name", template_path.name),
                             "description": template_data.get("description", ""),
                             "mcp_servers": template_data.get("mcp_servers", []),
-                            "resources": template_data.get("resources", {"cpu": "2", "memory": "4g"}),
+                            "resources": template_data.get("resources", DEFAULT_RESOURCES),
                             "source": "local",
                             "required_credentials": creds_info.get("required_credentials", []),
-                            "priority": template_data.get("priority", 100)  # Default priority
+                            "priority": priority
                         })
                     except Exception as e:
                         print(f"Error loading template {template_path}: {e}")
@@ -93,8 +100,8 @@ async def get_template_env_template(
             creds_info = extract_agent_credentials(template_path)
             required_credentials = creds_info.get("required_credentials", [])
 
-            template_yaml = template_path / "template.yaml"
-            if template_yaml.exists():
+            template_yaml = find_template_file(template_path)
+            if template_yaml:
                 with open(template_yaml) as f:
                     template_data = yaml.safe_load(f)
                     template_name = template_data.get("display_name", template_id)
@@ -197,8 +204,8 @@ async def get_template(template_id: str, current_user: User = Depends(get_curren
         if not template_path.exists():
             raise HTTPException(status_code=404, detail="Template not found")
 
-        template_yaml = template_path / "template.yaml"
-        if not template_yaml.exists():
+        template_yaml = find_template_file(template_path)
+        if not template_yaml:
             raise HTTPException(status_code=404, detail="Template configuration not found")
 
         with open(template_yaml) as f:

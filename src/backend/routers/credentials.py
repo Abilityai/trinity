@@ -24,6 +24,7 @@ from services.template_service import (
     get_github_template,
     extract_agent_credentials,
     generate_credential_files,
+    find_template_file,
 )
 from utils.helpers import parse_env_content, infer_service_from_key, infer_type_from_key
 from credentials import (
@@ -415,8 +416,8 @@ async def reload_agent_credentials(
             if not templates_dir.exists():
                 templates_dir = Path("./config/agent-templates")
 
-            template_path = templates_dir / template_id / "template.yaml"
-            if template_path.exists():
+            template_path = find_template_file(templates_dir / template_id)
+            if template_path:
                 with open(template_path) as f:
                     template_data = yaml.safe_load(f)
 
@@ -786,8 +787,8 @@ async def apply_credentials(
         if not templates_dir.exists():
             templates_dir = Path("./config/agent-templates")
 
-        template_path = templates_dir / template_id / "template.yaml"
-        if template_path.exists():
+        template_path = find_template_file(templates_dir / template_id)
+        if template_path:
             with open(template_path) as f:
                 template_data = yaml.safe_load(f)
 
