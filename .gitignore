@@ -130,3 +130,6 @@ config/agent-templates/**/memory/
 config/agent-templates/**/outputs/
 config/agent-templates/**/metrics.json
 .playwright-mcp/
+
+# SMARTS flow data exports (contains live trading data)
+data/smarts-flows/*.json

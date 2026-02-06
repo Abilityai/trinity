@@ -1,3 +1,29 @@
+### 2026-02-06 01:56:52
+✨ **SMARTS Flow Visualization with Live Supabase Data**
+
+Added live flow visualization from Supabase `integration_context` table to Miro board.
+
+**New Features**:
+- Fetches complete analysis flows from Supabase (market_regime → execution)
+- Generates flow cards with proper HTML formatting (`<br>` line breaks)
+- Shows full context data without truncation
+- Creates `data/smarts-flows/` directory for JSON exports
+
+**Key Files**:
+- `scripts/smarts_diagram/flow_visualizer.py` - Supabase client + Miro generator
+- `scripts/update_smarts_flow.py` - CLI entry point
+- `data/smarts-flows/README.md` - Export documentation
+
+**Usage**:
+```bash
+python3 scripts/update_smarts_flow.py           # Update Miro board
+python3 scripts/update_smarts_flow.py --dry-run --json > data/smarts-flows/MSFT.json
+```
+
+**Board**: https://miro.com/app/board/uXjVIz9lwcM/
+
+---
+
 ### 2026-02-06 01:05:17
 ✨ **Auto-Generated SMARTS Pipeline Miro Diagram**
 
