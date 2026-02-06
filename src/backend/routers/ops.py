@@ -934,3 +934,66 @@ def _format_duration(seconds: float) -> str:
         if minutes > 0:
             return f"{hours}h {minutes}m"
         return f"{hours}h"
+
+
+# ============================================================================
+# SMARTS Trading Summary
+# ============================================================================
+
+@router.post("/smarts/summary")
+async def send_smarts_summary(
+    force_all: bool = Query(False, description="Send all contexts even if already sent"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate and send SMARTS trading summary to Telegram.
+
+    Pulls data from Supabase integration_context and Alpaca,
+    formats into readable messages, sends to configured Telegram chat.
+
+    By default, only sends contexts that haven't been sent before (deduplication).
+    Use force_all=true to send all contexts regardless.
+
+    Returns summary of what was sent.
+    """
+    require_admin(current_user)
+
+    from services.smarts_summary_service import get_summary_service
+
+    service = get_summary_service()
+    result = await service.generate_and_send_summary(force_all=force_all)
+
+    if not result["success"]:
+        logger.warning(f"SMARTS summary had errors: {result['errors']}")
+
+    return {
+        "status": "ok" if result["success"] else "partial",
+        "messages_sent": result["messages_sent"],
+        "contexts_skipped": result.get("contexts_skipped", 0),
+        "errors": result["errors"],
+    }
+
+
+@router.get("/smarts/test-telegram")
+async def test_telegram_connection(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Test Telegram bot connection by sending a test message.
+
+    Returns success/failure status.
+    """
+    require_admin(current_user)
+
+    from services.smarts_summary_service import get_summary_service
+
+    service = get_summary_service()
+    await service._load_credentials()
+
+    test_msg = " Telegram connection test successful!\n\n_Sent from Trinity SMARTS_"
+    success = await service._send_telegram(test_msg)
+
+    return {
+        "status": "ok" if success else "error",
+        "message": "Test message sent" if success else "Failed to send test message",
+    }

@@ -227,6 +227,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error starting log archive service: {e}")
 
+    # Initialize SMARTS summary scheduler (daily Telegram reports)
+    try:
+        from services.smarts_summary_service import start_summary_scheduler
+        start_summary_scheduler()
+        print("SMARTS summary scheduler started")
+    except Exception as e:
+        print(f"Error starting SMARTS summary scheduler: {e}")
+
     # Run process execution recovery (IT5 P0 reliability feature)
     try:
         recovery_report = await run_execution_recovery()
@@ -255,6 +263,14 @@ async def lifespan(app: FastAPI):
         print("Log archive service stopped")
     except Exception as e:
         print(f"Error stopping log archive service: {e}")
+
+    # Shutdown SMARTS summary scheduler
+    try:
+        from services.smarts_summary_service import stop_summary_scheduler
+        stop_summary_scheduler()
+        print("SMARTS summary scheduler stopped")
+    except Exception as e:
+        print(f"Error stopping SMARTS summary scheduler: {e}")
 
 
 # Create FastAPI app
