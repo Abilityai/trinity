@@ -5,10 +5,36 @@ import json
 import re
 import subprocess
 import shutil
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import yaml
 from config import ALL_GITHUB_TEMPLATES
+
+# Default resources for agents without explicit resource configuration
+DEFAULT_RESOURCES = {"cpu": "2", "memory": "4g"}
+
+# Supported template file names (checked in order)
+TEMPLATE_FILE_NAMES = ["template.yaml", "config.yaml"]
+
+
+def find_template_file(path: Path) -> Optional[Path]:
+    """
+    Find the template configuration file in an agent directory.
+
+    Checks for template.yaml first, then config.yaml for backwards compatibility
+    with SMARTS-style agent configurations.
+
+    Args:
+        path: Path to the agent directory
+
+    Returns:
+        Path to the template file, or None if not found
+    """
+    for filename in TEMPLATE_FILE_NAMES:
+        template_path = path / filename
+        if template_path.exists():
+            return template_path
+    return None
 
 
 def get_github_template(template_id: str) -> Optional[dict]:
@@ -184,9 +210,9 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
                 all_vars[var] = []
             all_vars[var].append(f"mcp:{server_name}")
 
-    # Check template.yaml
-    template_yaml = repo_path / "template.yaml"
-    if template_yaml.exists():
+    # Check template.yaml or config.yaml
+    template_yaml = find_template_file(repo_path)
+    if template_yaml:
         template_creds = extract_credentials_from_template_yaml(template_yaml)
 
         for server_name, server_config in template_creds.get("mcp_servers", {}).items():
@@ -239,18 +265,61 @@ def generate_credential_files(
     creds_schema = template_data.get("credentials", {})
 
     # Generate .mcp.json with real credentials
-    mcp_servers_schema = creds_schema.get("mcp_servers", {})
-    if mcp_servers_schema:
-        if template_base_path:
-            mcp_template_path = template_base_path / ".mcp.json"
-        else:
-            templates_dir = Path("/agent-configs/templates")
-            if not templates_dir.exists():
-                templates_dir = Path("./config/agent-templates")
-            template_name = template_data.get("name", "")
-            mcp_template_path = templates_dir / template_name / ".mcp.json"
+    # Check for .mcp.json or .mcp.json.template in the template directory
+    mcp_template_path: Optional[Path] = None
+    mcp_is_template_file = False
 
-        if mcp_template_path.exists():
+    if template_base_path:
+        # Check for .mcp.json first, then .mcp.json.template
+        mcp_json_path = template_base_path / ".mcp.json"
+        mcp_template_file = template_base_path / ".mcp.json.template"
+        if mcp_json_path.exists():
+            mcp_template_path = mcp_json_path
+        elif mcp_template_file.exists():
+            mcp_template_path = mcp_template_file
+            mcp_is_template_file = True
+    else:
+        templates_dir = Path("/agent-configs/templates")
+        if not templates_dir.exists():
+            templates_dir = Path("./config/agent-templates")
+        template_name = template_data.get("name", "")
+        mcp_json_path = templates_dir / template_name / ".mcp.json"
+        mcp_template_file = templates_dir / template_name / ".mcp.json.template"
+        if mcp_json_path.exists():
+            mcp_template_path = mcp_json_path
+        elif mcp_template_file.exists():
+            mcp_template_path = mcp_template_file
+            mcp_is_template_file = True
+
+    # Also check mcp_servers_schema from template.yaml for backwards compat
+    mcp_servers_schema = creds_schema.get("mcp_servers", {})
+
+    if mcp_template_path and mcp_template_path.exists():
+        if mcp_is_template_file:
+            # .mcp.json.template: substitute ${VAR} placeholders first, then parse
+            template_content = mcp_template_path.read_text()
+
+            # Substitute all ${VAR_NAME} placeholders with credential values
+            for var_name, value in agent_credentials.items():
+                placeholder = f"${{{var_name}}}"
+                template_content = template_content.replace(placeholder, str(value))
+
+            # Also handle ${VAR:-default} syntax (with default values)
+            # Pattern: ${VAR_NAME:-default_value}
+            default_pattern = r'\$\{([A-Z][A-Z0-9_]*):-([^}]*)\}'
+            def replace_with_default(match: re.Match[str]) -> str:
+                var = match.group(1)
+                default = match.group(2)
+                return str(agent_credentials.get(var, default))
+            template_content = re.sub(default_pattern, replace_with_default, template_content)
+
+            try:
+                mcp_config = json.loads(template_content)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Failed to parse generated .mcp.json: {e}")
+                mcp_config = {}
+        else:
+            # Regular .mcp.json: parse and substitute in-place
             with open(mcp_template_path) as f:
                 mcp_config = json.load(f)
 
@@ -273,7 +342,12 @@ def generate_credential_files(
                             new_args.append(arg)
                     server_config["args"] = new_args
 
+        if mcp_config:
             files[".mcp.json"] = json.dumps(mcp_config, indent=2)
+    elif mcp_servers_schema:
+        # Fallback: No .mcp.json file but mcp_servers defined in template.yaml
+        # This is for backwards compatibility - generate basic .mcp.json
+        pass  # Handled by existing logic below
 
     # Generate .env file
     env_vars = creds_schema.get("env_file", [])
@@ -303,17 +377,15 @@ def generate_credential_files(
 # Trinity-Compatible Validation (Local Agent Deployment)
 # ============================================================================
 
-from typing import Tuple
-
 
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:
     """
     Check if a directory contains a Trinity-compatible agent.
 
     A Trinity-compatible agent must have:
-    1. template.yaml file
-    2. name field in template.yaml
-    3. resources field in template.yaml
+    1. template.yaml OR config.yaml file
+    2. name field in the config file
+    3. resources field is optional (defaults to {"cpu": "2", "memory": "4g"})
 
     Args:
         path: Path to the agent directory
@@ -322,32 +394,34 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
         Tuple of (is_compatible, error_message, template_data)
         - is_compatible: True if the agent is Trinity-compatible
         - error_message: Description of why validation failed (None if valid)
-        - template_data: Parsed template.yaml data (None if invalid)
+        - template_data: Parsed template.yaml/config.yaml data (None if invalid)
     """
-    template_path = path / "template.yaml"
+    template_path = find_template_file(path)
 
-    if not template_path.exists():
-        return (False, "Missing template.yaml", None)
+    if not template_path:
+        return (False, f"Missing template file (tried: {', '.join(TEMPLATE_FILE_NAMES)})", None)
 
     try:
         with open(template_path) as f:
             template_data = yaml.safe_load(f)
     except Exception as e:
-        return (False, f"Invalid template.yaml: {e}", None)
+        return (False, f"Invalid {template_path.name}: {e}", None)
 
     if not template_data:
-        return (False, "template.yaml is empty", None)
+        return (False, f"{template_path.name} is empty", None)
 
     if not template_data.get("name"):
-        return (False, "template.yaml missing required field: name", None)
+        return (False, f"{template_path.name} missing required field: name", None)
 
-    if not template_data.get("resources"):
-        return (False, "template.yaml missing required field: resources", None)
+    # Resources is now optional - apply defaults if not present
+    if "resources" not in template_data:
+        template_data["resources"] = DEFAULT_RESOURCES.copy()
+        print(f"Info: {template_path.name} has no resources field, using defaults: {DEFAULT_RESOURCES}")
 
-    # Validate resources has expected structure
+    # Validate resources has expected structure if present
     resources = template_data.get("resources", {})
     if not isinstance(resources, dict):
-        return (False, "template.yaml resources must be a dictionary", None)
+        return (False, f"{template_path.name} resources must be a dictionary", None)
 
     # Check for CLAUDE.md (warn but don't fail)
     claude_md = path / "CLAUDE.md"
@@ -360,16 +434,16 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 
 def get_name_from_template(path: Path) -> Optional[str]:
     """
-    Extract agent name from template.yaml.
+    Extract agent name from template.yaml or config.yaml.
 
     Args:
         path: Path to the agent directory
 
     Returns:
-        Agent name from template.yaml, or None if not found
+        Agent name from template file, or None if not found
     """
-    template_path = path / "template.yaml"
-    if not template_path.exists():
+    template_path = find_template_file(path)
+    if not template_path:
         return None
 
     try:
