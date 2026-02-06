@@ -178,13 +178,13 @@ class SupabaseClient:
 # Miro Flow Diagram Generation
 # =============================================================================
 
-# Layout configuration
+# Layout configuration - positioned below architecture diagram (which ends ~Y=1800)
 FLOW_START_X = 200
-FLOW_START_Y = 300
-CARD_WIDTH = 400
-CARD_HEIGHT = 300
-HORIZONTAL_SPACING = 500
-VERTICAL_SPACING = 400
+FLOW_START_Y = 2200  # Below architecture diagram
+CARD_WIDTH = 450
+CARD_HEIGHT = 350
+HORIZONTAL_SPACING = 550
+VERTICAL_SPACING = 450
 
 # Context type colors (Miro sticky note colors)
 CONTEXT_COLORS = {
@@ -214,19 +214,12 @@ def format_timestamp(dt: datetime) -> str:
     return dt.strftime("%H:%M:%S UTC")
 
 
-def truncate(text: str, max_length: int = 100) -> str:
-    """Truncate text to max length."""
-    if len(text) <= max_length:
-        return text
-    return text[: max_length - 3] + "..."
-
-
 def format_market_regime_content(data: dict[str, Any], created_at: datetime) -> str:
     """Format market regime context for Miro card."""
     regime = data.get("market_regime", data.get("regime", "N/A")).upper()
     vix = data.get("vix_level", "N/A")
     spy = data.get("spy_price", "N/A")
-    description = truncate(data.get("description", ""), 150)
+    description = data.get("description", "")
     warnings = data.get("warning_flags", [])
 
     lines = [
@@ -244,8 +237,8 @@ def format_market_regime_content(data: dict[str, Any], created_at: datetime) -> 
     if warnings:
         lines.append("")
         lines.append("<b>Warnings:</b>")
-        for w in warnings[:3]:
-            lines.append(f"• {truncate(w, 60)}")
+        for w in warnings:
+            lines.append(f"• {w}")
 
     return "\n".join(lines)
 
@@ -255,7 +248,7 @@ def format_news_sentiment_content(data: dict[str, Any], created_at: datetime, sy
     sentiment = data.get("sentiment", "N/A")
     direction = data.get("direction", "")
     score = data.get("sentiment_score", 0)
-    theme = truncate(data.get("theme", ""), 80)
+    theme = data.get("theme", "")
     factors = data.get("key_factors", [])
 
     lines = [
@@ -270,8 +263,8 @@ def format_news_sentiment_content(data: dict[str, Any], created_at: datetime, sy
     if factors:
         lines.append("")
         lines.append("<b>Key Factors:</b>")
-        for f in factors[:4]:
-            lines.append(f"• {truncate(f, 60)}")
+        for f in factors:
+            lines.append(f"• {f}")
 
     return "\n".join(lines)
 
@@ -285,8 +278,8 @@ def format_scanner_content(data: dict[str, Any], created_at: datetime, symbol: s
     signals = data.get("signals", [])
     rec = data.get("recommendation", {})
     setup = rec.get("setup", "N/A")
-    rationale = truncate(rec.get("rationale", ""), 120)
-    trade_idea = truncate(rec.get("trade_idea", ""), 120)
+    rationale = rec.get("rationale", "")
+    trade_idea = rec.get("trade_idea", "")
 
     lines = [
         "<b>🔍 DISCOVERY</b>",
@@ -352,13 +345,13 @@ def format_analysis_content(data: dict[str, Any], created_at: datetime, symbol: 
     if catalysts:
         lines.append("")
         lines.append("<b>Catalysts:</b>")
-        for c in catalysts[:2]:
-            lines.append(f"✅ {truncate(c, 50)}")
+        for c in catalysts:
+            lines.append(f"✅ {c}")
 
     if risks:
         lines.append("<b>Risks:</b>")
-        for r in risks[:2]:
-            lines.append(f"⚠️ {truncate(r, 50)}")
+        for r in risks:
+            lines.append(f"⚠️ {r}")
 
     return "\n".join(lines)
 
@@ -369,7 +362,7 @@ def format_decision_content(data: dict[str, Any], created_at: datetime, symbol: 
     action = decision.get("action", data.get("action", "N/A"))
     confidence = decision.get("confidence", "N/A")
     urgency = decision.get("urgency", "N/A")
-    rationale = truncate(decision.get("rationale", ""), 150)
+    rationale = decision.get("rationale", "")
 
     current = data.get("current_situation", {})
     existing_pos = current.get("existing_position", "NONE")
@@ -426,7 +419,7 @@ def format_execution_content(data: dict[str, Any], created_at: datetime, symbol:
     impact = data.get("financial_impact", {})
     opportunity_cost = impact.get("opportunity_cost", 0)
 
-    compliance = truncate(data.get("compliance_note", ""), 100)
+    compliance = data.get("compliance_note", "")
 
     lines = [
         "<b>⚡ EXECUTION</b>",
@@ -530,19 +523,40 @@ def generate_flow_diagram(flow: AnalysisFlow) -> dict[str, Any]:
     """
     Generate Miro diagram data for an analysis flow.
 
+    Layout:
+    - Section title at top
+    - Two columns on left: Market Regime | News Sentiment (stacked)
+    - Main pipeline row: Discovery → Analysis → Decision → Execution
+    - PM Directive below the pipeline (if present)
+
     Returns dict with items and connectors to create on Miro.
     """
     items: list[dict[str, Any]] = []
     connectors: list[dict[str, Any]] = []
 
-    # Title
+    # Layout constants for this section
+    section_x = FLOW_START_X
+    section_y = FLOW_START_Y
+    news_stack_spacing = 320  # Vertical spacing for stacked news cards
+
+    # Section title
+    items.append(
+        {
+            "type": "text",
+            "data": {"content": "<b>═══════════════════════════════════════════════════════════</b>"},
+            "style": {"fontSize": "24", "fontFamily": "open_sans", "textAlign": "center"},
+            "position": {"x": section_x + 1200, "y": section_y - 280},
+            "geometry": {"width": 1600},
+        }
+    )
+
     items.append(
         {
             "type": "text",
             "data": {"content": f"<b>SMARTS Analysis Flow: {flow.symbol}</b>"},
-            "style": {"fontSize": "36", "fontFamily": "open_sans"},
-            "position": {"x": FLOW_START_X + 600, "y": FLOW_START_Y - 200},
-            "geometry": {"width": 800},
+            "style": {"fontSize": "36", "fontFamily": "open_sans", "textAlign": "center"},
+            "position": {"x": section_x + 1200, "y": section_y - 230},
+            "geometry": {"width": 1000},
         }
     )
 
@@ -552,11 +566,11 @@ def generate_flow_diagram(flow: AnalysisFlow) -> dict[str, Any]:
         {
             "type": "text",
             "data": {
-                "content": f"{flow.start_time.strftime('%Y-%m-%d %H:%M')} - {flow.end_time.strftime('%H:%M')} UTC | Duration: {duration:.1f} min | {len(flow.contexts)} contexts"
+                "content": f"{flow.start_time.strftime('%Y-%m-%d %H:%M')} → {flow.end_time.strftime('%H:%M')} UTC  |  Duration: {duration:.1f} min  |  {len(flow.contexts)} contexts"
             },
-            "style": {"fontSize": "18", "fontFamily": "open_sans"},
-            "position": {"x": FLOW_START_X + 600, "y": FLOW_START_Y - 150},
-            "geometry": {"width": 800},
+            "style": {"fontSize": "18", "fontFamily": "open_sans", "textAlign": "center"},
+            "position": {"x": section_x + 1200, "y": section_y - 180},
+            "geometry": {"width": 1000},
         }
     )
 
@@ -570,52 +584,94 @@ def generate_flow_diagram(flow: AnalysisFlow) -> dict[str, Any]:
             by_type[ctx.context_type] = []
         by_type[ctx.context_type].append(ctx)
 
-    # Create cards for each context type in flow order
-    for col_idx, ctx_type in enumerate(FLOW_ORDER):
-        if ctx_type not in by_type:
-            continue
+    # === LAYOUT ===
+    # Column 0: Market Regime (top) + News Sentiment (stacked below)
+    # Column 1-4: Main pipeline (Discovery → Analysis → Decision → Execution)
+    # Row below: PM Directive (centered)
 
-        contexts = by_type[ctx_type]
-        color = CONTEXT_COLORS.get(ctx_type, "light_yellow")
+    pipeline_start_x = section_x + HORIZONTAL_SPACING  # Start pipeline after context column
 
-        for row_idx, ctx in enumerate(contexts[:3]):  # Max 3 per type
-            x = FLOW_START_X + col_idx * HORIZONTAL_SPACING
-            y = FLOW_START_Y + row_idx * VERTICAL_SPACING
+    # --- Market Regime (Column 0, top) ---
+    if "market_regime" in by_type:
+        ctx = by_type["market_regime"][0]
+        color = CONTEXT_COLORS.get("market_regime", "cyan")
+        x = section_x
+        y = section_y
 
-            content = format_context_content(ctx)
-
-            item_idx = len(items)
-            items.append(
-                {
-                    "type": "sticky_note",
-                    "data": {"content": content, "shape": "rectangle"},
-                    "style": {"fillColor": color, "textAlign": "left", "textAlignVertical": "top"},
-                    "position": {"x": x, "y": y},
-                    "geometry": {"width": CARD_WIDTH},
-                }
-            )
-
-            # Track first item of each type for connectors
-            if ctx_type not in context_positions:
-                context_positions[ctx_type] = item_idx
-
-    # Add PM directive if present (special position below the flow)
-    if "pm_directive" in by_type:
-        ctx = by_type["pm_directive"][0]
-        color = CONTEXT_COLORS.get("pm_directive", "violet")
-        x = FLOW_START_X + 2 * HORIZONTAL_SPACING  # Center-ish
-        y = FLOW_START_Y + VERTICAL_SPACING * 2  # Below main flow
-
-        content = format_context_content(ctx)
+        item_idx = len(items)
         items.append(
             {
                 "type": "sticky_note",
-                "data": {"content": content, "shape": "rectangle"},
+                "data": {"content": format_context_content(ctx), "shape": "rectangle"},
                 "style": {"fillColor": color, "textAlign": "left", "textAlignVertical": "top"},
                 "position": {"x": x, "y": y},
                 "geometry": {"width": CARD_WIDTH},
             }
         )
+        context_positions["market_regime"] = item_idx
+
+    # --- News Sentiment (Column 0, stacked below market regime) ---
+    if "news_sentiment" in by_type:
+        for row_idx, ctx in enumerate(by_type["news_sentiment"]):
+            color = CONTEXT_COLORS.get("news_sentiment", "light_blue")
+            x = section_x
+            y = section_y + VERTICAL_SPACING + row_idx * news_stack_spacing
+
+            item_idx = len(items)
+            items.append(
+                {
+                    "type": "sticky_note",
+                    "data": {"content": format_context_content(ctx), "shape": "rectangle"},
+                    "style": {"fillColor": color, "textAlign": "left", "textAlignVertical": "top"},
+                    "position": {"x": x, "y": y},
+                    "geometry": {"width": CARD_WIDTH},
+                }
+            )
+            if "news_sentiment" not in context_positions:
+                context_positions["news_sentiment"] = item_idx
+
+    # --- Main Pipeline (Columns 1-4) ---
+    pipeline_types = ["scanner_opportunity", "analysis", "decision", "execution"]
+    for col_idx, ctx_type in enumerate(pipeline_types):
+        if ctx_type not in by_type:
+            continue
+
+        ctx = by_type[ctx_type][0]  # Take first (should only be one)
+        color = CONTEXT_COLORS.get(ctx_type, "light_yellow")
+        x = pipeline_start_x + col_idx * HORIZONTAL_SPACING
+        y = section_y + VERTICAL_SPACING // 2  # Center vertically with context column
+
+        item_idx = len(items)
+        items.append(
+            {
+                "type": "sticky_note",
+                "data": {"content": format_context_content(ctx), "shape": "rectangle"},
+                "style": {"fillColor": color, "textAlign": "left", "textAlignVertical": "top"},
+                "position": {"x": x, "y": y},
+                "geometry": {"width": CARD_WIDTH},
+            }
+        )
+        context_positions[ctx_type] = item_idx
+
+    # --- PM Directive (below pipeline, centered) ---
+    if "pm_directive" in by_type:
+        ctx = by_type["pm_directive"][0]
+        color = CONTEXT_COLORS.get("pm_directive", "violet")
+        # Position below decision/execution
+        x = pipeline_start_x + 1.5 * HORIZONTAL_SPACING
+        y = section_y + VERTICAL_SPACING * 2
+
+        item_idx = len(items)
+        items.append(
+            {
+                "type": "sticky_note",
+                "data": {"content": format_context_content(ctx), "shape": "rectangle"},
+                "style": {"fillColor": color, "textAlign": "left", "textAlignVertical": "top"},
+                "position": {"x": x, "y": y},
+                "geometry": {"width": CARD_WIDTH},
+            }
+        )
+        context_positions["pm_directive"] = item_idx
 
     # Create connectors between flow stages
     flow_connections = [
@@ -624,6 +680,8 @@ def generate_flow_diagram(flow: AnalysisFlow) -> dict[str, Any]:
         ("scanner_opportunity", "analysis", "#4CAF50", "opportunity"),
         ("analysis", "decision", "#FF9800", "analysis"),
         ("decision", "execution", "#F44336", "decision"),
+        ("pm_directive", "decision", "#9C27B0", "directive"),
+        ("pm_directive", "execution", "#9C27B0", "directive"),
     ]
 
     for source, target, color, label in flow_connections:
