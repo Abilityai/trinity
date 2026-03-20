@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from models import AgentConfig, AgentStatus, User, DeployLocalRequest
 from database import db
-from dependencies import get_current_user, decode_token, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, CurrentUser
 from services.docker_service import (
     docker_client,
     get_agent_container,
@@ -305,8 +305,8 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
 
 
 @router.post("")
-async def create_agent_endpoint(config: AgentConfig, request: Request, current_user: User = Depends(get_current_user)):
-    """Create a new agent."""
+async def create_agent_endpoint(config: AgentConfig, request: Request, current_user: User = Depends(require_role("creator"))):
+    """Create a new agent. Requires creator role or above."""
     return await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
 
 
@@ -314,9 +314,9 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role("creator"))
 ):
-    """Deploy a Trinity-compatible local agent."""
+    """Deploy a Trinity-compatible local agent. Requires creator role or above."""
     return await deploy_local_agent_logic(
         body=body,
         current_user=current_user,
@@ -376,12 +376,6 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         db.delete_agent_permissions(agent_name)
     except Exception as e:
         logger.warning(f"Failed to delete permissions for agent {agent_name}: {e}")
-
-    # Delete agent event subscriptions (EVT-001)
-    try:
-        db.delete_agent_event_subscriptions(agent_name)
-    except Exception as e:
-        logger.warning(f"Failed to delete event subscriptions for agent {agent_name}: {e}")
 
     # Delete agent skills
     try:
@@ -522,9 +516,9 @@ async def get_agent_logs_endpoint(
 
 @router.get("/{agent_name}/stats")
 async def get_agent_stats_endpoint(
-    agent_name: AuthorizedAgentByName,
+    agent_name: str,
     request: Request,
-    current_user: CurrentUser,
+    current_user: User = Depends(get_current_user)
 ):
     """Get live container stats (CPU, memory, network) for an agent."""
     return await get_agent_stats_logic(agent_name, current_user)
@@ -536,8 +530,8 @@ async def get_agent_stats_endpoint(
 
 @router.get("/{agent_name}/queue")
 async def get_agent_queue_status(
-    agent_name: AuthorizedAgentByName,
-    current_user: CurrentUser,
+    agent_name: str,
+    current_user: User = Depends(get_current_user)
 ):
     """Get execution queue status for an agent."""
     return await get_agent_queue_status_logic(agent_name, current_user)
@@ -545,19 +539,19 @@ async def get_agent_queue_status(
 
 @router.post("/{agent_name}/queue/clear")
 async def clear_agent_queue(
-    agent_name: OwnedAgentByName,
-    current_user: CurrentUser,
+    agent_name: str,
+    current_user: User = Depends(get_current_user)
 ):
-    """Clear all queued executions for an agent. Owner-only."""
+    """Clear all queued executions for an agent."""
     return await clear_agent_queue_logic(agent_name, current_user)
 
 
 @router.post("/{agent_name}/queue/release")
 async def force_release_agent(
-    agent_name: OwnedAgentByName,
-    current_user: CurrentUser,
+    agent_name: str,
+    current_user: User = Depends(get_current_user)
 ):
-    """Force release an agent from its running state. Owner-only."""
+    """Force release an agent from its running state."""
     return await force_release_agent_logic(agent_name, current_user)
 
 

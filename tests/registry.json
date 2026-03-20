@@ -96,6 +96,13 @@
       "added": "2026-03-27",
       "categories": ["backend", "security", "websocket", "integration"],
       "description": "Integration tests for WebSocket authentication: HTTP-level rejection for missing/invalid tokens, valid token acceptance"
+    },
+    {
+      "file": "test_role_model.py",
+      "feature": "Issue #143",
+      "added": "2026-03-20",
+      "categories": ["backend", "api", "auth", "roles"],
+      "description": "Tests for 4-tier role model: list users, update roles, admin-only access, role validation"
     }
   ]
 }

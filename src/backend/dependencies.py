@@ -170,6 +170,34 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+# Role hierarchy: admin > creator > operator > user
+ROLE_HIERARCHY = ["user", "operator", "creator", "admin"]
+
+
+def require_role(min_role: str):
+    """
+    Dependency factory that requires the current user to have at least `min_role`.
+
+    Usage:
+        @router.post("/agents")
+        async def create(current_user: User = Depends(require_role("creator"))):
+            ...
+
+    Raises:
+        HTTPException(403): If user's role is below the minimum required
+    """
+    def _require_role(current_user: User = Depends(get_current_user)) -> User:
+        user_level = ROLE_HIERARCHY.index(current_user.role) if current_user.role in ROLE_HIERARCHY else -1
+        min_level = ROLE_HIERARCHY.index(min_role) if min_role in ROLE_HIERARCHY else len(ROLE_HIERARCHY)
+        if user_level < min_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{min_role}' or above required"
+            )
+        return current_user
+    return _require_role
+
+
 # ============================================================================
 # Agent Access Control Dependencies
 # ============================================================================

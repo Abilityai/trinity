@@ -943,6 +943,78 @@ Example:
             </div>
           </div>
 
+          <!-- User Management Section (ROLE-001) -->
+          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+              <h2 class="text-lg font-medium text-gray-900 dark:text-white">User Management</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Manage user roles. Roles control what actions each user can perform on the platform.
+              </p>
+            </div>
+
+            <div class="px-6 py-4">
+              <!-- Role legend -->
+              <div class="flex flex-wrap gap-2 mb-4 text-xs text-gray-500 dark:text-gray-400">
+                <span class="font-medium">Roles:</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">admin — full control</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200">creator — create &amp; manage agents</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">operator — run existing agents</span>
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">user — public links only</span>
+              </div>
+
+              <!-- Users Table -->
+              <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead class="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">User</th>
+                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Email</th>
+                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Role</th>
+                      <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Login</th>
+                    </tr>
+                  </thead>
+                  <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    <tr v-if="loadingUsers">
+                      <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600 mx-auto"></div>
+                      </td>
+                    </tr>
+                    <tr v-else-if="usersList.length === 0">
+                      <td colspan="4" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">No users found.</td>
+                    </tr>
+                    <tr v-else v-for="u in usersList" :key="u.username" class="hover:bg-gray-50 dark:hover:bg-gray-700">
+                      <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                        {{ u.name || u.username }}
+                      </td>
+                      <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {{ u.email || u.username }}
+                      </td>
+                      <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        <select
+                          v-if="u.username !== currentUsername"
+                          :value="u.role"
+                          @change="updateUserRole(u.username, $event.target.value)"
+                          class="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        >
+                          <option value="admin">admin</option>
+                          <option value="creator">creator</option>
+                          <option value="operator">operator</option>
+                          <option value="user">user</option>
+                        </select>
+                        <span v-else class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200">
+                          {{ u.role }} (you)
+                        </span>
+                      </td>
+                      <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {{ u.last_login ? formatDate(u.last_login) : 'Never' }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
           <!-- GitHub Templates Section (TMPL-001) -->
           <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -1321,6 +1393,16 @@ const newEmail = ref('')
 const addingEmail = ref(false)
 const removingEmail = ref(null)
 const loadingWhitelist = ref(false)
+
+// User management state (ROLE-001)
+const usersList = ref([])
+const loadingUsers = ref(false)
+const currentUsername = computed(() => {
+  const u = authStore.user
+  // admin login stores email as `${username}@localhost`
+  if (u?.email?.endsWith('@localhost')) return u.email.replace('@localhost', '')
+  return u?.email || u?.name || null
+})
 
 // GitHub Templates state (TMPL-001)
 const githubTemplates = ref([])
@@ -1818,6 +1900,33 @@ function formatDate(dateString) {
   return date.toLocaleDateString()
 }
 
+// User management methods (ROLE-001)
+async function loadUsers() {
+  loadingUsers.value = true
+  try {
+    const response = await axios.get('/api/users', {
+      headers: authStore.authHeader
+    })
+    usersList.value = response.data || []
+  } catch (e) {
+    console.error('Failed to load users:', e)
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+async function updateUserRole(username, role) {
+  try {
+    await axios.put(`/api/users/${encodeURIComponent(username)}/role`, { role }, {
+      headers: authStore.authHeader
+    })
+    await loadUsers()
+  } catch (e) {
+    alert(e.response?.data?.detail || 'Failed to update role')
+    await loadUsers() // refresh to reset select
+  }
+}
+
 // GitHub Templates methods (TMPL-001)
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/
 
@@ -2254,6 +2363,7 @@ onMounted(() => {
   // For now, allow access - backend will reject if not admin
   loadSettings()
   loadEmailWhitelist()
+  loadUsers()
   loadGithubTemplates()
   loadOpsSettings()
   loadSkillsLibrarySettings()

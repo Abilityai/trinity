@@ -245,7 +245,7 @@ class EmailAuthOperations:
             cursor.execute("""
                 INSERT INTO users (username, email, role, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-            """, (username, email.lower(), "user", now, now))
+            """, (username, email.lower(), "creator", now, now))
 
             conn.commit()
 

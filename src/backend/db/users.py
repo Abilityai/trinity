@@ -221,3 +221,18 @@ class UserOperations:
                 FROM users ORDER BY created_at DESC
             """)
             return [dict(row) for row in cursor.fetchall()]
+
+    def update_user_role(self, username: str, role: str) -> Optional[Dict]:
+        """Update a user's role. Returns updated user or None if not found."""
+        valid_roles = {"admin", "creator", "operator", "user"}
+        if role not in valid_roles:
+            raise ValueError(f"Invalid role '{role}'. Must be one of: {', '.join(sorted(valid_roles))}")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE users SET role = ?, updated_at = ? WHERE username = ?
+            """, (role, datetime.utcnow().isoformat(), username))
+            conn.commit()
+            if cursor.rowcount == 0:
+                return None
+        return self.get_user_by_username(username)

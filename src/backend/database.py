@@ -298,6 +298,9 @@ class DatabaseManager:
     def list_users(self):
         return self._user_ops.list_users()
 
+    def update_user_role(self, username: str, role: str):
+        return self._user_ops.update_user_role(username, role)
+
     # =========================================================================
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================

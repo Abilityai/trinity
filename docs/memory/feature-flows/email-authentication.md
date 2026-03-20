@@ -12,7 +12,7 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
-| 2026-03-26 | **OTP rate limiting added**: `verify_email_login_code()` now enforces both IP-based rate limiting (existing) and new per-email OTP rate limiting (5 failed attempts → 429 for 10 minutes, Redis key `otp_attempts:{email}`). `confirm_verification_code()` in public.py also gains IP-based rate limiting. New helpers: `check_otp_rate_limit(email)`, `record_otp_attempt(email, success)`. |
+| 2026-03-20 | **ROLE-001**: `get_or_create_email_user()` now assigns role `"creator"` (was `"user"`) to new email-authenticated users. Existing users unaffected. See [role-model.md](role-model.md). |
 | 2026-02-23 | **Related security fixes**: M-003 removed plaintext password fallback (affects admin login path). M-005 added rate limiting to admin `/token` endpoint (5 attempts per 10 minutes per IP). See [admin-login.md](admin-login.md) for details. Email auth flow unchanged but now has consistent security posture with admin login. |
 | 2026-01-23 | Verified line numbers, updated auth.py references (140-269), settings.py (429-503), db/email_auth.py (27-253) |
 | 2025-12-29 | Login page simplified to email+admin only |
@@ -96,14 +96,11 @@ As an admin, I want to control who can access the platform via an email whitelis
 │  auth.py:verify_email_login_code()      │   │
 │  1. Check setup_completed               │   │
 │  2. Check EMAIL_AUTH_ENABLED            │   │
-│  3. Check IP rate limit (existing)      │   │
-│  4. Check per-email OTP rate limit      │   │
-│  5. Verify code and expiry  ────────────┼───┘
-│  6. Record attempt (IP + email)         │
-│  7. Mark code as verified               │
-│  8. Get or create user (email = user)   │
-│  9. Generate JWT with mode="email"      │
-│  10. Audit log                          │
+│  3. Verify code and expiry  ────────────┼───┘
+│  4. Mark code as verified               │
+│  5. Get or create user (email = user)   │
+│  6. Generate JWT with mode="email"      │
+│  7. Audit log                           │
 └─────────┬───────────────────────────────┘
           │
           v
@@ -600,27 +597,22 @@ async def verify_email_login_code(request: Request):
 **Business Logic:**
 1. Check if setup is completed (lines 210-215)
 2. Check if email auth is enabled (lines 217-223)
-3. Parse request, extract `client_ip` from request
-4. Call `check_login_rate_limit(client_ip)` — IP-based rate limit (raises 429 if exceeded)
-5. Parse and lowercase email
-6. Call `check_otp_rate_limit(email)` — per-email OTP rate limit (raises 429 after 5 failures)
-7. Verify code
+3. Parse request (lines 225-229)
+4. Verify code (line 232)
    - `db.verify_login_code(email, code)`
    - Checks: code exists, not already used, not expired
-8. If invalid: call `record_login_attempt(client_ip, False)` and `record_otp_attempt(email, False)`, return 401
-9. On success: call `record_login_attempt(client_ip, True)` and `record_otp_attempt(email, True)`
-   - Clears both the IP and per-email attempt counters
-10. Mark code as verified with `used_at` timestamp
-11. Get or create user
-    - `db.get_or_create_email_user(email)`
-    - Username = email (lowercase)
-    - Role = "user"
-    - No password set (email auth only)
-12. Update last login
-13. Create JWT token
-    - 7-day expiry (ACCESS_TOKEN_EXPIRE_MINUTES = 10080)
-    - Include `mode="email"` claim
-14. Return token and user profile
+   - Marks code as verified with `used_at` timestamp
+5. If invalid: return 401 (lines 233-237)
+6. Get or create user (lines 239-245)
+   - `db.get_or_create_email_user(email)`
+   - Username = email (lowercase)
+   - Role = "user"
+   - No password set (email auth only)
+7. Update last login (line 248)
+8. Create JWT token (lines 250-256)
+   - 7-day expiry (ACCESS_TOKEN_EXPIRE_MINUTES = 10080)
+   - Include `mode="email"` claim
+9. Return token and user profile (lines 258-268)
 
 **Response:**
 ```json
@@ -636,21 +628,6 @@ async def verify_email_login_code(request: Request):
   }
 }
 ```
-
-#### POST /api/public/verify/confirm (public.py)
-
-**Public code confirm endpoint — unauthenticated**
-
-Used by the public-facing verification flow (separate from the main email login). As of 2026-03-26 this endpoint also enforces IP-based rate limiting.
-
-**Business Logic:**
-1. Extract `client_ip` from request
-2. Call `check_login_rate_limit(client_ip)` — raises 429 if IP is locked out
-3. Parse and verify the code
-4. On failure: call `record_login_attempt(client_ip, False)`
-5. On success: call `record_login_attempt(client_ip, True)`
-
-**Note:** This endpoint does not apply per-email OTP rate limiting (`check_otp_rate_limit`); only the IP-based limit is enforced here.
 
 ### Whitelist Management Endpoints (`src/backend/routers/settings.py`)
 
@@ -853,12 +830,10 @@ if not db.is_email_whitelisted(email):
 
 ### Rate Limiting
 
-Three independent rate-limiting layers protect the email authentication endpoints:
-
-**1. Code request rate limit — 3 requests per 10 minutes per email (code issuance):**
+**3 code requests per 10 minutes per email:**
 
 ```python
-# Lines 179-185 in auth.py (request_email_login_code)
+# Lines 179-185 in auth.py
 recent_requests = db.count_recent_code_requests(email, minutes=10)
 if recent_requests >= 3:
     raise HTTPException(
@@ -866,28 +841,6 @@ if recent_requests >= 3:
         detail="Too many requests. Please try again in 10 minutes"
     )
 ```
-
-**2. IP-based login rate limit (code verification and public confirm):**
-
-Applied at the top of `verify_email_login_code()` (auth.py) and `confirm_verification_code()` (public.py) via the existing `check_login_rate_limit(client_ip)` helper. Shared with the admin `/token` endpoint logic (M-005).
-
-**3. Per-email OTP attempt rate limit — 5 failures per 10 minutes per email (added 2026-03-26):**
-
-```python
-# Constants in auth.py
-OTP_MAX_ATTEMPTS = 5
-OTP_RATE_WINDOW = 600  # seconds (10 minutes)
-
-# check_otp_rate_limit(email) — raises HTTP 429 when counter >= 5
-# Redis key: otp_attempts:{email}
-# TTL: OTP_RATE_WINDOW (600 seconds)
-```
-
-Helpers:
-- `check_otp_rate_limit(email)` — reads `otp_attempts:{email}` from Redis; raises 429 if value >= `OTP_MAX_ATTEMPTS`
-- `record_otp_attempt(email, success)` — on `success=False`: increments the counter and sets TTL; on `success=True`: deletes the key (clears lockout)
-
-Both `record_login_attempt(client_ip, ...)` and `record_otp_attempt(email, ...)` are called together on every verification outcome so the two counters stay in sync.
 
 ### Code Expiration
 
@@ -931,9 +884,7 @@ All operations are logged to audit service:
 | Setup not completed | 403 | `setup_required` | Block login until first-time setup done |
 | Email auth disabled | 403 | `Email authentication is disabled` | Check `EMAIL_AUTH_ENABLED` setting |
 | Email not whitelisted | 200 | Generic success (prevents enumeration) | Logs audit event with `result="denied"` |
-| Code request rate limit exceeded | 429 | `Too many requests. Please try again in 10 minutes` | 3 code requests per 10 min per email (issuance) |
-| IP login rate limit exceeded | 429 | (rate limit message) | IP-based limit on verify and public confirm endpoints |
-| Per-email OTP rate limit exceeded | 429 | (rate limit message) | 5 failed OTP attempts per 10 min per email; Redis key `otp_attempts:{email}` |
+| Rate limit exceeded | 429 | `Too many requests. Please try again in 10 minutes` | 3 requests per 10 min per email |
 | Invalid code | 401 | `Invalid or expired verification code` | Code doesn't exist, expired, or already used |
 | Code expired | 401 | `Invalid or expired verification code` | Code older than 10 minutes |
 | User creation failed | 500 | `Failed to create user account` | Database error |
