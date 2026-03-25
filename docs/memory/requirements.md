@@ -202,12 +202,20 @@ Trinity implements infrastructure for "System 2" AI — Deep Agents that plan, r
 ### 7.1 Trinity MCP Server
 - **Status**: ✅ Implemented
 - **Description**: Agent orchestration via Model Context Protocol
-- **Key Features**: FastMCP with Streamable HTTP, 55 tools, API key authentication
+- **Key Features**: FastMCP with Streamable HTTP, 62 tools, API key authentication
 - **Flow**: `docs/memory/feature-flows/mcp-orchestration.md`
 
 ### 7.2 Per-User API Keys
 - **Status**: ✅ Implemented
 - **Description**: Generate, revoke, and track usage per key
+
+### 7.3 MCP Execution Query Tools (MCP-007)
+- **Status**: ✅ Implemented (2026-03-25)
+- **Requirement ID**: MCP-007
+- **GitHub Issue**: #19
+- **Description**: MCP tools for querying execution history, polling async results, and monitoring agent activity
+- **Key Features**: `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary`; enables async polling pattern for agent-to-agent collaboration beyond 60s MCP timeout
+- **Spec**: `docs/requirements/MCP_EXECUTION_QUERY_TOOLS.md`
 
 ---
 

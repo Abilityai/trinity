@@ -171,7 +171,7 @@ Trinity implements four foundational capabilities that transform simple AI assis
 - **Shared Folders** — File-based state sharing between agents via Docker volumes
 - **System Manifest Deployment** — Deploy multi-agent systems from a single YAML configuration
 - **Scheduling** — Cron-based automation with dedicated scheduler service and Redis distributed locks
-- **MCP Integration** — 59 tools for external agent orchestration via Model Context Protocol
+- **MCP Integration** — 62 tools for external agent orchestration via Model Context Protocol
 - **Trinity Connect** — WebSocket event streaming for local Claude Code integration
 
 ### Operations
@@ -298,7 +298,7 @@ trinity/
 ├── src/
 │   ├── backend/          # FastAPI backend API
 │   ├── frontend/         # Vue.js 3 + Tailwind CSS web UI
-│   ├── mcp-server/       # Trinity MCP server (59 tools)
+│   ├── mcp-server/       # Trinity MCP server (62 tools)
 │   └── scheduler/        # Dedicated scheduler service (Redis locks)
 ├── docker/
 │   ├── base-image/       # Universal agent base image

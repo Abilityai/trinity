@@ -276,13 +276,14 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - Tools access auth context via `context.session` parameter
 - Agent-to-agent collaboration uses agent-scoped keys for access control
 
-**59 Tools** across 12 tool modules (`src/tools/`):
+**62 Tools** across 13 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
 | `agents.ts` (17) | `list_agents`, `get_agent`, `get_agent_info`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync |
 | `chat.ts` (3) | `chat_with_agent`, `get_chat_history`, `get_agent_logs` | Chat (enforces sharing rules), history, logs |
 | `schedules.ts` (8) | `list_agent_schedules`, `create_agent_schedule`, `get_agent_schedule`, `update_agent_schedule`, `delete_agent_schedule`, `toggle_agent_schedule`, `trigger_agent_schedule`, `get_schedule_executions` | Schedule CRUD and execution history |
+| `executions.ts` (3) | `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary` | Execution queries, async result polling, activity monitoring (MCP-007) |
 | `skills.ts` (7) | `list_skills`, `get_skill`, `get_skills_library_status`, `assign_skill_to_agent`, `set_agent_skills`, `sync_agent_skills`, `get_agent_skills` | Skill management and assignment |
 | `tags.ts` (5) | `list_tags`, `get_agent_tags`, `tag_agent`, `untag_agent`, `set_agent_tags` | Agent tagging |
 | `systems.ts` (4) | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest` | System manifest deployment |

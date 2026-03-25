@@ -20,6 +20,7 @@ import type {
   ScheduleExecution,
   ScheduleToggleResult,
   ScheduleTriggerResult,
+  ActivityTimelineResponse,
 } from "./types.js";
 
 /**
@@ -737,6 +738,53 @@ export class TrinityClient {
     return this.request<ScheduleExecution[]>(
       "GET",
       `/api/agents/${encodeURIComponent(agentName)}/executions?limit=${limit}`
+    );
+  }
+
+  /**
+   * Get a specific execution by ID (MCP-007)
+   */
+  async getExecution(
+    agentName: string,
+    executionId: string
+  ): Promise<ScheduleExecution> {
+    return this.request<ScheduleExecution>(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/executions/${encodeURIComponent(executionId)}`
+    );
+  }
+
+  /**
+   * Get the full execution log/transcript for an execution (MCP-007)
+   */
+  async getExecutionLog(
+    agentName: string,
+    executionId: string
+  ): Promise<{ execution_id: string; agent_name: string; log: unknown }> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/executions/${encodeURIComponent(executionId)}/log`
+    );
+  }
+
+  /**
+   * Get cross-agent activity timeline (MCP-007)
+   */
+  async getActivityTimeline(params: {
+    start_time?: string;
+    end_time?: string;
+    activity_types?: string;
+    limit?: number;
+  } = {}): Promise<ActivityTimelineResponse> {
+    const searchParams = new URLSearchParams();
+    if (params.start_time) searchParams.set("start_time", params.start_time);
+    if (params.end_time) searchParams.set("end_time", params.end_time);
+    if (params.activity_types) searchParams.set("activity_types", params.activity_types);
+    if (params.limit) searchParams.set("limit", String(params.limit));
+    const qs = searchParams.toString();
+    return this.request<ActivityTimelineResponse>(
+      "GET",
+      `/api/activities/timeline${qs ? `?${qs}` : ""}`
     );
   }
 

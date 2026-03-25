@@ -1,3 +1,24 @@
+### 2026-03-25
+
+**feat: MCP Execution Query Tools — agents can poll for async results (MCP-007) (#19)**
+
+Three new MCP tools enabling agents to query execution history and poll for async task results. This closes the async agent-to-agent collaboration loop: `chat_with_agent(async=true)` returns an `execution_id`, then `get_execution_result(id)` polls until complete.
+
+- `list_recent_executions` — List recent executions for an agent across all trigger types (schedule, manual, MCP, chat) with optional status filter
+- `get_execution_result` — Get full execution details including response text, cost, and optionally the full transcript/log
+- `get_agent_activity_summary` — High-level activity summary over a time window with counts by type and state
+
+**MCP Server:**
+- `src/mcp-server/src/tools/executions.ts` — NEW: 3 execution query tools with agent-scoped access control
+- `src/mcp-server/src/tools/index.ts` — Export new tools
+- `src/mcp-server/src/server.ts` — Register 3 new tools (total: 62 tools)
+- `src/mcp-server/src/client.ts` — Added `getExecution()`, `getExecutionLog()`, `getActivityTimeline()` client methods
+- `src/mcp-server/src/types.ts` — Added `ActivityTimelineResponse`, `ActivityEntry` types; extended `ScheduleExecution` with `model_used`, `claude_session_id`, etc.
+
+**No backend changes** — all tools wrap existing REST endpoints (`GET /api/agents/{name}/executions`, `GET /api/agents/{name}/executions/{id}`, `GET /api/activities/timeline`).
+
+---
+
 ### 2026-03-23
 
 **feat: Voice Chat — real-time voice conversations with agents via Gemini Live API (VOICE-001)**

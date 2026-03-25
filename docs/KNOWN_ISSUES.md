@@ -79,7 +79,14 @@ Claude Code has a hardcoded 60-second timeout for all MCP HTTP tool calls. This 
        async=true
    )
    # Returns: { "execution_id": "abc123" }
-   # Poll for results later via API or shared folders
+
+   # Poll for results using get_execution_result (MCP-007)
+   result = mcp__trinity__get_execution_result(
+       agent_name="worker",
+       execution_id="abc123"
+   )
+   # Returns: { "status": "running" | "success" | "failed", "response": "...", ... }
+   # If still running, sleep 30s and poll again
    ```
 3. **Use shared folders** — Write results to `/home/developer/shared-out/` instead of returning them synchronously
 4. **Hybrid pattern** — Use async MCP to trigger work, shared folders for results

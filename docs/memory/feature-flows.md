@@ -172,7 +172,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 45+ MCP tools for agent orchestration |
+| MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 62 MCP tools for agent orchestration |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 
 ### GitHub Integration

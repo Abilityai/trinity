@@ -195,6 +195,35 @@ export interface ScheduleExecution {
   context_used?: number;
   context_max?: number;
   cost?: number;
+  tool_calls?: string;
+  execution_log?: string;
+  model_used?: string;
+  claude_session_id?: string;
+  source_agent_name?: string;
+  source_user_email?: string;
+}
+
+// Execution Query Types (MCP-007)
+
+export interface ActivityTimelineResponse {
+  count: number;
+  start_time?: string;
+  end_time?: string;
+  activity_types?: string[];
+  activities: ActivityEntry[];
+}
+
+export interface ActivityEntry {
+  id: string;
+  agent_name: string;
+  activity_type: string;
+  activity_state: string;
+  started_at: string;
+  completed_at?: string;
+  duration_ms?: number;
+  triggered_by: string;
+  details?: string;
+  error?: string;
 }
 
 export interface ScheduleToggleResult {

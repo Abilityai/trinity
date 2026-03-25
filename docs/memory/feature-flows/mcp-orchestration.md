@@ -495,17 +495,27 @@ chat_with_agent({
 - Background jobs: trigger maintenance/analysis tasks that run independently
 - Load distribution: batch processing across multiple agents
 
-**Polling for results**:
+**Polling for results via MCP (MCP-007)**:
+```typescript
+// Poll using get_execution_result MCP tool
+get_execution_result({
+  agent_name: "worker-1",
+  execution_id: "abc123xyz"
+})
+// Returns: { "status": "running", ... }  -- keep polling
+// Returns: { "status": "success", "response": "...", "cost": 0.05, ... }  -- done
+
+// Also available: list_recent_executions to find execution IDs
+list_recent_executions({ agent_name: "worker-1", limit: 5 })
+
+// And: get_agent_activity_summary for monitoring
+get_agent_activity_summary({ agent_name: "worker-1", hours: 24 })
+```
+
+**Polling for results via REST API**:
 ```bash
-# Check execution status
 curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/agents/worker-1/executions/abc123xyz
-
-# Response when running:
-# { "status": "running", "agent_name": "worker-1", ... }
-
-# Response when complete:
-# { "status": "success", "response": "...", "cost": 0.05, ... }
 ```
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for implementation details.

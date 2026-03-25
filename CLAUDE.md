@@ -166,7 +166,7 @@ project_trinity/
 ├── src/
 │   ├── backend/          # FastAPI backend (main.py, database.py)
 │   ├── frontend/         # Vue.js 3 + Tailwind CSS
-│   └── mcp-server/       # Trinity MCP server (59 tools)
+│   └── mcp-server/       # Trinity MCP server (62 tools)
 ├── docker/
 │   ├── base-image/       # Universal agent base (agent-server.py)
 │   ├── backend/          # Backend Dockerfile
