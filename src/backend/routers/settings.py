@@ -9,6 +9,7 @@ import os
 import re
 import httpx
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -991,8 +992,6 @@ def _get_default_mcp_url(request: Request) -> str:
 
 def _validate_mcp_url(url: str) -> str:
     """Validate and normalize MCP URL. Returns normalized URL or raises HTTPException."""
-    from urllib.parse import urlparse
-
     url = url.strip().rstrip("/")
 
     parsed = urlparse(url)

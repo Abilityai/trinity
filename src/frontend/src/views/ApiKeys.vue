@@ -309,6 +309,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
+import axios from 'axios'
 import NavBar from '../components/NavBar.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { useAuthStore } from '../stores/auth'
@@ -357,15 +358,8 @@ const mcpServerUrl = computed(() => {
 
 const fetchMcpUrl = async () => {
   try {
-    const response = await fetch('/api/settings/mcp-url', {
-      headers: {
-        'Authorization': `Bearer ${authStore.token}`
-      }
-    })
-    if (response.ok) {
-      const data = await response.json()
-      configuredMcpUrl.value = data.url || null
-    }
+    const response = await axios.get('/api/settings/mcp-url')
+    configuredMcpUrl.value = response.data.url || null
   } catch (error) {
     console.error('Failed to fetch MCP URL setting:', error)
   }
@@ -572,9 +566,7 @@ const formatDate = (dateString) => {
 }
 
 onMounted(async () => {
-  await fetchMcpUrl()
-  await fetchUserRole()
-  await fetchApiKeys()
+  await Promise.all([fetchMcpUrl(), fetchUserRole(), fetchApiKeys()])
   // After loading keys, ensure user has a default key (for first-time users)
   await ensureDefaultKey()
 })

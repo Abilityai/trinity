@@ -1166,7 +1166,7 @@ Example:
                 {{ mcpUrlError }}
               </p>
               <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-green-600 dark:text-green-400">
-                MCP server URL updated successfully.
+                {{ mcpUrlSuccess }}
               </p>
             </div>
           </div>
@@ -1655,7 +1655,7 @@ const mcpUrlConfig = ref({ url: null, default_url: '' })
 const mcpUrlInput = ref('')
 const savingMcpUrl = ref(false)
 const mcpUrlError = ref(null)
-const mcpUrlSuccess = ref(false)
+const mcpUrlSuccess = ref('')
 
 // GitHub Templates state (TMPL-001)
 const githubTemplates = ref([])
@@ -1812,20 +1812,14 @@ async function loadSettings() {
     trinityPrompt.value = settingsStore.trinityPrompt || ''
     originalPrompt.value = trinityPrompt.value
 
-    // Load public URL
-    await loadPublicUrl()
-
-    // Load API keys status
-    await loadApiKeyStatus()
-
-    // Load Slack settings (SLACK-001)
-    await loadSlackSettings()
-
-    // Load Slack transport status (SLACK-002)
-    await loadSlackTransportStatus()
-
-    // Load MCP URL config (#76)
-    await loadMcpUrl()
+    // Load independent settings in parallel
+    await Promise.all([
+      loadPublicUrl(),
+      loadApiKeyStatus(),
+      loadSlackSettings(),
+      loadSlackTransportStatus(),
+      loadMcpUrl(),
+    ])
   } catch (e) {
     if (e.response?.status === 403) {
       error.value = 'Access denied. Admin privileges required.'
@@ -2246,42 +2240,37 @@ async function loadMcpUrl() {
   }
 }
 
-async function saveMcpUrl() {
-  if (!mcpUrlInput.value) return
-
+async function _submitMcpUrl(action, successMsg) {
   savingMcpUrl.value = true
   mcpUrlError.value = null
-  mcpUrlSuccess.value = false
+  mcpUrlSuccess.value = ''
 
   try {
-    await axios.put('/api/settings/mcp-url', { url: mcpUrlInput.value })
+    await action()
     await loadMcpUrl()
     mcpUrlInput.value = ''
-    mcpUrlSuccess.value = true
-    setTimeout(() => { mcpUrlSuccess.value = false }, 3000)
+    mcpUrlSuccess.value = successMsg
+    setTimeout(() => { mcpUrlSuccess.value = '' }, 3000)
   } catch (e) {
-    mcpUrlError.value = e.response?.data?.detail || 'Failed to save MCP URL'
+    mcpUrlError.value = e.response?.data?.detail || 'Failed to update MCP URL'
   } finally {
     savingMcpUrl.value = false
   }
 }
 
-async function resetMcpUrl() {
-  savingMcpUrl.value = true
-  mcpUrlError.value = null
-  mcpUrlSuccess.value = false
+async function saveMcpUrl() {
+  if (!mcpUrlInput.value) return
+  await _submitMcpUrl(
+    () => axios.put('/api/settings/mcp-url', { url: mcpUrlInput.value }),
+    'MCP server URL updated successfully.'
+  )
+}
 
-  try {
-    await axios.delete('/api/settings/mcp-url')
-    await loadMcpUrl()
-    mcpUrlInput.value = ''
-    mcpUrlSuccess.value = true
-    setTimeout(() => { mcpUrlSuccess.value = false }, 3000)
-  } catch (e) {
-    mcpUrlError.value = e.response?.data?.detail || 'Failed to reset MCP URL'
-  } finally {
-    savingMcpUrl.value = false
-  }
+async function resetMcpUrl() {
+  await _submitMcpUrl(
+    () => axios.delete('/api/settings/mcp-url'),
+    'MCP server URL reset to auto-detect.'
+  )
 }
 
 // GitHub Templates methods (TMPL-001)
