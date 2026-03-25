@@ -1029,3 +1029,114 @@ class TestOpsSettingsReset:
             if isinstance(setting, dict) and "is_default" in setting:
                 assert setting["is_default"] is True, \
                     f"Setting {key} should be at default after reset"
+
+
+class TestMcpUrlSettings:
+    """Tests for MCP Server URL configuration endpoints (#76)."""
+
+    pytestmark = pytest.mark.smoke
+
+    MCP_URL_ENDPOINT = "/api/settings/mcp-url"
+
+    def test_get_mcp_url_no_custom_setting(self, api_client: TrinityApiClient):
+        """GET /api/settings/mcp-url returns null url when no custom URL is set."""
+        # Ensure clean state
+        api_client.delete(self.MCP_URL_ENDPOINT)
+
+        response = api_client.get(self.MCP_URL_ENDPOINT)
+        assert_status(response, 200)
+        data = assert_json_response(response)
+        assert data["url"] is None
+        assert "default_url" in data
+        assert data["default_url"].endswith("/mcp")
+
+    def test_put_valid_https_url(self, api_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url with valid HTTPS URL succeeds."""
+        try:
+            response = api_client.put(
+                self.MCP_URL_ENDPOINT,
+                json={"url": "https://example.com/mcp"}
+            )
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert data["success"] is True
+            assert data["url"] == "https://example.com/mcp"
+
+            # Verify it's stored
+            get_response = api_client.get(self.MCP_URL_ENDPOINT)
+            assert get_response.json()["url"] == "https://example.com/mcp"
+        finally:
+            api_client.delete(self.MCP_URL_ENDPOINT)
+
+    def test_put_valid_http_url(self, api_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url with valid HTTP URL succeeds."""
+        try:
+            response = api_client.put(
+                self.MCP_URL_ENDPOINT,
+                json={"url": "http://192.168.1.100:8080/mcp"}
+            )
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert data["url"] == "http://192.168.1.100:8080/mcp"
+        finally:
+            api_client.delete(self.MCP_URL_ENDPOINT)
+
+    def test_put_invalid_url_no_protocol(self, api_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url rejects URL without http/https."""
+        response = api_client.put(
+            self.MCP_URL_ENDPOINT,
+            json={"url": "example.com/mcp"}
+        )
+        assert_status(response, 422)
+
+    def test_put_invalid_url_not_ending_mcp(self, api_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url rejects URL not ending in /mcp."""
+        response = api_client.put(
+            self.MCP_URL_ENDPOINT,
+            json={"url": "https://example.com/api"}
+        )
+        assert_status(response, 422)
+
+    def test_delete_resets_to_null(self, api_client: TrinityApiClient):
+        """DELETE /api/settings/mcp-url resets URL to auto-detect."""
+        # Set a custom URL first
+        api_client.put(
+            self.MCP_URL_ENDPOINT,
+            json={"url": "https://example.com/mcp"}
+        )
+
+        # Delete it
+        response = api_client.delete(self.MCP_URL_ENDPOINT)
+        assert_status(response, 200)
+
+        # Verify it's gone
+        get_response = api_client.get(self.MCP_URL_ENDPOINT)
+        assert get_response.json()["url"] is None
+
+    def test_unauthenticated_get_returns_401(self, unauthenticated_client: TrinityApiClient):
+        """GET /api/settings/mcp-url requires authentication."""
+        response = unauthenticated_client.get(self.MCP_URL_ENDPOINT, auth=False)
+        assert_status(response, 401)
+
+    def test_unauthenticated_put_returns_401(self, unauthenticated_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url requires authentication."""
+        response = unauthenticated_client.put(
+            self.MCP_URL_ENDPOINT,
+            json={"url": "https://example.com/mcp"},
+            auth=False
+        )
+        assert_status(response, 401)
+
+    def test_put_strips_trailing_slash(self, api_client: TrinityApiClient):
+        """PUT /api/settings/mcp-url normalizes trailing slash before /mcp check."""
+        try:
+            response = api_client.put(
+                self.MCP_URL_ENDPOINT,
+                json={"url": "https://example.com/mcp/"}
+            )
+            # After stripping trailing slash, URL ends with /mcp — should succeed
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert data["url"] == "https://example.com/mcp"
+        finally:
+            api_client.delete(self.MCP_URL_ENDPOINT)

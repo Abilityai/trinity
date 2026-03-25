@@ -969,6 +969,116 @@ async def delete_github_templates(
 
 
 # ============================================================================
+# MCP Server URL Configuration (#76)
+# ============================================================================
+
+MCP_URL_SETTING_KEY = "mcp_external_url"
+
+
+class McpUrlUpdate(BaseModel):
+    """Request body for updating the MCP server URL."""
+    url: str
+
+
+def _get_default_mcp_url(request: Request) -> str:
+    """Compute the auto-detected MCP URL from the request hostname."""
+    host = request.headers.get("host", "localhost:8080")
+    hostname = host.split(":")[0]
+    if hostname in ("localhost", "127.0.0.1"):
+        return "http://localhost:8080/mcp"
+    return f"http://{hostname}:8080/mcp"
+
+
+def _validate_mcp_url(url: str) -> str:
+    """Validate and normalize MCP URL. Returns normalized URL or raises HTTPException."""
+    from urllib.parse import urlparse
+
+    url = url.strip().rstrip("/")
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=422,
+            detail="URL must start with http:// or https://"
+        )
+    if not parsed.netloc:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid URL format"
+        )
+    if not parsed.path.endswith("/mcp"):
+        raise HTTPException(
+            status_code=422,
+            detail="URL must end with /mcp"
+        )
+
+    return url
+
+
+@router.get("/mcp-url")
+async def get_mcp_url(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the configured MCP server URL.
+
+    Any authenticated user can read this (used by API Keys page).
+    Returns both the stored custom URL (if any) and the auto-detected default.
+    """
+    stored_url = db.get_setting_value(MCP_URL_SETTING_KEY)
+    default_url = _get_default_mcp_url(request)
+
+    return {
+        "url": stored_url,
+        "default_url": default_url
+    }
+
+
+@router.put("/mcp-url")
+async def update_mcp_url(
+    body: McpUrlUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set a custom MCP server URL.
+
+    Admin-only. Validates URL format (must be http/https, must end with /mcp).
+    """
+    require_admin(current_user)
+
+    validated_url = _validate_mcp_url(body.url)
+    db.set_setting(MCP_URL_SETTING_KEY, validated_url)
+
+    return {
+        "success": True,
+        "url": validated_url
+    }
+
+
+@router.delete("/mcp-url")
+async def delete_mcp_url(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Reset MCP server URL to auto-detect.
+
+    Admin-only. Removes the custom URL, reverting to hostname-based auto-detection.
+    """
+    require_admin(current_user)
+
+    deleted = db.delete_setting(MCP_URL_SETTING_KEY)
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": "MCP server URL reset to auto-detect"
+    }
+
+
+# ============================================================================
 # Generic Settings CRUD - /{key} catch-all routes
 # NOTE: These must come AFTER specific routes like /api-keys
 # ============================================================================

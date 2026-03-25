@@ -341,14 +341,35 @@ const confirmDialog = reactive({
   onConfirm: () => {}
 })
 
+// MCP server URL: use admin-configured URL if set, otherwise auto-detect from hostname
+const configuredMcpUrl = ref(null)
+
 const mcpServerUrl = computed(() => {
+  if (configuredMcpUrl.value) {
+    return configuredMcpUrl.value
+  }
   const host = window.location.hostname
   if (host === 'localhost' || host === '127.0.0.1') {
     return 'http://localhost:8080/mcp'
   }
-  // Production: MCP server runs on port 8080 (not proxied through nginx)
   return `http://${host}:8080/mcp`
 })
+
+const fetchMcpUrl = async () => {
+  try {
+    const response = await fetch('/api/settings/mcp-url', {
+      headers: {
+        'Authorization': `Bearer ${authStore.token}`
+      }
+    })
+    if (response.ok) {
+      const data = await response.json()
+      configuredMcpUrl.value = data.url || null
+    }
+  } catch (error) {
+    console.error('Failed to fetch MCP URL setting:', error)
+  }
+}
 
 // Filter out agent-scoped keys for non-admin users
 const displayedKeys = computed(() => {
@@ -551,6 +572,7 @@ const formatDate = (dateString) => {
 }
 
 onMounted(async () => {
+  await fetchMcpUrl()
   await fetchUserRole()
   await fetchApiKeys()
   // After loading keys, ensure user has a default key (for first-time users)

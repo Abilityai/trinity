@@ -1110,6 +1110,67 @@ Example:
             </div>
           </div>
 
+          <!-- MCP Server URL Section (#76) -->
+          <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+              <h2 class="text-lg font-medium text-gray-900 dark:text-white">MCP Server URL</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Configure the external MCP server URL shown on the API Keys page. Leave empty to auto-detect from hostname.
+              </p>
+            </div>
+            <div class="px-6 py-4">
+              <div class="flex items-center gap-2 mb-4">
+                <span
+                  :class="[
+                    'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
+                    mcpUrlConfig.url
+                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300'
+                      : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+                  ]"
+                >
+                  {{ mcpUrlConfig.url ? 'Custom' : 'Auto-detect' }}
+                </span>
+                <span v-if="mcpUrlConfig.url" class="text-sm text-gray-500 dark:text-gray-400 truncate">
+                  {{ mcpUrlConfig.url }}
+                </span>
+                <span v-else class="text-sm text-gray-500 dark:text-gray-400 truncate">
+                  {{ mcpUrlConfig.default_url || 'Loading...' }}
+                </span>
+              </div>
+
+              <div class="flex gap-3">
+                <input
+                  v-model="mcpUrlInput"
+                  type="url"
+                  :placeholder="mcpUrlConfig.default_url || 'https://your-domain.com/mcp'"
+                  class="flex-1 block rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+                />
+                <button
+                  @click="saveMcpUrl"
+                  :disabled="!mcpUrlInput || savingMcpUrl"
+                  class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {{ savingMcpUrl ? 'Saving...' : 'Save' }}
+                </button>
+                <button
+                  v-if="mcpUrlConfig.url"
+                  @click="resetMcpUrl"
+                  :disabled="savingMcpUrl"
+                  class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-50"
+                >
+                  Reset to Default
+                </button>
+              </div>
+
+              <p v-if="mcpUrlError" class="mt-2 text-sm text-red-600 dark:text-red-400">
+                {{ mcpUrlError }}
+              </p>
+              <p v-if="mcpUrlSuccess" class="mt-2 text-sm text-green-600 dark:text-green-400">
+                MCP server URL updated successfully.
+              </p>
+            </div>
+          </div>
+
           <!-- GitHub Templates Section (TMPL-001) -->
           <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -1589,6 +1650,13 @@ const currentUsername = computed(() => {
   return u?.email || null
 })
 
+// MCP Server URL state (#76)
+const mcpUrlConfig = ref({ url: null, default_url: '' })
+const mcpUrlInput = ref('')
+const savingMcpUrl = ref(false)
+const mcpUrlError = ref(null)
+const mcpUrlSuccess = ref(false)
+
 // GitHub Templates state (TMPL-001)
 const githubTemplates = ref([])
 const githubTemplatesOriginal = ref([])
@@ -1755,6 +1823,9 @@ async function loadSettings() {
 
     // Load Slack transport status (SLACK-002)
     await loadSlackTransportStatus()
+
+    // Load MCP URL config (#76)
+    await loadMcpUrl()
   } catch (e) {
     if (e.response?.status === 403) {
       error.value = 'Access denied. Admin privileges required.'
@@ -2162,6 +2233,54 @@ async function updateUserRole(username, role) {
   } catch (e) {
     alert(e.response?.data?.detail || 'Failed to update role')
     await loadUsers() // refresh to reset select
+  }
+}
+
+// MCP Server URL methods (#76)
+async function loadMcpUrl() {
+  try {
+    const response = await axios.get('/api/settings/mcp-url')
+    mcpUrlConfig.value = response.data
+  } catch (e) {
+    console.error('Failed to load MCP URL:', e)
+  }
+}
+
+async function saveMcpUrl() {
+  if (!mcpUrlInput.value) return
+
+  savingMcpUrl.value = true
+  mcpUrlError.value = null
+  mcpUrlSuccess.value = false
+
+  try {
+    await axios.put('/api/settings/mcp-url', { url: mcpUrlInput.value })
+    await loadMcpUrl()
+    mcpUrlInput.value = ''
+    mcpUrlSuccess.value = true
+    setTimeout(() => { mcpUrlSuccess.value = false }, 3000)
+  } catch (e) {
+    mcpUrlError.value = e.response?.data?.detail || 'Failed to save MCP URL'
+  } finally {
+    savingMcpUrl.value = false
+  }
+}
+
+async function resetMcpUrl() {
+  savingMcpUrl.value = true
+  mcpUrlError.value = null
+  mcpUrlSuccess.value = false
+
+  try {
+    await axios.delete('/api/settings/mcp-url')
+    await loadMcpUrl()
+    mcpUrlInput.value = ''
+    mcpUrlSuccess.value = true
+    setTimeout(() => { mcpUrlSuccess.value = false }, 3000)
+  } catch (e) {
+    mcpUrlError.value = e.response?.data?.detail || 'Failed to reset MCP URL'
+  } finally {
+    savingMcpUrl.value = false
   }
 }
 
