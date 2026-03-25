@@ -2,7 +2,7 @@
 
 ## Overview
 
-Admin-only page for managing system-wide configuration including API keys (Anthropic, GitHub), Trinity Prompt, email whitelist, SSH access toggle, ops configuration settings, GitHub template configuration (TMPL-001), and default avatar generation (AVATAR-003).
+Admin-only page for managing system-wide configuration including API keys (Anthropic, GitHub), Trinity Prompt, email whitelist, SSH access toggle, ops configuration settings, GitHub template configuration (TMPL-001), MCP Server URL (#76), and default avatar generation (AVATAR-003).
 
 ## User Stories
 
@@ -14,6 +14,7 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
 | SET-011 | As an admin, I want to update ops settings so that I can tune context warnings, cost limits, and other thresholds | Implemented |
 | SET-012 | As an admin, I want to reset ops settings to defaults so that I can restore standard configuration | Implemented |
 | AVATAR-003 | As an admin, I want to generate default avatars for all agents so that agents without custom avatars get AI-generated ones | Implemented |
+| MCP-URL-001 | As an admin, I want to configure the external MCP server URL so that API Keys page shows the correct URL for production deployments | Implemented |
 
 ## Entry Points
 
@@ -30,6 +31,9 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
   - `GET /api/settings/github-templates` - Get GitHub templates config (TMPL-001)
   - `PUT /api/settings/github-templates` - Set GitHub templates (TMPL-001)
   - `DELETE /api/settings/github-templates` - Reset templates to defaults (TMPL-001)
+  - `GET /api/settings/mcp-url` - Get MCP URL config (any auth user) (#76)
+  - `PUT /api/settings/mcp-url` - Set custom MCP URL (admin-only) (#76)
+  - `DELETE /api/settings/mcp-url` - Reset MCP URL to auto-detect (admin-only) (#76)
   - `POST /api/agents/avatars/generate-defaults` - Generate avatars for agents without one (AVATAR-003, see [agent-avatars.md](agent-avatars.md))
 
 ---
@@ -47,6 +51,7 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
 | Trinity Prompt | 224-289 | Textarea for custom agent instructions |
 | Email Whitelist | 291-390 | Table of whitelisted emails with add/remove |
 | SSH Access Toggle | 392-430 | Toggle switch for enabling SSH access |
+| MCP Server URL | 827-889 | Configure external MCP URL with custom/auto-detect badge (#76) |
 | Default Avatars | 1054-1092 | Generate AI avatars for agents without custom ones (AVATAR-003) |
 
 **Key Reactive State**

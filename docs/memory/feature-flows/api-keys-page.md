@@ -47,13 +47,14 @@ As a Trinity user, I want to manage my MCP API keys from a dedicated page so tha
 
 ### Lifecycle (onMounted)
 ```javascript
-// ApiKeys.vue:553-558
+// ApiKeys.vue
 onMounted(async () => {
-  await fetchUserRole()     // Check if user is admin
-  await fetchApiKeys()      // Load existing keys
+  await Promise.all([fetchMcpUrl(), fetchUserRole(), fetchApiKeys()])
   await ensureDefaultKey()  // Auto-create default key for first-time users
 })
 ```
+
+**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise falls back to auto-detect from `window.location.hostname`. (#76)
 
 ### Step 1: Fetch User Role
 ```javascript

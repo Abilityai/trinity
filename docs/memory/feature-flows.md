@@ -44,6 +44,7 @@
 | 2026-03-26 | EVT-001 | Agent Event Subscriptions — lightweight pub/sub for inter-agent pipelines | [agent-event-subscriptions.md](feature-flows/agent-event-subscriptions.md) |
 | 2026-03-25 | #129 | Active watchdog — reconcile DB state against agent process registries, recover orphans, auto-terminate timeouts | [cleanup-service.md](feature-flows/cleanup-service.md) |
 | 2026-03-25 | #148 | Fix silent subscription registration failure — encryption key auto-generation, status endpoint, frontend warning | [subscription-management.md](feature-flows/subscription-management.md) |
+| 2026-03-25 | #76 | Configurable MCP Server URL in Admin Settings | [platform-settings.md](feature-flows/platform-settings.md), [api-keys-page.md](feature-flows/api-keys-page.md) |
 | 2026-03-25 | #74 | Auto-assign subscription to new agents (round-robin, rate-limit aware) | [subscription-management.md](feature-flows/subscription-management.md) |
 | 2026-03-23 | VOICE-001 | Voice Chat — real-time voice conversations with agents via Gemini Live API | [voice-chat.md](feature-flows/voice-chat.md) |
 | 2026-03-23 | SLACK-002 | Channel adapter abstraction + multi-agent Slack routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
