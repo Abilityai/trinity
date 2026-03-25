@@ -610,6 +610,14 @@ Services that run continuously in the backend process:
 | GET | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
 | POST | `/api/nevermined/retry-settlement/{log_id}` | Admin | Retry settlement |
 
+### Platform Settings (3 endpoints)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/settings/mcp-url` | Get configured MCP server URL (any auth user) |
+| PUT | `/api/settings/mcp-url` | Set MCP server URL (admin-only) |
+| DELETE | `/api/settings/mcp-url` | Reset to auto-detect (admin-only) |
+
 ---
 
 ## Architectural Invariants

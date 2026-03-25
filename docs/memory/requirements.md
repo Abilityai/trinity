@@ -233,6 +233,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Key Features**: `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary`; enables async polling pattern for agent-to-agent collaboration beyond 60s MCP timeout
 - **Spec**: `docs/requirements/MCP_EXECUTION_QUERY_TOOLS.md`
 
+### 7.4 Configurable MCP Server URL (MCP-URL-001)
+- **Status**: ✅ Implemented (2026-03-25)
+- **Requirement ID**: MCP-URL-001
+- **GitHub Issue**: #76
+- **Description**: Admin-configurable MCP server URL displayed on the API Keys page connection snippets. Replaces hardcoded `http://{hostname}:8080/mcp` which is wrong for production deployments where MCP is proxied through nginx.
+- **Key Features**: `GET/PUT/DELETE /api/settings/mcp-url` endpoints, URL validation (requires `http(s)://` and `/mcp` suffix), Settings UI section with save/reset, auto-detect fallback when not configured
+- **Flow**: `docs/memory/feature-flows/platform-settings.md`
+
 ---
 
 ## 8. Infrastructure
