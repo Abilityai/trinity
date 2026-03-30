@@ -181,12 +181,13 @@ class ChannelMessageRouter:
 
         try:
             task_execution_service = get_task_execution_service()
+
             result = await task_execution_service.execute_task(
                 agent_name=agent_name,
                 message=context_prompt,
                 triggered_by="slack",
                 source_user_email=source_email,
-                timeout_seconds=_get_channel_timeout(),
+                timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
             )
 
@@ -196,7 +197,9 @@ class ChannelMessageRouter:
                 await adapter.indicate_done(message)
 
                 # User-friendly error messages
-                if "at capacity" in error_msg:
+                if result.error_code == "timeout":
+                    response_text = "Sorry, that took too long to process. Try a simpler request or ask me to be more concise."
+                elif "at capacity" in error_msg:
                     response_text = "I'm busy right now. Please try again in a moment."
                 elif "billing" in error_msg.lower() or "credit" in error_msg.lower():
                     response_text = "I'm having trouble processing your request. Please try again later."

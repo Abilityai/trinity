@@ -21,6 +21,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
 import httpx
@@ -40,6 +41,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
+class TaskExecutionErrorCode(str, Enum):
+    """Machine-readable error codes for task execution failures.
+
+    Used by callers (message router, chat, etc.) to match error types
+    without parsing human-readable error strings.
+    """
+    TIMEOUT = "timeout"              # Execution exceeded timeout_seconds
+    CAPACITY = "capacity"            # All parallel slots in use
+    AUTH = "auth"                    # No API key or subscription configured
+    BILLING = "billing"             # Rate limit, credit, or billing issue
+    AGENT_ERROR = "agent_error"     # Agent returned non-zero exit code
+    NETWORK = "network"             # HTTP/connection error to agent container
+
+
+@dataclass
 class TaskExecutionResult:
     """Result of a task execution."""
     execution_id: str
@@ -52,6 +68,7 @@ class TaskExecutionResult:
     execution_log: Optional[str] = None # Sanitized JSON transcript
     raw_response: dict = field(default_factory=dict)
     error: Optional[str] = None
+    error_code: Optional[TaskExecutionErrorCode] = None
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +356,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 response="",
                 error=error_msg,
+                error_code=TaskExecutionErrorCode.TIMEOUT,
             )
 
         except httpx.HTTPError as e:
