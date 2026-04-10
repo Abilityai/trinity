@@ -261,9 +261,17 @@ class SlotService:
 
         return []
 
-    async def cleanup_stale_slots(self) -> Dict[str, List[str]]:
+    async def cleanup_stale_slots(
+        self, agent_timeouts: Dict[str, int] = None
+    ) -> Dict[str, List[str]]:
         """
         Remove slots older than TTL for all agents.
+
+        Args:
+            agent_timeouts: Optional dict mapping agent_name to execution_timeout_seconds.
+                When provided, uses per-agent TTL (timeout + buffer) instead of the
+                fixed default. Fixes #226: prevents premature slot reclamation for
+                agents with custom timeouts.
 
         Returns:
             Dict mapping agent_name to list of reclaimed execution IDs.
@@ -278,7 +286,14 @@ class SlotService:
             cursor, keys = self.redis.scan(cursor, match=pattern, count=100)
             for key in keys:
                 agent_name = key.replace(self.slots_prefix, "")
-                stale_ids = await self._cleanup_stale_slots_for_agent(agent_name)
+                # Use per-agent timeout if available, otherwise fall back to default
+                if agent_timeouts and agent_name in agent_timeouts:
+                    slot_ttl = agent_timeouts[agent_name] + SLOT_TTL_BUFFER
+                else:
+                    slot_ttl = DEFAULT_SLOT_TTL_SECONDS
+                stale_ids = await self._cleanup_stale_slots_for_agent(
+                    agent_name, slot_ttl
+                )
                 if stale_ids:
                     reclaimed[agent_name] = stale_ids
             if cursor == 0:

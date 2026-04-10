@@ -235,7 +235,7 @@ Every 5 seconds (agents store / network store):
 | `src/backend/services/slot_service.py` | 130-152 | release_slot() - Slot release and cleanup |
 | `src/backend/services/slot_service.py` | 154-199 | get_slot_state() - Detailed slot info |
 | `src/backend/services/slot_service.py` | 201-221 | get_all_slot_states() - Bulk query for Dashboard |
-| `src/backend/services/slot_service.py` | 247-271 | cleanup_stale_slots() - 30-min TTL enforcement |
+| `src/backend/services/slot_service.py` | 264-302 | cleanup_stale_slots(agent_timeouts) - Per-agent TTL enforcement (#226) |
 
 ### REST API Endpoints
 

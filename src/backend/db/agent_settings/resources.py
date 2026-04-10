@@ -153,6 +153,21 @@ class ResourcesMixin:
                 return row["execution_timeout_seconds"]
             return 900  # Default 15 minutes
 
+    def get_all_execution_timeouts(self) -> dict:
+        """
+        Get execution_timeout_seconds for all agents.
+
+        Returns:
+            Dict mapping agent_name to timeout in seconds.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT agent_name, COALESCE(execution_timeout_seconds, 900) as timeout
+                FROM agent_ownership
+            """)
+            return {row["agent_name"]: row["timeout"] for row in cursor.fetchall()}
+
     def set_execution_timeout(self, agent_name: str, timeout_seconds: int) -> bool:
         """
         Set execution_timeout_seconds for an agent.

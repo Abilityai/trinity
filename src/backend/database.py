@@ -446,6 +446,9 @@ class DatabaseManager:
     def get_execution_timeout(self, agent_name: str) -> int:
         return self._agent_ops.get_execution_timeout(agent_name)
 
+    def get_all_execution_timeouts(self) -> dict:
+        return self._agent_ops.get_all_execution_timeouts()
+
     def set_execution_timeout(self, agent_name: str, timeout_seconds: int) -> bool:
         return self._agent_ops.set_execution_timeout(agent_name, timeout_seconds)
 

@@ -94,23 +94,27 @@ Seven sequential operations, each wrapped in individual try/except. Watchdog run
    ```
    Calls `DatabaseManager.mark_stale_activities_failed()` which delegates to `ActivityOperations.mark_stale_activities_failed()`.
 
-5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219)
+5. **Cleanup stale Redis slots and fail execution records** (lines 176-213, Issue #219, #226)
    ```python
    slot_service = get_slot_service()
-   reclaimed = await slot_service.cleanup_stale_slots()
+   agent_timeouts = db.get_all_execution_timeouts()  # #226: per-agent TTL
+   reclaimed = await slot_service.cleanup_stale_slots(agent_timeouts=agent_timeouts)
    report.stale_slots = sum(len(ids) for ids in reclaimed.values())
-   # Fail execution records whose slots were reclaimed
+   # Fail execution records whose slots were reclaimed,
+   # but skip IDs the watchdog confirmed as still running (#226)
    for agent_name, execution_ids in reclaimed.items():
        for execution_id in execution_ids:
+           if execution_id in confirmed_running_ids:
+               continue  # Watchdog verified alive
            db.fail_stale_slot_execution(execution_id, error=...)
    ```
-   Calls `SlotService.cleanup_stale_slots()` which scans all `agent:slots:*` keys, removes entries older than TTL, and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`) to avoid overwriting executions that completed via another path.
+   Calls `SlotService.cleanup_stale_slots(agent_timeouts)` which scans all `agent:slots:*` keys, removes entries older than per-agent TTL (agent timeout + 5 min buffer, #226), and returns a dict mapping agent names to reclaimed execution IDs. The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`), skipping any execution IDs the watchdog confirmed are still running on their agents.
 
 ### Watchdog Reconciliation (Issue #129)
 
 Active reconciliation of DB execution state against agent process registries. Replaces the passive "detect-and-report" model with active remediation.
 
-#### `_reconcile_orphaned_executions()` → `tuple[int, int]`
+#### `_reconcile_orphaned_executions()` → `tuple[int, int, set]`
 1. Query `db.get_running_executions_with_agent_info()` — LEFT JOINs `schedule_executions` with `agent_schedules` and `agent_ownership` for timeout resolution: `COALESCE(schedule.timeout, agent.timeout, 900)`
 2. Group executions by `agent_name`
 3. Parallel fan-out: `asyncio.gather` queries all agents concurrently via shared `httpx.AsyncClient`
@@ -122,7 +126,7 @@ Active reconciliation of DB execution state against agent process registries. Re
 | No (ConnectError/Timeout) | — | — | **SKIP** (retry next cycle) |
 | Yes | No | Age < 60s | **SKIP** (dispatch grace window) |
 | Yes | No | Age >= 60s | **ORPHAN RECOVERY** |
-| Yes | Yes | No | **NO ACTION** |
+| Yes | Yes | No | **CONFIRMED RUNNING** (#226: added to confirmed_running set, slot cleanup skips DB failure) |
 | Yes | Yes | Yes, terminate succeeds | **AUTO-TERMINATE** |
 | Yes | Yes | Yes, terminate fails | **SKIP** (defer to 120-min stale cleanup) |
 
@@ -348,21 +352,24 @@ WHERE id = ?
 ### Redis Operations
 
 #### cleanup_stale_slots (SlotService)
-**File**: `src/backend/services/slot_service.py:259-295`
+**File**: `src/backend/services/slot_service.py:264-302`
 
 **Returns**: `Dict[str, List[str]]` — mapping of agent_name to list of reclaimed execution IDs (Issue #219).
 
+**Args** (#226): `agent_timeouts: Dict[str, int]` — optional mapping of agent_name to execution_timeout_seconds. When provided, uses per-agent TTL (timeout + 5 min buffer) instead of the fixed default.
+
 **Logic**:
 1. Scans all keys matching `agent:slots:*` pattern via `SCAN`
-2. For each agent, calls `_cleanup_stale_slots_for_agent()` which returns the reclaimed execution IDs
-3. Removes ZSET entries with score (timestamp) older than TTL:
+2. For each agent, computes slot TTL: `agent_timeouts[name] + SLOT_TTL_BUFFER` if available, else `DEFAULT_SLOT_TTL_SECONDS` (#226)
+3. Calls `_cleanup_stale_slots_for_agent(agent_name, slot_ttl)` which returns the reclaimed execution IDs
+4. Removes ZSET entries with score (timestamp) older than TTL:
    ```
    ZREMRANGEBYSCORE agent:slots:{name} -inf {cutoff_timestamp}
    ```
-4. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
-5. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
+5. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
+6. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
 
-**TTL**: `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes, line 31)
+**TTL**: Per-agent (`execution_timeout_seconds + 300`), falling back to `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes) for agents not in the map (#226)
 
 ## Side Effects
 - **Logging**: Each cleanup cycle logs results at INFO level when resources are cleaned
