@@ -7,7 +7,7 @@ Provides API endpoints for:
 - Viewing commit history
 - Pulling from GitHub
 """
-from typing import Optional, List
+from typing import Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -131,10 +131,17 @@ async def sync_to_github(
     if not result.success:
         # Return 409 for conflicts, 400 for other failures
         status_code = 409 if result.conflict_type else 400
+        # S5 #386: surface conflict_class in headers so the frontend can render
+        # operator-readable copy without parsing free-form detail strings.
+        conflict_headers: Optional[Dict[str, str]] = None
+        if result.conflict_type:
+            conflict_headers = {"X-Conflict-Type": result.conflict_type}
+            if result.conflict_class:
+                conflict_headers["X-Conflict-Class"] = result.conflict_class
         raise HTTPException(
             status_code=status_code,
             detail=result.message,
-            headers={"X-Conflict-Type": result.conflict_type} if result.conflict_type else None
+            headers=conflict_headers,
         )
 
     return {
@@ -202,10 +209,17 @@ async def pull_from_github(
         # Return 409 for conflicts, 400 for other failures
         conflict_type = result.get("conflict_type")
         status_code = 409 if conflict_type else 400
+        # S5 #386: surface conflict_class alongside conflict_type.
+        conflict_headers: Optional[Dict[str, str]] = None
+        if conflict_type:
+            conflict_headers = {"X-Conflict-Type": conflict_type}
+            conflict_class = result.get("conflict_class")
+            if conflict_class:
+                conflict_headers["X-Conflict-Class"] = conflict_class
         raise HTTPException(
             status_code=status_code,
             detail=result.get("message"),
-            headers={"X-Conflict-Type": conflict_type} if conflict_type else None
+            headers=conflict_headers,
         )
 
     return result

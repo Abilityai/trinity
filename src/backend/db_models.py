@@ -228,6 +228,7 @@ class GitSyncResult(BaseModel):
     branch: Optional[str] = None
     sync_time: Optional[datetime] = None
     conflict_type: Optional[str] = None  # "push_rejected", "merge_conflict", etc.
+    conflict_class: Optional[str] = None  # S5 #386: operator-readable class (AHEAD_ONLY, PARALLEL_HISTORY, ...)
 
 
 # =========================================================================
