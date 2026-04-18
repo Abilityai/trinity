@@ -790,6 +790,10 @@ class DatabaseManager:
     def list_git_enabled_agents(self):
         return self._schedule_ops.list_git_enabled_agents()
 
+    def find_duplicate_bindings(self):
+        """#390 S6: agents sharing (repo, working_branch), excluding source_mode."""
+        return self._schedule_ops.find_duplicate_bindings()
+
     # =========================================================================
     # Sync State Operations (#389 — delegated to db/sync_state.py)
     # =========================================================================

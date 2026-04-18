@@ -1367,6 +1367,29 @@ class ScheduleOperations:
             ).fetchone()
             return bool(row[0]) if row else False
 
+    def find_duplicate_bindings(self) -> set:
+        """#390 S6: return the set of agent_names whose (github_repo, working_branch)
+        pair is shared with another row where source_mode = 0.
+
+        Source-mode agents intentionally share branches (e.g. all legacy-mode
+        siblings track `main`) and are excluded by the partial filter, mirroring
+        the spec's §P5 query verbatim.
+        """
+        query = """
+            SELECT agent_name FROM agent_git_config
+            WHERE source_mode = 0
+              AND (github_repo, working_branch) IN (
+                  SELECT github_repo, working_branch
+                  FROM agent_git_config
+                  WHERE source_mode = 0
+                  GROUP BY github_repo, working_branch
+                  HAVING COUNT(*) > 1
+              )
+        """
+        with get_db_connection() as conn:
+            rows = conn.execute(query).fetchall()
+            return {row[0] for row in rows}
+
     def delete_git_config(self, agent_name: str) -> bool:
         """Delete git configuration for an agent (when agent is deleted)."""
         with get_db_connection() as conn:

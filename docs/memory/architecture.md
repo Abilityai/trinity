@@ -589,6 +589,17 @@ picks up on its next poll. (#389 S1a)
 | GET | `/oauth/{provider}/callback` | OAuth callback |
 | GET | `/api/health` | Health check |
 
+### Fleet Sync Audit (#390 / S6)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/fleet/sync-audit` | Aggregate per-agent sync state + `duplicate_binding` flag. Admins see all; non-admins see accessible agents. |
+
+The `duplicate_binding` field flags agents whose
+`(github_repo, working_branch)` pair is shared with another non-source-mode
+agent — detects the §P5 silent-clobber setup at fleet level.
+
+
 ### Operator Queue (OPS-001)
 
 | Method | Path | Description |

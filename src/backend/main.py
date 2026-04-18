@@ -55,6 +55,7 @@ from routers.chat import router as chat_router, set_websocket_manager as set_cha
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
 from routers.git import router as git_router
+from routers.fleet import router as fleet_router
 from routers.activities import router as activities_router
 from routers.settings import router as settings_router
 from routers.systems import router as systems_router
@@ -617,6 +618,7 @@ app.include_router(chat_router)
 app.include_router(fan_out_router)
 app.include_router(schedules_router)
 app.include_router(git_router)
+app.include_router(fleet_router)  # #390 S6 fleet sync-audit
 app.include_router(settings_router)
 app.include_router(systems_router)
 app.include_router(observability_router)
