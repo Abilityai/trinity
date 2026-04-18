@@ -411,6 +411,30 @@ TABLES = {
             sync_enabled INTEGER DEFAULT 1,
             sync_paths TEXT,
             github_pat_encrypted TEXT,
+            auto_sync_enabled INTEGER DEFAULT 0,
+            freeze_schedules_if_sync_failing INTEGER DEFAULT 0,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+        )
+    """,
+
+    # Sync health observability (#389 S1). One row per agent, tracks last
+    # sync outcome + consecutive_failures so the dashboard can render a
+    # health dot and the backend can emit operator-queue alerts.
+    "agent_sync_state": """
+        CREATE TABLE IF NOT EXISTS agent_sync_state (
+            agent_name TEXT PRIMARY KEY,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            last_error_summary TEXT,
+            last_remote_sha_main TEXT,
+            last_remote_sha_working TEXT,
+            ahead_main INTEGER DEFAULT 0,
+            behind_main INTEGER DEFAULT 0,
+            ahead_working INTEGER DEFAULT 0,
+            behind_working INTEGER DEFAULT 0,
+            last_check_at TEXT,
+            updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
         )
     """,
@@ -756,6 +780,10 @@ INDEXES = [
     # for the operator-assisted migration path on existing databases.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_git_config_repo_branch_unique "
     "ON agent_git_config(github_repo, working_branch) WHERE source_mode = 0",
+
+    # Sync health state (#389 S1)
+    "CREATE INDEX IF NOT EXISTS idx_sync_state_status "
+    "ON agent_sync_state(last_sync_status, consecutive_failures)",
 
     # Chat session indexes
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_agent ON chat_sessions(agent_name)",

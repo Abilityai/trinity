@@ -175,7 +175,12 @@ class ScheduleOperations:
             last_sync_at=parse_iso_timestamp(row["last_sync_at"]) if row["last_sync_at"] else None,
             last_commit_sha=row["last_commit_sha"],
             sync_enabled=bool(row["sync_enabled"]),
-            sync_paths=row["sync_paths"]
+            sync_paths=row["sync_paths"],
+            # #389 sync health fields — absent on DBs predating the migration.
+            auto_sync_enabled=bool(row["auto_sync_enabled"])
+                if "auto_sync_enabled" in row_keys else False,
+            freeze_schedules_if_sync_failing=bool(row["freeze_schedules_if_sync_failing"])
+                if "freeze_schedules_if_sync_failing" in row_keys else False,
         )
 
     # =========================================================================
@@ -1319,6 +1324,48 @@ class ScheduleOperations:
             """, (1 if enabled else 0, agent_name))
             conn.commit()
             return cursor.rowcount > 0
+
+    def set_git_auto_sync_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """#389: toggle the 15-min auto-sync heartbeat for an agent."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_git_config SET auto_sync_enabled = ? WHERE agent_name = ?",
+                (1 if enabled else 0, agent_name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def set_freeze_schedules_if_sync_failing(self, agent_name: str, enabled: bool) -> bool:
+        """#389: toggle scheduler freeze-on-failure opt-in."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_git_config "
+                "SET freeze_schedules_if_sync_failing = ? WHERE agent_name = ?",
+                (1 if enabled else 0, agent_name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_git_auto_sync_enabled(self, agent_name: str) -> bool:
+        """#389: read the auto-sync flag. False if config missing."""
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT auto_sync_enabled FROM agent_git_config WHERE agent_name = ?",
+                (agent_name,),
+            ).fetchone()
+            return bool(row[0]) if row else False
+
+    def get_freeze_schedules_if_sync_failing(self, agent_name: str) -> bool:
+        """#389: read the freeze-schedules flag. False if config missing."""
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT freeze_schedules_if_sync_failing "
+                "FROM agent_git_config WHERE agent_name = ?",
+                (agent_name,),
+            ).fetchone()
+            return bool(row[0]) if row else False
 
     def delete_git_config(self, agent_name: str) -> bool:
         """Delete git configuration for an agent (when agent is deleted)."""

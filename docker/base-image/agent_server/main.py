@@ -27,6 +27,7 @@ from .routers import (
 )
 from .state import agent_state
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
+from .auto_sync import schedule_auto_sync_if_enabled
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +60,9 @@ app.include_router(trinity_router)  # Trinity injection API
 app.include_router(dashboard_router)  # Dashboard endpoint
 app.include_router(skills_router)  # Skills/playbooks listing endpoint
 app.include_router(snapshot_router)  # Snapshot/restore primitives (#384, S3)
+
+# #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
+schedule_auto_sync_if_enabled(app)
 
 
 def run_server():

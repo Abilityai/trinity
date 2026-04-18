@@ -58,6 +58,30 @@ async def internal_health():
     return {"status": "ok"}
 
 
+@router.get("/agents/{agent_name}/sync-health-status")
+async def internal_agent_sync_health(agent_name: str):
+    """#389: lightweight read used by the dedicated scheduler before dispatching.
+
+    Returns both the per-agent `freeze_schedules_if_sync_failing` flag and
+    whether the current sync state would trip it. The scheduler multiplies
+    the two to decide whether to skip the fire.
+    """
+    from database import db as _db
+    freeze_flag = _db.get_freeze_schedules_if_sync_failing(agent_name)
+    state = _db.get_sync_state(agent_name) or {}
+    failing = (
+        state.get("last_sync_status") == "failed"
+        and (state.get("consecutive_failures") or 0) >= 3
+    )
+    return {
+        "agent_name": agent_name,
+        "freeze_schedules_if_sync_failing": bool(freeze_flag),
+        "sync_failing": bool(failing),
+        "should_freeze": bool(freeze_flag and failing),
+        "consecutive_failures": state.get("consecutive_failures") or 0,
+    }
+
+
 # =============================================================================
 # Activity Tracking Endpoints (for dedicated scheduler)
 # =============================================================================

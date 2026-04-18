@@ -12,7 +12,9 @@ export const useAgentsStore = defineStore('agents', {
     // PERF-269: Stats moved to networkStore (single source of truth, no duplicate polling)
     sortBy: 'created_desc',  // Default sort order
     // Running toggle loading state per agent
-    runningToggleLoading: {}  // Map of agent name -> boolean
+    runningToggleLoading: {},  // Map of agent name -> boolean
+    // #389 Sync health per agent (populated by fetchSyncHealth)
+    syncHealth: {}  // Map of agent name -> { last_sync_status, consecutive_failures, behind_working, ... }
   }),
 
   getters: {
@@ -91,6 +93,24 @@ export const useAgentsStore = defineStore('agents', {
         console.error('Failed to fetch agents:', error)
       } finally {
         this.loading = false
+      }
+    },
+
+    async fetchSyncHealth() {
+      // #389: batch endpoint for dashboard sync-health dots.
+      try {
+        const authStore = useAuthStore()
+        const response = await axios.get('/api/agents/sync-health', {
+          headers: authStore.authHeader
+        })
+        const map = {}
+        for (const entry of response.data.agents || []) {
+          map[entry.agent_name] = entry
+        }
+        this.syncHealth = map
+      } catch (error) {
+        // Silent — sync health is advisory; don't block the dashboard.
+        console.warn('Failed to fetch sync health:', error.message)
       }
     },
 

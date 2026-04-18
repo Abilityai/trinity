@@ -2,12 +2,13 @@
 Git sync endpoints for GitHub bidirectional sync.
 """
 import json
+import os
 import subprocess
 import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -81,6 +82,131 @@ def _conflict_response(
             "X-Conflict-Class": conflict_class,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Sync state file (#389 S1a) — small JSON persisted under .trinity/sync-state.json
+# so counters survive container restarts. The backend's SyncHealthService
+# reads these fields via GET /api/git/status every minute.
+# ---------------------------------------------------------------------------
+
+_SYNC_STATE_DEFAULT: Dict = {
+    "last_sync_status": "never",
+    "last_sync_at": None,
+    "last_error_summary": None,
+    "consecutive_failures": 0,
+}
+
+
+def _sync_state_path(home_dir: Path) -> Path:
+    return home_dir / ".trinity" / "sync-state.json"
+
+
+def _read_sync_state_file(home_dir: Path) -> Dict:
+    """Read `.trinity/sync-state.json` or return defaults on missing/corrupt."""
+    path = _sync_state_path(home_dir)
+    if not path.exists():
+        return dict(_SYNC_STATE_DEFAULT)
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("sync-state.json root is not an object")
+        merged = dict(_SYNC_STATE_DEFAULT)
+        merged.update(data)
+        return merged
+    except (ValueError, json.JSONDecodeError):
+        logger.warning("sync-state.json corrupt, returning default")
+        return dict(_SYNC_STATE_DEFAULT)
+
+
+def _write_sync_state_file(
+    home_dir: Path,
+    last_sync_status: str,
+    last_sync_at: Optional[str] = None,
+    last_error_summary: Optional[str] = None,
+) -> Dict:
+    """Persist one sync outcome.
+
+    consecutive_failures is bumped on `failed`, reset on `success`, untouched
+    on `never`. last_error_summary is cleared on success, kept on never.
+    """
+    prior = _read_sync_state_file(home_dir)
+
+    if last_sync_status == "failed":
+        prior["consecutive_failures"] = (prior.get("consecutive_failures") or 0) + 1
+        prior["last_error_summary"] = last_error_summary
+    elif last_sync_status == "success":
+        prior["consecutive_failures"] = 0
+        prior["last_error_summary"] = None
+    # else 'never' — leave counters alone
+
+    prior["last_sync_status"] = last_sync_status
+    prior["last_sync_at"] = last_sync_at or datetime.now(timezone.utc).isoformat()
+
+    path = _sync_state_path(home_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prior, indent=2))
+    return prior
+
+
+def _run_auto_sync_once(home_dir: Path) -> Dict:
+    """One auto-sync cycle: stage, commit if dirty, push. Records outcome.
+
+    Intentionally minimal — heavy conflict handling stays in the operator-
+    initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
+    rescue.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        # Stage everything.
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(home_dir), capture_output=True, text=True, timeout=30, check=True,
+        )
+
+        # Is there anything to commit?
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(home_dir), capture_output=True, text=True, timeout=10,
+        )
+        if status.stdout.strip():
+            commit_msg = f"Trinity auto-sync: {now}"
+            subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=str(home_dir), capture_output=True, text=True, timeout=30, check=True,
+            )
+
+        push = subprocess.run(
+            ["git", "push", "origin", "HEAD"],
+            cwd=str(home_dir), capture_output=True, text=True, timeout=60,
+        )
+        if push.returncode != 0:
+            err = _summarize_git_error(push.stderr or push.stdout or "push failed")
+            _write_sync_state_file(home_dir, "failed",
+                                    last_sync_at=now, last_error_summary=err)
+            return {"status": "failed", "error": err}
+
+        _write_sync_state_file(home_dir, "success", last_sync_at=now)
+        return {"status": "success"}
+
+    except subprocess.CalledProcessError as exc:
+        err = _summarize_git_error(exc.stderr or exc.stdout or str(exc))
+        _write_sync_state_file(home_dir, "failed",
+                                last_sync_at=now, last_error_summary=err)
+        return {"status": "failed", "error": err}
+    except Exception as exc:  # defensive — never let the loop crash
+        err = _summarize_git_error(str(exc))
+        _write_sync_state_file(home_dir, "failed",
+                                last_sync_at=now, last_error_summary=err)
+        return {"status": "failed", "error": err}
+
+
+def _summarize_git_error(raw: str) -> str:
+    """Trim git stderr to a 240-char one-liner (matches operator-queue field size)."""
+    if not raw:
+        return "unknown error"
+    first = raw.strip().splitlines()[0]
+    return first[:240]
 
 
 def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
@@ -227,6 +353,40 @@ def _is_stale_lease_rejection(stderr: str) -> bool:
     return "stale info" in s or "stale" in s and "rejected" in s
 
 
+def _dual_ahead_behind_payload(current_branch: str, home_dir: Path) -> dict:
+    """Return ahead/behind tuples for both `origin/main` and the working branch.
+
+    Fixes P6 (#389): the old implementation redirected `trinity/*` branches to
+    `origin/main` for ahead/behind, hiding external writes to the working
+    branch. We now compute BOTH tuples:
+
+    - `ahead_main`/`behind_main`     — against `origin/main` (template sync)
+    - `ahead_working`/`behind_working` — against `origin/<current_branch>`
+      (peer divergence / P5-style silent clobber)
+
+    Legacy aliases `ahead` and `behind` track the main tuple to preserve
+    backward compatibility with clients written against the old response.
+    """
+    # Uses upstream's `_compute_ahead_behind(home_dir, branch) -> (ahead, behind)`
+    # defined near the top of this module.
+    main_ahead, main_behind = _compute_ahead_behind(home_dir, "main")
+    # Non-trinity branches use the same ref twice; avoid a second subprocess
+    # for the common case.
+    if current_branch.startswith("trinity/") and current_branch != "main":
+        working_ahead, working_behind = _compute_ahead_behind(home_dir, current_branch)
+    else:
+        working_ahead, working_behind = main_ahead, main_behind
+
+    return {
+        "ahead": main_ahead,  # legacy alias
+        "behind": main_behind,  # legacy alias
+        "ahead_main": main_ahead,
+        "behind_main": main_behind,
+        "ahead_working": working_ahead,
+        "behind_working": working_behind,
+    }
+
+
 @router.get("/api/git/status")
 async def get_git_status():
     """
@@ -305,23 +465,13 @@ async def get_git_status():
         if fetch_result.returncode == 0:
             _persist_last_remote_sha(current_branch, home_dir)
 
-        # For trinity/* working branches, compare against origin/main
-        pull_branch = _get_pull_branch(current_branch, home_dir)
-
-        ahead_behind_result = subprocess.run(
-            ["git", "rev-list", "--left-right", "--count", f"origin/{pull_branch}...HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=str(home_dir),
-            timeout=10
-        )
-        ahead = 0
-        behind = 0
-        if ahead_behind_result.returncode == 0:
-            parts = ahead_behind_result.stdout.strip().split()
-            if len(parts) == 2:
-                behind = int(parts[0])
-                ahead = int(parts[1])
+        # #389 P6: compute ahead/behind against BOTH origin/main and the
+        # working branch's own remote, so external writes to trinity/* are
+        # visible in the UI. Legacy `ahead`/`behind` keys still alias the
+        # main tuple.
+        ahead_behind = _dual_ahead_behind_payload(current_branch, home_dir)
+        ahead = ahead_behind["ahead"]
+        behind = ahead_behind["behind"]
 
         # Parallel-history detection (S2, issue #385): surface the common
         # ancestor between HEAD and origin/<pull_branch> so the frontend can
@@ -377,7 +527,7 @@ async def get_git_status():
             else:
                 remote_url = url
 
-        return {
+        response = {
             "git_enabled": True,
             "branch": current_branch,
             "pull_branch": pull_branch,
@@ -389,8 +539,13 @@ async def get_git_status():
             "behind": behind,
             "common_ancestor_sha": common_ancestor_sha,
             "common_ancestor_age_days": common_ancestor_age_days,
-            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync"
+            "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync",
         }
+        # #389: dual ahead/behind tuples plus legacy ahead/behind aliases.
+        response.update(ahead_behind)
+        # #389: merge auto-sync heartbeat state (may be defaults if never run).
+        response["sync_state"] = _read_sync_state_file(home_dir)
+        return response
 
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Git operation timed out")

@@ -130,6 +130,7 @@ from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
+from db.sync_state import SyncStateOperations
 
 
 def init_database():
@@ -282,6 +283,7 @@ class DatabaseManager:
         self._telegram_channel_ops = TelegramChannelOperations()
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
+        self._sync_state_ops = SyncStateOperations()  # #389 sync health
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -769,11 +771,40 @@ class DatabaseManager:
     def set_git_sync_enabled(self, agent_name: str, enabled: bool):
         return self._schedule_ops.set_git_sync_enabled(agent_name, enabled)
 
+    # #389 sync health observability
+    def set_git_auto_sync_enabled(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_git_auto_sync_enabled(agent_name, enabled)
+
+    def set_freeze_schedules_if_sync_failing(self, agent_name: str, enabled: bool):
+        return self._schedule_ops.set_freeze_schedules_if_sync_failing(agent_name, enabled)
+
+    def get_git_auto_sync_enabled(self, agent_name: str):
+        return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
+
+    def get_freeze_schedules_if_sync_failing(self, agent_name: str):
+        return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
+
     def delete_git_config(self, agent_name: str):
         return self._schedule_ops.delete_git_config(agent_name)
 
     def list_git_enabled_agents(self):
         return self._schedule_ops.list_git_enabled_agents()
+
+    # =========================================================================
+    # Sync State Operations (#389 — delegated to db/sync_state.py)
+    # =========================================================================
+
+    def get_sync_state(self, agent_name: str):
+        return self._sync_state_ops.get(agent_name)
+
+    def list_sync_states(self):
+        return self._sync_state_ops.list_all()
+
+    def upsert_sync_state(self, agent_name: str, **fields):
+        return self._sync_state_ops.upsert(agent_name, **fields)
+
+    def delete_sync_state(self, agent_name: str):
+        return self._sync_state_ops.delete(agent_name)
 
     # =========================================================================
     # Chat Session and Message Operations (delegated to db/chat.py)

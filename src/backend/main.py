@@ -99,6 +99,7 @@ from services.log_archive_service import log_archive_service
 
 # Import operator queue sync service
 from services.operator_queue_service import operator_queue_service, set_websocket_manager as set_opqueue_sync_ws_manager
+from services.sync_health_service import sync_health_service
 
 # Import cleanup service
 from services.cleanup_service import cleanup_service, set_cleanup_ws_manager
@@ -369,6 +370,16 @@ async def lifespan(app: FastAPI):
             print(f"Error starting cleanup service: {e}")
     asyncio.create_task(_start_cleanup_delayed())
 
+    # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
+    async def _start_sync_health_delayed():
+        await asyncio.sleep(5)
+        try:
+            sync_health_service.start()
+            print("Sync health service started (staggered +5s)")
+        except Exception as e:
+            print(f"Error starting sync health service: {e}")
+    asyncio.create_task(_start_sync_health_delayed())
+
     # BACKLOG-001: Register backlog drain as a slot-release callback and spawn
     # a 60s maintenance task. The maintenance loop handles two things:
     #   1. Expire queued rows older than 24h (-> FAILED)
@@ -522,6 +533,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error stopping Telegram transport: {e}")
 
+
+    # Shutdown sync health service (#389)
+    try:
+        sync_health_service.stop()
+        print("Sync health service stopped")
+    except Exception as e:
+        print(f"Error stopping sync health service: {e}")
 
     # Shutdown operator queue sync service
     try:

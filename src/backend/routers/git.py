@@ -613,3 +613,84 @@ async def reset_to_main_preserve_state(
         )
 
     return {"success": True, **result}
+
+
+# ============================================================================
+# Sync health observability (#389)
+# ============================================================================
+
+
+class AutoSyncToggle(BaseModel):
+    enabled: bool
+
+
+class FreezeSchedulesToggle(BaseModel):
+    enabled: bool
+
+
+@router.get("/{agent_name}/git/auto-sync")
+async def get_auto_sync_config(agent_name: AuthorizedAgentByName):
+    """Return current auto-sync flag and interval for this agent (#389)."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    value = getattr(config, "auto_sync_enabled", False)
+    return {
+        "agent_name": agent_name,
+        "auto_sync_enabled": bool(value),
+    }
+
+
+@router.put("/{agent_name}/git/auto-sync")
+async def set_auto_sync_config(
+    agent_name: OwnedAgentByName,
+    body: AutoSyncToggle,
+):
+    """Toggle the 15-min auto-sync heartbeat for this agent (#389)."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    db.set_git_auto_sync_enabled(agent_name, body.enabled)
+    return {"agent_name": agent_name, "auto_sync_enabled": body.enabled}
+
+
+@router.get("/{agent_name}/git/freeze-schedules-if-failing")
+async def get_freeze_schedules_config(agent_name: AuthorizedAgentByName):
+    """Return whether scheduled executions should pause when sync is failing."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    value = getattr(config, "freeze_schedules_if_sync_failing", False)
+    return {
+        "agent_name": agent_name,
+        "freeze_schedules_if_sync_failing": bool(value),
+    }
+
+
+@router.put("/{agent_name}/git/freeze-schedules-if-failing")
+async def set_freeze_schedules_config(
+    agent_name: OwnedAgentByName,
+    body: FreezeSchedulesToggle,
+):
+    """Toggle schedule-freeze-when-sync-failing for this agent (#389)."""
+    config = db.get_git_config(agent_name)
+    if not config:
+        raise HTTPException(status_code=404, detail="Git not configured")
+    db.set_freeze_schedules_if_sync_failing(agent_name, body.enabled)
+    return {
+        "agent_name": agent_name,
+        "freeze_schedules_if_sync_failing": body.enabled,
+    }
+
+
+@router.get("/{agent_name}/git/sync-state")
+async def get_agent_sync_state(agent_name: AuthorizedAgentByName):
+    """Return the persisted sync-state row for this agent (#389)."""
+    row = db.get_sync_state(agent_name)
+    if row is None:
+        return {
+            "agent_name": agent_name,
+            "last_sync_status": "never",
+            "consecutive_failures": 0,
+        }
+    return row

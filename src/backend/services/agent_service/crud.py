@@ -426,6 +426,13 @@ async def create_agent_internal(
         if _git_base:
             env_vars['TRINITY_GIT_BASE_URL'] = _git_base
 
+        # #389 S1a: 15-min auto-sync heartbeat. Only legacy (working-branch)
+        # agents get it — source-mode agents track main read-only, and
+        # auto-pushing to main would clobber protected branches. Operators
+        # can toggle per-agent via PUT /api/agents/{name}/git/auto-sync.
+        if not config.source_mode:
+            env_vars['GIT_SYNC_AUTO'] = 'true'
+
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
         if config.source_mode:
@@ -645,6 +652,17 @@ async def create_agent_internal(
                     f"[S4] Failed to materialize persistent-state.yaml for "
                     f"{config.name}: {e}"
                 )
+
+            # #389 S1a: opt non-source-mode GitHub-template agents into the
+            # auto-sync heartbeat by default. Source-mode agents stay opt-in
+            # (auto-pushing to main would clobber protected branches).
+            if github_repo_for_agent and not config.source_mode:
+                try:
+                    db.set_git_auto_sync_enabled(config.name, True)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to enable auto-sync for {config.name}: {e}"
+                    )
 
             return agent_status
         except Exception as e:

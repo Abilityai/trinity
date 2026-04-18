@@ -217,6 +217,9 @@ class AgentGitConfig(BaseModel):
     last_commit_sha: Optional[str] = None
     sync_enabled: bool = True
     sync_paths: Optional[str] = None  # JSON array of paths to sync
+    # #389 sync health observability
+    auto_sync_enabled: bool = False
+    freeze_schedules_if_sync_failing: bool = False
 
 
 class GitSyncResult(BaseModel):

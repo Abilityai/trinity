@@ -243,6 +243,39 @@ async def get_all_autonomy_status(
     return await get_all_autonomy_status_logic(current_user)
 
 
+@router.get("/sync-health")
+async def get_all_sync_health(
+    current_user: User = Depends(get_current_user)
+):
+    """Dashboard batch endpoint for sync-health dots (#389).
+
+    Returns one entry per accessible agent. Entries join `agent_sync_state`
+    with the per-agent auto-sync flag so the UI can colour dots and badge
+    agents that have auto-sync off.
+    """
+    accessible = {a["name"] for a in get_accessible_agents(current_user)}
+    rows = db.list_sync_states()
+    by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
+
+    entries = []
+    for name in sorted(accessible):
+        row = by_name.get(name)
+        auto_sync = db.get_git_auto_sync_enabled(name)
+        entries.append({
+            "agent_name": name,
+            "auto_sync_enabled": bool(auto_sync),
+            "last_sync_at": (row or {}).get("last_sync_at"),
+            "last_sync_status": (row or {}).get("last_sync_status") or "never",
+            "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
+            "last_error_summary": (row or {}).get("last_error_summary"),
+            "behind_working": (row or {}).get("behind_working") or 0,
+            "behind_main": (row or {}).get("behind_main") or 0,
+            "ahead_working": (row or {}).get("ahead_working") or 0,
+            "ahead_main": (row or {}).get("ahead_main") or 0,
+        })
+    return {"agents": entries}
+
+
 @router.get("/slots")
 async def get_all_agent_slots(
     current_user: User = Depends(get_current_user)

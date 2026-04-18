@@ -279,6 +279,13 @@
                   :style="{ backgroundColor: getStatusDotColor(agent.name) }"
                 ></div>
 
+                <!-- #389 Sync health dot (visible only for git-enabled agents) -->
+                <div
+                  v-if="syncHealthEntry(agent.name)"
+                  :class="['w-2 h-2 rounded-full flex-shrink-0', syncHealthColorClass(agent.name)]"
+                  :title="syncHealthLabel(agent.name)"
+                ></div>
+
                 <!-- Name + badges -->
                 <div class="flex items-center min-w-0 gap-2">
                   <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="sm" />
@@ -700,6 +707,7 @@ import ReadOnlyToggle from '../components/ReadOnlyToggle.vue'
 import CapacityMeter from '../components/CapacityMeter.vue'
 import { ServerIcon } from '@heroicons/vue/24/outline'
 import axios from 'axios'
+import { syncHealthColor, syncHealthLabel as syncHealthLabelFn } from '../utils/syncHealth'
 
 const agentsStore = useAgentsStore()
 const networkStore = useNetworkStore()
@@ -877,6 +885,7 @@ onMounted(async () => {
 
   await Promise.allSettled([
     agentsStore.fetchAgents(),
+    agentsStore.fetchSyncHealth(),  // #389
     fetchUserRole(),
     fetchAvailableTags(),
     fetchAllAgentTags(),
@@ -889,6 +898,11 @@ onMounted(async () => {
 onUnmounted(() => {
   networkStore.stopContextPolling()
 })
+
+// #389 Sync health helpers
+const syncHealthEntry = (agentName) => agentsStore.syncHealth[agentName] || null
+const syncHealthColorClass = (agentName) => syncHealthColor(syncHealthEntry(agentName))
+const syncHealthLabel = (agentName) => syncHealthLabelFn(syncHealthEntry(agentName))
 
 // Activity state helpers
 const getActivityState = (agentName) => {

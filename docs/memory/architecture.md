@@ -383,9 +383,16 @@ Services that run continuously in the backend process:
 |---------|--------|-------------|
 | **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. (CLEANUP-001, #129) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
+| **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. |
 | **Backlog Maintenance** | `backlog_service.py` | Expires stale queued tasks (>24h) and drains orphans after restart. Runs every 60s. (BACKLOG-001) |
+
+The **agent server** also runs a 15-min `auto_sync` heartbeat loop (gated
+by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
+agents) that stages/commits/pushes in-container changes and writes the
+outcome to `.trinity/sync-state.json` — which the Sync Health Service
+picks up on its next poll. (#389 S1a)
 
 ---
 
