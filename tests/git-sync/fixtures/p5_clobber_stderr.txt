@@ -1,0 +1,4 @@
+remote: error: cannot lock ref 'refs/heads/trinity/alpaca-repro-a/bd47596d': is at 20e0a936e2e919b9d0aa9ff56f5badcd8d64ea9f but expected 2d1351ec5177e73c549582ad5ad1f899addbe84a        
+To http://trinity-gitea-dev:3000/trinity-dev/trinity-alpaca-repro.git
+ ! [remote rejected] trinity/alpaca-repro-a/bd47596d -> trinity/alpaca-repro-a/bd47596d (failed to update ref)
+error: failed to push some refs to 'http://trinity-gitea-dev:3000/trinity-dev/trinity-alpaca-repro.git'

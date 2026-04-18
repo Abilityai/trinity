@@ -1,0 +1,11 @@
+From /tmp/trinity-repro/p2/bare
+ * branch            main       -> FETCH_HEAD
+Rebasing (1/2)Auto-merging trader.conf
+CONFLICT (add/add): Merge conflict in trader.conf
+error: could not apply 0703f4b... Add polymarket trader configuration
+hint: Resolve all conflicts manually, mark them as resolved with
+hint: "git add/rm <conflicted_files>", then run "git rebase --continue".
+hint: You can instead skip this commit: run "git rebase --skip".
+hint: To abort and get back to the state before "git rebase", run "git rebase --abort".
+hint: Disable this message with "git config set advice.mergeConflict false"
+Could not apply 0703f4b... # Add polymarket trader configuration

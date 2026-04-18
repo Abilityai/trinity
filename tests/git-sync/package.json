@@ -1,0 +1,16 @@
+{
+  "name": "trinity-tests-git-sync",
+  "private": true,
+  "type": "module",
+  "description": "Vitest harness for Trinity frontend git-sync tests (issues #385, #386).",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/test-utils": "^2.4.6",
+    "happy-dom": "^15.11.7",
+    "vitest": "^2.1.8",
+    "vue": "^3.5.13"
+  }
+}
