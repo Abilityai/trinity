@@ -220,6 +220,8 @@
     <GitConflictModal
       :show="showConflictModal"
       :conflict="gitConflict"
+      :is-parallel-history="isParallelHistory"
+      :pull-branch="pullBranch"
       @resolve="resolveConflict"
       @dismiss="dismissConflict"
     />
@@ -357,6 +359,9 @@ const {
   gitBehind,
   gitConflict,
   showConflictModal,
+  // S2 (issue #385) parallel-history detection
+  isParallelHistory,
+  pullBranch,
   refreshGitStatus,
   syncToGithub,
   pullFromGithub,

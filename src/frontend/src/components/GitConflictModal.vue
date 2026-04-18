@@ -1,5 +1,5 @@
 <template>
-  <div v-if="show" class="fixed z-50 inset-0 overflow-y-auto">
+  <div v-if="show && !isParallelHistory" class="fixed z-50 inset-0 overflow-y-auto">
     <div class="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:p-0">
       <!-- Backdrop -->
       <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity" @click="$emit('dismiss')"></div>
@@ -114,6 +114,85 @@
       </div>
     </div>
   </div>
+  <!-- S2 (issue #385): parallel-history variant. Rendered when the agent's
+       branch and origin/<pull_branch> share no recent common ancestor AND
+       behind > 0 — neither Pull First nor Force Push recovers. -->
+  <div v-if="show && isParallelHistory" class="fixed z-50 inset-0 overflow-y-auto">
+    <div class="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:p-0">
+      <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity" @click="$emit('dismiss')"></div>
+
+      <div class="inline-block align-middle bg-white dark:bg-gray-800 rounded-lg text-left shadow-xl transform transition-all sm:max-w-lg sm:w-full">
+        <div class="px-4 pt-5 pb-4 sm:p-6">
+          <div class="flex items-start">
+            <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30">
+              <svg class="h-6 w-6 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <div class="ml-4 flex-1">
+              <h3 class="text-lg font-medium text-gray-900 dark:text-white">
+                Your agent cannot sync
+              </h3>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Your agent's branch and <code class="font-mono text-xs">{{ pullBranchLabel }}</code> have diverged —
+                each side has commits the other doesn't. Pull First and Force Push would both lose data.
+              </p>
+              <p v-if="divergenceSummary" class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                {{ divergenceSummary }}
+              </p>
+            </div>
+          </div>
+
+          <div class="mt-6 space-y-3">
+            <button
+              @click="$emit('resolve', 'adopt_upstream_preserve_state')"
+              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-blue-500 dark:hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors group"
+            >
+              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 group-hover:bg-blue-200 dark:group-hover:bg-blue-900/50">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+              </div>
+              <div class="ml-4 text-left">
+                <p class="text-sm font-medium text-gray-900 dark:text-white">Adopt latest upstream (preserve my state)</p>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Reset the agent's source files to <code class="font-mono">{{ pullBranchLabel }}</code> while keeping
+                  its workspace / persistent state intact. Recommended.
+                </p>
+              </div>
+            </button>
+
+            <button
+              @click="$emit('resolve', 'force_push')"
+              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-red-500 dark:hover:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors group"
+            >
+              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 group-hover:bg-red-200 dark:group-hover:bg-red-900/50">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                </svg>
+              </div>
+              <div class="ml-4 text-left">
+                <p class="text-sm font-medium text-gray-900 dark:text-white">Force push anyway</p>
+                <p class="text-xs text-red-600 dark:text-red-400 mt-0.5">
+                  Overwrites the remote working branch with your local history. Does NOT bring in
+                  {{ pullBranchLabel }}'s commits. Destructive.
+                </p>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <div class="bg-gray-50 dark:bg-gray-700/50 px-4 py-3 sm:px-6 flex justify-end">
+          <button
+            @click="$emit('dismiss')"
+            class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -137,6 +216,25 @@ const props = defineProps({
     //                             // WORKING_BRANCH_EXTERNAL_WRITE | UNKNOWN
     //   rawStderr?: string        // full git stderr, rendered inside <details>
     // }
+  },
+  // S2 (issue #385): when true, render the parallel-history variant instead
+  // of the default Pull First / Force Push modal. Read-only flag computed
+  // upstream in useGitSync.js.
+  isParallelHistory: {
+    type: Boolean,
+    default: false
+  },
+  // S2 (issue #385): label of the branch the agent pulls from (e.g. 'main',
+  // 'master', 'trunk'). Avoids hardcoding 'main' in user-facing copy.
+  pullBranch: {
+    type: String,
+    default: ''
+  },
+  // S2 (issue #385): optional human-readable summary like
+  // "main has 3 new commits; your agent has 2 local commits".
+  divergenceSummary: {
+    type: String,
+    default: ''
   }
 })
 
@@ -209,4 +307,5 @@ const copy = computed(() => {
 })
 
 const rawStderr = computed(() => props.conflict?.rawStderr || '')
+const pullBranchLabel = computed(() => props.pullBranch || 'upstream')
 </script>

@@ -31,6 +31,29 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
     return gitStatus.value?.behind || 0
   })
 
+  // S2 (issue #385): the branch name the agent pulls from (e.g. 'main',
+  // 'master', 'trunk'). Surfaced so UI copy stays label-agnostic.
+  const pullBranch = computed(() => {
+    return gitStatus.value?.pull_branch || gitStatus.value?.branch || ''
+  })
+
+  // S2 (issue #385): parallel-history predicate. When the agent's working
+  // branch and origin/<pull_branch> share no recent common ancestor AND the
+  // agent is behind, both 'Pull First' and 'Force Push' are wrong answers.
+  // The frontend uses this flag to render a different modal variant.
+  const PARALLEL_HISTORY_STALE_DAYS = 30
+  const isParallelHistory = computed(() => {
+    const s = gitStatus.value
+    if (!s) return false
+    const behind = s.behind || 0
+    if (behind <= 0) return false
+    const ancestorSha = s.common_ancestor_sha
+    const ancestorAge = s.common_ancestor_age_days
+    const noAncestor = !ancestorSha
+    const staleAncestor = typeof ancestorAge === 'number' && ancestorAge >= PARALLEL_HISTORY_STALE_DAYS
+    return noAncestor || staleAncestor
+  })
+
   const loadGitStatus = async () => {
     if (!agentRef.value || agentRef.value.status !== 'running' || !hasGitSync.value) return
     gitLoading.value = true
@@ -155,10 +178,56 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
     showConflictModal.value = false
     const conflictType = gitConflict.value?.type
 
+    // S2 (issue #385): parallel-history recovery dispatches to the S3
+    // endpoint (issue #384). The endpoint may 404 until #384 lands — the
+    // error surface is the same as any other failed pull/sync.
+    if (strategy === 'adopt_upstream_preserve_state') {
+      await adoptUpstreamPreserveState()
+      return
+    }
+
     if (conflictType === 'pull') {
       await pullFromGithub(strategy)
     } else if (conflictType === 'sync') {
       await syncToGithub(strategy)
+    }
+  }
+
+  /**
+   * Call the S3 endpoint (issue #384, blocking) to adopt upstream source
+   * while preserving persistent workspace state. Intended recovery path
+   * when parallel-history is detected.
+   */
+  const adoptUpstreamPreserveState = async () => {
+    if (!agentRef.value) return
+    const agentName = agentRef.value.name
+    try {
+      const result = await agentsStore.adoptUpstreamPreserveState?.(agentName)
+      if (result?.success) {
+        showNotification(result.message || 'Adopted latest upstream', 'success')
+      } else if (result) {
+        showNotification(result.message || 'Adopt upstream failed', 'error')
+      } else {
+        // Store method not yet wired (waiting on #384). Surface a clear
+        // not-implemented error instead of a silent no-op.
+        showNotification(
+          'Adopt-upstream action requires backend endpoint from issue #384 (not yet available).',
+          'error'
+        )
+      }
+      await loadGitStatus()
+    } catch (err) {
+      console.error('Adopt upstream failed:', err)
+      const status = err.response?.status
+      const message = err.response?.data?.detail || err.message || 'Failed to adopt upstream'
+      if (status === 404) {
+        showNotification(
+          'Adopt-upstream endpoint not available yet (blocked on issue #384).',
+          'error'
+        )
+      } else {
+        showNotification(message, 'error')
+      }
     }
   }
 
@@ -201,6 +270,9 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
     gitHasChanges,
     gitChangesCount,
     gitBehind,
+    // S2 (issue #385) parallel-history detection
+    pullBranch,
+    isParallelHistory,
     // Conflict state
     gitConflict,
     showConflictModal,
