@@ -7,6 +7,7 @@ Provides API endpoints for:
 - Viewing commit history
 - Pulling from GitHub
 """
+import logging
 from typing import Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -15,6 +16,8 @@ from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName
 from services import git_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["git"])
 
@@ -349,47 +352,66 @@ async def initialize_github_sync(
                     detail=f"Repository '{repo_full_name}' does not exist. Set create_repo=true to create it, or use an existing repository."
                 )
 
-        # Step 2: Initialize git in container (using git_service)
-        init_result = await git_service.initialize_git_in_container(
+        # Step 2: Reserve the working branch BEFORE touching the container.
+        # S7 Layer 0 (#382): goes through the single-entry helper so the
+        # remote probe + DB insert under the partial UNIQUE index happen
+        # atomically. If anything in the rest of this handler fails we
+        # roll the DB row back below so retries can claim a fresh branch.
+        instance_id, reserved_branch = await git_service.reserve_and_generate_instance_id(
             agent_name=agent_name,
             github_repo=repo_full_name,
-            github_pat=github_pat
         )
 
-        if not init_result.success:
-            # Determine if this is a user error (400) or server error (500)
-            error_msg = init_result.error or "Unknown error"
-            # Repository not found during push = user configuration error
-            if "Repository not found" in error_msg or "not found" in error_msg.lower():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Git initialization failed: {error_msg}. Verify the repository exists and you have push access."
-                )
-            # Permission issues = user error
-            if "permission" in error_msg.lower() or "403" in error_msg:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Git initialization failed: {error_msg}. Check that your GitHub PAT has push access to this repository."
-                )
-            # Other errors could still be server issues
-            raise HTTPException(
-                status_code=400,
-                detail=f"Git initialization failed: {error_msg}"
+        try:
+            # Step 3: Initialize git in container using the reserved branch.
+            # `create_working_branch=False` tells the helper not to generate
+            # its own ID — the caller owns the reservation now (S7 Layer 0).
+            init_result = await git_service.initialize_git_in_container(
+                agent_name=agent_name,
+                github_repo=repo_full_name,
+                github_pat=github_pat,
+                create_working_branch=False,
+                working_branch=reserved_branch,
             )
 
-        # Step 3: Store configuration in database
-        instance_id = git_service.generate_instance_id()
-        config = await git_service.create_git_config_for_agent(
-            agent_name=agent_name,
-            github_repo=repo_full_name,
-            instance_id=instance_id
-        )
+            if not init_result.success:
+                # Determine if this is a user error (400) or server error (500)
+                error_msg = init_result.error or "Unknown error"
+                # Repository not found during push = user configuration error
+                if "Repository not found" in error_msg or "not found" in error_msg.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Git initialization failed: {error_msg}. Verify the repository exists and you have push access."
+                    )
+                # Permission issues = user error
+                if "permission" in error_msg.lower() or "403" in error_msg:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Git initialization failed: {error_msg}. Check that your GitHub PAT has push access to this repository."
+                    )
+                # Other errors could still be server issues
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Git initialization failed: {error_msg}"
+                )
+        except Exception:
+            # Release the reservation so a retry can grab a fresh branch.
+            try:
+                db.delete_git_config(agent_name)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Failed to roll back agent_git_config for %s after init "
+                    "failure: %s",
+                    agent_name,
+                    cleanup_exc,
+                )
+            raise
 
         return {
             "success": True,
             "message": "GitHub sync initialized successfully",
             "github_repo": repo_full_name,
-            "working_branch": init_result.working_branch,
+            "working_branch": reserved_branch,
             "instance_id": instance_id,
             "repo_url": f"https://github.com/{repo_full_name}"
         }

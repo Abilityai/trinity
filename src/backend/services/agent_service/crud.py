@@ -221,9 +221,22 @@ async def create_agent_internal(
                 # Log but don't block creation for transient network errors
                 logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
 
-            # Generate git sync instance ID and branch for Phase 7
-            git_instance_id = git_service.generate_instance_id()
-            git_working_branch = git_service.generate_working_branch(config.name, git_instance_id)
+            # Generate git sync instance ID and branch for Phase 7.
+            # S7 Layer 0 (#382): reserve the working branch atomically —
+            # probes the remote with `git ls-remote` and inserts the DB
+            # row under the partial UNIQUE index so no two agents can end
+            # up bound to the same (repo, branch). The row is written
+            # here, before the container is created, so it must be rolled
+            # back if anything in the rest of the flow fails (see the
+            # `try: ... except: db.delete_git_config(...)` block below).
+            git_instance_id, git_working_branch = (
+                await git_service.reserve_and_generate_instance_id(
+                    agent_name=config.name,
+                    github_repo=github_repo_for_agent,
+                    source_branch=config.source_branch or "main",
+                    source_mode=config.source_mode,
+                )
+            )
         elif config.template.startswith("local:"):
             # Local template - strip "local:" prefix
             template_name = config.template[6:]  # Remove "local:" prefix
@@ -607,21 +620,11 @@ async def create_agent_internal(
             except Exception as e:
                 logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
 
-            # Phase 7: Create git config for GitHub-native agents
-            if github_repo_for_agent:
-                try:
-                    # In source mode, working_branch = source_branch (no separate working branch)
-                    effective_working_branch = config.source_branch if config.source_mode else git_working_branch
-                    db.create_git_config(
-                        agent_name=config.name,
-                        github_repo=github_repo_for_agent,
-                        working_branch=effective_working_branch,
-                        instance_id=git_instance_id,
-                        source_branch=config.source_branch or "main",
-                        source_mode=config.source_mode
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to create git config for {config.name}: {e}")
+            # Phase 7: git config was already reserved and persisted via
+            # `reserve_and_generate_instance_id` earlier in this function
+            # (S7 Layer 0). No second db.create_git_config call here — that
+            # would either be a no-op (agent_name UNIQUE) or, worse, mask
+            # a Layer 2 conflict.
 
             # S4 (#383): Materialize persistent-state allowlist into the agent.
             # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
@@ -645,6 +648,19 @@ async def create_agent_internal(
 
             return agent_status
         except Exception as e:
+            # S7 Layer 0 (#382): if anything after the reservation fails,
+            # roll back the agent_git_config row so the working branch is
+            # released and a retry can claim it fresh.
+            if github_repo_for_agent and git_instance_id:
+                try:
+                    db.delete_git_config(config.name)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to roll back agent_git_config for %s after "
+                        "creation failure: %s",
+                        config.name,
+                        cleanup_exc,
+                    )
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
