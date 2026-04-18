@@ -16,7 +16,7 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
   let gitStatusInterval = null
 
   // Conflict state
-  const gitConflict = ref(null) // { type: 'pull'|'sync', conflictType: string, message: string }
+  const gitConflict = ref(null) // { type: 'pull'|'sync', conflictType: string, message: string, conflictClass?: string, rawStderr?: string }
   const showConflictModal = ref(false)
 
   const gitHasChanges = computed(() => {
@@ -80,11 +80,18 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
       const message = err.response?.data?.detail || 'Failed to sync to GitHub'
 
       if (status === 409 && conflictType) {
-        // Conflict detected - show modal with options
+        // Conflict detected - show modal with options.
+        // S5 (issue #386): surface the operator-readable classification and
+        // the raw stderr so GitConflictModal can render per-class copy with
+        // a developer-facing <details> fallback.
+        const conflictClass = err.response?.headers?.['x-conflict-class'] || null
+        const rawStderr = err.response?.data?.detail || ''
         gitConflict.value = {
           type: 'sync',
           conflictType,
-          message
+          message,
+          conflictClass,
+          rawStderr
         }
         showConflictModal.value = true
       } else {
@@ -120,11 +127,16 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
       const message = err.response?.data?.detail || 'Failed to pull from GitHub'
 
       if (status === 409 && conflictType) {
-        // Conflict detected - show modal with options
+        // Conflict detected - show modal with options.
+        // S5 (issue #386): see sync branch above for conflictClass/rawStderr.
+        const conflictClass = err.response?.headers?.['x-conflict-class'] || null
+        const rawStderr = err.response?.data?.detail || ''
         gitConflict.value = {
           type: 'pull',
           conflictType,
-          message
+          message,
+          conflictClass,
+          rawStderr
         }
         showConflictModal.value = true
       } else {

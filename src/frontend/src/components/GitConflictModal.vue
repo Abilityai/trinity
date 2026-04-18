@@ -15,14 +15,25 @@
               </svg>
             </div>
             <div class="ml-4 flex-1">
-              <h3 class="text-lg font-medium text-gray-900 dark:text-white">
-                {{ isPull ? 'Pull Conflict' : 'Push Conflict' }}
+              <h3 class="text-lg font-medium text-gray-900 dark:text-white" data-testid="gcm-title">
+                {{ copy.title }}
               </h3>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                {{ conflict?.message || 'A conflict was detected. Choose how to proceed:' }}
+              <!-- Plain-English body (bullets of what's true) -->
+              <ul v-if="copy.body.length" class="mt-2 text-sm text-gray-600 dark:text-gray-300 list-disc list-inside space-y-1" data-testid="gcm-body">
+                <li v-for="(line, i) in copy.body" :key="i">{{ line }}</li>
+              </ul>
+              <!-- Recommendation: single-sentence suggested action -->
+              <p class="mt-2 text-sm font-medium text-gray-900 dark:text-white" data-testid="gcm-recommendation">
+                {{ copy.recommendation }}
               </p>
             </div>
           </div>
+
+          <!-- Developer-facing raw git output (S5 / issue #386). -->
+          <details v-if="rawStderr" class="mt-4 text-xs text-gray-600 dark:text-gray-400" data-testid="gcm-details">
+            <summary class="cursor-pointer select-none">Git details (for developers)</summary>
+            <pre class="mt-2 whitespace-pre-wrap bg-gray-50 dark:bg-gray-900/40 rounded p-2 overflow-auto max-h-60" data-testid="gcm-raw-stderr">{{ rawStderr }}</pre>
+          </details>
 
           <!-- Options for Pull conflicts -->
           <div v-if="isPull" class="mt-6 space-y-3">
@@ -116,11 +127,86 @@ const props = defineProps({
   conflict: {
     type: Object,
     default: null
-    // { type: 'pull'|'sync', conflictType: string, message: string }
+    // {
+    //   type: 'pull'|'sync',
+    //   conflictType: string,
+    //   message: string,
+    //   // S5 (issue #386):
+    //   conflictClass?: string,   // AHEAD_ONLY | BEHIND_ONLY | PARALLEL_HISTORY |
+    //                             // UNCOMMITTED_LOCAL | AUTH_FAILURE |
+    //                             // WORKING_BRANCH_EXTERNAL_WRITE | UNKNOWN
+    //   rawStderr?: string        // full git stderr, rendered inside <details>
+    // }
   }
 })
 
 defineEmits(['resolve', 'dismiss'])
 
 const isPull = computed(() => props.conflict?.type === 'pull')
+
+// S5 (issue #386) — operator-readable copy keyed on conflictClass.
+// Keep one place for copy so title/body/recommendation stay aligned.
+// Fallback entries preserve the pre-S5 strings verbatim for unknown classes.
+const COPY = {
+  AHEAD_ONLY: {
+    title: 'You have local changes to push',
+    body: ['Your agent has changes that are not yet on the remote.', 'The remote has not moved since your last sync.'],
+    recommendation: 'Push your changes to share them with the team.'
+  },
+  BEHIND_ONLY: {
+    title: 'The remote has new changes',
+    body: ['The remote branch has commits your agent does not have yet.', 'You have no unpushed local changes.'],
+    recommendation: 'Pull the latest changes to catch up.'
+  },
+  PARALLEL_HISTORY: {
+    title: 'Your agent and main have diverged',
+    body: [
+      'Main has been rewritten since your agent forked from it.',
+      'A normal pull cannot replay your changes on top of the new main.',
+      'A force push would silently hide the improved main from your agent.'
+    ],
+    recommendation: 'Use "Adopt latest upstream" (blocked on #384) to re-fork from main while keeping your workspace state.'
+  },
+  UNCOMMITTED_LOCAL: {
+    title: 'Uncommitted local changes are blocking the sync',
+    body: ['Git refuses to pull because your workspace has uncommitted edits that would be overwritten.'],
+    recommendation: 'Use "Stash & Reapply" to save your edits, pull the remote, then reapply them.'
+  },
+  AUTH_FAILURE: {
+    title: 'Git could not authenticate with the remote',
+    body: ['The remote rejected the credentials git sent.', 'This is usually an expired or missing GitHub PAT.'],
+    recommendation: 'Update the agent\u2019s GitHub PAT on the Credentials tab and retry.'
+  },
+  WORKING_BRANCH_EXTERNAL_WRITE: {
+    title: 'Another process wrote to this working branch',
+    body: [
+      'The remote working branch moved between when your agent read it and when it tried to push.',
+      'This usually means a second agent or operator just pushed to the same branch.'
+    ],
+    recommendation: 'Refresh git status and decide whether to adopt the other side\u2019s work or overwrite it.'
+  },
+  UNKNOWN: {
+    title: 'Your agent cannot sync',
+    body: ['Git returned an error that Trinity does not yet classify.'],
+    recommendation: 'Expand "Git details" below and share the output with whoever set up the agent.'
+  }
+}
+
+const FALLBACK_TITLE = (isPull) => (isPull ? 'Pull Conflict' : 'Push Conflict')
+
+const copy = computed(() => {
+  const cls = props.conflict?.conflictClass
+  if (cls && COPY[cls]) {
+    return COPY[cls]
+  }
+  // Pre-S5 behavior when the backend did not send a class — keeps existing
+  // agent images working without a forced upgrade.
+  return {
+    title: FALLBACK_TITLE(isPull.value),
+    body: [],
+    recommendation: props.conflict?.message || 'A conflict was detected. Choose how to proceed:'
+  }
+})
+
+const rawStderr = computed(() => props.conflict?.rawStderr || '')
 </script>
