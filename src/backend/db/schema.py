@@ -749,6 +749,13 @@ INDEXES = [
     # Git config indexes
     "CREATE INDEX IF NOT EXISTS idx_git_config_agent ON agent_git_config(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_git_config_repo ON agent_git_config(github_repo)",
+    # S7 Layer 2: a working branch may only be bound to one agent within a
+    # given repo. Source-mode agents intentionally share a branch (e.g. every
+    # reader points at `main`) so the index is partial and excludes them.
+    # See src/backend/db/migrations.py::_migrate_agent_git_config_branch_ownership
+    # for the operator-assisted migration path on existing databases.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_git_config_repo_branch_unique "
+    "ON agent_git_config(github_repo, working_branch) WHERE source_mode = 0",
 
     # Chat session indexes
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_agent ON chat_sessions(agent_name)",

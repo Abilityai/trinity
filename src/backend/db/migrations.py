@@ -1408,6 +1408,109 @@ def _migrate_proactive_messaging(cursor, conn):
     conn.commit()
 
 
+def _find_duplicate_working_branches(cursor):
+    """Return groups of (github_repo, working_branch) pairs bound to >1 agent
+    with source_mode=0.
+
+    S7 Layer 2 pre-flight. Duplicates here are the exact bug the 2026-04-17
+    alpaca incident was caused by, and they block the UNIQUE index from
+    being created on an existing database. The migration surfaces them so
+    an operator can rebind the losing agent to a fresh working branch
+    before re-running.
+
+    Returns:
+        List of dicts: ``{github_repo, working_branch, agent_names}``.
+        Empty list if no duplicates.
+    """
+    cursor.execute(
+        """
+        SELECT github_repo, working_branch, GROUP_CONCAT(agent_name, ',') AS agents,
+               COUNT(*) AS n
+        FROM agent_git_config
+        WHERE source_mode = 0
+        GROUP BY github_repo, working_branch
+        HAVING n > 1
+        ORDER BY github_repo, working_branch
+        """
+    )
+    rows = cursor.fetchall()
+
+    duplicates = []
+    for row in rows:
+        github_repo = row[0] if not hasattr(row, "keys") else row["github_repo"]
+        working_branch = row[1] if not hasattr(row, "keys") else row["working_branch"]
+        agents_csv = row[2] if not hasattr(row, "keys") else row["agents"]
+        agent_names = sorted(agents_csv.split(",")) if agents_csv else []
+        duplicates.append(
+            {
+                "github_repo": github_repo,
+                "working_branch": working_branch,
+                "agent_names": agent_names,
+            }
+        )
+    return duplicates
+
+
+def _migrate_agent_git_config_branch_ownership(cursor, conn):
+    """Add partial UNIQUE index to agent_git_config enforcing branch ownership (S7 Layer 2 / #382).
+
+    Enforces ``UNIQUE(github_repo, working_branch) WHERE source_mode = 0``,
+    which makes it impossible for two working-branch agents to be bound to
+    the same (repo, branch) pair. Source-mode agents intentionally share
+    branches (e.g. every reader pointing at ``main``) and are excluded from
+    the constraint.
+
+    Pre-flight: if the database already contains duplicate bindings (e.g.
+    from the 2026-04-17 alpaca incident), the migration refuses to create
+    the index and raises with an actionable error that names every
+    offending row. The operator must rebind duplicates to fresh working
+    branches (via the UI / MCP ``initialize_github_sync`` flow) before
+    re-running. We never auto-delete rows — that would mask the bug.
+    """
+    # Idempotency: skip if the index is already present.
+    cursor.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='index' AND name='idx_git_config_repo_branch_unique'"
+    )
+    if cursor.fetchone():
+        return
+
+    duplicates = _find_duplicate_working_branches(cursor)
+    if duplicates:
+        report_lines = [
+            "Cannot enforce S7 branch-ownership UNIQUE index — "
+            "found existing duplicate bindings:",
+        ]
+        for group in duplicates:
+            report_lines.append(
+                f"  - repo={group['github_repo']!r} "
+                f"branch={group['working_branch']!r} "
+                f"agents={group['agent_names']}"
+            )
+            # Also log each individual agent name so tests / log search
+            # can find them easily.
+            for agent in group["agent_names"]:
+                report_lines.append(f"      offending agent: {agent}")
+        report_lines.append(
+            "Resolve by assigning a fresh working branch to all but one "
+            "agent in each group (see docs/memory/feature-flows/ "
+            "github-sync.md), then re-run the migration."
+        )
+        message = "\n".join(report_lines)
+        # Print so the operator sees it even if logging is suppressed.
+        print(message)
+        logger.error(message)
+        raise RuntimeError(message)
+
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_git_config_repo_branch_unique "
+        "ON agent_git_config(github_repo, working_branch) WHERE source_mode = 0"
+    )
+    conn.commit()
+    print("Created S7 partial UNIQUE index idx_git_config_repo_branch_unique "
+          "on agent_git_config(github_repo, working_branch) WHERE source_mode = 0")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1456,4 +1559,5 @@ MIGRATIONS = [
     ("agent_ownership_guardrails", _migrate_agent_ownership_guardrails),
     ("agent_git_config_pat", _migrate_agent_git_config_pat),
     ("proactive_messaging", _migrate_proactive_messaging),
+    ("agent_git_config_branch_ownership", _migrate_agent_git_config_branch_ownership),
 ]
