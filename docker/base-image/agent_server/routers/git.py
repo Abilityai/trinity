@@ -7,13 +7,15 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..models import GitSyncRequest, GitPullRequest
 from ..utils.git_conflict import classify_conflict
+from .files import _read_persistent_state
+from .snapshot import build_snapshot, restore_from_tar
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -960,3 +962,143 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
     except Exception as e:
         logger.error(f"Git pull error: {e}")
         raise HTTPException(status_code=500, detail=f"Git pull error: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Reset-preserve-state (S3, #384)
+# ---------------------------------------------------------------------------
+
+
+def _git(args: list[str], cwd: Path, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def reset_to_main_preserve_state_impl(
+    home_dir: Path,
+    read_allowlist: Callable[[], list[str]] = _read_persistent_state,
+    skip_push: bool = False,
+) -> dict:
+    """Adopt origin/main as the new baseline, preserving allowlisted files.
+
+    The safe-recovery primitive for the parallel-history deadlock (P2/P3
+    in the git-improvements proposal). Composes three steps:
+
+    1. Read the persistent-state allowlist (#383 / S4).
+    2. Snapshot matching files to `.trinity/backup/<iso-ts>/` so the
+       destructive reset is always recoverable from inside the container.
+    3. `git reset --hard origin/main`, overlay the snapshot, commit with
+       the spec's exact message, and `git push --force-with-lease`.
+
+    `skip_push=True` is used by tests so the full sequence can be
+    verified without needing a writable remote.
+    """
+    if not (home_dir / ".git").exists():
+        return {"error": "no_git_config"}
+    if _git(["remote", "get-url", "origin"], home_dir).returncode != 0:
+        return {"error": "no_git_config"}
+
+    _git(["fetch", "origin", "main"], home_dir, timeout=120)
+    if _git(["rev-parse", "--verify", "origin/main"], home_dir).returncode != 0:
+        return {"error": "no_remote_main"}
+
+    current = _git(["rev-parse", "--abbrev-ref", "HEAD"], home_dir)
+    if current.returncode != 0:
+        return {"error": "no_git_config"}
+    working_branch = current.stdout.strip()
+
+    patterns = read_allowlist()
+    iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    backup_rel = Path(".trinity/backup") / iso
+    backup_dir = home_dir / backup_rel
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    tar_bytes, files_preserved = build_snapshot(home_dir, patterns)
+    (backup_dir / "snapshot.tar").write_bytes(tar_bytes)
+    (backup_dir / "files.txt").write_text("\n".join(files_preserved) + "\n")
+
+    reset_res = _git(["reset", "--hard", "origin/main"], home_dir)
+    if reset_res.returncode != 0:
+        return {"error": "reset_failed", "stderr": reset_res.stderr}
+
+    restored, _skipped = restore_from_tar(home_dir, tar_bytes, patterns)
+
+    _git(["add", "-A"], home_dir)
+    commit_res = _git(
+        ["commit", "-m", "Adopt main baseline, preserve state", "--allow-empty"],
+        home_dir,
+    )
+    if commit_res.returncode != 0:
+        return {"error": "commit_failed", "stderr": commit_res.stderr}
+
+    commit_sha = _git(["rev-parse", "HEAD"], home_dir).stdout.strip()
+
+    if not skip_push:
+        push_res = _git(
+            [
+                "push",
+                "--force-with-lease",
+                "origin",
+                f"HEAD:{working_branch}",
+            ],
+            home_dir,
+            timeout=120,
+        )
+        if push_res.returncode != 0:
+            return {
+                "error": "push_failed",
+                "stderr": push_res.stderr,
+                "commit_sha": commit_sha,
+            }
+
+    return {
+        "snapshot_dir": str(backup_rel) + "/",
+        "files_preserved": restored,
+        "commit_sha": commit_sha,
+        "working_branch": working_branch,
+    }
+
+
+@router.post("/api/git/reset-to-main-preserve-state")
+async def reset_to_main_preserve_state():
+    """Adopt origin/main as the baseline, preserving allowlisted files (S3, #384).
+
+    The sync-time counterpart to the persistent-state allowlist (#383).
+    Snapshots every file matching the allowlist to `.trinity/backup/<ts>/`
+    before running `git reset --hard origin/main`, then overlays the
+    snapshot back, commits `Adopt main baseline, preserve state`, and
+    pushes with `--force-with-lease`.
+
+    Backend must verify the agent is not running a task before calling this
+    endpoint; the check lives there because this server has no view of the
+    activity service.
+    """
+    home_dir = Path("/home/developer")
+    try:
+        result = reset_to_main_preserve_state_impl(home_dir)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Git operation timed out")
+
+    err = result.get("error")
+    if err == "no_git_config":
+        raise HTTPException(
+            status_code=409,
+            detail="Agent has no git configuration",
+            headers={"X-Conflict-Type": "no_git_config"},
+        )
+    if err == "no_remote_main":
+        raise HTTPException(
+            status_code=409,
+            detail="Remote origin has no main branch",
+            headers={"X-Conflict-Type": "no_remote_main"},
+        )
+    if err:
+        stderr = result.get("stderr", "")
+        detail = f"{err}: {stderr[:500]}" if stderr else err
+        raise HTTPException(status_code=500, detail=detail)
+    return result
