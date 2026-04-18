@@ -5,13 +5,67 @@ import subprocess
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 
 from ..models import GitSyncRequest, GitPullRequest
+from ..utils.git_conflict import classify_conflict
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _compute_ahead_behind(home_dir: Path, branch: str) -> tuple:
+    """Best-effort ahead/behind counts vs origin/<branch>.
+
+    Returns ``(0, 0)`` on any failure — the classifier only uses these to pick
+    AHEAD_ONLY vs BEHIND_ONLY when stderr is empty, and every real 409 path
+    here has non-empty stderr, so a failure to resolve counts is harmless.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", f"origin/{branch}...HEAD"],
+            capture_output=True, text=True, cwd=str(home_dir), timeout=10
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                return int(parts[1]), int(parts[0])  # (ahead, behind)
+    except Exception:  # best-effort diagnostic only
+        pass
+    return 0, 0
+
+
+def _conflict_response(
+    *,
+    status_code: int,
+    detail: str,
+    conflict_type: str,
+    stderr: str,
+    home_dir: Path,
+    branch: Optional[str],
+) -> JSONResponse:
+    """Build a 409 ``JSONResponse`` that carries both the legacy ``detail`` and
+    the new ``conflict_class`` classification (issue #386 / S5).
+
+    Keeps the ``X-Conflict-Type`` header intact for backward compatibility
+    with older clients; adds ``X-Conflict-Class`` alongside it.
+    """
+    ahead, behind = _compute_ahead_behind(home_dir, branch) if branch else (0, 0)
+    conflict_class = classify_conflict(stderr or "", ahead=ahead, behind=behind).value
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": detail,
+            "conflict_class": conflict_class,
+        },
+        headers={
+            "X-Conflict-Type": conflict_type,
+            "X-Conflict-Class": conflict_class,
+        },
+    )
 
 
 def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
@@ -253,10 +307,13 @@ async def sync_to_github(request: GitSyncRequest):
                     subprocess.run(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
                     if stash_created:
                         subprocess.run(["git", "stash", "pop"], cwd=str(home_dir), timeout=30, capture_output=True)
-                    raise HTTPException(
+                    return _conflict_response(
                         status_code=409,
                         detail=f"Pull failed during sync: {pull_result.stderr}",
-                        headers={"X-Conflict-Type": "merge_conflict"}
+                        conflict_type="merge_conflict",
+                        stderr=pull_result.stderr or "",
+                        home_dir=home_dir,
+                        branch=pull_branch,
                     )
 
                 # Reapply stash
@@ -385,10 +442,13 @@ async def sync_to_github(request: GitSyncRequest):
                     }
                 # Check if it's a rejection due to remote changes
                 if "rejected" in stderr_lower or "fetch first" in stderr_lower or "non-fast-forward" in stderr_lower:
-                    raise HTTPException(
+                    return _conflict_response(
                         status_code=409,
                         detail="Push rejected: Remote has changes. Use 'Pull First' or 'Force Push' strategy.",
-                        headers={"X-Conflict-Type": "push_rejected"}
+                        conflict_type="push_rejected",
+                        stderr=stderr,
+                        home_dir=home_dir,
+                        branch=current_branch,
                     )
                 else:
                     raise HTTPException(status_code=500, detail=f"Git push failed: {stderr}")
@@ -557,10 +617,13 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
                     timeout=30
                 )
                 if stash_result.returncode != 0:
-                    raise HTTPException(
+                    return _conflict_response(
                         status_code=409,
                         detail=f"Failed to stash local changes: {stash_result.stderr}",
-                        headers={"X-Conflict-Type": "stash_failed"}
+                        conflict_type="stash_failed",
+                        stderr=stash_result.stderr or "",
+                        home_dir=home_dir,
+                        branch=pull_branch,
                     )
                 stash_created = "No local changes" not in stash_result.stdout
 
@@ -581,10 +644,13 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
                 if stash_created:
                     subprocess.run(["git", "stash", "pop"], cwd=str(home_dir), timeout=30, capture_output=True)
 
-                raise HTTPException(
+                return _conflict_response(
                     status_code=409,
                     detail=f"Pull failed with conflicts: {pull_result.stderr}",
-                    headers={"X-Conflict-Type": "merge_conflict"}
+                    conflict_type="merge_conflict",
+                    stderr=pull_result.stderr or "",
+                    home_dir=home_dir,
+                    branch=pull_branch,
                 )
 
             # Reapply stash if we created one
@@ -644,10 +710,13 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
                 conflict_type = "local_uncommitted" if has_local_changes else "merge_conflict"
                 error_detail = pull_result.stderr.strip()
 
-                raise HTTPException(
+                return _conflict_response(
                     status_code=409,
                     detail=f"Pull failed: {error_detail}",
-                    headers={"X-Conflict-Type": conflict_type}
+                    conflict_type=conflict_type,
+                    stderr=pull_result.stderr or "",
+                    home_dir=home_dir,
+                    branch=pull_branch,
                 )
 
             return {
