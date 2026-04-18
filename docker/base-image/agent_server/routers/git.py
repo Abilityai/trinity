@@ -969,7 +969,9 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
 # ---------------------------------------------------------------------------
 
 
-def _git(args: list[str], cwd: Path, timeout: int = 60) -> subprocess.CompletedProcess:
+def _git(
+    args: list[str], cwd: Path, timeout: int = 60
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd),
@@ -983,7 +985,7 @@ def reset_to_main_preserve_state_impl(
     home_dir: Path,
     read_allowlist: Callable[[], list[str]] = _read_persistent_state,
     skip_push: bool = False,
-) -> dict:
+) -> dict[str, object]:
     """Adopt origin/main as the new baseline, preserving allowlisted files.
 
     The safe-recovery primitive for the parallel-history deadlock (P2/P3
