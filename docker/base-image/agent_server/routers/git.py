@@ -3,7 +3,7 @@ Git sync endpoints for GitHub bidirectional sync.
 """
 import subprocess
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -176,6 +176,43 @@ async def get_git_status():
                 behind = int(parts[0])
                 ahead = int(parts[1])
 
+        # Parallel-history detection (S2, issue #385): surface the common
+        # ancestor between HEAD and origin/<pull_branch> so the frontend can
+        # distinguish "simple behind" from "parallel history" (where both
+        # Pull First and Force Push are wrong answers).
+        common_ancestor_sha = ""
+        common_ancestor_age_days = None
+        merge_base_result = subprocess.run(
+            ["git", "merge-base", "HEAD", f"origin/{pull_branch}"],
+            capture_output=True,
+            text=True,
+            cwd=str(home_dir),
+            timeout=10
+        )
+        if merge_base_result.returncode == 0:
+            common_ancestor_sha = merge_base_result.stdout.strip()
+            if common_ancestor_sha:
+                ancestor_date_result = subprocess.run(
+                    ["git", "log", "-1", "--format=%cI", common_ancestor_sha],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(home_dir),
+                    timeout=10
+                )
+                if ancestor_date_result.returncode == 0:
+                    date_str = ancestor_date_result.stdout.strip()
+                    if date_str:
+                        try:
+                            ancestor_dt = datetime.fromisoformat(date_str)
+                            if ancestor_dt.tzinfo is None:
+                                ancestor_dt = ancestor_dt.replace(tzinfo=timezone.utc)
+                            delta = datetime.now(timezone.utc) - ancestor_dt
+                            common_ancestor_age_days = delta.days
+                        except ValueError:
+                            logger.warning(
+                                f"Could not parse common-ancestor date: {date_str!r}"
+                            )
+
         # Get remote URL (without credentials)
         remote_result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
@@ -196,12 +233,15 @@ async def get_git_status():
         return {
             "git_enabled": True,
             "branch": current_branch,
+            "pull_branch": pull_branch,
             "remote_url": remote_url,
             "last_commit": last_commit,
             "changes": changes,
             "changes_count": len(changes),
             "ahead": ahead,
             "behind": behind,
+            "common_ancestor_sha": common_ancestor_sha,
+            "common_ancestor_age_days": common_ancestor_age_days,
             "sync_status": "up_to_date" if ahead == 0 and len(changes) == 0 else "pending_sync"
         }
 

@@ -1,0 +1,4 @@
+# Vitest install for test_s2_usegitsync.test.js
+node_modules/
+package-lock.json
+__pycache__/
