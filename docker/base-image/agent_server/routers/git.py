@@ -1,8 +1,10 @@
 """
 Git sync endpoints for GitHub bidirectional sync.
 """
+import json
 import subprocess
 import logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -15,6 +17,17 @@ from ..utils.git_conflict import classify_conflict
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# S7 Layer 3 (#382): directory where we persist the last-observed remote
+# SHA per branch. Written after every successful fetch and consumed by the
+# push path as the "expected-sha" argument to `git push --force-with-lease`.
+# Living under ~/.trinity keeps it out of the workspace tree while still
+# surviving container restarts (the home bind mount is persistent).
+LAST_REMOTE_SHA_DIR = Path.home() / ".trinity" / "last-remote-sha"
+
+# File the operator queue sync service reads. We append collision entries
+# here when a push is rejected by the lease.
+OPERATOR_QUEUE_FILE = Path.home() / ".trinity" / "operator-queue.json"
 
 
 def _compute_ahead_behind(home_dir: Path, branch: str) -> tuple:
@@ -82,6 +95,134 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
         capture_output=True, text=True, cwd=str(home_dir), timeout=10
     )
     return "main" if result.returncode == 0 else current_branch
+
+
+def _sha_file_for_branch(branch: str) -> Path:
+    """Path to the last-remote-sha file for a given branch.
+
+    Branches can contain ``/`` (``trinity/<agent>/<id>``) so we mirror the
+    branch layout as nested directories. That keeps the file names readable
+    rather than URL-escaping the slashes.
+    """
+    return LAST_REMOTE_SHA_DIR / branch
+
+
+def _persist_last_remote_sha(branch: str, home_dir: Path) -> None:
+    """Record the remote SHA this instance observed for ``branch`` after fetch.
+
+    S7 Layer 3: the stored value becomes the ``expected-sha`` lease on the
+    next push. If the remote moves out from under us (another instance
+    pushed in the interim) the fetch will update ``origin/<branch>`` to the
+    new SHA but the persisted lease is still the old one — which is exactly
+    what ``--force-with-lease`` is checking, so the collision is caught.
+
+    Failure to persist is logged, never raised: it would turn a minor I/O
+    glitch into a hard sync failure, and the worst case is the next push
+    has no lease and behaves like plain `--force` (one-time regression, not
+    silent corruption).
+    """
+    rev = subprocess.run(
+        ["git", "rev-parse", f"origin/{branch}"],
+        capture_output=True,
+        text=True,
+        cwd=str(home_dir),
+        timeout=10,
+    )
+    if rev.returncode != 0:
+        logger.debug(
+            "No origin/%s ref yet — skipping last-remote-sha persist", branch
+        )
+        return
+
+    sha = rev.stdout.strip()
+    if not sha:
+        return
+
+    try:
+        target = _sha_file_for_branch(branch)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(sha + "\n")
+    except OSError as exc:
+        logger.warning(
+            "Could not persist last-remote-sha for %s: %s", branch, exc
+        )
+
+
+def _read_last_remote_sha(branch: str) -> str | None:
+    """Read the previously persisted remote SHA for ``branch``, if any."""
+    path = _sha_file_for_branch(branch)
+    try:
+        return path.read_text().strip() or None
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Could not read last-remote-sha for %s: %s", branch, exc)
+        return None
+
+
+def _record_push_collision(branch: str, lease_sha: str | None, stderr: str) -> None:
+    """Append a structured alert to ~/.trinity/operator-queue.json.
+
+    S7 Layer 3 surfacing: when ``--force-with-lease`` rejects the push the
+    losing instance now knows it lost, so we write an operator-queue entry
+    that the backend's ``operator_queue_service`` picks up on its next
+    poll. The entry is an ``alert`` (no decision required) — the operator
+    just needs to know another instance is writing to the same branch so
+    they can rebind one of them.
+    """
+    try:
+        OPERATOR_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if OPERATOR_QUEUE_FILE.exists():
+            try:
+                payload = json.loads(OPERATOR_QUEUE_FILE.read_text() or "{}")
+            except json.JSONDecodeError:
+                logger.warning(
+                    "operator-queue.json is malformed; recreating before appending"
+                )
+                payload = {}
+        else:
+            payload = {}
+
+        payload.setdefault("$schema", "operator-queue-v1")
+        requests = payload.setdefault("requests", [])
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        requests.append(
+            {
+                "id": f"git-collision-{uuid.uuid4().hex[:12]}",
+                "type": "alert",
+                "status": "pending",
+                "priority": "high",
+                "title": f"Git push rejected on {branch} — branch binding collision",
+                "question": (
+                    "Another Trinity instance wrote to this working branch since "
+                    "this agent last fetched. The --force-with-lease push was "
+                    "rejected to prevent silent data loss. Rebind one of the "
+                    "agents to a fresh working branch before retrying."
+                ),
+                "options": None,
+                "context": {
+                    "branch": branch,
+                    "expected_sha": lease_sha,
+                    "git_stderr": (stderr or "").strip()[:2000],
+                    "remediation": (
+                        "Assign a fresh working branch to one of the colliding "
+                        "agents (Fleet → Branch Bindings → Assign fresh branch)."
+                    ),
+                },
+                "created_at": now_iso,
+            }
+        )
+
+        OPERATOR_QUEUE_FILE.write_text(json.dumps(payload, indent=2))
+    except Exception as exc:  # pragma: no cover — best-effort surfacing
+        logger.warning("Failed to record push-collision alert: %s", exc)
+
+
+def _is_stale_lease_rejection(stderr: str) -> bool:
+    """Return True if git's stderr indicates a --force-with-lease mismatch."""
+    s = (stderr or "").lower()
+    return "stale info" in s or "stale" in s and "rejected" in s
 
 
 @router.get("/api/git/status")
@@ -157,6 +298,10 @@ async def get_git_status():
             cwd=str(home_dir),
             timeout=30
         )
+        # S7 Layer 3 (#382): snapshot the remote SHA we just observed so
+        # the next push can use it as the --force-with-lease expected-sha.
+        if fetch_result.returncode == 0:
+            _persist_last_remote_sha(current_branch, home_dir)
 
         # For trinity/* working branches, compare against origin/main
         pull_branch = _get_pull_branch(current_branch, home_dir)
@@ -297,6 +442,10 @@ async def sync_to_github(request: GitSyncRequest):
                 cwd=str(home_dir),
                 timeout=60
             )
+            # S7 Layer 3 (#382): snapshot the remote SHA for lease checks
+            # on the upcoming push.
+            if fetch_result.returncode == 0:
+                _persist_last_remote_sha(current_branch, home_dir)
 
             # For trinity/* working branches, pull from main
             pull_branch = _get_pull_branch(current_branch, home_dir)
@@ -435,16 +584,53 @@ async def sync_to_github(request: GitSyncRequest):
 
         # 3. Push to remote based on strategy
         if strategy == "force_push":
-            # Force push (overwrites remote)
+            # S7 Layer 3 (#382): replace plain `git push --force` with
+            # `--force-with-lease=<ref>:<expected-sha>`. If another instance
+            # wrote to the branch since we last fetched, the lease is stale
+            # and the push is rejected cleanly with "stale info" — rather
+            # than silently clobbering the peer's state (2026-04-17
+            # alpaca incident).
+            lease_sha = _read_last_remote_sha(current_branch)
+            push_cmd: list[str] = ["git", "push"]
+            if lease_sha:
+                push_cmd.append(f"--force-with-lease={current_branch}:{lease_sha}")
+            else:
+                # No lease on file (first push, or we couldn't persist one).
+                # Use the unparameterized `--force-with-lease`, which falls
+                # back to remote-tracking-ref as the expected-sha — still
+                # safer than `--force`.
+                push_cmd.append("--force-with-lease")
+            push_cmd += ["origin", current_branch]
+
             push_result = subprocess.run(
-                ["git", "push", "--force"],
+                push_cmd,
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
-                timeout=60
+                timeout=60,
             )
             if push_result.returncode != 0:
-                raise HTTPException(status_code=500, detail=f"Force push failed: {push_result.stderr}")
+                stderr = push_result.stderr or ""
+                if _is_stale_lease_rejection(stderr):
+                    # Surface the collision to the operator queue. The
+                    # losing instance now knows it lost — that's the whole
+                    # point of the lease.
+                    _record_push_collision(current_branch, lease_sha, stderr)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Force-push rejected: another instance has "
+                            "written to this branch since the last fetch. "
+                            "A collision alert was recorded in the operator "
+                            "queue. Rebind one of the agents to a fresh "
+                            "working branch before retrying."
+                        ),
+                        headers={"X-Conflict-Type": "branch_ownership_collision"},
+                    )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Force push failed: {stderr}",
+                )
         else:
             # Normal push or pull_first (after pull, should be safe to push)
             push_result = subprocess.run(
