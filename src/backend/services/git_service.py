@@ -924,9 +924,9 @@ async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
                        "message": "..."}`
     """
     # Imported here (not at module top) so test suites that stub the
-    # activity service via patch.dict("sys.modules", ...) can control the
-    # dependency without triggering docker_service's heavy imports.
-    from services.activity_service import activity_service  # noqa: WPS433
+    # activity service via sys.modules can control the dependency without
+    # triggering docker_service's heavy imports at git_service load time.
+    from services.activity_service import activity_service
 
     current = await activity_service.get_current_activities(agent_name)
     if current:
