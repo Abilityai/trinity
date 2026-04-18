@@ -566,3 +566,50 @@ async def clear_agent_github_pat(
         "agent_name": agent_name,
         "source": "global"
     }
+
+
+# ============================================================================
+# S3 — Reset-to-main-preserve-state (abilityai/trinity#384)
+# ============================================================================
+
+
+@router.post("/{agent_name}/git/reset-to-main-preserve-state")
+async def reset_to_main_preserve_state(
+    agent_name: OwnedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """Adopt `origin/main` as the new baseline, preserving instance state.
+
+    The safe recovery for the parallel-history deadlock (§S3 in the
+    git-improvements proposal). Snapshots the files matching the
+    persistent-state allowlist (§S4) to `.trinity/backup/<ts>/`, hard-
+    resets to `origin/main`, overlays the snapshot back, commits `Adopt
+    main baseline, preserve state`, and pushes with `--force-with-lease`.
+
+    Guardrails (409):
+    - `agent_busy` — the agent is currently executing a task.
+    - `no_git_config` — the agent has no `.git` directory or no origin.
+    - `no_remote_main` — origin has no `main` branch to adopt.
+    """
+    result = await git_service.reset_to_main_preserve_state(agent_name)
+
+    err = result.get("error")
+    if err == "agent_busy":
+        raise HTTPException(
+            status_code=409,
+            detail=result.get("message", "Agent is currently executing a task"),
+            headers={"X-Conflict-Type": "agent_busy"},
+        )
+    if err in ("no_git_config", "no_remote_main"):
+        raise HTTPException(
+            status_code=409,
+            detail=result.get("message", err),
+            headers={"X-Conflict-Type": err},
+        )
+    if err:
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("message", err),
+        )
+
+    return {"success": True, **result}

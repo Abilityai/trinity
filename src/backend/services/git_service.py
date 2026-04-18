@@ -903,3 +903,59 @@ async def check_git_initialized(agent_name: str) -> Optional[str]:
         return "/home/developer"
 
     return None
+
+
+# ============================================================================
+# S3 — Reset-to-main-preserve-state proxy (abilityai/trinity#384)
+# ============================================================================
+
+
+async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
+    """Proxy the reset-preserve-state operation to the agent-server.
+
+    Adds one guardrail on top of the agent-server's own checks: refuse if
+    the agent is currently executing a task. The activity service is a
+    backend-only view, so this check cannot live in the agent-server.
+
+    Returns a dict shaped for the router to translate into HTTP responses:
+
+    - Success: `{snapshot_dir, files_preserved, commit_sha, working_branch}`
+    - Guard tripped: `{"error": "agent_busy" | "no_git_config" | ...,
+                       "message": "..."}`
+    """
+    # Imported here (not at module top) so test suites that stub the
+    # activity service via patch.dict("sys.modules", ...) can control the
+    # dependency without triggering docker_service's heavy imports.
+    from services.activity_service import activity_service  # noqa: WPS433
+
+    current = await activity_service.get_current_activities(agent_name)
+    if current:
+        return {
+            "error": "agent_busy",
+            "message": (
+                f"Agent {agent_name} is currently executing a task. "
+                "Wait for it to finish before resetting."
+            ),
+        }
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"http://agent-{agent_name}:8000/api/git/reset-to-main-preserve-state"
+        )
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code == 409:
+            detail = ""
+            try:
+                detail = response.json().get("detail", "") or ""
+            except Exception:  # noqa: BLE001
+                detail = response.text
+            return {
+                "error": response.headers.get("X-Conflict-Type", "conflict"),
+                "message": detail,
+            }
+        return {
+            "error": "proxy_failed",
+            "message": response.text[:500],
+            "status_code": response.status_code,
+        }

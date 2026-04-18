@@ -430,3 +430,148 @@ def test_success_pushes_with_force_with_lease(tmp_path: Path):
         ["ls-remote", "origin", "trinity/demo/abc"], worker
     ).stdout.strip()
     assert origin_branch.startswith(result["commit_sha"])
+
+
+# ---------------------------------------------------------------------------
+# Backend layer — agent-busy guard + HTTP proxy to agent-server
+# ---------------------------------------------------------------------------
+
+
+import sys  # noqa: E402
+from unittest.mock import AsyncMock, Mock, patch  # noqa: E402
+
+import pytest  # noqa: E402
+
+_project_root = Path(__file__).resolve().parents[2]
+_backend_path = str(_project_root / "src" / "backend")
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
+
+
+def _load_git_service():
+    """Import git_service with heavy deps mocked out.
+
+    Unlike the helper in test_persistent_state_allowlist.py, we keep the
+    sys.modules entries installed even after the loader returns, because
+    `reset_to_main_preserve_state` does a lazy
+    `from services.activity_service import activity_service` that must
+    hit the mock at call time. Each test gets a fresh stub by calling
+    this loader again.
+    """
+    activity_service_stub = Mock()
+    activity_service_stub.get_current_activities = AsyncMock(return_value=[])
+    activity_module = Mock()
+    activity_module.activity_service = activity_service_stub
+
+    sys.modules.setdefault("docker", Mock())
+    sys.modules.setdefault("docker.errors", Mock())
+    sys.modules.setdefault("docker.types", Mock())
+    sys.modules.setdefault("redis", Mock())
+    sys.modules.setdefault("redis.asyncio", Mock())
+
+    database_mock = Mock()
+    database_mock.db = Mock()
+    database_mock.AgentGitConfig = Mock
+    database_mock.GitSyncResult = Mock
+    sys.modules["database"] = database_mock
+    sys.modules["services.docker_service"] = Mock()
+    sys.modules["services.activity_service"] = activity_module
+
+    for key in list(sys.modules.keys()):
+        if key.startswith("services.git_service"):
+            del sys.modules[key]
+    import services.git_service as gs
+
+    return gs, activity_service_stub
+
+
+@pytest.mark.asyncio
+async def test_backend_refuses_when_agent_busy():
+    """Non-empty current-activities list → agent_busy error, no HTTP call."""
+    gs, activity = _load_git_service()
+    activity.get_current_activities.return_value = [
+        {"id": "x", "activity_type": "chat_start"}
+    ]
+
+    with patch.object(gs, "httpx") as httpx_mod:
+        result = await gs.reset_to_main_preserve_state("alice")
+
+    assert result["error"] == "agent_busy"
+    httpx_mod.AsyncClient.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backend_proxies_when_idle():
+    """Empty current-activities → proxies to agent-server endpoint."""
+    gs, activity = _load_git_service()
+    activity.get_current_activities.return_value = []
+
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "snapshot_dir": ".trinity/backup/2026-04-18T120000Z/",
+        "files_preserved": ["workspace/state.json"],
+        "commit_sha": "abc1234",
+        "working_branch": "trinity/alice/abcd1234",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+
+    async_cm = AsyncMock()
+    async_cm.__aenter__.return_value = mock_client
+    async_cm.__aexit__.return_value = None
+
+    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+        result = await gs.reset_to_main_preserve_state("alice")
+
+    assert result["commit_sha"] == "abc1234"
+    assert result["files_preserved"] == ["workspace/state.json"]
+    mock_client.post.assert_called_once_with(
+        "http://agent-alice:8000/api/git/reset-to-main-preserve-state"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_surfaces_agent_server_conflict_header():
+    """A 409 from agent-server is normalised into the service's error shape."""
+    gs, _ = _load_git_service()
+
+    mock_response = Mock()
+    mock_response.status_code = 409
+    mock_response.headers = {"X-Conflict-Type": "no_remote_main"}
+    mock_response.json.return_value = {"detail": "origin has no main"}
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    async_cm = AsyncMock()
+    async_cm.__aenter__.return_value = mock_client
+    async_cm.__aexit__.return_value = None
+
+    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+        result = await gs.reset_to_main_preserve_state("alice")
+
+    assert result["error"] == "no_remote_main"
+    assert "no main" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_backend_surfaces_unexpected_status_as_proxy_failed():
+    """Anything other than 200/409 becomes `proxy_failed` with the status."""
+    gs, _ = _load_git_service()
+
+    mock_response = Mock()
+    mock_response.status_code = 500
+    mock_response.text = "internal error"
+
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    async_cm = AsyncMock()
+    async_cm.__aenter__.return_value = mock_client
+    async_cm.__aexit__.return_value = None
+
+    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+        result = await gs.reset_to_main_preserve_state("alice")
+
+    assert result["error"] == "proxy_failed"
+    assert result["status_code"] == 500
