@@ -515,6 +515,11 @@ Services that run continuously in the backend process:
 | PUT | `/api/agents/{name}/github-pat` | Set per-agent GitHub PAT (validated, encrypted) |
 | DELETE | `/api/agents/{name}/github-pat` | Clear per-agent PAT (revert to global) |
 
+### Git Recovery (1 endpoint - S3, #384)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/agents/{name}/git/reset-to-main-preserve-state` | Adopt `origin/main`, snapshot persistent-state allowlist (S4) first, overlay back, force-with-lease push. Safe recovery for parallel-history deadlock (P2/P3). 409 with `X-Conflict-Type: agent_busy \| no_git_config \| no_remote_main`. |
+
 ### Internal (1 endpoint - no auth)
 | Method | Path | Description |
 |--------|------|-------------|
