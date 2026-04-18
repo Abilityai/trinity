@@ -10,6 +10,7 @@ from .trinity import router as trinity_router
 from .info import router as info_router
 from .dashboard import router as dashboard_router
 from .skills import router as skills_router
+from .snapshot import router as snapshot_router
 
 __all__ = [
     "chat_router",
@@ -21,4 +22,5 @@ __all__ = [
     "info_router",
     "dashboard_router",
     "skills_router",
+    "snapshot_router",
 ]
