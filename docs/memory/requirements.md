@@ -434,6 +434,16 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Frontend `COPY` lookup in `GitConflictModal.vue` renders per-class title/body/recommendation; raw git stderr lives inside an expandable `<details>` element.
   - Pre-S5 fallback preserved for older agent images that don't emit `conflict_class`.
 - **GitHub Issue**: #386 (Epic #381)
+
+### 11.4 Parallel-History Detection (S2)
+- **Status**: ✅ Implemented (2026-04-19)
+- **Description**: When the agent's working branch and the upstream pull-branch share no recent ancestor and both have diverging commits, render a different conflict modal that offers an "Adopt latest upstream (preserve my state)" recovery instead of the (always-wrong) Pull-First / Force-Push pair.
+- **Key Features**:
+  - `/api/git/status` returns `common_ancestor_sha`, `common_ancestor_age_days`, and `pull_branch` (label-agnostic copy).
+  - Frontend `isParallelHistory` predicate: `(no common ancestor OR ancestor age ≥ 30 days) AND behind > 0`.
+  - New sibling modal variant in `GitConflictModal.vue`; existing pull/push variants untouched.
+  - Primary recovery button calls the S3 endpoint owned by #384 (deferred dependency).
+- **GitHub Issue**: #385 (Epic #381)
 - **Flow**: `docs/memory/feature-flows/github-sync.md`
 
 ---
