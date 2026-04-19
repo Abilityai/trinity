@@ -246,6 +246,124 @@ sequenceDiagram
 
 ---
 
+## Recovery: Reset-to-Main-Preserve-State (S3, #384)
+
+### Purpose
+
+A first-class recovery path for the **parallel-history deadlock** — when an
+agent's `trinity/<agent>/<id>` working branch and `origin/main` share no
+common ancestor (e.g., agent was initialised from a state older than a
+subsequent rewrite of `main`). Neither "Pull First" nor "Force Push" fixes
+this: pull re-applies the conflicting commit and fails identically; force
+push overwrites remote with stale parallel history.
+
+The correct recovery — and the only one safe for data — is: **adopt
+`origin/main` as the new baseline, overlay instance-specific state, push
+with `--force-with-lease`.** This operation exposes that as a first-class
+endpoint so operators with UI-only access can recover without SSH-ing into
+the container.
+
+Paired with the [persistent-state allowlist](../architecture.md) from S4
+(#383) — the allowlist names which paths survive the reset.
+
+### API contract
+
+```
+POST /api/agents/{name}/git/reset-to-main-preserve-state
+  Auth: OwnedAgentByName (owner or admin)
+  Body: none
+
+  200 -> {
+    success: true,
+    snapshot_dir: ".trinity/backup/2026-04-18T120000Z/",
+    files_preserved: ["workspace/decisions.csv", ".trinity/config.yaml", ...],
+    commit_sha: "abc1234...",
+    working_branch: "trinity/my-agent/abcd1234"
+  }
+  409 (X-Conflict-Type: agent_busy)     -> agent currently executing a task
+  409 (X-Conflict-Type: no_git_config)  -> .git missing or origin unset
+  409 (X-Conflict-Type: no_remote_main) -> origin has no `main` branch
+  500 -> snapshot/reset/push failure (detail includes the failing step)
+```
+
+### Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant Backend
+    participant AS as Agent-Server
+    participant GH as GitHub
+
+    Op->>Backend: POST .../git/reset-to-main-preserve-state
+    Backend->>Backend: activity_service.get_current_activities(agent_name)
+    alt agent is busy
+        Backend-->>Op: 409 X-Conflict-Type: agent_busy
+    else agent is idle
+        Backend->>AS: POST /api/git/reset-to-main-preserve-state
+        AS->>AS: _read_persistent_state()  (from S4)
+        AS->>AS: build_snapshot(home_dir, patterns)
+        AS->>AS: write .trinity/backup/<ts>/snapshot.tar + files.txt
+        AS->>GH: git fetch origin main
+        AS->>AS: git reset --hard origin/main
+        AS->>AS: restore_from_tar(home_dir, tar, patterns)
+        AS->>AS: git add -A && git commit -m "Adopt main baseline, preserve state"
+        AS->>GH: git push --force-with-lease origin HEAD:<working_branch>
+        AS-->>Backend: {snapshot_dir, files_preserved, commit_sha, working_branch}
+        Backend-->>Op: 200 {success: true, ...}
+    end
+```
+
+### Guardrails (in order)
+
+1. **Backend: agent_busy** — `activity_service.get_current_activities()`
+   returns a non-empty list (chat, schedule, tool-call, collaboration in
+   progress). Returned before any HTTP call to the agent-server so the
+   agent is never interrupted mid-task.
+2. **Agent-server: no_git_config** — `/home/developer/.git` missing or
+   `git remote get-url origin` fails. Prevents destructive git ops on an
+   agent that was never initialised for sync.
+3. **Agent-server: no_remote_main** — `git rev-parse --verify origin/main`
+   fails after fetch. Prevents resetting to a non-existent baseline.
+4. **Always snapshot first** — the compose routine writes the backup tar
+   to `.trinity/backup/<iso-ts>/snapshot.tar` *before* `git reset --hard`.
+   Even if the push later fails, the operator can pull the tar via the
+   Files panel and restore manually.
+5. **`--force-with-lease`, never bare `--force`** — aligns with S7 (#382);
+   prevents silent clobber of a peer Trinity instance that happens to share
+   the working branch.
+
+### Primitives Used
+
+| Component | Purpose | File |
+|-----------|---------|------|
+| `build_snapshot(home_dir, paths)` | Pure function: walk home_dir, tar files matching allowlist globs | `docker/base-image/agent_server/routers/snapshot.py` |
+| `restore_from_tar(home_dir, tar, paths)` | Pure function: extract tar, enforcing allowlist + path-traversal guards | `docker/base-image/agent_server/routers/snapshot.py` |
+| `_read_persistent_state()` | S4 reader: load allowlist from `.trinity/persistent-state.yaml` with default fallback | `docker/base-image/agent_server/routers/files.py` |
+| `reset_to_main_preserve_state_impl(home_dir, ...)` | Compose routine: snapshot → fetch → reset → overlay → commit → push | `docker/base-image/agent_server/routers/git.py` |
+| Backend proxy | Adds `agent_busy` guardrail on top of agent-server response | `src/backend/services/git_service.py` |
+
+### Code References
+
+- Backend endpoint: `src/backend/routers/git.py` (bottom of file)
+- Backend service: `src/backend/services/git_service.py::reset_to_main_preserve_state`
+- Agent-server endpoint: `docker/base-image/agent_server/routers/git.py` (bottom)
+- Agent-server primitives: `docker/base-image/agent_server/routers/snapshot.py`
+- Unit tests (mirror pattern):
+  - `tests/unit/test_reset_preserve_state_allowlist.py` (snapshot/restore)
+  - `tests/unit/test_reset_preserve_state_guardrails.py` (compose + backend proxy)
+- Pure-git regression: `tests/git-sync/s3_reset_preserve.sh`
+- Integration (opt-in): `tests/test_reset_preserve_state_integration.py`
+
+### Non-goals (owned by other PRs)
+
+- **UI** — the "third modal button" wiring on `GitConflictModal.vue` belongs to S2 (#385 / PR #395).
+- **Auto-sync cadence** — S1 (#389).
+- **Branch-ownership enforcement** — S7 (#382).
+- **`PROTECTED_PATHS` / `EDIT_PROTECTED_PATHS` wiring to the allowlist** — explicitly out of S4/S3 scope.
+
+---
+
 ## Data Layer
 
 ### Database Model: AgentGitConfig
