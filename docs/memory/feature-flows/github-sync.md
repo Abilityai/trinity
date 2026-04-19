@@ -652,10 +652,45 @@ POST /api/agents/{name}/git/sync
 ```json
 // HTTP 409 Conflict
 {
-  "detail": "Pull failed: merge conflict detected"
+  "detail": "Pull failed: merge conflict detected",
+  "conflict_class": "PARALLEL_HISTORY"
 }
-// Header: X-Conflict-Type: merge_conflict | local_uncommitted | push_rejected
+// Headers:
+//   X-Conflict-Type:  merge_conflict | local_uncommitted | push_rejected
+//   X-Conflict-Class: AHEAD_ONLY | BEHIND_ONLY | PARALLEL_HISTORY |
+//                     UNCOMMITTED_LOCAL | AUTH_FAILURE |
+//                     WORKING_BRANCH_EXTERNAL_WRITE | UNKNOWN
 ```
+
+The `conflict_class` body field and `X-Conflict-Class` header were added in S5 (#386); the legacy `X-Conflict-Type` header is preserved for backward compatibility. See [Conflict classification (S5, #386)](#conflict-classification-s5-386) below.
+
+### Conflict classification (S5, #386)
+
+Operators staring at `merge_conflict` and a wall of raw git stderr could not tell which of several distinct failure shapes they were looking at. S5 adds a small classifier that maps the stderr + ahead/behind counts to a stable symbolic class, and threads that class through the API surfaces so the modal can render per-class copy.
+
+**Enum** — `ConflictClass` (`src/backend/services/git_service.py:28-43`):
+
+| Member | Meaning |
+|--------|---------|
+| `AHEAD_ONLY` | Local has unpushed commits, remote has not moved |
+| `BEHIND_ONLY` | Remote has new commits, local has none |
+| `PARALLEL_HISTORY` | Branches diverged; rebase apply failed (P2 trap) |
+| `UNCOMMITTED_LOCAL` | Working tree dirty, git refused the operation |
+| `AUTH_FAILURE` | Remote rejected credentials (expired/missing PAT) |
+| `WORKING_BRANCH_EXTERNAL_WRITE` | Ref moved under us (P5 clobber signature) |
+| `UNKNOWN` | Stderr did not match any known shape |
+
+**Classifier** — `classify_conflict(stderr, ahead, behind, common_ancestor_sha=None) -> ConflictClass` (`src/backend/services/git_service.py:77-130`). Pure function, no IO, regex-only. `common_ancestor_sha` is accepted for forward compatibility (#385 discriminator) but unused today. Decision order: auth → uncommitted → external-write → parallel-history → numeric fallback → `UNKNOWN`. Regex patterns are drawn from `tests/git-sync/fixtures/p2_parallel_history_stderr.txt` and `tests/git-sync/fixtures/p5_clobber_stderr.txt`.
+
+**Agent-server mirror** — `docker/base-image/agent_server/utils/git_conflict.py` (NEW) holds a parallel implementation. The agent-server runs inside the container image and does not import from the backend, so the classifier is duplicated intentionally. The two copies must be kept in sync; the backend copy is canonical. `docker/base-image/agent_server/routers/git.py:41-68` adds a shared `_conflict_response()` helper that replaced 5 prior `raise HTTPException(status_code=409, detail=...)` sites; it returns a `JSONResponse` with `conflict_class` in the body and both `X-Conflict-Type` + `X-Conflict-Class` headers.
+
+**Wire-level field** — `GitSyncResult.conflict_class` added in `src/backend/db_models.py:231`. `src/backend/routers/git.py:134-140` (sync) and `:212-218` (pull) forward it via the `X-Conflict-Class` header alongside `X-Conflict-Type`. The backend git service reads the header or body field from agent responses and propagates it (`src/backend/services/git_service.py:267-276` sync path, `:346-355` pull path).
+
+**Frontend modal** — `src/frontend/src/components/GitConflictModal.vue:150-209` defines a `COPY` lookup table keyed on `conflictClass`; each entry provides `title`, `body` (bullet list), and `recommendation`. Raw stderr is rendered inside an expandable `<details>` block labeled "Git details (for developers)". Resolve buttons and their strategies are unchanged. **Pre-S5 fallback**: when `conflictClass` is absent (older agents), the modal falls back to the pre-S5 generic title ("Pull Conflict" / "Push Conflict") and uses `conflict.message` as the recommendation (`GitConflictModal.vue:195-209`), so older agent images keep working without a forced upgrade.
+
+**Composable plumbing** — `src/frontend/src/composables/useGitSync.js:87-93` (sync branch) and `:131-138` (pull branch) read `err.response?.headers?.['x-conflict-class']` and store it on the existing `gitConflict` ref. No branching logic change; the modal reads the new field directly.
+
+**Regression tests** — `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases covering each enum member, the fallback, and the two stderr fixtures) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshot scenarios for the per-class copy and the pre-S5 fallback).
 
 ### Component Files
 
@@ -732,6 +767,7 @@ Working - Pull fix for working branches (2026-03-26)
 
 | Date | Changes |
 |------|---------|
+| 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py:28-130`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` (`db_models.py:231`) and `X-Conflict-Class` response header on 409s (`routers/git.py:134-140, 212-218`). Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper (`docker/base-image/agent_server/routers/git.py:41-68`). `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js:87-93, 131-138` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
 | 2026-04-16 | **Per-Agent GitHub PAT** (#347): Added per-agent PAT configuration. Agents can now use their own GitHub PAT instead of the global one. DB column `github_pat_encrypted` in `agent_git_config`, encrypted with AES-256-GCM. 3 new API endpoints (GET/PUT/DELETE), 2 MCP tools, GitPanel.vue settings UI. Helper `get_github_pat_for_agent()` provides fallback logic. |
 | 2026-03-26 | **Fix git pull for working branches** (#195): Added `_get_pull_branch()` helper that detects `trinity/*` branches and redirects pull/status to `origin/main`. Fixed `git fetch --dry-run` → `git fetch origin` in status endpoint. Fixed `initialize_git_in_container()` to preserve remote history via `git fetch + reset` instead of `git init + force push`. Tests in `tests/unit/test_git_pull_branch.py`. |
 | 2026-02-28 | **Git Branch Support** (GIT-002): Added complete data flow documentation with line numbers. URL syntax (`github:owner/repo@branch`) parses branch in crud.py:102-113. MCP types.ts:29 and agents.ts:201-207 expose `source_branch` parameter. template_service.py:22-41 passes branch to git clone. startup.sh:38-45 uses `-b` flag. Added testing checklist from requirements spec. |
