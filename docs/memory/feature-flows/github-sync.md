@@ -630,6 +630,68 @@ When a conflict is detected (HTTP 409 response), the UI shows a modal with optio
 +---------------------------------------------+
 ```
 
+### Parallel-history modal (S2, #385)
+
+When the agent's branch and `origin/<pull_branch>` have diverged with no recent
+common ancestor, the standard Pull First / Force Push options would both lose
+data. The frontend detects this at modal-open time (no new endpoint, no extra
+round-trip) and renders a different modal variant.
+
+**Predicate** (`src/frontend/src/composables/useGitSync.js:44-55`):
+
+```javascript
+const PARALLEL_HISTORY_STALE_DAYS = 30
+const isParallelHistory = computed(() => {
+  const s = gitStatus.value
+  if (!s) return false
+  if ((s.behind || 0) <= 0) return false
+  const noAncestor = !s.common_ancestor_sha
+  const staleAncestor = typeof s.common_ancestor_age_days === 'number'
+    && s.common_ancestor_age_days >= PARALLEL_HISTORY_STALE_DAYS
+  return noAncestor || staleAncestor
+})
+```
+
+**Label-agnostic copy**: a sibling `pullBranch` computed
+(`useGitSync.js:36-38`) echoes the backend `pull_branch` field; all modal copy
+uses `{{ pullBranchLabel }}` so working-branch agents (`trinity/*` -> `main`)
+and non-default upstreams (`master`, `trunk`, ...) all render correctly.
+
+**Modal variant** (`src/frontend/src/components/GitConflictModal.vue:106-184`):
+purely additive sibling `<div v-if="show && isParallelHistory">`. The original
+Pull/Push variant has its outer `v-if` narrowed to
+`show && !isParallelHistory` (line 2) so the new variant takes priority — no
+existing branches were rewritten.
+
+| Element | Description |
+|---------|-------------|
+| Title | "Your agent cannot sync" |
+| Body | Plain-English divergence explanation, references `{{ pullBranchLabel }}` |
+| Primary button | "Adopt latest upstream (preserve my state)" -> emits `resolve('adopt_upstream_preserve_state')` |
+| Secondary button | "Force push anyway" with destructive warning -> emits `resolve('force_push')` |
+
+**Recovery dispatch**: `resolveConflict()` in `useGitSync.js:165-182` short-
+circuits the `adopt_upstream_preserve_state` strategy to a dedicated resolver,
+`adoptUpstreamPreserveState()` (lines 189-220), which calls
+`agentsStore.adoptUpstreamPreserveState(agentName)` -> `POST
+/api/agents/{name}/git/reset-to-main-preserve-state`.
+
+**Deferred dependency on #384**: the S3 endpoint is not yet live. The resolver
+handles two not-yet-wired states explicitly (no silent no-op): if the store
+method is missing it surfaces "Adopt-upstream action requires backend endpoint
+from issue #384 (not yet available)."; on HTTP 404 it surfaces "Adopt-upstream
+endpoint not available yet (blocked on issue #384)."
+
+**Wiring**: `src/frontend/src/views/AgentDetail.vue` forwards `pullBranch` and
+`isParallelHistory` from the composable into the `<GitConflictModal>` mount.
+
+### Regression tests (S2, #385)
+
+| File | Scope |
+|------|-------|
+| `tests/git-sync/test_p2_parallel_history_detection.sh` | Drives the real FastAPI handler in-process and asserts `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` are present and well-formed in the `/api/git/status` response. |
+| `tests/git-sync/test_s2_usegitsync.test.js` | Vitest scenarios for the `isParallelHistory` predicate (no ancestor, stale ancestor, recent ancestor, behind=0 short-circuit). |
+
 ### API Request Format
 
 ```json
@@ -728,10 +790,26 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
 
 | Endpoint | Line Range | Description |
 |----------|------------|-------------|
-| `GET /api/git/status` | 33-155 | Get repository status, branch, changes, ahead/behind (uses `_get_pull_branch` for behind count) |
-| `POST /api/git/sync` | 158-407 | Stage, commit, push with strategy support (`pull_first` pulls from `pull_branch`) |
+| `GET /api/git/status` | 86-251 | Get repository status, branch, changes, ahead/behind (uses `_get_pull_branch` for behind count); also surfaces `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` for parallel-history detection (S2, #385) |
+| `POST /api/git/sync` | 254-407 | Stage, commit, push with strategy support (`pull_first` pulls from `pull_branch`) |
 | `GET /api/git/log` | 410-457 | Get recent commit history |
 | `POST /api/git/pull` | 460-659 | Pull from remote with conflict strategies (targets `pull_branch`) |
+
+#### `GET /api/git/status` — parallel-history fields (S2, #385)
+
+In addition to the existing `branch`, `ahead`, `behind`, `changes_count`, etc., the
+status response now carries three fields used by the frontend to distinguish a
+"simple behind" state from parallel histories where neither Pull First nor Force
+Push is the right answer:
+
+| Field | Type | Source | Notes |
+|-------|------|--------|-------|
+| `pull_branch` | string | `_get_pull_branch(current_branch, home_dir)` (line 70-83); returned at line 235 | Effective upstream branch — `main` for `trinity/*` working branches, otherwise the current branch. Lets the frontend keep copy label-agnostic (no hardcoded "main"). |
+| `common_ancestor_sha` | string | `git merge-base HEAD origin/<pull_branch>` (line 184-192); returned at line 242 | Empty string when no merge-base exists (truly disjoint histories). |
+| `common_ancestor_age_days` | int \| null | `git log -1 --format=%cI <sha>` parsed to days (line 194-213); returned at line 243 | `null` when the ancestor date can't be parsed (logged as a warning). |
+
+`ahead` and `behind` are unchanged — they still come from
+`git rev-list --left-right --count origin/<pull_branch>...HEAD` (line 163-176).
 
 ---
 
@@ -768,6 +846,7 @@ Working - Pull fix for working branches (2026-03-26)
 | Date | Changes |
 |------|---------|
 | 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py:28-130`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` (`db_models.py:231`) and `X-Conflict-Class` response header on 409s (`routers/git.py:134-140, 212-218`). Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper (`docker/base-image/agent_server/routers/git.py:41-68`). `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js:87-93, 131-138` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
+| 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch` (line 235), `common_ancestor_sha` (line 242), and `common_ancestor_age_days` (line 243), computed via `git merge-base HEAD origin/<pull_branch>` (line 184-192) and `git log -1 --format=%cI` (line 194-213). Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch` (lines 36-38), `isParallelHistory` predicate (lines 44-55, threshold 30 days), and an `adoptUpstreamPreserveState()` resolver (lines 189-220) that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant (lines 106-184) titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git-sync/test_p2_parallel_history_detection.sh` (in-process FastAPI) and `tests/git-sync/test_s2_usegitsync.test.js` (Vitest predicate scenarios). |
 | 2026-04-16 | **Per-Agent GitHub PAT** (#347): Added per-agent PAT configuration. Agents can now use their own GitHub PAT instead of the global one. DB column `github_pat_encrypted` in `agent_git_config`, encrypted with AES-256-GCM. 3 new API endpoints (GET/PUT/DELETE), 2 MCP tools, GitPanel.vue settings UI. Helper `get_github_pat_for_agent()` provides fallback logic. |
 | 2026-03-26 | **Fix git pull for working branches** (#195): Added `_get_pull_branch()` helper that detects `trinity/*` branches and redirects pull/status to `origin/main`. Fixed `git fetch --dry-run` → `git fetch origin` in status endpoint. Fixed `initialize_git_in_container()` to preserve remote history via `git fetch + reset` instead of `git init + force push`. Tests in `tests/unit/test_git_pull_branch.py`. |
 | 2026-02-28 | **Git Branch Support** (GIT-002): Added complete data flow documentation with line numbers. URL syntax (`github:owner/repo@branch`) parses branch in crud.py:102-113. MCP types.ts:29 and agents.ts:201-207 expose `source_branch` parameter. template_service.py:22-41 passes branch to git clone. startup.sh:38-45 uses `-b` flag. Added testing checklist from requirements spec. |
