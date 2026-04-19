@@ -460,6 +460,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents` | List all agents |
 | GET | `/api/agents/context-stats` | Get context & activity state for all agents (NEW: 2025-12-02) |
 | GET | `/api/agents/autonomy-status` | Get autonomy status for all accessible agents (NEW: 2026-01-01) |
+| GET | `/api/agents/sync-health` | Per-agent git sync health for dashboard dots (NEW: 2026-04-19, #389) |
 | POST | `/api/agents` | Create agent |
 | GET | `/api/agents/{name}` | Get agent details |
 | DELETE | `/api/agents/{name}` | Delete agent |
@@ -521,6 +522,11 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/github-pat` | Get PAT config status (agent vs global) |
 | PUT | `/api/agents/{name}/github-pat` | Set per-agent GitHub PAT (validated, encrypted) |
 | DELETE | `/api/agents/{name}/github-pat` | Clear per-agent PAT (revert to global) |
+| GET | `/api/agents/{name}/git/auto-sync` | Read per-agent auto-sync flag (NEW: 2026-04-19, #389) |
+| PUT | `/api/agents/{name}/git/auto-sync` | Toggle 15-min auto-sync heartbeat |
+| GET | `/api/agents/{name}/git/freeze-schedules-if-failing` | Read freeze-on-sync-failure flag |
+| PUT | `/api/agents/{name}/git/freeze-schedules-if-failing` | Toggle freeze-on-sync-failure flag |
+| GET | `/api/agents/{name}/git/sync-state` | Persisted sync-state row (#389) |
 
 ### Git Recovery (1 endpoint - S3, #384)
 | Method | Path | Description |
@@ -1034,6 +1040,40 @@ CREATE INDEX idx_opqueue_priority ON operator_queue(priority);
 CREATE INDEX idx_opqueue_created ON operator_queue(created_at);
 CREATE INDEX idx_opqueue_agent_status ON operator_queue(agent_name, status);
 ```
+
+**agent_sync_state:** (Issue #389 — Sync health observability, NEW: 2026-04-19)
+```sql
+CREATE TABLE agent_sync_state (
+    agent_name TEXT PRIMARY KEY,
+    last_sync_at TEXT,
+    last_sync_status TEXT,                 -- 'success' | 'failed' | 'never'
+    consecutive_failures INTEGER DEFAULT 0,
+    last_error_summary TEXT,
+    last_remote_sha_main TEXT,
+    last_remote_sha_working TEXT,
+    ahead_main INTEGER DEFAULT 0,
+    behind_main INTEGER DEFAULT 0,
+    ahead_working INTEGER DEFAULT 0,       -- #389 P6: working-branch divergence
+    behind_working INTEGER DEFAULT 0,
+    last_check_at TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+);
+CREATE INDEX idx_sync_state_status
+    ON agent_sync_state(last_sync_status, consecutive_failures);
+
+-- Also adds to agent_git_config:
+--   auto_sync_enabled INTEGER DEFAULT 0
+--   freeze_schedules_if_sync_failing INTEGER DEFAULT 0
+```
+
+**agent_sync_state Features:**
+- One row per agent; upserted by `SyncHealthService` every 60s.
+- `consecutive_failures` incremented on `failed`, reset on `success`.
+- `ahead_working`/`behind_working` fix P6 (external writes to the working
+  branch now visible in `GET /api/git/status`).
+- Powers the dashboard sync-health dot + `sync_failing` operator-queue alerts.
+
 
 **audit_log:** (SEC-001 / Issue #20 — Phase 1, NEW: 2026-04-14)
 ```sql
