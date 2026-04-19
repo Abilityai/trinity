@@ -887,3 +887,248 @@ class TestRecoverExecutionWithErrorContext:
         service._get_execution_error.assert_not_called()
         error_arg = mock_db.mark_execution_failed_by_watchdog.call_args[0][1]
         assert error_arg == "cleanup reason only"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 slot reclaim re-verification tests (Issue #378)
+# ---------------------------------------------------------------------------
+
+# Eager import so @patch("services.cleanup_service.*") decorators can resolve
+# the module before test setup runs.
+import services.cleanup_service  # noqa: E402,F401
+
+
+class TestProcessStaleSlotReclaims:
+    """Tests for _process_stale_slot_reclaims() — Phase 3 slot cleanup with #378 race fix.
+
+    The bug: cleanup service's Phase 3 sometimes marked executions FAILED with
+    "Stale execution — slot TTL expired" even though the task was still running
+    (or had just completed). The fix adds a just-in-time re-verify call to the
+    agent right before failing. On agent unreachable, we skip this cycle — the
+    120-min Phase 1 stale cleanup is the backstop.
+    """
+
+    pytestmark = pytest.mark.unit
+
+    PHANTOM_ERROR_PREFIX = "Stale execution — slot TTL expired"
+
+    def _make_service(self):
+        from services.cleanup_service import CleanupService
+        return CleanupService()
+
+    def _make_report(self):
+        from services.cleanup_service import CleanupReport
+        return CleanupReport()
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_empty_reclaimed_is_noop(self, mock_db, mock_httpx):
+        """No reclaimed slots → method returns early without any calls."""
+        service = self._make_service()
+        service._get_agent_running_ids = AsyncMock()
+        service._terminate_on_agent = AsyncMock()
+
+        report = self._make_report()
+        asyncio.run(service._process_stale_slot_reclaims({}, set(), report))
+
+        service._get_agent_running_ids.assert_not_called()
+        service._terminate_on_agent.assert_not_called()
+        mock_db.fail_stale_slot_execution.assert_not_called()
+        # httpx.AsyncClient should not even be constructed
+        mock_httpx.assert_not_called()
+        assert report.stale_slot_executions == 0
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_skips_when_in_confirmed_running_ids(self, mock_db, mock_httpx):
+        """Phase 0 confirmed this exec as running → Phase 3 skips without
+        even calling fail_stale_slot_execution. Regression guard for #226."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        service = self._make_service()
+        service._get_agent_running_ids = AsyncMock(return_value=set())
+        service._terminate_on_agent = AsyncMock()
+
+        reclaimed = {"agent-a": ["exec-1"]}
+        confirmed = {"exec-1"}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, confirmed, report))
+
+        mock_db.fail_stale_slot_execution.assert_not_called()
+        service._terminate_on_agent.assert_not_called()
+        assert report.stale_slot_executions == 0
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_378_race_skips_when_reverify_shows_still_running(self, mock_db, mock_httpx):
+        """#378 core scenario: Phase 0 missed this exec (agent had just
+        finished handing it back), but just-in-time re-verify catches
+        the agent still has it → Phase 3 skips. No FAILED row written."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        service = self._make_service()
+        # Re-verify returns a set containing the exec → still running on agent
+        service._get_agent_running_ids = AsyncMock(return_value={"exec-1"})
+        service._terminate_on_agent = AsyncMock()
+
+        reclaimed = {"agent-a": ["exec-1"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        mock_db.fail_stale_slot_execution.assert_not_called()
+        service._terminate_on_agent.assert_not_called()
+        assert report.stale_slot_executions == 0
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_proceeds_to_fail_when_reverify_confirms_inactive(self, mock_db, mock_httpx):
+        """Re-verify returns set without the exec → agent confirms gone →
+        proceed to terminate + fail. Phantom-stale error message emitted."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_db.fail_stale_slot_execution.return_value = True
+
+        service = self._make_service()
+        service._get_agent_running_ids = AsyncMock(return_value=set())
+        service._terminate_on_agent = AsyncMock(return_value=True)
+
+        reclaimed = {"agent-a": ["exec-1"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        service._terminate_on_agent.assert_called_once_with(ANY, "agent-a", "exec-1")
+        mock_db.fail_stale_slot_execution.assert_called_once()
+        call_kwargs = mock_db.fail_stale_slot_execution.call_args.kwargs
+        assert call_kwargs["execution_id"] == "exec-1"
+        assert self.PHANTOM_ERROR_PREFIX in call_kwargs["error"]
+        assert report.stale_slot_executions == 1
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_skips_when_agent_unreachable(self, mock_db, mock_httpx):
+        """Re-verify returns None (agent unreachable) → skip this cycle.
+        Phase 1's 120-min stale cleanup is the backstop for truly stuck
+        agents — we do NOT maintain cross-cycle defer state because
+        cleanup_stale_slots removes reclaimed IDs from Redis permanently."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        service = self._make_service()
+        service._get_agent_running_ids = AsyncMock(return_value=None)
+        service._terminate_on_agent = AsyncMock()
+
+        reclaimed = {"agent-a": ["exec-1"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        mock_db.fail_stale_slot_execution.assert_not_called()
+        service._terminate_on_agent.assert_not_called()
+        assert report.stale_slot_executions == 0
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_per_agent_batching_single_reverify_call(self, mock_db, mock_httpx):
+        """Two stale slots on the same agent → _get_agent_running_ids
+        called exactly once for that agent (per-agent batching via
+        asyncio.gather, not per-execution)."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_db.fail_stale_slot_execution.return_value = True
+
+        service = self._make_service()
+        service._get_agent_running_ids = AsyncMock(return_value=set())  # both inactive
+        service._terminate_on_agent = AsyncMock(return_value=True)
+
+        reclaimed = {"agent-a": ["exec-1", "exec-2"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        # One re-verify call for the agent, not two
+        assert service._get_agent_running_ids.call_count == 1
+        # Both executions failed
+        assert mock_db.fail_stale_slot_execution.call_count == 2
+        assert report.stale_slot_executions == 2
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_multi_agent_reverify_dispatched_in_parallel(self, mock_db, mock_httpx):
+        """Two different agents → both re-verify calls dispatched via
+        asyncio.gather. Verified by call count — both agents queried
+        regardless of order."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_db.fail_stale_slot_execution.return_value = True
+
+        service = self._make_service()
+        # Both agents report their execs as inactive — simple fail path
+        service._get_agent_running_ids = AsyncMock(return_value=set())
+        service._terminate_on_agent = AsyncMock(return_value=True)
+
+        reclaimed = {"agent-a": ["exec-a1"], "agent-b": ["exec-b1"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        # Both agents queried
+        assert service._get_agent_running_ids.call_count == 2
+        called_agents = {
+            call.args[1] for call in service._get_agent_running_ids.call_args_list
+        }
+        assert called_agents == {"agent-a", "agent-b"}
+        assert mock_db.fail_stale_slot_execution.call_count == 2
+        assert report.stale_slot_executions == 2
+
+    @patch("services.cleanup_service.httpx.AsyncClient")
+    @patch("services.cleanup_service.db")
+    def test_one_agent_raises_others_proceed(self, mock_db, mock_httpx):
+        """One agent's re-verify raises → asyncio.gather(return_exceptions=True)
+        captures it → that agent's execs are skipped as unreachable;
+        other agents proceed normally."""
+        mock_httpx.return_value.__aenter__ = AsyncMock(
+            return_value=AsyncMock()
+        )
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_db.fail_stale_slot_execution.return_value = True
+
+        service = self._make_service()
+
+        async def flaky(_client, name):
+            if name == "agent-a":
+                raise RuntimeError("boom")
+            return set()  # agent-b: exec inactive
+
+        service._get_agent_running_ids = AsyncMock(side_effect=flaky)
+        service._terminate_on_agent = AsyncMock(return_value=True)
+
+        reclaimed = {"agent-a": ["exec-a1"], "agent-b": ["exec-b1"]}
+        report = self._make_report()
+
+        asyncio.run(service._process_stale_slot_reclaims(reclaimed, set(), report))
+
+        # Only agent-b's exec was failed; agent-a treated as unreachable
+        mock_db.fail_stale_slot_execution.assert_called_once()
+        assert mock_db.fail_stale_slot_execution.call_args.kwargs["execution_id"] == "exec-b1"
+        assert report.stale_slot_executions == 1
