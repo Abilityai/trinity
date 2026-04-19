@@ -51,7 +51,7 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
 | Trinity Prompt | 224-289 | Textarea for custom agent instructions |
 | Email Whitelist | 291-390 | Table of whitelisted emails with add/remove |
 | SSH Access Toggle | 392-430 | Toggle switch for enabling SSH access |
-| MCP Server URL | 827-889 | Configure external MCP URL with custom/auto-detect badge (#76) |
+| MCP Server URL | 1089-1149 | Configure external MCP URL with custom/auto-detect badge (#76) |
 | Default Avatars | 1054-1092 | Generate AI avatars for agents without custom ones (AVATAR-003) |
 
 **Key Reactive State**
