@@ -21,6 +21,12 @@ from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
 
 logger = logging.getLogger(__name__)
 
+# #378: Error-message marker written by cleanup_service._process_stale_slot_reclaims
+# when Phase 3 fails an execution. Used to scope the residual-race WARNING log
+# below so it doesn't misfire on other legitimate FAILED→SUCCESS transitions
+# (e.g. Phase 0 auto-terminate, Phase 1 stale cleanup, startup recovery).
+_STALE_SLOT_ERROR_PATTERN = "Stale execution — slot TTL expired"
+
 
 class ScheduleOperations:
     """Schedule and execution database operations."""
@@ -909,11 +915,34 @@ class ScheduleOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Get started_at for duration calculation
-            cursor.execute("SELECT started_at FROM schedule_executions WHERE id = ?", (execution_id,))
+            # Get started_at for duration calculation and current status/error
+            # for #378 residual-race observability (see log below).
+            cursor.execute(
+                "SELECT started_at, status, error FROM schedule_executions WHERE id = ?",
+                (execution_id,),
+            )
             row = cursor.fetchone()
             if not row:
                 return False
+
+            # #378: warn when SUCCESS overwrites a Phase-3 phantom-stale FAILED.
+            # This lets us observe residual races in production without
+            # changing update semantics (agent's response still wins). Scoped
+            # to the stale-slot error pattern so other legitimate FAILED→SUCCESS
+            # transitions (Phase 0/1 recovery, startup recovery) don't misfire.
+            current_status = row["status"] if "status" in row.keys() else None
+            current_error = row["error"] if "error" in row.keys() else None
+            if (
+                status == TaskExecutionStatus.SUCCESS
+                and current_status == TaskExecutionStatus.FAILED
+                and current_error
+                and _STALE_SLOT_ERROR_PATTERN in current_error
+            ):
+                logger.warning(
+                    f"[DB] SUCCESS overwrote Phase-3 stale-slot FAILED for execution "
+                    f"{execution_id} — residual race condition (#378). Prior error: "
+                    f"{current_error[:200]}"
+                )
 
             # Use parse_iso_timestamp to handle both 'Z' and non-'Z' timestamps
             started_at = parse_iso_timestamp(row["started_at"])

@@ -96,22 +96,19 @@ Seven sequential operations, each wrapped in individual try/except. Watchdog run
    ```
    Calls `DatabaseManager.mark_stale_activities_failed()` which delegates to `ActivityOperations.mark_stale_activities_failed()`.
 
-5. **Cleanup stale Redis slots and fail execution records** (lines 123-148, Issue #219, #226, #61)
+5. **Cleanup stale Redis slots and fail execution records** (Issues #219, #226, #61, #378)
    ```python
    slot_service = get_slot_service()
    agent_timeouts = db.get_all_execution_timeouts()  # #226: per-agent TTL
    reclaimed = await slot_service.cleanup_stale_slots(agent_timeouts=agent_timeouts)
    report.stale_slots = sum(len(ids) for ids in reclaimed.values())
-   # Fail execution records whose slots were reclaimed, skip confirmed running (#226)
-   for agent_name, execution_ids in reclaimed.items():
-       for execution_id in execution_ids:
-           if execution_id in confirmed_running_ids:
-               continue  # Watchdog verified still running
-           # Issue #61: Attempt to terminate process before marking failed (best-effort)
-           await self._terminate_on_agent(client, agent_name, execution_id)
-           db.fail_stale_slot_execution(execution_id, error=...)
+   # #378: delegates to _process_stale_slot_reclaims which re-verifies
+   # each agent just-in-time before writing FAILED
+   await self._process_stale_slot_reclaims(
+       reclaimed, confirmed_running_ids, report
+   )
    ```
-   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. **Issue #61**: Before failing the execution, the cleanup service attempts to terminate any orphaned Claude process on the agent (best-effort, failures logged). The cleanup service then fails the corresponding `schedule_executions` DB records using a guarded update (`WHERE status = 'running'`), skipping any IDs the watchdog confirmed as still running.
+   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. Phase 3 is then implemented by `_process_stale_slot_reclaims()` — see [Phase 3 Slot Reclaim Re-verification](#phase-3-slot-reclaim-re-verification-issue-378) below.
 
 ### Watchdog Reconciliation (Issue #129)
 
@@ -158,6 +155,35 @@ Shared DRY helper for both orphan recovery and auto-terminate:
 
 #### `_terminate_on_agent(client, agent_name, execution_id)` → `bool`
 `POST http://agent-{name}:8000/api/executions/{id}/terminate`. Returns True if HTTP 2xx (agent confirmed termination), False otherwise. Callers only proceed with DB/resource cleanup on success — failed terminations are deferred to the 120-min stale cleanup safety net.
+
+### Phase 3 Slot Reclaim Re-verification (Issue #378)
+
+Before this fix, Phase 3 could mark an execution `FAILED` with "Stale execution — slot TTL expired" while the task was actually still running on the agent (agent had just dropped it from its registry before Phase 0's batch query, so `confirmed_running_ids` missed it). The agent's authoritative `SUCCESS` response then arrived seconds later and overwrote `FAILED` → `SUCCESS`, causing a phantom failure flash in the UI.
+
+#### `_process_stale_slot_reclaims(reclaimed, confirmed_running_ids, report)` → `None`
+
+Replaces the inline Phase 3 loop. Extracted as its own method for direct unit testing (mirrors `_reconcile_orphaned_executions` testability pattern). Key additions over the old inline loop:
+
+1. **Parallel per-agent re-verify fan-out** — one `GET /api/executions/running` call per agent (not per-execution), dispatched concurrently via `asyncio.gather(..., return_exceptions=True)`. Mirrors Phase 0's pattern. Worst-case Phase 3 wall-time goes from O(N_agents × 5s) serial to O(5s) parallel when agents are slow.
+2. **Just-in-time re-verify** — the agent is re-queried as close as possible to the `fail_stale_slot_execution` write, minimizing the race window that Phase 0's earlier batch query leaves open.
+3. **Per-execution decision matrix**:
+
+| Phase 0 said running? | Re-verify says? | Action |
+|---|---|---|
+| Yes (`confirmed_running_ids`) | — | **SKIP** (trust Phase 0, save an HTTP call) |
+| No | Agent unreachable (None) | **SKIP this cycle** — Phase 1 (120-min stale cleanup) is the backstop |
+| No | Agent says still running | **SKIP** — #378 race closed; agent's own SUCCESS write will land correctly |
+| No | Agent says not running | **FAIL** — terminate (best-effort, #61) + `fail_stale_slot_execution` with phantom-stale error |
+
+4. **No cross-cycle state** — `slot_service.cleanup_stale_slots` removes reclaimed IDs from Redis permanently (`zremrangebyscore`), so a deferred ID cannot reappear in a later cycle's `reclaimed` dict. Any "retry on next cycle" state machine would be dead code. Transiently-unreachable agents are caught by Phase 0's orphan recovery on subsequent cycles (when the agent becomes reachable again) and by Phase 1's 120-min stale cleanup as a final backstop.
+
+#### Residual-race observability
+
+`db.schedules.update_execution_status` emits a narrowly-scoped `logger.warning` whenever a `SUCCESS` write overwrites a row whose existing error matches the `_STALE_SLOT_ERROR_PATTERN = "Stale execution — slot TTL expired"` marker. Purely observational — update semantics are unchanged (the agent's SUCCESS still wins). The pattern match prevents misattribution of other legitimate FAILED→SUCCESS transitions (Phase 0 auto-terminate, Phase 1 stale cleanup, startup recovery) to #378. Grep with:
+
+```bash
+docker logs trinity-backend | grep "residual race condition (#378)"
+```
 
 ### Startup Loop (`_cleanup_loop`)
 
@@ -475,8 +501,8 @@ This is a purely backend service. The only "UI" is the two admin API endpoints u
 
 | File | Role |
 |------|------|
-| `src/backend/services/cleanup_service.py` | Service class, watchdog reconciliation, and global instance |
-| `src/backend/db/schedules.py` | `get_running_executions_with_agent_info()` (Issue #129), `mark_execution_failed_by_watchdog()` (Issue #129), `mark_stale_executions_failed()`, `mark_execution_dispatched()`, `mark_no_session_executions_failed()` (Issue #106), `fail_stale_slot_execution()` (Issue #219), `finalize_orphaned_skipped_executions()` (Issue #106) |
+| `src/backend/services/cleanup_service.py` | Service class, watchdog reconciliation, Phase 3 re-verification (Issue #378), and global instance |
+| `src/backend/db/schedules.py` | `get_running_executions_with_agent_info()` (Issue #129), `mark_execution_failed_by_watchdog()` (Issue #129), `mark_stale_executions_failed()`, `mark_execution_dispatched()`, `mark_no_session_executions_failed()` (Issue #106), `fail_stale_slot_execution()` (Issue #219), `finalize_orphaned_skipped_executions()` (Issue #106), residual-race observability log in `update_execution_status()` (Issue #378) |
 | `src/backend/db/activities.py` | `mark_stale_activities_failed()` |
 | `src/backend/database.py` | Delegation methods on DatabaseManager |
 | `src/backend/services/slot_service.py` | `cleanup_stale_slots()` Redis cleanup, returns reclaimed IDs (Issue #219), `release_slot()` used by watchdog |
@@ -487,4 +513,5 @@ This is a purely backend service. The only "UI" is the two admin API endpoints u
 | `docker/base-image/agent_server/services/process_registry.py` | `get_last_error()` method scans log buffer for errors (Issue #286) |
 | `tests/test_cleanup_service.py` | API integration tests for cleanup (Issue #106) |
 | `tests/test_watchdog.py` | API integration tests for watchdog fields (Issue #129) |
-| `tests/test_watchdog_unit.py` | Unit tests for watchdog reconciliation logic (Issue #129), error context tests (Issue #286) |
+| `tests/test_watchdog_unit.py` | Unit tests for watchdog reconciliation logic (Issue #129), error context tests (Issue #286), Phase 3 re-verify tests (Issue #378) |
+| `tests/unit/test_schedule_status_observability.py` | Residual-race observability log tests (Issue #378) |
