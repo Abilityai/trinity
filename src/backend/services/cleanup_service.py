@@ -176,7 +176,8 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale activities: {e}")
 
-        # 3. Cleanup stale Redis slots and fail corresponding execution records (#219, #226)
+        # 3. Cleanup stale Redis slots and fail corresponding execution records
+        #    (#219, #226, #378 — see _process_stale_slot_reclaims docstring).
         try:
             slot_service = get_slot_service()
 
@@ -189,38 +190,9 @@ class CleanupService:
             )
             report.stale_slots = sum(len(ids) for ids in reclaimed.values())
 
-            # Fail execution records whose slots were reclaimed,
-            # but skip IDs the watchdog confirmed as still running (#226).
-            for agent_name, execution_ids in reclaimed.items():
-                for execution_id in execution_ids:
-                    if execution_id in confirmed_running_ids:
-                        logger.info(
-                            f"[Cleanup] Skipping execution {execution_id} for agent "
-                            f"'{agent_name}' — watchdog confirmed still running"
-                        )
-                        continue
-                    try:
-                        # Issue #61: Attempt to terminate execution on agent before
-                        # marking it failed. Best-effort — may fail if agent unreachable.
-                        try:
-                            async with httpx.AsyncClient(timeout=WATCHDOG_HTTP_TIMEOUT) as term_client:
-                                await self._terminate_on_agent(term_client, agent_name, execution_id)
-                        except Exception as term_err:
-                            logger.debug(f"[Cleanup] Could not terminate {execution_id}: {term_err}")
-
-                        updated = db.fail_stale_slot_execution(
-                            execution_id=execution_id,
-                            error=f"Stale execution — slot TTL expired for agent '{agent_name}', cleaned by cleanup service",
-                        )
-                        if updated:
-                            report.stale_slot_executions += 1
-                            logger.info(
-                                f"[Cleanup] Failed execution {execution_id} for agent '{agent_name}' (slot reclaimed)"
-                            )
-                    except Exception as e:
-                        logger.error(
-                            f"[Cleanup] Error failing execution {execution_id} after slot reclaim: {e}"
-                        )
+            await self._process_stale_slot_reclaims(
+                reclaimed, confirmed_running_ids, report
+            )
         except Exception as e:
             logger.error(f"[Cleanup] Error cleaning stale slots: {e}")
 
@@ -231,6 +203,114 @@ class CleanupService:
             logger.info(f"[Cleanup] Cycle complete: {report.to_dict()}")
 
         return report
+
+    async def _process_stale_slot_reclaims(
+        self,
+        reclaimed: Dict[str, List[str]],
+        confirmed_running_ids: set,
+        report: CleanupReport,
+    ) -> None:
+        """Fail execution records whose slots were reclaimed, with just-in-time
+        re-verify to prevent phantom failures (#378).
+
+        The bug: cleanup service's Phase 3 sometimes marked executions FAILED
+        with "Stale execution — slot TTL expired" even though the task was
+        still running (agent had just dropped it from its registry after
+        completion, so Phase 0's batch query missed it). The SUCCESS response
+        then arrived after Phase 3 already wrote FAILED — user saw the flip.
+
+        The fix:
+        - Do a just-in-time re-verify with each agent RIGHT BEFORE writing
+          FAILED, closing the window between Phase 0 and Phase 3.
+        - Parallel fan-out via asyncio.gather (mirrors Phase 0 pattern at
+          _reconcile_orphaned_executions).
+        - On agent unreachable: skip this cycle. Do NOT accumulate cross-cycle
+          state — slot_service.cleanup_stale_slots removes reclaimed IDs from
+          Redis permanently, so the same ID will not reappear in a later
+          cycle. The 120-min Phase 1 stale cleanup is the backstop for truly
+          stuck agents.
+        """
+        if not reclaimed:
+            return
+
+        agent_names = list(reclaimed.keys())
+        async with httpx.AsyncClient(timeout=WATCHDOG_HTTP_TIMEOUT) as client:
+            results = await asyncio.gather(
+                *(self._get_agent_running_ids(client, name) for name in agent_names),
+                return_exceptions=True,
+            )
+            per_agent_running: Dict[str, Optional[set]] = {}
+            for name, result in zip(agent_names, results):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        f"[Cleanup] Phase 3 re-verify failed for '{name}': {result}"
+                    )
+                    per_agent_running[name] = None
+                else:
+                    # result is Optional[set] here after the BaseException branch
+                    per_agent_running[name] = result
+
+            for agent_name, execution_ids in reclaimed.items():
+                running_ids = per_agent_running.get(agent_name)
+
+                for execution_id in execution_ids:
+                    # #226: Phase 0 already confirmed this exec as running —
+                    # trust it to save an HTTP call.
+                    if execution_id in confirmed_running_ids:
+                        logger.info(
+                            f"[Cleanup] Skipping {execution_id} for '{agent_name}' "
+                            f"— watchdog confirmed still running"
+                        )
+                        continue
+
+                    # Just-in-time re-verify interpretation
+                    if running_ids is None:
+                        # Agent unreachable during re-verify. Skip this cycle;
+                        # Phase 1 (120-min stale cleanup) is the backstop.
+                        logger.info(
+                            f"[Cleanup] Skipping {execution_id} for '{agent_name}' "
+                            f"— agent unreachable during re-verify (#378); "
+                            f"Phase 1 stale cleanup is fallback"
+                        )
+                        continue
+
+                    if execution_id in running_ids:
+                        # #378: agent says this exec is still running — the
+                        # slot TTL fired prematurely relative to the task.
+                        # Skip; the task's own SUCCESS/FAILED write will
+                        # land correctly later.
+                        logger.info(
+                            f"[Cleanup] Skipping {execution_id} for '{agent_name}' "
+                            f"— re-verification shows still running (#378)"
+                        )
+                        continue
+
+                    # Re-verify confirmed inactive → safe to fail.
+                    try:
+                        # Issue #61: best-effort terminate before marking failed.
+                        try:
+                            await self._terminate_on_agent(
+                                client, agent_name, execution_id
+                            )
+                        except Exception as term_err:
+                            logger.debug(
+                                f"[Cleanup] Could not terminate {execution_id}: {term_err}"
+                            )
+
+                        updated = db.fail_stale_slot_execution(
+                            execution_id=execution_id,
+                            error=f"Stale execution — slot TTL expired for agent '{agent_name}', cleaned by cleanup service",
+                        )
+                        if updated:
+                            report.stale_slot_executions += 1
+                            logger.info(
+                                f"[Cleanup] Failed execution {execution_id} for agent "
+                                f"'{agent_name}' (slot reclaimed)"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"[Cleanup] Error failing {execution_id} after slot reclaim: {e}"
+                        )
 
     async def _reconcile_orphaned_executions(self) -> tuple[int, int, set]:
         """Reconcile DB execution state against agent process registries.
