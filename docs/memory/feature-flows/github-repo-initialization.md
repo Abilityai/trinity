@@ -12,6 +12,7 @@ As a **Trinity platform user**, I want to **enable GitHub synchronization for an
 
 | Date | Changes |
 |------|---------|
+| 2026-04-19 | S7 Layers 0/2 (#382): consolidated three independent `generate_instance_id()` call sites behind new `reserve_and_generate_instance_id()` helper in `services/git_service.py:115-206`. Reservation now atomically (a) generates a UUID, (b) probes the remote with `git ls-remote --heads --exit-code` (Layer 1), and (c) inserts the `agent_git_config` row under a new partial UNIQUE index `UNIQUE(github_repo, working_branch) WHERE source_mode = 0` (Layer 2). Retries up to `MAX_INSTANCE_ID_RETRIES` (5) on either remote or DB collision before raising `RuntimeError`. The reservation is performed BEFORE container creation in `agent_service/crud.py` and BEFORE `initialize_git_in_container` in `routers/git.py`, and is rolled back via `db.delete_git_config(...)` if any later step fails so a retry can claim a fresh branch. The duplicate post-container `db.create_git_config` call previously made by `crud.py` was removed. Schema added in `db/schema.py:757-758`; existing databases get the index via migration `agent_git_config_branch_ownership` (`db/migrations.py:1454-1511`), which refuses to install when `_find_duplicate_working_branches` finds existing collisions and prints every offending row so the operator can rebind one of the duplicates first. Failure mode: agent creation that previously could silently bind to an in-use working branch now fails fast with `RuntimeError` after 5 reservation attempts. Regression coverage: `tests/git-sync/test_s7_reserve_instance_id.py`. (Layer 3 push-time `--force-with-lease` guard documented in `github-sync.md`.) |
 | 2026-04-10 | Fix (#256): `initialize_git_in_container` now pushes after commit in the `remote_has_main` code path. Previously the workspace was committed locally inside the container but never reached GitHub when the target repo already had a `main` branch, making the UI report success while no files synced. |
 | 2026-02-11 | Added LEGACY notes for workspace path checks - new agents (2026-02+) use `/home/developer` directly, workspace checks exist for backward compatibility with pre-2026-02 agents |
 | 2026-01-23 | Verified line numbers against current implementation, updated MCP tool lines (530-604), verified git_service.py structure |
@@ -109,8 +110,27 @@ sequenceDiagram
         GitHubService->>Backend: GitHubRepoInfo(exists=True)
     end
 
-    Note over Backend,Container: Phase 4: Git Initialization (via git_service)
-    Backend->>GitService: initialize_git_in_container()
+    Note over Backend,Container: Phase 4a: Reserve Working Branch (S7 Layer 0)
+    Backend->>GitService: reserve_and_generate_instance_id(agent, repo)
+    loop up to MAX_INSTANCE_ID_RETRIES (5)
+        GitService->>GitService: generate_instance_id() (UUID prefix)
+        GitService->>GitService: working_branch = trinity/{agent}/{id}
+        GitService->>GitHub: git ls-remote --heads --exit-code (Layer 1)
+        alt Remote already has branch
+            Note over GitService: Retry with fresh UUID
+        else Remote clear
+            GitService->>GitService: db.create_git_config() (Layer 2 partial UNIQUE)
+            alt sqlite3.IntegrityError on (repo, branch)
+                Note over GitService: Retry with fresh UUID
+            else Insert succeeds
+                GitService->>Backend: (instance_id, working_branch)
+            end
+        end
+    end
+    Note over GitService: After 5 collisions: raise RuntimeError
+
+    Note over Backend,Container: Phase 4b: Git Initialization (via git_service)
+    Backend->>GitService: initialize_git_in_container(working_branch=reserved, create_working_branch=False)
     GitService->>Container: Check for existing git directory
     alt Has existing /home/developer/workspace with content (LEGACY)
         Note over GitService: LEGACY: Agents created before 2026-02
@@ -120,14 +140,13 @@ sequenceDiagram
         GitService->>Container: Create .gitignore
     end
     GitService->>Container: Execute git init, add, commit, push
-    GitService->>Container: Create working branch
+    GitService->>Container: Check out + push pre-reserved working branch
     GitService->>Container: Verify git directory
     GitService->>Backend: GitInitResult(success=True, git_dir, working_branch)
+    Note over Backend: On any failure: db.delete_git_config(agent) to release reservation
 
-    Note over Backend,Container: Phase 5: Persistence
-    Backend->>GitService: create_git_config_for_agent()
-    GitService->>GitService: Store in agent_git_config table
-    Backend->>Store: Return success + repo details
+    Note over Backend,Container: Phase 5: Response
+    Backend->>Store: Return success + repo details (config row already persisted in Phase 4a)
     Store->>GitPanel: Close modal
     GitPanel->>GitPanel: Reload git status
     GitPanel->>User: Show git sync UI with remote URL
@@ -351,17 +370,44 @@ class GitHubService:
 
 | Lines | Component | Description |
 |-------|-----------|-------------|
-| 22-24 | `generate_instance_id()` | Generate 8-char UUID for instance |
-| 27-29 | `generate_working_branch()` | Generate branch name `trinity/{name}/{id}` |
-| 32-61 | `create_git_config_for_agent()` | Create database git config record |
-| 253-259 | `GitInitResult` dataclass | Result of git init in container |
-| 262-399 | `initialize_git_in_container()` | Full git init workflow |
-| 402-427 | `check_git_initialized()` | Check if git exists in container |
+| 29 | `MAX_INSTANCE_ID_RETRIES` | Max reservation retries before `RuntimeError` (5) — S7 Layer 0 |
+| 32-40 | `generate_instance_id()` | Raw 8-char UUID prefix. Kept for the reserve helper; new callers MUST use `reserve_and_generate_instance_id` |
+| 43-45 | `generate_working_branch()` | Generate branch name `trinity/{name}/{id}` |
+| 48-112 | `check_remote_branch_exists()` | `git ls-remote --heads --exit-code` probe (S7 Layer 1) — fails-open on network/timeout because Layer 2 is the real guarantee |
+| 115-206 | `reserve_and_generate_instance_id()` | **S7 Layer 0 single entry point**: UUID + remote probe + DB insert under partial UNIQUE index. Retries `MAX_INSTANCE_ID_RETRIES` times then raises `RuntimeError` |
+| 209-238 | `create_git_config_for_agent()` | Legacy create-without-reserve helper (still used in tests/non-S7 paths) |
+| 430-436 | `GitInitResult` dataclass | Result of git init in container |
+| 439-658 | `initialize_git_in_container()` | Full git init workflow. New `working_branch` kwarg accepts pre-reserved branch; `create_working_branch=True` is deprecated and logs a warning |
+| 661-690 | `check_git_initialized()` | Check if git exists in container |
 
-**Key Function**:
+**Key Functions**:
 
 ```python
-# Line 253-259: GitInitResult dataclass
+# Line 115-206: S7 Layer 0 single entry point — atomic reserve
+async def reserve_and_generate_instance_id(
+    agent_name: str,
+    github_repo: str,
+    source_branch: str = "main",
+    source_mode: bool = False,
+    sync_paths: Optional[List[str]] = None,
+) -> Tuple[str, str]:
+    """Atomically reserve a fresh working branch.
+
+    Combines:
+      1. UUID generation
+      2. ``git ls-remote`` probe (Layer 1)
+      3. DB insert into ``agent_git_config`` under the partial UNIQUE
+         index UNIQUE(github_repo, working_branch) WHERE source_mode = 0
+         (Layer 2)
+
+    Retries on either remote or DB collision up to
+    MAX_INSTANCE_ID_RETRIES (5) before raising RuntimeError.
+    For source_mode=True the remote probe is skipped (intentional shared
+    branch) and the DB insert bypasses the partial UNIQUE index by design.
+    """
+
+
+# Line 430-436: GitInitResult dataclass
 @dataclass
 class GitInitResult:
     """Result of git initialization in container."""
@@ -371,12 +417,13 @@ class GitInitResult:
     error: Optional[str] = None
 
 
-# Line 262-399: Initialize git in container
+# Line 439-658: Initialize git in container (S7 Layer 0 signature)
 async def initialize_git_in_container(
     agent_name: str,
     github_repo: str,
     github_pat: str,
-    create_working_branch: bool = True
+    create_working_branch: bool = True,  # DEPRECATED — emits warning
+    working_branch: Optional[str] = None,  # NEW: pre-reserved branch
 ) -> GitInitResult:
     """
     Initialize git in an agent container.
@@ -388,7 +435,10 @@ async def initialize_git_in_container(
     4. Configure remote
     5. Create initial commit
     6. Push to GitHub
-    7. Create working branch (optional)
+    7. Create working branch — prefers the pre-reserved path:
+       - working_branch=<reserved> (preferred)  → just check out + push
+       - create_working_branch=True (legacy)    → generates an instance ID
+         internally, bypassing the Layer 0/1/2 guarantees. Warning logged.
     """
     container_name = f"agent-{agent_name}"
 
@@ -500,7 +550,9 @@ OwnedAgentByName = Annotated[str, Depends(get_owned_agent_by_name)]
 | Lines | Component | Description |
 |-------|-----------|-------------|
 | 34-41 | `GitInitializeRequest` model | Request body schema |
-| 251-389 | `POST /{agent_name}/git/initialize` | Main initialization endpoint |
+| 251-410 | `POST /{agent_name}/git/initialize` | Main initialization endpoint (S7 Layer 0 reserve-then-init) |
+| 346-349 | `reserve_and_generate_instance_id()` call | Atomic reservation BEFORE container init |
+| 351-394 | `try`/`except` around `initialize_git_in_container` | Rolls back via `db.delete_git_config` if init fails so retries can claim a fresh branch |
 
 **Endpoint Implementation**:
 
@@ -562,30 +614,42 @@ async def initialize_github_sync(
             if not repo_info.exists:
                 raise HTTPException(status_code=400, detail=f"Repository '{repo_full_name}' does not exist...")
 
-        # Step 2: Initialize git in container (lines 338-364)
-        init_result = await git_service.initialize_git_in_container(
+        # Step 2: Reserve the working branch BEFORE touching the container.
+        # S7 Layer 0 (#382): single-entry helper — remote probe + DB insert
+        # under the partial UNIQUE index in one shot. Raises RuntimeError
+        # after MAX_INSTANCE_ID_RETRIES collisions.
+        instance_id, reserved_branch = await git_service.reserve_and_generate_instance_id(
             agent_name=agent_name,
             github_repo=repo_full_name,
-            github_pat=github_pat
         )
 
-        if not init_result.success:
-            # Handle various error types with appropriate status codes
-            raise HTTPException(status_code=400, detail=f"Git initialization failed: {init_result.error}")
+        try:
+            # Step 3: Initialize git in container using the reserved branch.
+            # create_working_branch=False tells the helper not to generate
+            # its own ID — the caller owns the reservation now.
+            init_result = await git_service.initialize_git_in_container(
+                agent_name=agent_name,
+                github_repo=repo_full_name,
+                github_pat=github_pat,
+                create_working_branch=False,
+                working_branch=reserved_branch,
+            )
 
-        # Step 3: Store configuration (lines 366-372)
-        instance_id = git_service.generate_instance_id()
-        config = await git_service.create_git_config_for_agent(
-            agent_name=agent_name,
-            github_repo=repo_full_name,
-            instance_id=instance_id
-        )
+            if not init_result.success:
+                raise HTTPException(status_code=400, detail=f"Git initialization failed: {init_result.error}")
+        except Exception:
+            # Release the reservation so a retry can grab a fresh branch.
+            try:
+                db.delete_git_config(agent_name)
+            except Exception as cleanup_exc:
+                logger.warning("Failed to roll back agent_git_config for %s after init failure: %s", agent_name, cleanup_exc)
+            raise
 
         return {
             "success": True,
             "message": "GitHub sync initialized successfully",
             "github_repo": repo_full_name,
-            "working_branch": init_result.working_branch,
+            "working_branch": reserved_branch,
             "instance_id": instance_id,
             "repo_url": f"https://github.com/{repo_full_name}"
         }
@@ -729,14 +793,28 @@ initializeGithubSync: {
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `agent_name` | TEXT PRIMARY KEY | Agent identifier |
+| `id` | TEXT PRIMARY KEY | Row id |
+| `agent_name` | TEXT UNIQUE NOT NULL | Agent identifier |
 | `github_repo` | TEXT | Full repo name (owner/name) |
 | `working_branch` | TEXT | Branch name (trinity/{name}/{id}) |
 | `instance_id` | TEXT | Unique instance identifier (8 chars) |
+| `source_branch` | TEXT | Source branch (default `'main'`) |
+| `source_mode` | INTEGER | 0 = working-branch agent, 1 = read-only source-mode |
 | `created_at` | TIMESTAMP | When config was created |
 | `last_sync_at` | TIMESTAMP | Last successful sync |
 | `last_commit_sha` | TEXT | Last synced commit SHA |
 | `sync_enabled` | BOOLEAN | Whether sync is active |
+| `sync_paths` | TEXT | Optional JSON list of allowed paths |
+| `github_pat_encrypted` | TEXT | Per-agent PAT (#347) |
+
+**Indexes**:
+- `idx_git_config_agent` on `agent_name`
+- `idx_git_config_repo` on `github_repo`
+- `idx_git_config_repo_branch_unique` — **S7 Layer 2 partial UNIQUE**:
+  `UNIQUE(github_repo, working_branch) WHERE source_mode = 0`. Defined in
+  `src/backend/db/schema.py:757-758` for fresh installs and added to existing
+  databases by migration `agent_git_config_branch_ownership`
+  (`src/backend/db/migrations.py:1454-1511`).
 
 **Table**: `system_settings`
 
@@ -1306,6 +1384,66 @@ trinity/{agent-name}/{instance-id}
 - Clear ownership of changes
 - Easy to create PRs from working branch to main
 - Instance ID ensures uniqueness across restarts
+
+### Branch Ownership (S7 Layers 0 & 2 — #382, 2026-04-19)
+
+Working-branch agents must be exclusively bound to their `(github_repo,
+working_branch)` pair. This is enforced in three layers; Layers 0 and 2
+live in this flow (Layer 3, the push-time `--force-with-lease` guard,
+lives in [github-sync.md](github-sync.md)).
+
+**Layer 0 — single-entry reservation helper**
+- `services/git_service.py:reserve_and_generate_instance_id()` (lines 115-206)
+  is the only sanctioned way to allocate a working branch.
+- Atomically: generates a UUID prefix → probes the remote with
+  `git ls-remote --heads --exit-code` → inserts into `agent_git_config`.
+- Retries up to `MAX_INSTANCE_ID_RETRIES` (5, defined at line 29) on any
+  collision before raising `RuntimeError`.
+- Source-mode agents (`source_mode=True`) intentionally share branches
+  (e.g. every reader pointing at `main`); the remote probe is skipped and
+  the DB insert bypasses the partial UNIQUE index by design.
+
+**Layer 1 — remote probe**
+- `services/git_service.py:check_remote_branch_exists()` (lines 48-112).
+- Uses `https://github.com/<repo>.git` so the check works without a PAT
+  for public repos. Fails open (returns `False`) on network errors,
+  timeout, or `git` missing — Layer 2 is the real guarantee.
+
+**Layer 2 — partial UNIQUE index**
+- `db/schema.py:757-758` for fresh installs.
+- Migration `agent_git_config_branch_ownership` in
+  `db/migrations.py:1454-1511` for existing databases.
+- Pre-flight `_find_duplicate_working_branches()`
+  (`db/migrations.py:1411-1451`) scans for pre-existing duplicates.
+  If any are found the migration **refuses to install the index** and
+  prints every offending `(repo, branch, agents)` group plus each
+  individual agent name so the operator can rebind one of the colliding
+  agents (via the UI / MCP `initialize_github_sync` flow) before
+  re-running. The migration **never auto-deletes rows** — that would
+  mask the bug.
+
+**Call-site consolidation**
+| Caller | Location | Behavior change |
+|--------|----------|-----------------|
+| Agent creation | `services/agent_service/crud.py:232-239` | Reserves BEFORE container creation. The duplicate post-container `db.create_git_config` (previously around line 619) was removed. On any failure later in the function the `except` block at lines 626-639 calls `db.delete_git_config(config.name)` to release the reservation. |
+| `POST /git/initialize` | `routers/git.py:346-394` | Reserves BEFORE `initialize_git_in_container`. Passes `working_branch=<reserved>, create_working_branch=False`. Wraps the container init in a `try`/`except` that rolls back the reservation on failure. |
+| `initialize_git_in_container` | `services/git_service.py:439-658` | Adds `working_branch: Optional[str] = None` kwarg for the pre-reserved path (lines 595-611). The legacy `create_working_branch=True` path (lines 612-636) emits a deprecation warning on every use but is kept so older callers don't break. |
+
+**Failure mode**
+Agent creation that previously could silently bind to an in-use working
+branch (the 2026-04-17 alpaca incident) now fails fast with a
+`RuntimeError` if all 5 reservation attempts collide. The partial
+transaction is rolled back; the caller is expected to retry agent
+creation, which will pick a fresh UUID.
+
+**Regression coverage**
+`tests/git-sync/test_s7_reserve_instance_id.py` covers:
+- (i) `reserve_and_generate_instance_id` retries on `ls-remote` hits
+- (ii) raises after `MAX_INSTANCE_ID_RETRIES`
+- (iii) the partial UNIQUE index rejects duplicate working-branch
+  bindings and accepts duplicates for source-mode agents
+- (iv) the migration pre-flight surfaces existing duplicates and
+  refuses to install the index until they're resolved
 
 ### Repository Structure
 
