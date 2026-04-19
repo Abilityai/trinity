@@ -28,6 +28,7 @@ GitHub-native agents can synchronize with GitHub repositories in two modes:
 | **API** | `POST /api/agents/{name}/git/sync` | Push changes to GitHub (working branch mode) |
 | **API** | `GET /api/agents/{name}/git/status` | Get git repository status |
 | **API** | `GET /api/agents/{name}/git/config` | Get stored git config |
+| **API** | `POST /api/agents/{name}/git/reset-to-main-preserve-state` | Adopt `origin/main`, preserve persistent-state allowlist (S3, #384) |
 
 ---
 
