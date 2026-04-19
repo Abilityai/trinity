@@ -446,6 +446,16 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **GitHub Issue**: #385 (Epic #381)
 - **Flow**: `docs/memory/feature-flows/github-sync.md`
 
+### 11.5 Branch Ownership Enforcement (S7)
+- **Status**: ✅ Implemented (2026-04-19)
+- **Description**: Prevent silent data loss from two agents binding to the same `(github_repo, working_branch)` pair (2026-04-17 alpaca incident).
+- **Key Features**:
+  - Layer 0/1: single `reserve_and_generate_instance_id` helper atomically generates a UUID, probes `git ls-remote`, and inserts under the partial UNIQUE; retries 5x on collision.
+  - Layer 2: partial UNIQUE `(github_repo, working_branch) WHERE source_mode = 0` on `agent_git_config`; migration refuses to install on existing duplicates so operators rebind first.
+  - Layer 3: agent-server pushes with `git push --force-with-lease=<branch>:<expected-sha>`; lease rejection returns 409 + `X-Conflict-Type: branch_ownership_collision` and emits a structured alert into `~/.trinity/operator-queue.json` so the Operating Room surfaces the collision.
+- **GitHub Issue**: #382 (Epic #381)
+- **Flows**: `docs/memory/feature-flows/github-repo-initialization.md`, `docs/memory/feature-flows/github-sync.md`
+
 ---
 
 ## 12. Platform Operations
