@@ -425,6 +425,17 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Description**: Initialize GitHub sync for existing agents
 - **Flow**: `docs/memory/feature-flows/github-repo-initialization.md`
 
+### 11.3 Operator-Readable Conflict Diagnosis (S5)
+- **Status**: ✅ Implemented (2026-04-19)
+- **Description**: Replace the raw git stderr that previously leaked into `GitConflictModal` with structured classification and per-class operator copy so non-developers can understand what failed and what to do.
+- **Key Features**:
+  - `ConflictClass` enum (7 members: `AHEAD_ONLY`, `BEHIND_ONLY`, `PARALLEL_HISTORY`, `UNCOMMITTED_LOCAL`, `AUTH_FAILURE`, `WORKING_BRANCH_EXTERNAL_WRITE`, `UNKNOWN`) + pure `classify_conflict()` in both backend (`git_service.py`) and agent-server (`utils/git_conflict.py`) — the two runtimes don't share code.
+  - 409 responses now carry `conflict_class` in body and an `X-Conflict-Class` header alongside the legacy `X-Conflict-Type`.
+  - Frontend `COPY` lookup in `GitConflictModal.vue` renders per-class title/body/recommendation; raw git stderr lives inside an expandable `<details>` element.
+  - Pre-S5 fallback preserved for older agent images that don't emit `conflict_class`.
+- **GitHub Issue**: #386 (Epic #381)
+- **Flow**: `docs/memory/feature-flows/github-sync.md`
+
 ---
 
 ## 12. Platform Operations
