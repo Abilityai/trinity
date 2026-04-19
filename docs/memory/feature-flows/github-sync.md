@@ -238,9 +238,9 @@ sequenceDiagram
     Backend->>Container: POST /api/git/sync
     Container->>Container: git add -A
     Container->>Container: git commit -m "Trinity sync: {timestamp}"
-    Container->>Container: git push --force-with-lease
-    Container->>Backend: Return commit SHA
-    Backend->>UI: Show notification
+    Container->>Container: git push --force-with-lease={branch}:{expected-sha}
+    Container->>Backend: Return commit SHA (or 409 on stale lease)
+    Backend->>UI: Show notification (or branch_ownership_collision modal)
 ```
 
 ---
@@ -760,7 +760,7 @@ Operators staring at `merge_conflict` and a wall of raw git stderr could not tel
 |-----------|------|------------|-------------|
 | Modal | `src/frontend/src/components/GitConflictModal.vue` | - | Conflict resolution UI |
 | Composable | `src/frontend/src/composables/useGitSync.js` | 1-202 | State management with conflict handling |
-| Agent-Server | `docker/base-image/agent_server/routers/git.py` | 1-644 | Git operations with strategies |
+| Agent-Server | `docker/base-image/agent_server/routers/git.py` | 1-854 | Git operations with strategies + S7 Layer 3 lease/collision surfacing |
 | Backend Router | `src/backend/routers/git.py` | 1-389 | API endpoints with strategy params |
 | Git Service | `src/backend/services/git_service.py` | 1-427 | Proxy to agent with conflict detection |
 | Settings Service | `src/backend/services/settings_service.py` | 71-76, 113-115 | GitHub PAT retrieval |
@@ -790,10 +790,91 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
 
 | Endpoint | Line Range | Description |
 |----------|------------|-------------|
-| `GET /api/git/status` | 86-251 | Get repository status, branch, changes, ahead/behind (uses `_get_pull_branch` for behind count); also surfaces `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` for parallel-history detection (S2, #385) |
-| `POST /api/git/sync` | 254-407 | Stage, commit, push with strategy support (`pull_first` pulls from `pull_branch`) |
-| `GET /api/git/log` | 410-457 | Get recent commit history |
-| `POST /api/git/pull` | 460-659 | Pull from remote with conflict strategies (targets `pull_branch`) |
+| `GET /api/git/status` | — | Get repository status, branch, changes, ahead/behind (uses `_get_pull_branch` for behind count); surfaces `pull_branch`, `common_ancestor_sha`, `common_ancestor_age_days` for parallel-history detection (S2, #385); persists last-remote-sha after fetch (S7 Layer 3, #382) |
+| `POST /api/git/sync` | — | Stage, commit, push with strategy support (`pull_first` pulls from `pull_branch`); `force_push` uses `--force-with-lease=<branch>:<expected-sha>` (S7 Layer 3, #382) |
+| `GET /api/git/log` | — | Get recent commit history |
+| `POST /api/git/pull` | — | Pull from remote with conflict strategies (targets `pull_branch`) |
+
+---
+
+## Branch-Ownership Collision Handling (S7 Layer 3, #382)
+
+When two Trinity instances bind to the same working branch, only one can push without clobbering the other. Layers 0 and 2 (reservation helper + partial UNIQUE index — see [github-repo-initialization.md](github-repo-initialization.md)) prevent the binding from being created in the first place. Layer 3 — the push-time guard documented here — is the last line of defense for instances that already have a stale binding from before those constraints existed.
+
+**2026-04-17 incident reference**: This Layer 3 change is the response to the alpaca-vybe-live silent clobber, where a peer instance's `git push --force` overwrote in-flight work without either side noticing. Tier-1 regression coverage lives at `tests/git-sync/test_p5_branch_ownership.sh`.
+
+### Persisted last-remote-sha (the lease)
+
+After every successful `git fetch`, the agent server records the observed remote SHA to `~/.trinity/last-remote-sha/<branch>` (file path mirrors the branch layout, so `trinity/<agent>/<id>` becomes nested directories). The next push reads that value and passes it as the `expected-sha` argument to `--force-with-lease`.
+
+| Helper | File | Lines | Purpose |
+|--------|------|-------|---------|
+| `LAST_REMOTE_SHA_DIR` | `docker/base-image/agent_server/routers/git.py` | 18-23 | `~/.trinity/last-remote-sha` (under bind-mounted home, survives restarts) |
+| `_sha_file_for_branch()` | `docker/base-image/agent_server/routers/git.py` | 46-53 | Mirrors branch layout as nested dirs |
+| `_persist_last_remote_sha()` | `docker/base-image/agent_server/routers/git.py` | 56-94 | Called after fetch; failure is logged, never raised |
+| `_read_last_remote_sha()` | `docker/base-image/agent_server/routers/git.py` | 97-106 | Read on push path; returns `None` if missing |
+
+**Persist call sites** (after every successful fetch):
+- `get_git_status()` — line 249-250 (after the status-path fetch)
+- `sync_to_github()` `pull_first` strategy — line 353-354 (after the pre-sync fetch)
+
+**Failure mode**: if persistence fails (disk full, permission error), the next push has no lease on file and falls back to the unparameterized `git push --force-with-lease`, which uses the remote-tracking ref as the expected-sha. Still safer than plain `--force`; degraded for one push then self-heals on the next fetch.
+
+### Force-push with lease
+
+`sync_to_github()` `force_push` strategy (lines 489-536):
+
+```python
+lease_sha = _read_last_remote_sha(current_branch)
+push_cmd: list[str] = ["git", "push"]
+if lease_sha:
+    push_cmd.append(f"--force-with-lease={current_branch}:{lease_sha}")
+else:
+    push_cmd.append("--force-with-lease")  # remote-tracking-ref fallback
+push_cmd += ["origin", current_branch]
+```
+
+If a peer instance pushed to the branch since this instance last fetched, `origin/<branch>` is now ahead of `lease_sha`, the lease is stale, and `git push` exits non-zero with `stderr` containing `stale info`. `_is_stale_lease_rejection()` (lines 168-171) detects that signature.
+
+### HTTP 409 + collision header
+
+On lease rejection, the endpoint returns:
+
+```
+HTTP/1.1 409 Conflict
+X-Conflict-Type: branch_ownership_collision
+
+{"detail": "Force-push rejected: another instance has written to this branch since the last fetch. ..."}
+```
+
+(`agent_server/routers/git.py:522-532`.) The new `branch_ownership_collision` value is distinct from the existing `push_rejected` (non-fast-forward without `force_push`) and `merge_conflict` cases, so the frontend can show a dedicated remediation modal instead of offering a "force push again" button (which would fail the same way).
+
+### Operator-queue collision alert
+
+`_record_push_collision()` (lines 109-165) appends a structured `alert` entry to `~/.trinity/operator-queue.json` when the lease is rejected:
+
+```json
+{
+  "id": "git-collision-<uuid12>",
+  "type": "alert",
+  "status": "pending",
+  "priority": "high",
+  "title": "Git push rejected on <branch> — branch binding collision",
+  "question": "Another Trinity instance wrote to this working branch since this agent last fetched. ...",
+  "options": null,
+  "context": {
+    "branch": "<branch>",
+    "expected_sha": "<lease-sha or null>",
+    "git_stderr": "<truncated to 2000 chars>",
+    "remediation": "Assign a fresh working branch to one of the colliding agents (Fleet → Branch Bindings → Assign fresh branch)."
+  },
+  "created_at": "<utc iso>"
+}
+```
+
+The backend's `OperatorQueueSyncService` (5s polling, see `services/operator_queue_service.py`) picks this up on its next sweep and surfaces it in the Operating Room. The losing instance now learns it lost the race, instead of believing its push succeeded — that's the substantive behavior change versus the pre-#382 silent-clobber regime.
+
+Append failures are caught and logged but never raised — surfacing the alert is best-effort; the 409 to the caller is the authoritative signal.
 
 #### `GET /api/git/status` — parallel-history fields (S2, #385)
 
@@ -817,7 +898,7 @@ Push is the right answer:
 
 1. **GitHub PAT**: Passed as environment variable, never exposed in logs or API responses
 2. **Remote URL Sanitization**: Credentials stripped before display
-3. **Force Push Protection**: Uses `--force-with-lease` for normal pushes
+3. **Force Push Protection**: All pushes (normal AND `force_push` strategy) use `--force-with-lease`. `force_push` parameterizes the lease with the persisted last-observed remote SHA so a stale binding cannot clobber a peer (S7 Layer 3, #382). See "Branch-Ownership Collision Handling" above.
 4. **Force Operations Warning**: UI shows red destructive warnings for force operations
 5. **Infrastructure Files**: `content/`, `.local/` auto-added to `.gitignore`
 6. **Access Control**: Read endpoints and pull use `AuthorizedAgentByName` (owner/shared/admin), write endpoints (sync/initialize) use `OwnedAgentByName` (owner/admin only)
@@ -845,8 +926,9 @@ Working - Pull fix for working branches (2026-03-26)
 
 | Date | Changes |
 |------|---------|
-| 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py:28-130`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` (`db_models.py:231`) and `X-Conflict-Class` response header on 409s (`routers/git.py:134-140, 212-218`). Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper (`docker/base-image/agent_server/routers/git.py:41-68`). `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js:87-93, 131-138` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
-| 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch` (line 235), `common_ancestor_sha` (line 242), and `common_ancestor_age_days` (line 243), computed via `git merge-base HEAD origin/<pull_branch>` (line 184-192) and `git log -1 --format=%cI` (line 194-213). Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch` (lines 36-38), `isParallelHistory` predicate (lines 44-55, threshold 30 days), and an `adoptUpstreamPreserveState()` resolver (lines 189-220) that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant (lines 106-184) titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git-sync/test_p2_parallel_history_detection.sh` (in-process FastAPI) and `tests/git-sync/test_s2_usegitsync.test.js` (Vitest predicate scenarios). |
+| 2026-04-19 | **S7 Layer 3 push-time guard** (#382, PR #396): `sync_to_github()` `force_push` strategy now uses `git push --force-with-lease=<branch>:<expected-sha>` instead of plain `--force` (`docker/base-image/agent_server/routers/git.py`). The expected-sha is the remote value last observed at fetch, persisted to `~/.trinity/last-remote-sha/<branch>` via `_persist_last_remote_sha()` after every successful fetch. Stale-lease rejection returns HTTP 409 with header `X-Conflict-Type: branch_ownership_collision` and appends a structured alert to `~/.trinity/operator-queue.json` (`_record_push_collision()`), which the backend's `OperatorQueueSyncService` surfaces in the Operating Room on its next 5s poll. Persistence/append failures are logged, never raised. Response to the 2026-04-17 alpaca-vybe-live silent clobber; Tier-1 regression at `tests/git-sync/test_p5_branch_ownership.sh`. Layers 0 and 2 (reservation helper + partial UNIQUE index) are documented in `github-repo-initialization.md`. |
+| 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` and `X-Conflict-Class` response header on 409s. Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper. `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
+| 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch`, `common_ancestor_sha`, and `common_ancestor_age_days`, computed via `git merge-base HEAD origin/<pull_branch>` and `git log -1 --format=%cI`. Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch`, `isParallelHistory` predicate (threshold 30 days), and an `adoptUpstreamPreserveState()` resolver that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git-sync/test_p2_parallel_history_detection.sh` and `tests/git-sync/test_s2_usegitsync.test.js`. |
 | 2026-04-16 | **Per-Agent GitHub PAT** (#347): Added per-agent PAT configuration. Agents can now use their own GitHub PAT instead of the global one. DB column `github_pat_encrypted` in `agent_git_config`, encrypted with AES-256-GCM. 3 new API endpoints (GET/PUT/DELETE), 2 MCP tools, GitPanel.vue settings UI. Helper `get_github_pat_for_agent()` provides fallback logic. |
 | 2026-03-26 | **Fix git pull for working branches** (#195): Added `_get_pull_branch()` helper that detects `trinity/*` branches and redirects pull/status to `origin/main`. Fixed `git fetch --dry-run` → `git fetch origin` in status endpoint. Fixed `initialize_git_in_container()` to preserve remote history via `git fetch + reset` instead of `git init + force push`. Tests in `tests/unit/test_git_pull_branch.py`. |
 | 2026-02-28 | **Git Branch Support** (GIT-002): Added complete data flow documentation with line numbers. URL syntax (`github:owner/repo@branch`) parses branch in crud.py:102-113. MCP types.ts:29 and agents.ts:201-207 expose `source_branch` parameter. template_service.py:22-41 passes branch to git clone. startup.sh:38-45 uses `-b` flag. Added testing checklist from requirements spec. |
