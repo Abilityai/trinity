@@ -1095,7 +1095,7 @@ Working - Pull fix for working branches (2026-03-26)
 |-----------|------|--------------|
 | **Upstream** | [Template Processing](template-processing.md) | GitHub templates trigger git sync setup |
 | **Upstream** | [Agent Lifecycle](agent-lifecycle.md) | Agent creation enables git sync |
-| **Downstream** | [Git Sync Health](git-sync-health.md) | Auto-sync heartbeat + observability on top of this flow (#389, #390) |
+| **Downstream** | [Git Sync Health](git-sync-health.md) | Auto-sync heartbeat + observability on top of this flow (#389) |
 | **Downstream** | Content generation | Large files go to `content/` folder |
 | **Related** | [Async Docker Operations](async-docker-operations.md) | Git commands use async docker exec (DOCKER-001) |
 
