@@ -17,7 +17,7 @@
 | 2026-04-19 | #211 | Auto-propagate global GitHub PAT to running agents on update — per-agent PAT holders and agents without `GITHUB_PAT` in `.env` are skipped; delete does NOT propagate | [github-sync.md](feature-flows/github-sync.md), [platform-settings.md](feature-flows/platform-settings.md) |
 | 2026-04-19 | #378 | Cleanup service Phase 3 just-in-time re-verify + parallel per-agent fan-out — eliminates phantom stale-slot failures for still-running tasks; adds residual-race observability log | [cleanup-service.md](feature-flows/cleanup-service.md) |
 | 2026-04-19 | S4 (#383) | Persistent-state allowlist primitive — materialize `.trinity/persistent-state.yaml` at agent creation; readers with default fallback on backend + agent-server | [persistent-state-allowlist.md](feature-flows/persistent-state-allowlist.md) |
-| 2026-04-19 | #389 | Git sync health observability — auto-sync heartbeat, dual ahead/behind (P6 fix), `agent_sync_state` + `sync_failing` operator-queue entry, dashboard dot | [git-sync-health.md](feature-flows/git-sync-health.md) |
+| 2026-04-19 | #389, #390 | Git sync health observability — auto-sync heartbeat, dual ahead/behind (P6 fix), `agent_sync_state` + `sync_failing` operator-queue, dashboard dot, `/api/fleet/sync-audit` with `duplicate_binding` flag | [git-sync-health.md](feature-flows/git-sync-health.md) |
 | 2026-04-18 | #384 (S3) | Reset-to-main-preserve-state operation — snapshot persistent-state allowlist, reset to `origin/main`, overlay back, force-with-lease push; guardrails for agent-busy / no-git-config / no-remote-main | [github-sync.md](feature-flows/github-sync.md) |
 | 2026-04-18 | DOCS-QA-001 | Trinity Docs Q&A — public Vertex AI Search endpoint + in-app floating help widget (#391) | [trinity-docs-qa.md](feature-flows/trinity-docs-qa.md) |
 | 2026-04-17 | #376 | Proactive messaging UI toggle — SharingPanel shows allow_proactive switch per shared user | [proactive-messaging.md](feature-flows/proactive-messaging.md), [agent-sharing.md](feature-flows/agent-sharing.md) |
@@ -234,7 +234,7 @@
 | GitHub Sync | [github-sync.md](feature-flows/github-sync.md) | Source mode (pull-only) or Working Branch mode |
 | GitHub Repo Initialization | [github-repo-initialization.md](feature-flows/github-repo-initialization.md) | Initialize GitHub sync for existing agents |
 | Persistent-State Allowlist | [persistent-state-allowlist.md](feature-flows/persistent-state-allowlist.md) | `.trinity/persistent-state.yaml` primitive for reset-preserve-state (S4, #383) |
-| Git Sync Health | [git-sync-health.md](feature-flows/git-sync-health.md) | Auto-sync heartbeat, dual ahead/behind, sync-state, dashboard dot |
+| Git Sync Health | [git-sync-health.md](feature-flows/git-sync-health.md) | Auto-sync heartbeat, dual ahead/behind, dashboard dot, `/api/fleet/sync-audit` |
 
 ### Skills Management
 

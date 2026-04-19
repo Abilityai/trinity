@@ -479,17 +479,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Endpoint**: `POST /api/agents/{name}/git/reset-to-main-preserve-state`
 - **Flow**: `docs/memory/feature-flows/github-sync.md` (Recovery section)
 
-### 11.8 Git Sync Health Observability (#389)
+### 11.8 Git Sync Health Observability (#389, #390)
 - **Status**: ✅ Implemented (2026-04-19)
-- **Description**: Per-agent sync-state tracking, 15-min auto-sync heartbeat, dashboard health dot, and operator-queue alerts on consecutive failures. Fixes P1 (silent desync) and P6 (working-branch divergence hidden) from the git-improvements proposal.
+- **Description**: Per-agent sync-state tracking, 15-min auto-sync heartbeat, dashboard health dot, operator-queue alerts on consecutive failures, and a fleet-wide audit endpoint with duplicate-binding detection. Fixes P1 (silent desync) and P6 (working-branch divergence hidden) from the git-improvements proposal.
 - **Key Features**:
   - `agent_sync_state` table + `auto_sync_enabled` / `freeze_schedules_if_sync_failing` flags on `agent_git_config`
   - 15-min `GIT_SYNC_AUTO` heartbeat loop in the agent container (default-on for non-source-mode GitHub-template agents)
   - Dual `ahead_main`/`ahead_working` tuples in `GET /api/git/status` (P6 fix)
   - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3`
   - `GET /api/agents/sync-health` (batch) + dashboard dot
+  - `GET /api/fleet/sync-audit` with `duplicate_binding` flag (§P5 query)
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
-- **Upstream**: Epic #381 — sub-issue #389 (S1). Fleet audit (#390/S6) and branch-ownership enforcement (#382/S7) build on the fields added here.
+- **Upstream**: Epic #381 — sub-issues #389 (S1), #390 (S6)
 
 ---
 

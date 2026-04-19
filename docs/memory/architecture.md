@@ -1083,7 +1083,8 @@ CREATE INDEX idx_sync_state_status
 - `consecutive_failures` incremented on `failed`, reset on `success`.
 - `ahead_working`/`behind_working` fix P6 (external writes to the working
   branch now visible in `GET /api/git/status`).
-- Powers the dashboard sync-health dot + `sync_failing` operator-queue alerts.
+- Powers the dashboard sync-health dot + `sync_failing` operator-queue
+  alerts + `/api/fleet/sync-audit` aggregator.
 
 
 **audit_log:** (SEC-001 / Issue #20 — Phase 1, NEW: 2026-04-14)

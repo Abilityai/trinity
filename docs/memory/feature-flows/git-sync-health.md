@@ -21,13 +21,12 @@ This flow adds:
   branch become visible in the UI (fixes P6).
 - A **dashboard sync-health dot** (green / yellow / red / gray) on the
   agents list.
+- A fleet-level **sync-audit** endpoint with a `duplicate_binding` flag
+  that catches the §P5 silent-clobber setup (two non-source-mode agents
+  sharing the same `(repo, working_branch)` pair).
 
 Per-agent opt-outs are available via API for both the auto-sync
 heartbeat and schedule-freeze behaviour.
-
-> **Follow-up** — fleet-level audit (with a `duplicate_binding` flag) is
-> tracked separately in #390 / S6 and builds on the `agent_sync_state`
-> table added here.
 
 ## User Stories
 
@@ -37,6 +36,8 @@ heartbeat and schedule-freeze behaviour.
   to by someone else (peer-clobber on a shared branch)."
 - **Operator**: "Automatically nudge agent containers to push their
   in-container state to GitHub so I don't have to remember."
+- **Fleet admin**: "Tell me if two agents are bound to the same working
+  branch — that setup causes silent data loss on force-push."
 
 ## Entry Points
 
@@ -48,6 +49,7 @@ heartbeat and schedule-freeze behaviour.
 | **API** | `GET /api/agents/{name}/git/sync-state` | Persisted sync-state row for one agent |
 | **API** | `GET/PUT /api/agents/{name}/git/auto-sync` | Toggle the per-agent auto-sync flag |
 | **API** | `GET/PUT /api/agents/{name}/git/freeze-schedules-if-failing` | Toggle the freeze-schedules-on-sync-failure flag |
+| **API** | `GET /api/fleet/sync-audit` | Fleet-wide audit including `duplicate_binding` flag (admins see all; non-admins filtered) |
 | **API** | `GET /api/internal/agents/{name}/sync-health-status` | Internal endpoint for the scheduler to check freeze-on-failure |
 | **Operator Queue** | type=`sync_failing` | Inserted by `SyncHealthService` when `consecutive_failures` crosses 3 |
 
@@ -157,7 +159,36 @@ computes BOTH tuples:
 Legacy `ahead` / `behind` in the response alias the main tuple so older
 clients keep working.
 
-### 4. Dashboard dot
+### 4. Fleet sync-audit (S6)
+
+```
+GET /api/fleet/sync-audit
+    ├── build_fleet_sync_audit(agent_names=...)
+    │     ├── db.find_duplicate_bindings()  -- §P5 SQL
+    │     ├── db.list_git_enabled_agents()
+    │     └── db.list_sync_states()
+    └── assembled { agents: [...], summary: {...} }
+```
+
+`find_duplicate_bindings()` implements the spec's §P5 query verbatim:
+
+```sql
+SELECT agent_name FROM agent_git_config
+WHERE source_mode = 0
+  AND (github_repo, working_branch) IN (
+      SELECT github_repo, working_branch
+      FROM agent_git_config
+      WHERE source_mode = 0
+      GROUP BY github_repo, working_branch
+      HAVING COUNT(*) > 1
+  )
+```
+
+Source-mode rows are excluded — legacy-mode siblings all tracking `main`
+is legitimate; two non-source-mode agents sharing `trinity/<x>/<id>` is
+the data-loss setup.
+
+### 5. Dashboard dot
 
 - `src/frontend/src/utils/syncHealth.js::classifySyncHealth(entry)` →
   `'green' | 'yellow' | 'red' | 'gray'`.
@@ -180,15 +211,17 @@ clients keep working.
 | `db/schema.py` | `agent_sync_state` CREATE TABLE; new `agent_git_config` columns; index |
 | `db/migrations.py` | `_migrate_sync_health` function (appended to `MIGRATIONS`) |
 | `db/sync_state.py` | `SyncStateOperations` — upsert/get/list/delete, counter logic |
-| `db/schedules.py` | `set_git_auto_sync_enabled`, `set_freeze_schedules_if_sync_failing` |
+| `db/schedules.py` | `set_git_auto_sync_enabled`, `set_freeze_schedules_if_sync_failing`, `find_duplicate_bindings` |
 | `db_models.py` | Two new fields on `AgentGitConfig` |
 | `database.py` | Delegation to `SyncStateOperations` + the two new flags + duplicate query |
 | `services/sync_health_service.py` | Background poller + operator-queue emitter |
+| `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
+| `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
 | `routers/internal.py` | `GET /api/internal/agents/{name}/sync-health-status` |
-| `main.py` | Starts `SyncHealthService` (staggered +5 s, PERF-269) |
+| `main.py` | Starts `SyncHealthService` (staggered +5 s, PERF-269); registers `fleet_router` |
 
 ### Agent server
 
@@ -219,8 +252,11 @@ backend):
   `_run_auto_sync_once` (success + push-failure), env-gate helpers.
 - `tests/unit/test_sync_health_service.py` — persistence, threshold
   emission (edge-triggered + idempotent), behind-working red-flag.
+- `tests/unit/test_fleet_sync_audit.py` — `find_duplicate_bindings`
+  (source-mode exclusion + mixed-mode), `build_fleet_sync_audit`
+  (clean agent, duplicate flagged, ahead_working, filter).
 
-Baseline: 66 passing tests added in this PR.
+Baseline: 75 passing tests added across the two PRs.
 
 ## Operator Controls
 
@@ -234,6 +270,9 @@ Baseline: 66 passing tests added in this PR.
 
 ## Known Limitations
 
+- **`dirty_tree` in `/api/fleet/sync-audit` is always `false`** today.
+  Populating it requires a live agent call per row; can land as a
+  follow-up with `asyncio.gather`.
 - **`freeze_schedules_if_sync_failing` is read-only from the scheduler
   side**. The config flag, API, and internal lookup endpoint are wired
   but actual enforcement belongs in the dedicated `trinity-scheduler`
@@ -255,7 +294,6 @@ Baseline: 66 passing tests added in this PR.
 ## References
 
 - Upstream epic: [abilityai/trinity#381](https://github.com/abilityai/trinity/issues/381)
-- This PR: #389 (S1 + S1a). Follow-up #390 (S6, fleet audit) and
-  #382 (S7, branch-ownership enforcement) build on the fields added here.
-- Spec: `ability-trinity-git-improvements-proposal.md` (§P1, §P6, §S1,
-  §S1a)
+- Sub-issues: #389 (S1), #390 (S6); coordinates with #382 (S7)
+- Spec: `ability-trinity-git-improvements-proposal.md` (§P1, §P5, §P6,
+  §S1, §S1a, §S6)
