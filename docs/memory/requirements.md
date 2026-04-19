@@ -456,6 +456,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **GitHub Issue**: #382 (Epic #381)
 - **Flows**: `docs/memory/feature-flows/github-repo-initialization.md`, `docs/memory/feature-flows/github-sync.md`
 
+### 11.6 Persistent-State Allowlist (S4)
+- **Status**: ✅ Implemented (2026-04-19)
+- **GitHub Issue**: #383 (primitive); consumer #384 (S3 reset-preserve-state, pending)
+- **Description**: Named allowlist of workspace paths that must survive a template-level reset. Materialized to `.trinity/persistent-state.yaml` at agent creation so runtime sync/reset paths don't depend on the 10-minute `template.yaml` cache. Operator-editable per-agent.
+- **Key Features**: Default five-pattern list (`workspace/**`, `.trinity/**`, `.mcp.json`, `.claude.json`, `.claude/.credentials.json`); per-template override via `persistent_state:` key; readers on backend and agent-server with default fallback
+- **Scope**: Primitive only — the reset-preserve-state operation that consumes it lands in #384
+- **Flow**: `docs/memory/feature-flows/persistent-state-allowlist.md`
+
 ---
 
 ## 12. Platform Operations

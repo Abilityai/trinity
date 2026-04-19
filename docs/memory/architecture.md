@@ -186,7 +186,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `email_service.py` - Email sending for verification codes
 
 *Git & GitHub:*
-- `git_service.py` - Git sync operations for GitHub-native agents
+- `git_service.py` - Git sync operations for GitHub-native agents; persistent-state allowlist primitive (S4, #383)
 - `github_service.py` - GitHub API client (repo creation, validation, org detection)
 
 *Integrations:*
@@ -362,6 +362,7 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 ├── .mcp.json.template     # Template with ${VAR} placeholders
 ├── .claude/               # Claude Code config
 ├── .trinity/              # Trinity-specific files
+│   └── persistent-state.yaml  # S4 allowlist (#383): paths surviving reset
 ├── content/               # Generated assets (gitignored)
 └── [template files...]    # Any other files from template
 ```

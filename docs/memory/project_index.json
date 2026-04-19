@@ -63,7 +63,8 @@
       "cli_tool",
       "pypi_publishing",
       "per_agent_github_pat",
-      "github_pat_auto_propagation"
+      "github_pat_auto_propagation",
+      "persistent_state_allowlist"
     ],
     "in_progress": [
       "github_native_agents"
