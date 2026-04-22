@@ -459,19 +459,24 @@ async def initialize_git_in_container(
     # Otherwise use home directory directly (new standard)
     git_dir = "/home/developer/workspace" if workspace_has_content else "/home/developer"
 
-    # Step 2: Create .gitignore (standard path - /home/developer)
-    if git_dir == "/home/developer":
-        gitignore_content = """# Exclude sensitive and temporary files
-.bash_logout
-.bashrc
-.profile
-.bash_history
-.cache/
-.local/
-.npm/
-.ssh/
-"""
-        execute_command_in_container(...)
+    # Step 2: Merge the credential deny-list into .gitignore (issue #458).
+    # Runs for BOTH /home/developer AND the legacy /home/developer/workspace
+    # path. Idempotent — preserves any pre-existing user-supplied rules and
+    # only appends missing entries. Hard-fails initialization on error so we
+    # never reach `git add .` on a half-configured agent.
+    #
+    # DEFAULT_GITIGNORE_DENYLIST (in services/git_service.py) currently covers:
+    #   credentials:  .env, .env.*, !.env.example, .mcp.json, credentials.json,
+    #                 token.json, *.pem, *.key, *.p12, *.pfx,
+    #                 .aws/credentials, .config/gcloud/
+    #   shell/cache:  .bash_logout, .bashrc, .profile, .bash_history,
+    #                 .cache/, .local/, .npm/, .ssh/
+    gitignore_result = execute_command_in_container(
+        command=_build_gitignore_merge_command(git_dir),
+        timeout=10,
+    )
+    if gitignore_result["exit_code"] != 0:
+        return GitInitResult(success=False, error="Failed to write deny-list")
 
     # Step 3-6: Git commands (lines 329-356)
     commands = [
@@ -1099,8 +1104,10 @@ sqlite3 ~/trinity-data/trinity.db "SELECT key, substr(value, 1, 10) || '...' FRO
 # - Private badge (if selected)
 # - Two branches: main, trinity/test-agent/xxxxxxxx
 # - Commits on both branches
-# - Agent files: CLAUDE.md, .claude/, .trinity/, .mcp.json
-# - .gitignore excludes: .bashrc, .cache/, .ssh/ (if using home directory)
+# - Agent files: CLAUDE.md, .claude/, .trinity/
+# - .gitignore excludes credentials (.env*, .mcp.json, *.pem, *.key, ...)
+#   and shell/cache noise (.bashrc, .cache/, .ssh/, ...)
+# - .env and .mcp.json are NOT present (deny-listed, #458)
 ```
 
 **Verify in Database**:
@@ -1181,13 +1188,17 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 **Expected**:
 - System uses `/home/developer` directly (no workspace subdirectory)
 - Backend logs: `Using home directory: /home/developer`
-- `.gitignore` created with system file exclusions
-- Agent files (CLAUDE.md, .claude/, .trinity/, .mcp.json) pushed to GitHub
-- System files (.bashrc, .ssh/, .cache/) excluded via .gitignore
+- `.gitignore` contains the Trinity-managed credential deny-list (#458)
+- Agent files (CLAUDE.md, .claude/, .trinity/) pushed to GitHub
+- Credentials (`.env`, `.mcp.json`, `*.pem`, `*.key`, ...) excluded — NEVER committed
+- Shell/cache files (.bashrc, .ssh/, .cache/) excluded via .gitignore
+- If the agent workspace already had a `.gitignore`, its entries are preserved
+  (deny-list is appended under a `# Trinity-managed credential deny-list` header)
 
 **LEGACY Case** (agents created before 2026-02):
 - If `/home/developer/workspace/` exists with content, that directory is used
 - Backend logs: `Using workspace directory: /home/developer/workspace`
+- The credential deny-list is applied there too (#458 — previously skipped)
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files
@@ -1341,6 +1352,21 @@ docker exec agent-{name} bash -c "[ -d /home/developer/.git ] && echo exists || 
 - Fixed timeout issue: Increased frontend timeout to 120 seconds + console logging
 - Fixed verification: Git initialization verified before DB insert
 - Fixed system files: Created .gitignore to exclude .bashrc, .ssh/, etc.
+
+**Bug Fix 2026-04-22 (#458) — P0 credential leak**:
+- `initialize_git_in_container` previously wrote a narrow `.gitignore`
+  (shell/cache only) with `cat > .gitignore` — clobbering any workspace
+  deny-list and not listing `.env` / `.mcp.json`. Any agent with injected
+  credentials leaked them on the initial commit to GitHub.
+- Fix: new `DEFAULT_GITIGNORE_DENYLIST` module constant covers `.env`,
+  `.env.*`, `!.env.example`, `.mcp.json`, `credentials.json`, `token.json`,
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.aws/credentials`, `.config/gcloud/`
+  in addition to the existing shell/cache entries.
+- `_build_gitignore_merge_command` now **appends missing entries** to any
+  pre-existing `.gitignore` (idempotent, exact-line match) instead of
+  overwriting, and runs for the legacy `/home/developer/workspace` path
+  too (previously skipped).
+- Regression tests: `tests/unit/test_github_init_gitignore.py`.
 
 **Test Coverage**:
 - Settings UI: PAT configuration and testing

@@ -8,6 +8,7 @@ Handles:
 - Initializing git in agent containers
 """
 import asyncio
+import base64
 import httpx
 import os
 import re
@@ -642,6 +643,78 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # Git Initialization in Container
 # ============================================================================
 
+# Credential-leak deny-list merged into the agent's `.gitignore` at init time
+# (#458). Order matters — credentials must come before shell/cache entries so
+# any operator skimming the file sees the important patterns first.
+DEFAULT_GITIGNORE_DENYLIST: Tuple[str, ...] = (
+    # --- credentials & secrets (the fix for #458) ---
+    ".env",
+    ".env.*",
+    "!.env.example",
+    ".mcp.json",
+    "credentials.json",
+    "token.json",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    ".aws/credentials",
+    ".config/gcloud/",
+    # --- legacy shell/cache noise (preserved from pre-#458 behavior) ---
+    ".bash_logout",
+    ".bashrc",
+    ".profile",
+    ".bash_history",
+    ".cache/",
+    ".local/",
+    ".npm/",
+    ".ssh/",
+)
+
+_GITIGNORE_MANAGED_HEADER = "# Trinity-managed credential deny-list (issue #458)"
+
+
+def _build_gitignore_merge_command(git_dir: str) -> str:
+    """Build a bash command that merges ``DEFAULT_GITIGNORE_DENYLIST`` into the
+    agent's existing ``.gitignore`` without clobbering user-supplied rules.
+
+    The full inner script is base64-encoded to avoid all shell-quoting hazards
+    (both the patterns themselves — ``!``, ``*``, ``/`` — and the bash-builtin
+    quoting inside the script body). The script is idempotent: every pattern
+    is append-only and gated by an exact-line ``grep -qxF`` check, so running
+    the command twice produces the same file.
+    """
+    blob = "\n".join(DEFAULT_GITIGNORE_DENYLIST)
+    b64_patterns = base64.b64encode(blob.encode("utf-8")).decode("ascii")
+    header = _GITIGNORE_MANAGED_HEADER
+    script = f"""set -e
+cd {git_dir}
+touch .gitignore
+PATTERNS=$(echo '{b64_patterns}' | base64 -d)
+HEADER_ADDED=0
+while IFS= read -r pattern; do
+  [ -z "$pattern" ] && continue
+  if ! grep -qxF -- "$pattern" .gitignore; then
+    if [ "$HEADER_ADDED" = "0" ]; then
+      if [ -s .gitignore ]; then
+        last_byte=$(tail -c1 .gitignore)
+        if [ -n "$last_byte" ]; then
+          echo "" >> .gitignore
+        fi
+      fi
+      if ! grep -qxF -- '{header}' .gitignore; then
+        echo '{header}' >> .gitignore
+      fi
+      HEADER_ADDED=1
+    fi
+    printf '%s\\n' "$pattern" >> .gitignore
+  fi
+done <<< "$PATTERNS"
+"""
+    b64_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f"bash -c 'echo {b64_script} | base64 -d | bash'"
+
+
 @dataclass
 class GitInitResult:
     """Result of git initialization in container."""
@@ -714,22 +787,24 @@ async def initialize_git_in_container(
         git_dir = "/home/developer"
         logger.info(f"Using home directory: {git_dir}")
 
-    # Step 2: Create .gitignore (if using home directory)
-    if git_dir == "/home/developer":
-        gitignore_content = """# Exclude sensitive and temporary files
-.bash_logout
-.bashrc
-.profile
-.bash_history
-.cache/
-.local/
-.npm/
-.ssh/
-"""
-        await execute_command_in_container(
-            container_name=container_name,
-            command=f'bash -c "cat > {git_dir}/.gitignore << \'GITIGNORE_EOF\'\n{gitignore_content}\nGITIGNORE_EOF\n"',
-            timeout=5
+    # Step 2: Merge the credential deny-list into `.gitignore` (#458).
+    # Runs for BOTH the standard /home/developer path AND the legacy
+    # /home/developer/workspace path — previously the legacy branch skipped
+    # this entirely, leaking secrets on any initial sync.
+    # The merge is idempotent and preserves any pre-existing user rules.
+    gitignore_result = await execute_command_in_container(
+        container_name=container_name,
+        command=_build_gitignore_merge_command(git_dir),
+        timeout=10,
+    )
+    if gitignore_result.get("exit_code", 0) != 0:
+        return GitInitResult(
+            success=False,
+            git_dir=git_dir,
+            error=(
+                "Failed to write credential deny-list to .gitignore: "
+                f"{gitignore_result.get('output', '')}"
+            ),
         )
 
     # Step 3: Initialize git and try to preserve remote history
