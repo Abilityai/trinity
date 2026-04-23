@@ -1319,11 +1319,12 @@ The Process Engine supports six step types:
 - **Preconditions**: Setting enabled + 2+ consecutive errors + alternative subscription available
 - **Key Features**:
   - System setting `auto_switch_subscriptions` (default OFF) with Settings UI toggle
-  - Rate-limit event tracking per (agent, subscription) with 2h window
-  - Best-alternative selection: prefer fewer assigned agents, skip recently rate-limited
+  - Rate-limit event tracking per (agent, subscription) with 2h window (fallback heuristic)
+  - `rate_limited_until` timestamp persisted from 429 body — authoritative gate that matches Anthropic's actual 5-8h reset window (#476)
+  - Best-alternative selection: prefer fewer assigned agents, skip rate-limited subs (durable timestamp checked first)
   - Activity event logged on auto-switch, notification sent to agent owner
   - Hooks into chat proxy 429 handler and background task failure path
-- **Database**: `subscription_rate_limit_events` table
+- **Database**: `subscription_rate_limit_events` table; `subscription_credentials.rate_limited_until` column (#476)
 - **Files**:
   - `src/backend/db/subscriptions.py` - Rate-limit tracking queries
   - `src/backend/services/subscription_auto_switch.py` - Auto-switch orchestration

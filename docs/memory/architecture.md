@@ -187,6 +187,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Auth & Credentials:*
 - `credential_encryption.py` - AES-256-GCM encryption for .credentials.enc files (CRED-002)
 - `subscription_service.py` - Subscription management (SUB-002)
+- `subscription_auto_switch.py` - Auto-switches agents to alternative subscriptions on repeated 429s; parses reset timestamp from Anthropic error body and persists as `rate_limited_until` (SUB-003, #476)
 - `ssh_service.py` - Ephemeral SSH credential generation
 - `email_service.py` - Email sending for verification codes
 
