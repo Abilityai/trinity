@@ -97,7 +97,7 @@ class ScheduleOperations:
             allowed_tools=allowed_tools,
             model=row["model"] if "model" in row_keys else None,
             # Retry configuration (RETRY-001)
-            max_retries=row["max_retries"] if "max_retries" in row_keys and row["max_retries"] is not None else 1,
+            max_retries=row["max_retries"] if "max_retries" in row_keys and row["max_retries"] is not None else 0,
             retry_delay_seconds=row["retry_delay_seconds"] if "retry_delay_seconds" in row_keys and row["retry_delay_seconds"] is not None else 60,
             # Validation configuration (VALIDATE-001)
             validation_enabled=bool(row["validation_enabled"]) if "validation_enabled" in row_keys and row["validation_enabled"] is not None else False,

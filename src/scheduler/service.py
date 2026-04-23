@@ -1107,6 +1107,19 @@ class SchedulerService:
             logger.debug(f"Schedule {execution.schedule_id} not found, skipping retry")
             return
 
+        # Never retry rate-limit failures — the subscription is exhausted and the
+        # next scheduled cron tick is the right recovery path, not an immediate retry.
+        if error_msg:
+            error_lower = error_msg.lower()
+            if ("429" in error_lower or "rate limit" in error_lower
+                    or "too many requests" in error_lower
+                    or "subscription usage limit" in error_lower):
+                logger.info(
+                    f"Execution {execution.id} failed due to rate limit — skipping retry, "
+                    "next scheduled run will recover"
+                )
+                return
+
         # Check if retries are enabled
         max_retries = schedule.max_retries
         if max_retries <= 0:
@@ -1124,13 +1137,6 @@ class SchedulerService:
 
         # Calculate retry delay
         retry_delay = schedule.retry_delay_seconds
-
-        # Check for rate limit (429) in error - use 2x delay, capped at 300s
-        if error_msg:
-            error_lower = error_msg.lower()
-            if "429" in error_lower or "rate limit" in error_lower or "too many requests" in error_lower:
-                retry_delay = min(300, retry_delay * 2)
-                logger.info(f"Rate limit detected, using 2x delay: {retry_delay}s")
 
         # Schedule the retry
         retry_at = datetime.utcnow() + timedelta(seconds=retry_delay)

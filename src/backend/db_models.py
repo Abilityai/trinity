@@ -117,7 +117,7 @@ class ScheduleCreate(BaseModel):
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001)
-    max_retries: int = 1  # 0 = disabled, 1-5 range. Default 1 for resilience.
+    max_retries: int = 0  # 0 = disabled (default), 1-5 = retry count
     retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
     # Validation configuration (VALIDATE-001)
     validation_enabled: bool = False  # Enable post-execution validation
@@ -144,7 +144,7 @@ class Schedule(BaseModel):
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001)
-    max_retries: int = 1  # 0 = disabled, 1-5 range
+    max_retries: int = 0  # 0 = disabled (default), 1-5 = retry count
     retry_delay_seconds: int = 60  # Seconds between retries (30-600 range)
     # Validation configuration (VALIDATE-001)
     validation_enabled: bool = False  # Enable post-execution validation

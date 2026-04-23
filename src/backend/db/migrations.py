@@ -1567,6 +1567,23 @@ def _migrate_whatsapp_bindings(cursor, conn):
     conn.commit()
 
 
+def _migrate_subscription_rate_limited_until(cursor, conn):
+    """Add rate_limited_until column to subscription_credentials (#476).
+
+    Persists the actual Anthropic reset timestamp from 429 responses so
+    is_subscription_rate_limited() can make an authoritative decision instead
+    of relying on the 2-hour rolling event window (which is shorter than
+    Anthropic's real 5-8 hour reset cycle).
+    """
+    cursor.execute("PRAGMA table_info(subscription_credentials)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if "rate_limited_until" not in cols:
+        cursor.execute(
+            "ALTER TABLE subscription_credentials ADD COLUMN rate_limited_until TEXT"
+        )
+    conn.commit()
+
+
 def _migrate_agent_git_config_branch_ownership(cursor, conn):
     """Add partial UNIQUE index to agent_git_config enforcing branch ownership (S7 Layer 2 / #382).
 
@@ -1678,4 +1695,5 @@ MIGRATIONS = [
     ("agent_git_config_branch_ownership", _migrate_agent_git_config_branch_ownership),
     ("sync_health", _migrate_sync_health),
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
+    ("subscription_rate_limited_until", _migrate_subscription_rate_limited_until),
 ]

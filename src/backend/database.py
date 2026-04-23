@@ -1292,6 +1292,9 @@ class DatabaseManager:
     def is_subscription_rate_limited(self, subscription_id: str):
         return self._subscription_ops.is_subscription_rate_limited(subscription_id)
 
+    def set_subscription_rate_limited_until(self, subscription_id: str, until_iso: str):
+        return self._subscription_ops.set_subscription_rate_limited_until(subscription_id, until_iso)
+
     def clear_rate_limit_events(self, agent_name: str, subscription_id: str):
         return self._subscription_ops.clear_rate_limit_events(agent_name, subscription_id)
 

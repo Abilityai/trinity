@@ -10,7 +10,7 @@ Tokens are encrypted using the same AES-256-GCM system as other credentials.
 
 import uuid
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 from .connection import get_db_connection
@@ -504,10 +504,45 @@ class SubscriptionOperations:
             """, (agent_name, subscription_id))
             return cursor.fetchone()["cnt"]
 
-    def is_subscription_rate_limited(self, subscription_id: str) -> bool:
-        """Check if a subscription has been rate-limited in the last 2 hours."""
+    def set_subscription_rate_limited_until(self, subscription_id: str, until_iso: str) -> None:
+        """Persist the authoritative reset timestamp from a 429 response body."""
         with get_db_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE subscription_credentials SET rate_limited_until = ? WHERE id = ?",
+                (until_iso, subscription_id)
+            )
+            conn.commit()
+
+    def is_subscription_rate_limited(self, subscription_id: str) -> bool:
+        """Check if a subscription is rate-limited.
+
+        Checks the durable rate_limited_until timestamp first (authoritative when
+        Anthropic's reset time was parseable from the 429 body). Falls back to the
+        2-hour event-count heuristic for cases where parsing failed.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT rate_limited_until FROM subscription_credentials WHERE id = ?",
+                (subscription_id,)
+            )
+            row = cursor.fetchone()
+            if row and row["rate_limited_until"]:
+                until = datetime.fromisoformat(row["rate_limited_until"])
+                # Ensure timezone-aware comparison
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) < until:
+                    return True
+                # Expired — clear it so it doesn't block indefinitely
+                cursor.execute(
+                    "UPDATE subscription_credentials SET rate_limited_until = NULL WHERE id = ?",
+                    (subscription_id,)
+                )
+                conn.commit()
+
+            # Fallback: event-count heuristic
             cursor.execute("""
                 SELECT COUNT(*) as cnt
                 FROM subscription_rate_limit_events

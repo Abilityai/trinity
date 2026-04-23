@@ -11,13 +11,43 @@ Preconditions (all must be true):
 4. At least one alternative subscription is available and not rate-limited
 """
 
+import re
 import logging
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from database import db
 from db_models import NotificationCreate
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_rate_limit_reset(error_message: str) -> Optional[str]:
+    """Parse 'resets 8pm (America/New_York)' from a 429 body → UTC ISO string, or None.
+
+    Anthropic includes the reset time in the error message. Persisting it lets
+    is_subscription_rate_limited() block the subscription until it actually resets
+    rather than relying on the 2-hour rolling window (which is too short).
+    """
+    match = re.search(
+        r'resets\s+(\d{1,2}(?::\d{2})?(?:am|pm)?)\s+\(([^)]+)\)',
+        error_message, re.IGNORECASE
+    )
+    if not match:
+        return None
+    time_str, tz_str = match.group(1), match.group(2)
+    try:
+        tz = ZoneInfo(tz_str)
+        today = datetime.now(tz).date()
+        fmt = "%I:%M%p" if ":" in time_str else "%I%p"
+        t = datetime.strptime(time_str.upper(), fmt)
+        reset_local = datetime.combine(today, t.time(), tzinfo=tz)
+        if reset_local <= datetime.now(tz):
+            reset_local += timedelta(days=1)
+        return reset_local.astimezone(ZoneInfo("UTC")).isoformat()
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
 
 
 async def handle_rate_limit_error(
@@ -42,12 +72,16 @@ async def handle_rate_limit_error(
     if not current_sub_id:
         return None
 
-    # 3. Record the rate-limit event and get consecutive count
+    # 3. Record the rate-limit event and persist the authoritative reset time if parseable
     consecutive_count = db.record_rate_limit_event(
         agent_name=agent_name,
         subscription_id=current_sub_id,
         error_message=error_message
     )
+    reset_until = _parse_rate_limit_reset(error_message)
+    if reset_until:
+        db.set_subscription_rate_limited_until(current_sub_id, reset_until)
+        logger.info(f"[SUB-003] Subscription {current_sub_id} rate-limited until {reset_until}")
 
     if consecutive_count < 2:
         logger.info(
