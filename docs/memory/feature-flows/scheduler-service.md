@@ -691,18 +691,20 @@ Failed scheduled executions can be automatically retried with configurable delay
 
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
-| `max_retries` | 1 | 0-5 | Max retry attempts (0=disabled) |
+| `max_retries` | 0 | 0-5 | Max retry attempts (0=disabled, opt-in) |
 | `retry_delay_seconds` | 60 | 30-600 | Delay between retries |
 
-New schedules default to 1 retry. Existing schedules migrated with 0 (opt-in).
+Retries default to **disabled** (`max_retries=0`). Scheduled agents are typically stateful and idempotent — skipping a run is preferable to replaying a backlog of failures. Enable per schedule if the workload benefits from retry.
 
 ### Retry Flow
 
 ```
 Execution fails → _maybe_schedule_retry()
+    ├─ If error is rate-limit (429 / "rate limit" / "subscription usage limit"):
+    │       return immediately — next scheduled cron tick recovers, not a retry
     ├─ Check schedule.max_retries > 0
     ├─ Check attempt_number <= max_retries
-    ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
+    ├─ Calculate delay (base retry_delay_seconds)
     ├─ Persist: DB schedule_retry(execution_id, retry_scheduled_at)
     └─ Schedule: APScheduler DateTrigger → _execute_retry()
 
@@ -1075,6 +1077,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-04-23 | **Retry default opt-in + rate-limit skip (#476)**: `max_retries` default changed 1→0 (retries are opt-in). `_maybe_schedule_retry()` now returns immediately on rate-limit errors (429 / "subscription usage limit") — next cron tick handles recovery instead of building a retry backlog during subscription outages. |
 | 2026-04-14 | **Automatic Retry (RETRY-001)**: Added Flow 10 documenting configurable retry mechanism for failed executions. New fields: max_retries, retry_delay_seconds, attempt_number, retry_of_execution_id, retry_scheduled_at. New status: pending_retry. |
 | 2026-03-26 | **Line number refresh + Process Schedules documentation**: Updated all line numbers to match current code. Added Flow 3 (Process Schedule Execution), process schedule sync documentation, process schedule database operations, and full service method reference table. |
 | 2026-03-13 | **Schedule Update Nullable Field Fix**: Changed `schedules.py:270` from `if v is not None` filter to `model_dump(exclude_unset=True)`. |
