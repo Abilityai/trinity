@@ -359,14 +359,16 @@ Running cleanup twice back-to-back produces an empty second report. Failure here
 
 ## Recommended starting subset
 
-Ten invariants cover ~80% of orchestration risk:
+Twelve invariants cover ~80% of orchestration risk:
 
 | ID | Invariant | Why |
 |----|-----------|-----|
 | S-01 | Slot–row bijection | Core orchestration consistency |
 | S-02 | No overbooking | Capacity guarantee |
+| S-03 | Slot TTL ≥ execution timeout | #226 |
 | E-01 | Terminal-state closure | No stuck executions |
 | E-02 | No phantom reversal | #378/#403 |
+| E-05 | Dispatched rows have session | #106 |
 | E-06 | No completed-but-not-reported | #129 |
 | B-01 | Queue-status coherence | Backlog integrity |
 | B-02 | No queued without slots-full | Drain liveness |
