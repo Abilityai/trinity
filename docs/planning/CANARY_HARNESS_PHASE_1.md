@@ -18,20 +18,22 @@ This doc covers the infrastructure to support those three plus the fleet they ob
 
 ## Fleet
 
-Pre-seeded set of agents the canary observes. All run Claude Code (no architectural bypass exists); minimize cost via trivial prompts (e.g. `"reply ok"`).
+Pre-seeded agents the canary observes. All run Claude Code (no architectural bypass exists); minimize cost via trivial prompts (e.g. `"reply ok"`).
 
-**Strawman** — template choices and counts not in catalog, open for review:
+Strictly necessary for the 3 required invariants:
 
-| Agent | Schedules |
-|---|---|
-| `canary-1` | every 2min |
-| `canary-2` | every 5min |
-| `canary-3` | every 10min |
-| `canary-rotate-{ts}` | created+deleted hourly by canary skill |
+| Agent | Settings | Schedule | Covers |
+|---|---|---|---|
+| `canary-tick` | default | every 1min, short prompt | S-01 (running state present at every 5-min snapshot), E-02 (transitions to audit) |
+| `canary-rotate-{ts}` | default | hourly create+delete by canary skill | L-03 (real deletes, not vacuous orphan scans) |
 
-The rotation slot exists so L-03 fires on real deletes, not just vacuous orphan scans. Rotation is the only active behavior in Phase 1; everything else is observation.
+Two agents. Cadence on `canary-tick` is 1 min so that *something* is always in `running` state when the canary snapshots every 5 min — otherwise S-01 has nothing to check.
+
+Rotation is the only active behavior in Phase 1; everything else is observation.
 
 Naming follows catalog §Open Questions: `canary-*` prefix, dedicated synthetic operator user.
+
+Additional agents needed for the remaining 9 Phase 1 invariants (S-02, S-03, E-01, E-05, E-06, B-01, B-02, G-01, R-01) are added when those invariants ship — not Phase 1 v0 scope.
 
 ## Snapshot collector
 
