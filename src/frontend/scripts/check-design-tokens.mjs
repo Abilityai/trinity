@@ -24,11 +24,25 @@ const FRONTEND_ROOT = resolve(__dirname, '..')
 // expected palette via a literal `colors.<name>` reference — that's the only
 // invariant this PR commits to.
 const EXPECTED_ALIASES = {
-  'status-success': 'green',
-  'status-warning': 'yellow',
-  'status-danger':  'red',
-  'status-info':    'blue',
-  'status-urgent':  'orange',
+  'status-success':   'green',
+  'status-warning':   'yellow',
+  'status-danger':    'red',
+  'status-info':      'blue',
+  'status-urgent':    'orange',
+  'state-autonomous': 'amber',
+  'state-locked':     'rose',
+  'brand-claude':     'orange',
+  'brand-gemini':     'blue',
+  'accent-purple':    'purple',
+}
+
+// Known token families. Reference scanner uses this to flag references like
+// `bg-status-foo-500` where `foo` isn't a defined token in the family.
+const KNOWN_FAMILIES = {
+  status: new Set(['success', 'warning', 'danger', 'info', 'urgent']),
+  state:  new Set(['autonomous', 'locked']),
+  brand:  new Set(['claude', 'gemini']),
+  accent: new Set(['purple']),
 }
 
 function checkPaletteEquivalence() {
@@ -43,7 +57,11 @@ function checkPaletteEquivalence() {
   return failures
 }
 
-const TOKEN_REFERENCE_RE = /(?:bg|text|border|ring|fill|stroke|from|to|via|focus:ring|focus:bg|focus:text|focus:border|hover:bg|hover:text|hover:border|hover:ring|dark:bg|dark:text|dark:border|dark:ring|dark:hover:bg|dark:hover:text)-status-([a-z]+)-(?:50|100|200|300|400|500|600|700|800|900|950)\b/g
+const FAMILY_RE = Object.keys(KNOWN_FAMILIES).join('|')
+const TOKEN_REFERENCE_RE = new RegExp(
+  `(?:bg|text|border|ring|fill|stroke|from|to|via|focus:ring|focus:bg|focus:text|focus:border|hover:bg|hover:text|hover:border|hover:ring|dark:bg|dark:text|dark:border|dark:ring|dark:hover:bg|dark:hover:text)-(${FAMILY_RE})-([a-z]+)-(?:50|100|200|300|400|500|600|700|800|900|950)\\b`,
+  'g'
+)
 
 function* walkVueAndJs(dir) {
   for (const entry of readdirSync(dir)) {
@@ -56,15 +74,15 @@ function* walkVueAndJs(dir) {
 }
 
 function checkTokenReferences() {
-  const knownTokens = new Set(Object.keys(EXPECTED_ALIASES).map(t => t.replace(/^status-/, '')))
   const failures = []
   for (const file of walkVueAndJs(join(FRONTEND_ROOT, 'src'))) {
     const content = readFileSync(file, 'utf8')
     for (const match of content.matchAll(TOKEN_REFERENCE_RE)) {
-      const family = match[1]
-      if (!knownTokens.has(family)) {
+      const [whole, family, variant] = match
+      const variants = KNOWN_FAMILIES[family]
+      if (!variants?.has(variant)) {
         const line = content.slice(0, match.index).split('\n').length
-        failures.push(`${file.replace(FRONTEND_ROOT + '/', '')}:${line}: unknown status family "${family}" in "${match[0]}"`)
+        failures.push(`${file.replace(FRONTEND_ROOT + '/', '')}:${line}: unknown ${family}-* token "${variant}" in "${whole}"`)
       }
     }
   }

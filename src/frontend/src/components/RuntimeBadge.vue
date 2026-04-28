@@ -100,14 +100,11 @@ const tooltipText = computed(() => {
 
 const badgeClasses = computed(() => {
   if (isClaudeRuntime.value) {
-    // Anthropic brand colors - coral/terracotta
-    return 'bg-orange-50 dark:bg-orange-950/50 text-orange-700 dark:text-orange-300 border border-orange-200 dark:border-orange-800'
+    return 'bg-brand-claude-50 dark:bg-brand-claude-950/50 text-brand-claude-700 dark:text-brand-claude-300 border border-brand-claude-200 dark:border-brand-claude-800'
   }
   if (isGeminiRuntime.value) {
-    // Google Gemini brand colors - blue/purple gradient feel
-    return 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
+    return 'bg-brand-gemini-50 dark:bg-brand-gemini-950/50 text-brand-gemini-700 dark:text-brand-gemini-300 border border-brand-gemini-200 dark:border-brand-gemini-800'
   }
-  // Fallback
   return 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600'
 })
 </script>

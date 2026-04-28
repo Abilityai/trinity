@@ -5,7 +5,7 @@
       class="font-medium whitespace-nowrap min-w-[3rem] text-right"
       :class="[
         labelSizeClass,
-        modelValue ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'
+        modelValue ? 'text-state-autonomous-600 dark:text-state-autonomous-400' : 'text-gray-500 dark:text-gray-400'
       ]"
     >
       {{ modelValue ? 'AUTO' : 'Manual' }}
@@ -20,7 +20,7 @@
       class="relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
       :class="[
         sizeClasses,
-        modelValue ? 'bg-amber-500 focus:ring-amber-500' : 'bg-gray-300 dark:bg-gray-600 focus:ring-gray-400',
+        modelValue ? 'bg-state-autonomous-500 focus:ring-state-autonomous-500' : 'bg-gray-300 dark:bg-gray-600 focus:ring-gray-400',
         (disabled || loading) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
       ]"
     >
