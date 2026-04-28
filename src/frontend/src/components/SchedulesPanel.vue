@@ -986,10 +986,10 @@ function formatContextPercent(used, max) {
 function getContextBarColor(used, max) {
   if (!used || !max) return 'bg-gray-400'
   const percent = (used / max) * 100
-  if (percent < 50) return 'bg-green-500'
-  if (percent < 75) return 'bg-yellow-500'
-  if (percent < 90) return 'bg-orange-500'
-  return 'bg-red-500'
+  if (percent < 50) return 'bg-status-success-500'
+  if (percent < 75) return 'bg-status-warning-500'
+  if (percent < 90) return 'bg-status-urgent-500'
+  return 'bg-status-danger-500'
 }
 
 function viewExecutionDetail(exec) {

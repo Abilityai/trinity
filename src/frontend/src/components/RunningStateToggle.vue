@@ -5,7 +5,7 @@
       class="font-medium whitespace-nowrap min-w-[3.25rem] text-right"
       :class="[
         labelSizeClass,
-        modelValue ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'
+        modelValue ? 'text-status-success-600 dark:text-status-success-400' : 'text-gray-500 dark:text-gray-400'
       ]"
     >
       {{ modelValue ? 'Running' : 'Stopped' }}
@@ -19,7 +19,7 @@
       class="relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
       :class="[
         sizeClasses,
-        modelValue ? 'bg-green-500 focus:ring-green-500' : 'bg-gray-300 dark:bg-gray-600 focus:ring-gray-400',
+        modelValue ? 'bg-status-success-500 focus:ring-status-success-500' : 'bg-gray-300 dark:bg-gray-600 focus:ring-gray-400',
         (disabled || loading) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
       ]"
     >

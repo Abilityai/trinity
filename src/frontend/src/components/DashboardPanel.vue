@@ -504,12 +504,12 @@ const getSparklineColor = (widget) => {
 // Get status badge colors
 const getStatusColors = (color) => {
   const colorMap = {
-    green: 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
-    red: 'bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300',
-    yellow: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+    green: 'bg-status-success-100 text-status-success-800 dark:bg-status-success-900/50 dark:text-status-success-300',
+    red: 'bg-status-danger-100 text-status-danger-800 dark:bg-status-danger-900/50 dark:text-status-danger-300',
+    yellow: 'bg-status-warning-100 text-status-warning-800 dark:bg-status-warning-900/50 dark:text-status-warning-300',
     gray: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
-    blue: 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300',
-    orange: 'bg-orange-100 text-orange-800 dark:bg-orange-900/50 dark:text-orange-300',
+    blue: 'bg-status-info-100 text-status-info-800 dark:bg-status-info-900/50 dark:text-status-info-300',
+    orange: 'bg-status-urgent-100 text-status-urgent-800 dark:bg-status-urgent-900/50 dark:text-status-urgent-300',
     purple: 'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300'
   }
   return colorMap[color] || colorMap.gray

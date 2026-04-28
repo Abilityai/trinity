@@ -30,11 +30,10 @@ export function classifySyncHealth(entry) {
 }
 
 export function syncHealthColor(entry) {
-  // Tailwind utility classes for the dot.
   switch (classifySyncHealth(entry)) {
-    case 'green': return 'bg-green-500'
-    case 'yellow': return 'bg-yellow-500'
-    case 'red': return 'bg-red-500'
+    case 'green': return 'bg-status-success-500'
+    case 'yellow': return 'bg-status-warning-500'
+    case 'red': return 'bg-status-danger-500'
     default: return 'bg-gray-400'
   }
 }

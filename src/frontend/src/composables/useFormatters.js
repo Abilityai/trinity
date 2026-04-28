@@ -215,9 +215,9 @@ export function useFormatters() {
    * Get context bar color based on percentage
    */
   const getContextBarColor = (percent) => {
-    if (percent >= 90) return 'bg-red-500'
-    if (percent >= 70) return 'bg-yellow-500'
-    return 'bg-green-500'
+    if (percent >= 90) return 'bg-status-danger-500'
+    if (percent >= 70) return 'bg-status-warning-500'
+    return 'bg-status-success-500'
   }
 
   return {

@@ -263,9 +263,9 @@ const getPercentageColor = (value, metric) => {
   const critical = metric.critical_threshold ?? 0
   const warning = metric.warning_threshold ?? 0
 
-  if (critical > 0 && value < critical) return 'text-red-600'
-  if (warning > 0 && value < warning) return 'text-yellow-600'
-  return 'text-green-600'
+  if (critical > 0 && value < critical) return 'text-status-danger-600'
+  if (warning > 0 && value < warning) return 'text-status-warning-600'
+  return 'text-status-success-600'
 }
 
 // Get percentage bar color
@@ -274,9 +274,9 @@ const getPercentageBarColor = (value, metric) => {
   const critical = metric.critical_threshold ?? 0
   const warning = metric.warning_threshold ?? 0
 
-  if (critical > 0 && value < critical) return 'bg-red-500'
-  if (warning > 0 && value < warning) return 'bg-yellow-500'
-  return 'bg-green-500'
+  if (critical > 0 && value < critical) return 'bg-status-danger-500'
+  if (warning > 0 && value < warning) return 'bg-status-warning-500'
+  return 'bg-status-success-500'
 }
 
 // Get status badge colors
@@ -287,12 +287,12 @@ const getStatusColors = (value, metric) => {
   if (!statusDef) return 'bg-gray-100 text-gray-600'
 
   const colorMap = {
-    green: 'bg-green-100 text-green-800',
-    red: 'bg-red-100 text-red-800',
-    yellow: 'bg-yellow-100 text-yellow-800',
+    green: 'bg-status-success-100 text-status-success-800',
+    red: 'bg-status-danger-100 text-status-danger-800',
+    yellow: 'bg-status-warning-100 text-status-warning-800',
     gray: 'bg-gray-100 text-gray-600',
-    blue: 'bg-blue-100 text-blue-800',
-    orange: 'bg-orange-100 text-orange-800'
+    blue: 'bg-status-info-100 text-status-info-800',
+    orange: 'bg-status-urgent-100 text-status-urgent-800'
   }
 
   return colorMap[statusDef.color] || 'bg-gray-100 text-gray-600'

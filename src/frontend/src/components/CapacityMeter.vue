@@ -38,10 +38,10 @@ const atCapacity = computed(() => utilization.value >= 100)
 const fillClass = computed(() => {
   const u = utilization.value
   if (u <= 0) return 'bg-gray-200 dark:bg-gray-700'
-  if (u < 50) return 'bg-green-500'
-  if (u < 80) return 'bg-yellow-500'
-  if (u < 100) return 'bg-orange-500'
-  return 'bg-red-500'
+  if (u < 50) return 'bg-status-success-500'
+  if (u < 80) return 'bg-status-warning-500'
+  if (u < 100) return 'bg-status-urgent-500'
+  return 'bg-status-danger-500'
 })
 </script>
 

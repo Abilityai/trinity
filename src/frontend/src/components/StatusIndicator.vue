@@ -23,11 +23,11 @@ const props = defineProps({
 const statusClasses = computed(() => {
   switch (props.status) {
     case 'in_progress':
-      return 'bg-blue-500'
+      return 'bg-status-info-500'
     case 'completed':
-      return 'bg-green-500'
+      return 'bg-status-success-500'
     case 'error':
-      return 'bg-red-500'
+      return 'bg-status-danger-500'
     case 'pending':
     default:
       return 'bg-gray-300 border border-gray-400'
