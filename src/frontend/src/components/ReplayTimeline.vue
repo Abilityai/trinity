@@ -91,12 +91,12 @@
             <span>Public</span>
           </span>
           <span class="flex items-center space-x-1" title="Schedule marker (shows next scheduled run time)">
-            <span class="text-purple-500 text-xs font-bold">▼</span>
+            <span class="text-accent-purple-500 text-xs font-bold">▼</span>
             <span>Next Run</span>
           </span>
         </div>
         <span v-if="isLiveMode" class="flex items-center space-x-1">
-          <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+          <span class="w-1.5 h-1.5 rounded-full bg-status-success-500 animate-pulse"></span>
           <span>Live</span>
         </span>
         <span>{{ totalEvents }} events</span>
@@ -130,7 +130,7 @@
               'px-2 py-1.5 border-b border-r border-gray-200 dark:border-gray-700',
               'flex',
               row.isSystemAgent
-                ? 'bg-purple-50/80 dark:bg-purple-900/20'
+                ? 'bg-accent-purple-50/80 dark:bg-accent-purple-900/20'
                 : 'bg-white dark:bg-gray-800'
             ]"
             :style="{ height: rowHeight + 'px' }"
@@ -138,7 +138,7 @@
             <!-- Avatar (vertically centered, with border ring) -->
             <div class="flex-shrink-0 flex items-center mr-1.5">
               <div class="rounded-full border-2 overflow-hidden shadow-sm"
-                   :class="row.isSystemAgent ? 'border-purple-400 dark:border-purple-500' : 'border-indigo-400 dark:border-indigo-500'"
+                   :class="row.isSystemAgent ? 'border-accent-purple-400 dark:border-accent-purple-500' : 'border-indigo-400 dark:border-indigo-500'"
               >
                 <AgentAvatar :name="row.name" :avatar-url="row.avatarUrl" size="lg" />
               </div>
@@ -164,7 +164,7 @@
                   </span>
                   <span
                     v-if="row.isSystemAgent"
-                    class="ml-1.5 px-1 py-0.5 text-[10px] font-semibold rounded bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 flex-shrink-0"
+                    class="ml-1.5 px-1 py-0.5 text-[10px] font-semibold rounded bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 flex-shrink-0"
                   >
                     SYS
                   </span>
@@ -949,8 +949,8 @@ function getActivityStateLabel(row) {
 }
 
 function getActivityStateColor(row) {
-  if (row.activityState === 'active') return 'text-green-600 dark:text-green-400'
-  if (row.activityState === 'idle') return 'text-green-600 dark:text-green-400'
+  if (row.activityState === 'active') return 'text-status-success-600 dark:text-status-success-400'
+  if (row.activityState === 'idle') return 'text-status-success-600 dark:text-status-success-400'
   return 'text-gray-500 dark:text-gray-400'
 }
 
@@ -965,15 +965,15 @@ function getRowSuccessPercent(row) {
 }
 
 function getSuccessBarClass(percent) {
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 }
 
 function getSuccessRateClass(rate) {
-  if (rate >= 80) return 'text-green-600 dark:text-green-400'
-  if (rate >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (rate >= 80) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 }
 
 function formatLastExecution(timestamp) {

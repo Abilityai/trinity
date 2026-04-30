@@ -102,12 +102,12 @@
       </div>
 
       <!-- Error message -->
-      <div v-if="error" class="mx-4 mb-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+      <div v-if="error" class="mx-4 mb-2 p-3 bg-status-danger-50 dark:bg-status-danger-900/20 border border-status-danger-200 dark:border-status-danger-800 rounded-lg">
         <div class="flex items-center justify-between">
-          <p class="text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+          <p class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
           <button
             @click="retryLastMessage"
-            class="ml-2 text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 underline"
+            class="ml-2 text-xs text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-700 dark:hover:text-status-danger-300 underline"
           >
             Retry
           </button>

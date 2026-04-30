@@ -46,7 +46,7 @@
             <span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase w-16">Required</span>
             <span
               :class="helpContent.required
-                ? 'text-red-600 dark:text-red-400'
+                ? 'text-status-danger-600 dark:text-status-danger-400'
                 : 'text-gray-500 dark:text-gray-400'"
               class="text-xs font-medium"
             >

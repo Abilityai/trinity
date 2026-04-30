@@ -85,7 +85,7 @@
               <button
                 @click="revoke(file)"
                 :disabled="revokingId === file.file_id"
-                class="px-2 py-1 text-xs font-medium rounded-md text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/40 hover:bg-red-100 dark:hover:bg-red-900/70 disabled:opacity-50"
+                class="px-2 py-1 text-xs font-medium rounded-md text-status-danger-700 dark:text-status-danger-300 bg-status-danger-50 dark:bg-status-danger-900/40 hover:bg-status-danger-100 dark:hover:bg-status-danger-900/70 disabled:opacity-50"
               >
                 {{ revokingId === file.file_id ? 'Revoking…' : 'Revoke' }}
               </button>

@@ -93,7 +93,7 @@
             :key="step.id"
             :class="[
               'border-b border-gray-100 dark:border-gray-700/50 last:border-b-0',
-              !hasExecutor(step.id) && 'bg-red-50 dark:bg-red-900/10'
+              !hasExecutor(step.id) && 'bg-status-danger-50 dark:bg-status-danger-900/10'
             ]"
           >
             <!-- Step name -->
@@ -102,7 +102,7 @@
                 <span class="truncate max-w-[180px]" :title="step.name">{{ step.name }}</span>
                 <span
                   v-if="!hasExecutor(step.id)"
-                  class="px-1.5 py-0.5 text-xs font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 rounded"
+                  class="px-1.5 py-0.5 text-xs font-medium bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-400 rounded"
                   title="Step must have an executor"
                 >
                   No executor

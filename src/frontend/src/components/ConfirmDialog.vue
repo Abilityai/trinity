@@ -21,12 +21,12 @@
               <!-- Icon -->
               <div :class="[
                 'mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full sm:mx-0 sm:h-10 sm:w-10',
-                variant === 'danger' ? 'bg-red-100 dark:bg-red-900/50' : 'bg-yellow-100 dark:bg-yellow-900/50'
+                variant === 'danger' ? 'bg-status-danger-100 dark:bg-status-danger-900/50' : 'bg-status-warning-100 dark:bg-status-warning-900/50'
               ]">
                 <svg
                   :class="[
                     'h-6 w-6',
-                    variant === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-yellow-600 dark:text-yellow-400'
+                    variant === 'danger' ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-warning-600 dark:text-status-warning-400'
                   ]"
                   fill="none"
                   viewBox="0 0 24 24"
@@ -57,8 +57,8 @@
               :class="[
                 'w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 text-base font-medium text-white focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 sm:ml-3 sm:w-auto sm:text-sm',
                 variant === 'danger'
-                  ? 'bg-red-600 hover:bg-red-700 focus:ring-red-500'
-                  : 'bg-yellow-600 hover:bg-yellow-700 focus:ring-yellow-500'
+                  ? 'bg-status-danger-600 hover:bg-status-danger-700 focus:ring-status-danger-500'
+                  : 'bg-status-warning-600 hover:bg-status-warning-700 focus:ring-status-warning-500'
               ]"
               @click="onConfirm"
               data-testid="confirm-dialog-confirm"

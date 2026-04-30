@@ -4,11 +4,11 @@
     <div class="flex items-center justify-between mb-2 px-1">
       <div class="flex items-center gap-2">
         <span class="text-sm font-medium text-gray-700 dark:text-gray-200">YAML Editor</span>
-        <div v-if="errors.length > 0" class="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+        <div v-if="errors.length > 0" class="flex items-center gap-1 text-xs text-status-danger-600 dark:text-status-danger-400">
           <ExclamationCircleIcon class="h-3.5 w-3.5" />
           <span>{{ errors.length }} error{{ errors.length !== 1 ? 's' : '' }}</span>
         </div>
-        <div v-else-if="warnings.length > 0" class="flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">
+        <div v-else-if="warnings.length > 0" class="flex items-center gap-1 text-xs text-status-warning-600 dark:text-status-warning-400">
           <ExclamationTriangleIcon class="h-3.5 w-3.5" />
           <span>{{ warnings.length }} warning{{ warnings.length !== 1 ? 's' : '' }}</span>
         </div>
@@ -27,7 +27,7 @@
           title="Copy to clipboard"
         >
           <ClipboardDocumentIcon v-if="!copied" class="h-4 w-4" />
-          <CheckIcon v-else class="h-4 w-4 text-green-500" />
+          <CheckIcon v-else class="h-4 w-4 text-status-success-500" />
         </button>
       </div>
     </div>
@@ -44,11 +44,11 @@
       <div
         v-for="(error, index) in errors"
         :key="'error-' + index"
-        class="flex items-start gap-2 rounded-md border border-red-300 dark:border-red-700/50 bg-red-50 dark:bg-red-900/20 p-2 text-xs"
+        class="flex items-start gap-2 rounded-md border border-status-danger-300 dark:border-status-danger-700/50 bg-status-danger-50 dark:bg-status-danger-900/20 p-2 text-xs"
         @click="goToLine(error.line)"
       >
-        <ExclamationCircleIcon class="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-red-500" />
-        <div class="text-red-700 dark:text-red-300">
+        <ExclamationCircleIcon class="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-status-danger-500" />
+        <div class="text-status-danger-700 dark:text-status-danger-300">
           <span v-if="error.line" class="font-medium">Line {{ error.line }}:</span>
           {{ error.message }}
         </div>
@@ -56,11 +56,11 @@
       <div
         v-for="(warning, index) in warnings"
         :key="'warning-' + index"
-        class="flex items-start gap-2 rounded-md border border-yellow-300 dark:border-yellow-700/50 bg-yellow-50 dark:bg-yellow-900/20 p-2 text-xs"
+        class="flex items-start gap-2 rounded-md border border-status-warning-300 dark:border-status-warning-700/50 bg-status-warning-50 dark:bg-status-warning-900/20 p-2 text-xs"
         @click="goToLine(warning.line)"
       >
-        <ExclamationTriangleIcon class="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-yellow-500" />
-        <div class="text-yellow-700 dark:text-yellow-300">
+        <ExclamationTriangleIcon class="h-3.5 w-3.5 mt-0.5 flex-shrink-0 text-status-warning-500" />
+        <div class="text-status-warning-700 dark:text-status-warning-300">
           <span v-if="warning.line" class="font-medium">Line {{ warning.line }}:</span>
           {{ warning.message }}
         </div>

@@ -30,8 +30,8 @@
           >
             <div class="font-medium">{{ formatDate(item.date) }}</div>
             <div v-if="chartType === 'executions'">
-              <span class="text-green-400">{{ item.completed_count }}</span> /
-              <span class="text-red-400">{{ item.failed_count }}</span>
+              <span class="text-status-success-400">{{ item.completed_count }}</span> /
+              <span class="text-status-danger-400">{{ item.failed_count }}</span>
             </div>
             <div v-else-if="chartType === 'cost'">
               ${{ item.total_cost.toFixed(2) }}
@@ -46,19 +46,19 @@
             <!-- Success/Completed bar (green) -->
             <div
               v-if="chartType === 'executions'"
-              class="w-full bg-green-500 dark:bg-green-400 rounded-t transition-all duration-300"
+              class="w-full bg-status-success-500 dark:bg-status-success-400 rounded-t transition-all duration-300"
               :style="{ height: getBarHeight(item.completed_count) + '%' }"
             ></div>
             <!-- Failed bar (red) - stacked on top -->
             <div
               v-if="chartType === 'executions' && item.failed_count > 0"
-              class="w-full bg-red-500 dark:bg-red-400 rounded-t transition-all duration-300"
+              class="w-full bg-status-danger-500 dark:bg-status-danger-400 rounded-t transition-all duration-300"
               :style="{ height: getBarHeight(item.failed_count) + '%' }"
             ></div>
             <!-- Cost bar (blue) -->
             <div
               v-if="chartType === 'cost'"
-              class="w-full bg-blue-500 dark:bg-blue-400 rounded-t transition-all duration-300"
+              class="w-full bg-status-info-500 dark:bg-status-info-400 rounded-t transition-all duration-300"
               :style="{ height: getCostBarHeight(item.total_cost) + '%' }"
             ></div>
             <!-- Success rate bar (gradient) -->
@@ -89,11 +89,11 @@
     <!-- Legend -->
     <div v-if="chartType === 'executions'" class="flex items-center justify-center gap-4 mt-4 text-xs">
       <div class="flex items-center gap-1">
-        <div class="w-3 h-3 bg-green-500 rounded"></div>
+        <div class="w-3 h-3 bg-status-success-500 rounded"></div>
         <span class="text-gray-600 dark:text-gray-400">Completed</span>
       </div>
       <div class="flex items-center gap-1">
-        <div class="w-3 h-3 bg-red-500 rounded"></div>
+        <div class="w-3 h-3 bg-status-danger-500 rounded"></div>
         <span class="text-gray-600 dark:text-gray-400">Failed</span>
       </div>
     </div>
@@ -156,9 +156,9 @@ function getCostBarHeight(value) {
 }
 
 function getSuccessRateColor(rate) {
-  if (rate >= 80) return 'bg-green-500 dark:bg-green-400'
-  if (rate >= 50) return 'bg-yellow-500 dark:bg-yellow-400'
-  return 'bg-red-500 dark:bg-red-400'
+  if (rate >= 80) return 'bg-status-success-500 dark:bg-status-success-400'
+  if (rate >= 50) return 'bg-status-warning-500 dark:bg-status-warning-400'
+  return 'bg-status-danger-500 dark:bg-status-danger-400'
 }
 
 function formatDate(dateStr) {
