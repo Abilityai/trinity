@@ -1742,6 +1742,79 @@ def _migrate_agent_shared_files(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sessions_tables(cursor, conn):
+    """Create agent_sessions + agent_session_messages tables (Session tab).
+
+    The Session tab is a parallel surface to Chat that uses
+    ``claude --print --resume <uuid>`` to preserve tool memory and reasoning
+    state across turns. Each ``agent_sessions`` row owns one Claude Code
+    JSONL via ``cached_claude_session_id``. See
+    ``docs/planning/SESSION_TAB_2026-04.md``.
+
+    Schema lives independently from ``chat_sessions`` / ``chat_messages``;
+    no foreign keys or shared columns. Cleanup on session delete cascades
+    to messages.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            last_message_at TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            total_cost REAL DEFAULT 0.0,
+            total_context_used INTEGER DEFAULT 0,
+            total_context_max INTEGER DEFAULT 200000,
+            status TEXT DEFAULT 'active',
+            subscription_id TEXT,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_session_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            cost REAL,
+            context_used INTEGER,
+            context_max INTEGER,
+            cache_read_tokens INTEGER,
+            tool_calls TEXT,
+            execution_time_ms INTEGER,
+            claude_session_id TEXT,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent_user "
+        "ON agent_sessions(agent_name, user_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_status "
+        "ON agent_sessions(status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_session "
+        "ON agent_session_messages(session_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_user "
+        "ON agent_session_messages(user_id)"
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1795,4 +1868,5 @@ MIGRATIONS = [
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
     ("agent_shared_files", _migrate_agent_shared_files),
+    ("agent_sessions_tables", _migrate_agent_sessions_tables),
 ]

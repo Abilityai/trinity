@@ -241,6 +241,57 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Session Tables (Session tab — --resume-default chat surface)
+    #
+    # Parallel to chat_sessions / chat_messages but with cached_claude_session_id
+    # to drive per-session ``claude --resume`` and per-message tracking of
+    # cache_read_tokens + the actual Claude UUID a turn ran under. See
+    # docs/planning/SESSION_TAB_2026-04.md.
+    # -------------------------------------------------------------------------
+    "agent_sessions": """
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            last_message_at TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            total_cost REAL DEFAULT 0.0,
+            total_context_used INTEGER DEFAULT 0,
+            total_context_max INTEGER DEFAULT 200000,
+            status TEXT DEFAULT 'active',
+            subscription_id TEXT,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    "agent_session_messages": """
+        CREATE TABLE IF NOT EXISTS agent_session_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            cost REAL,
+            context_used INTEGER,
+            context_max INTEGER,
+            cache_read_tokens INTEGER,
+            tool_calls TEXT,
+            execution_time_ms INTEGER,
+            claude_session_id TEXT,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Activity Tables
     # -------------------------------------------------------------------------
     "agent_activities": """
@@ -823,6 +874,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_user ON chat_messages(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_subscription ON chat_messages(subscription_id, timestamp)",
+
+    # Agent session indexes (Session tab)
+    "CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent_user ON agent_sessions(agent_name, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_sessions_status ON agent_sessions(status)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_session ON agent_session_messages(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_user ON agent_session_messages(user_id)",
 
     # Execution subscription index (SUB-004)
     "CREATE INDEX IF NOT EXISTS idx_executions_subscription ON schedule_executions(subscription_id, started_at)",
