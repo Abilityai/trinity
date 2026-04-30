@@ -27,11 +27,11 @@
           <button
             @click="allowNoAgents"
             :disabled="permissionsSaving"
-            class="text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 font-medium disabled:opacity-50"
+            class="text-sm text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300 font-medium disabled:opacity-50"
           >
             Allow None
           </button>
-          <span v-if="permissionsDirty" class="text-amber-600 dark:text-amber-400 text-xs ml-4">
+          <span v-if="permissionsDirty" class="text-state-autonomous-600 dark:text-state-autonomous-400 text-xs ml-4">
             Unsaved changes
           </span>
         </div>
@@ -54,7 +54,7 @@
               </div>
               <span :class="[
                 'px-2 py-0.5 text-xs font-medium rounded-full',
-                targetAgent.status === 'running' ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                targetAgent.status === 'running' ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
               ]">
                 {{ targetAgent.status }}
               </span>
@@ -79,7 +79,7 @@
           <!-- Status Message -->
           <div v-if="permissionsMessage" :class="[
             'text-sm',
-            permissionsMessage.type === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+            permissionsMessage.type === 'success' ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'
           ]">
             {{ permissionsMessage.text }}
           </div>

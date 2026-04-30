@@ -8,7 +8,7 @@
         <div v-if="notification"
           :class="[
             'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           {{ notification.message }}
@@ -76,7 +76,7 @@
           <button
             v-if="hasActiveFilters"
             @click="clearAllFilters"
-            class="px-2.5 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors flex items-center gap-1"
+            class="px-2.5 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-status-danger-600 dark:hover:text-status-danger-400 transition-colors flex items-center gap-1"
           >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -136,7 +136,7 @@
             <div class="relative">
               <button
                 @click="showBulkAddTag = !showBulkAddTag"
-                class="px-3 py-1.5 bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 rounded text-sm font-medium hover:bg-green-200 dark:hover:bg-green-900 transition-colors"
+                class="px-3 py-1.5 bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded text-sm font-medium hover:bg-status-success-200 dark:hover:bg-status-success-900 transition-colors"
               >
                 + Add Tag
               </button>
@@ -192,7 +192,7 @@
             <div class="relative">
               <button
                 @click="showBulkRemoveTag = !showBulkRemoveTag"
-                class="px-3 py-1.5 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 rounded text-sm font-medium hover:bg-red-200 dark:hover:bg-red-900 transition-colors"
+                class="px-3 py-1.5 bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300 rounded text-sm font-medium hover:bg-status-danger-200 dark:hover:bg-status-danger-900 transition-colors"
               >
                 - Remove Tag
               </button>
@@ -207,7 +207,7 @@
                       v-for="tag in commonTagsInSelection"
                       :key="tag"
                       @click="removeBulkTag(tag)"
-                      class="px-2 py-0.5 rounded-full text-xs bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900 transition-colors"
+                      class="px-2 py-0.5 rounded-full text-xs bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300 hover:bg-status-danger-200 dark:hover:bg-status-danger-900 transition-colors"
                     >
                       #{{ tag }} ×
                     </button>
@@ -260,7 +260,7 @@
             <!-- Avatar: half out of the box (all breakpoints) -->
             <div class="absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
               <div class="rounded-full border-2 shadow-md overflow-hidden"
-                   :class="agent.is_system ? 'border-purple-400 dark:border-purple-500' : 'border-indigo-400 dark:border-indigo-500'">
+                   :class="agent.is_system ? 'border-accent-purple-400 dark:border-accent-purple-500' : 'border-indigo-400 dark:border-indigo-500'">
                 <AgentAvatar :name="agent.name" :avatar-url="agent.avatar_url" size="md" />
               </div>
             </div>
@@ -305,7 +305,7 @@
                   </router-link>
                   <span
                     v-if="agent.is_system"
-                    class="px-1.5 py-0.5 text-[10px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 rounded flex-shrink-0"
+                    class="px-1.5 py-0.5 text-[10px] font-semibold bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 rounded flex-shrink-0"
                   >
                     SYSTEM
                   </span>
@@ -474,7 +474,7 @@
                 </router-link>
                 <span
                   v-if="agent.is_system"
-                  class="px-1.5 py-0.5 text-[10px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 rounded flex-shrink-0"
+                  class="px-1.5 py-0.5 text-[10px] font-semibold bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 rounded flex-shrink-0"
                 >
                   SYSTEM
                 </span>
@@ -616,7 +616,7 @@
                 </router-link>
                 <span
                   v-if="agent.is_system"
-                  class="px-1.5 py-0.5 text-[10px] font-semibold bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 rounded flex-shrink-0"
+                  class="px-1.5 py-0.5 text-[10px] font-semibold bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 rounded flex-shrink-0"
                 >
                   SYS
                 </span>
@@ -932,7 +932,7 @@ const getStatusDotColor = (agentName) => {
 
 const getActivityLabelClass = (agentName) => {
   const state = getActivityState(agentName)
-  if (state === 'Active' || state === 'Idle') return 'text-green-600 dark:text-green-400'
+  if (state === 'Active' || state === 'Idle') return 'text-status-success-600 dark:text-status-success-400'
   return 'text-gray-500 dark:text-gray-400'
 }
 
@@ -944,9 +944,9 @@ const getSuccessBarPercent = (agentName) => {
 
 const getSuccessBarColor = (agentName) => {
   const percent = getSuccessBarPercent(agentName)
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 }
 
 const hasSuccessData = (agentName) => {
@@ -971,9 +971,9 @@ const get7dSuccessRate = (agentName) => {
 
 const get7dSuccessBarColor = (agentName) => {
   const percent = get7dSuccessRate(agentName)
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 }
 
 // Slot stats helpers (for capacity meters)
@@ -995,9 +995,9 @@ const getSuccessRateColorClass = (agentName) => {
   const stats = getExecutionStats(agentName)
   if (!stats) return 'text-gray-500 dark:text-gray-400'
   const rate = stats.successRate
-  if (rate >= 80) return 'text-green-600 dark:text-green-400'
-  if (rate >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (rate >= 80) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 }
 
 const getLastExecutionDisplay = (agentName) => {

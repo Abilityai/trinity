@@ -21,14 +21,14 @@
     <!-- Main Content -->
     <div v-else>
       <!-- Restart Required Banner -->
-      <div v-if="foldersData?.restart_required" class="mb-4 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
+      <div v-if="foldersData?.restart_required" class="mb-4 p-4 bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-700 rounded-lg">
         <div class="flex items-start">
-          <svg class="w-5 h-5 text-amber-500 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5 text-state-autonomous-500 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <div class="ml-3">
-            <h3 class="text-sm font-medium text-amber-800 dark:text-amber-200">Restart Required</h3>
-            <p class="mt-1 text-sm text-amber-700 dark:text-amber-300">
+            <h3 class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-200">Restart Required</h3>
+            <p class="mt-1 text-sm text-state-autonomous-700 dark:text-state-autonomous-300">
               Configuration has changed. Restart the agent to apply shared folder mounts.
             </p>
           </div>
@@ -121,7 +121,7 @@
                 <div class="flex items-center space-x-2">
                   <span :class="[
                     'w-2 h-2 rounded-full',
-                    consumer.status === 'running' ? 'bg-green-500' : 'bg-gray-400'
+                    consumer.status === 'running' ? 'bg-status-success-500' : 'bg-gray-400'
                   ]"></span>
                   <span class="font-medium dark:text-gray-200">{{ consumer.agent_name }}</span>
                 </div>
@@ -148,7 +148,7 @@
             <div class="flex items-center space-x-3">
               <span :class="[
                 'w-3 h-3 rounded-full',
-                folder.currently_mounted ? 'bg-green-500' : 'bg-amber-500'
+                folder.currently_mounted ? 'bg-status-success-500' : 'bg-state-autonomous-500'
               ]" :title="folder.currently_mounted ? 'Mounted' : 'Pending restart'"></span>
               <div>
                 <div class="font-medium text-gray-900 dark:text-white">{{ folder.source_agent }}</div>
@@ -157,7 +157,7 @@
             </div>
             <span :class="[
               'px-2 py-1 text-xs rounded-full',
-              folder.currently_mounted ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400'
+              folder.currently_mounted ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-400' : 'bg-state-autonomous-100 dark:bg-state-autonomous-900/30 text-state-autonomous-700 dark:text-state-autonomous-400'
             ]">
               {{ folder.currently_mounted ? 'Mounted' : 'Pending' }}
             </span>
@@ -178,7 +178,7 @@
             >
               <span :class="[
                 'w-2 h-2 rounded-full',
-                folder.source_status === 'running' ? 'bg-green-500' : 'bg-gray-400'
+                folder.source_status === 'running' ? 'bg-status-success-500' : 'bg-gray-400'
               ]"></span>
               <span class="dark:text-gray-200">{{ folder.source_agent }}</span>
             </div>

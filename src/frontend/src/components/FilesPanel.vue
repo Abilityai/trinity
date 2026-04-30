@@ -58,7 +58,7 @@
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
           </div>
-          <div v-else-if="error" class="text-red-500 text-sm p-2">{{ error }}</div>
+          <div v-else-if="error" class="text-status-danger-500 text-sm p-2">{{ error }}</div>
           <div v-else-if="filteredTree.length === 0" class="text-gray-500 dark:text-gray-400 text-sm p-2 text-center">
             {{ searchQuery ? 'No matching files found' : 'This folder is empty' }}
           </div>
@@ -172,7 +172,7 @@
                   <button
                     @click="showDeleteConfirm = true"
                     :disabled="deleting || isDeleteProtected"
-                    class="inline-flex items-center px-3 py-2 border border-red-300 dark:border-red-600 rounded-md shadow-sm text-sm font-medium text-red-700 dark:text-red-400 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-red-900/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50"
+                    class="inline-flex items-center px-3 py-2 border border-status-danger-300 dark:border-status-danger-600 rounded-md shadow-sm text-sm font-medium text-status-danger-700 dark:text-status-danger-400 bg-white dark:bg-gray-700 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-status-danger-500 disabled:opacity-50"
                     :title="isDeleteProtected ? 'Protected file cannot be deleted' : ''"
                   >
                     <svg class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -183,10 +183,10 @@
                 </template>
               </div>
             </div>
-            <p v-if="isDeleteProtected && !isEditing" class="mt-2 text-xs text-yellow-600 dark:text-yellow-400">
+            <p v-if="isDeleteProtected && !isEditing" class="mt-2 text-xs text-status-warning-600 dark:text-status-warning-400">
               This is a protected system file and cannot be deleted.
             </p>
-            <p v-if="isEditing && hasUnsavedChanges" class="mt-2 text-xs text-orange-600 dark:text-orange-400">
+            <p v-if="isEditing && hasUnsavedChanges" class="mt-2 text-xs text-status-urgent-600 dark:text-status-urgent-400">
               You have unsaved changes.
             </p>
           </div>
@@ -200,8 +200,8 @@
         <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" @click="showDeleteConfirm = false"></div>
         <div class="relative bg-white dark:bg-gray-800 rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:max-w-lg sm:w-full sm:p-6">
           <div class="sm:flex sm:items-start">
-            <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-red-100 dark:bg-red-900/30 sm:mx-0 sm:h-10 sm:w-10">
-              <svg class="h-6 w-6 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div class="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-status-danger-100 dark:bg-status-danger-900/30 sm:mx-0 sm:h-10 sm:w-10">
+              <svg class="h-6 w-6 text-status-danger-600 dark:text-status-danger-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
@@ -224,7 +224,7 @@
             <button
               @click="deleteFile"
               :disabled="deleting"
-              class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-red-600 text-base font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50"
+              class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-status-danger-600 text-base font-medium text-white hover:bg-status-danger-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-status-danger-500 sm:ml-3 sm:w-auto sm:text-sm disabled:opacity-50"
             >
               <svg v-if="deleting" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -247,7 +247,7 @@
     <div v-if="notification"
       :class="[
         'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-        notification.type === 'success' ? 'bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300'
+        notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
       ]"
     >
       {{ notification.message }}

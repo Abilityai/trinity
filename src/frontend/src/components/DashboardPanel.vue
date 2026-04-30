@@ -20,8 +20,8 @@
 
     <!-- Error State (only when no cached dashboard available) -->
     <div v-else-if="dashboardData?.error && !dashboardData?.has_dashboard" class="text-center py-8">
-      <div class="mx-auto w-16 h-16 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mb-4">
-        <svg class="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div class="mx-auto w-16 h-16 bg-status-danger-100 dark:bg-status-danger-900/30 rounded-full flex items-center justify-center mb-4">
+        <svg class="w-8 h-8 text-status-danger-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
       </div>
@@ -50,16 +50,16 @@
     <!-- Dashboard Display -->
     <div v-else class="space-y-6">
       <!-- Stale Dashboard Warning Banner -->
-      <div v-if="dashboardData.stale" class="rounded-md bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-3">
+      <div v-if="dashboardData.stale" class="rounded-md bg-status-warning-50 dark:bg-status-warning-900/20 border border-status-warning-200 dark:border-status-warning-800 p-3">
         <div class="flex items-start">
-          <svg class="w-5 h-5 text-yellow-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5 text-status-warning-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <div class="ml-3 flex-1">
-            <p class="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+            <p class="text-sm font-medium text-status-warning-800 dark:text-status-warning-200">
               Showing cached dashboard
             </p>
-            <p class="mt-1 text-xs text-yellow-700 dark:text-yellow-300">
+            <p class="mt-1 text-xs text-status-warning-700 dark:text-status-warning-300">
               {{ dashboardData.stale_reason }}
             </p>
           </div>
@@ -67,16 +67,16 @@
       </div>
 
       <!-- Widget Validation Warnings Banner -->
-      <div v-if="dashboardData.warnings?.length" class="rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3">
+      <div v-if="dashboardData.warnings?.length" class="rounded-md bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800 p-3">
         <div class="flex items-start">
-          <svg class="w-5 h-5 text-amber-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5 text-state-autonomous-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <div class="ml-3 flex-1">
-            <p class="text-sm font-medium text-amber-800 dark:text-amber-200">
+            <p class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-200">
               {{ dashboardData.warnings.length }} widget{{ dashboardData.warnings.length > 1 ? 's' : '' }} skipped due to validation errors
             </p>
-            <ul class="mt-1 text-xs text-amber-700 dark:text-amber-300 list-disc list-inside">
+            <ul class="mt-1 text-xs text-state-autonomous-700 dark:text-state-autonomous-300 list-disc list-inside">
               <li v-for="(warning, idx) in dashboardData.warnings" :key="idx">{{ warning }}</li>
             </ul>
           </div>
@@ -488,8 +488,8 @@ const formatRelativeTime = (isoString) => {
 
 // Get trend color
 const getTrendColor = (trend) => {
-  if (trend === 'up') return 'text-green-600'
-  if (trend === 'down') return 'text-red-600'
+  if (trend === 'up') return 'text-status-success-600'
+  if (trend === 'down') return 'text-status-danger-600'
   return 'text-gray-500'
 }
 
@@ -510,7 +510,7 @@ const getStatusColors = (color) => {
     gray: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
     blue: 'bg-status-info-100 text-status-info-800 dark:bg-status-info-900/50 dark:text-status-info-300',
     orange: 'bg-status-urgent-100 text-status-urgent-800 dark:bg-status-urgent-900/50 dark:text-status-urgent-300',
-    purple: 'bg-accent-purple-100 text-accent-purple-800 dark:bg-accent-purple-900/50 dark:text-accent-purple-300'
+    purple: 'bg-accent-accent-purple-100 text-accent-accent-purple-800 dark:bg-accent-accent-purple-900/50 dark:text-accent-accent-purple-300'
   }
   return colorMap[color] || colorMap.gray
 }
@@ -518,12 +518,12 @@ const getStatusColors = (color) => {
 // Get progress bar color
 const getProgressBarColor = (color) => {
   const colorMap = {
-    green: 'bg-green-500',
-    red: 'bg-red-500',
-    yellow: 'bg-yellow-500',
+    green: 'bg-status-success-500',
+    red: 'bg-status-danger-500',
+    yellow: 'bg-status-warning-500',
     blue: 'bg-blue-500',
-    orange: 'bg-orange-500',
-    purple: 'bg-purple-500'
+    orange: 'bg-status-urgent-500',
+    purple: 'bg-accent-purple-500'
   }
   return colorMap[color] || 'bg-blue-500'
 }
@@ -569,8 +569,8 @@ const getLinkStyle = (widget) => {
   if (widget.style === 'button') {
     const colorClasses = {
       blue: 'bg-blue-600 hover:bg-blue-700 text-white',
-      green: 'bg-green-600 hover:bg-green-700 text-white',
-      red: 'bg-red-600 hover:bg-red-700 text-white',
+      green: 'bg-status-success-600 hover:bg-status-success-700 text-white',
+      red: 'bg-status-danger-600 hover:bg-status-danger-700 text-white',
       gray: 'bg-gray-600 hover:bg-gray-700 text-white'
     }
     return `inline-flex items-center px-4 py-2 rounded-md text-sm font-medium ${colorClasses[widget.color] || colorClasses.blue}`

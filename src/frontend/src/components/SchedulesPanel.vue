@@ -199,7 +199,7 @@
               <label for="enabled" class="ml-2 text-sm text-gray-700 dark:text-gray-300">Enable schedule immediately</label>
             </div>
 
-            <div v-if="formError" class="p-3 bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-sm rounded-md">
+            <div v-if="formError" class="p-3 bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300 text-sm rounded-md">
               {{ formError }}
             </div>
 
@@ -258,7 +258,7 @@
               <span
                 :class="[
                   'px-2 py-0.5 text-xs font-medium rounded-full',
-                  schedule.enabled ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                  schedule.enabled ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
                 ]"
               >
                 {{ schedule.enabled ? 'Active' : 'Disabled' }}
@@ -343,7 +343,7 @@
               @click="toggleSchedule(schedule)"
               :disabled="toggleLoading === schedule.id"
               class="p-1.5 rounded transition-colors"
-              :class="schedule.enabled ? 'text-green-600 hover:text-gray-400' : 'text-gray-400 hover:text-green-600'"
+              :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"
               :title="schedule.enabled ? 'Disable' : 'Enable'"
             >
               <svg v-if="toggleLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
@@ -366,7 +366,7 @@
             <button
               @click="deleteSchedule(schedule)"
               :disabled="deleteLoading === schedule.id"
-              class="p-1.5 text-gray-400 hover:text-red-600 rounded transition-colors"
+              class="p-1.5 text-gray-400 hover:text-status-danger-600 rounded transition-colors"
               title="Delete"
             >
               <svg v-if="deleteLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
@@ -416,7 +416,7 @@
                 <span
                   :class="[
                     'w-2 h-2 rounded-full flex-shrink-0',
-                    exec.status === 'success' ? 'bg-green-500' : exec.status === 'failed' ? 'bg-red-500' : exec.status === 'running' ? 'bg-yellow-500 animate-pulse' : exec.status === 'skipped' ? 'bg-purple-500' : 'bg-gray-400'
+                    exec.status === 'success' ? 'bg-status-success-500' : exec.status === 'failed' ? 'bg-status-danger-500' : exec.status === 'running' ? 'bg-status-warning-500 animate-pulse' : exec.status === 'skipped' ? 'bg-accent-purple-500' : 'bg-gray-400'
                   ]"
                 ></span>
                 <span class="text-gray-600 dark:text-gray-400">{{ formatDateTime(exec.started_at) }}</span>
@@ -450,7 +450,7 @@
                 <span
                   :class="[
                     'font-medium',
-                    exec.status === 'success' ? 'text-green-600' : exec.status === 'failed' ? 'text-red-600' : exec.status === 'skipped' ? 'text-purple-600' : exec.status === 'pending_retry' ? 'text-orange-600' : 'text-yellow-600'
+                    exec.status === 'success' ? 'text-status-success-600' : exec.status === 'failed' ? 'text-status-danger-600' : exec.status === 'skipped' ? 'text-accent-purple-600' : exec.status === 'pending_retry' ? 'text-status-urgent-600' : 'text-status-warning-600'
                   ]"
                 >
                   {{ exec.status === 'pending_retry' ? 'retrying' : exec.status }}
@@ -477,9 +477,9 @@
               <span
                 :class="[
                   'px-2 py-1 rounded-full text-xs font-medium',
-                  selectedExecution.status === 'success' ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300' :
-                  selectedExecution.status === 'failed' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' :
-                  'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'
+                  selectedExecution.status === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' :
+                  selectedExecution.status === 'failed' ? 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-300' :
+                  'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'
                 ]"
               >
                 {{ selectedExecution.status }}
@@ -535,8 +535,8 @@
 
             <!-- Error (if any) -->
             <div v-if="selectedExecution.error">
-              <h4 class="text-sm font-medium text-red-700 dark:text-red-400 mb-2">Error</h4>
-              <div class="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded p-3 text-sm text-red-700 dark:text-red-300 whitespace-pre-wrap">{{ selectedExecution.error }}</div>
+              <h4 class="text-sm font-medium text-status-danger-700 dark:text-status-danger-400 mb-2">Error</h4>
+              <div class="bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800 rounded p-3 text-sm text-status-danger-700 dark:text-status-danger-300 whitespace-pre-wrap">{{ selectedExecution.error }}</div>
             </div>
 
             <!-- Tool Calls -->
@@ -556,7 +556,7 @@
                   </div>
                   <div class="flex items-center space-x-2">
                     <span v-if="tool.duration_ms" class="text-gray-400 dark:text-gray-500">{{ formatDuration(tool.duration_ms) }}</span>
-                    <span v-if="tool.success !== undefined" :class="tool.success ? 'text-green-600' : 'text-red-600'">
+                    <span v-if="tool.success !== undefined" :class="tool.success ? 'text-status-success-600' : 'text-status-danger-600'">
                       {{ tool.success ? '✓' : '✗' }}
                     </span>
                   </div>

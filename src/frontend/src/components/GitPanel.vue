@@ -47,8 +47,8 @@
                 </h3>
                 <div class="mt-4 space-y-4">
                   <!-- Error Message -->
-                  <div v-if="initializeError" class="rounded-md bg-red-50 dark:bg-red-900/30 p-4">
-                    <p class="text-sm text-red-800 dark:text-red-300">{{ initializeError }}</p>
+                  <div v-if="initializeError" class="rounded-md bg-status-danger-50 dark:bg-status-danger-900/30 p-4">
+                    <p class="text-sm text-status-danger-800 dark:text-status-danger-300">{{ initializeError }}</p>
                   </div>
 
                   <!-- Repository Owner -->
@@ -167,7 +167,7 @@
 
     <!-- Agent Not Running -->
     <div v-else-if="gitStatus?.agent_running === false" class="text-center py-8 text-gray-500 dark:text-gray-400">
-      <svg class="mx-auto h-12 w-12 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="mx-auto h-12 w-12 text-status-warning-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
       </svg>
       <p class="mt-2">Agent must be running to view git status</p>
@@ -201,10 +201,10 @@
                   </svg>
                   {{ gitStatus.branch }}
                 </span>
-                <span v-if="gitStatus.ahead > 0" class="text-xs text-green-600">
+                <span v-if="gitStatus.ahead > 0" class="text-xs text-status-success-600">
                   {{ gitStatus.ahead }} ahead
                 </span>
-                <span v-if="gitStatus.behind > 0" class="text-xs text-orange-600">
+                <span v-if="gitStatus.behind > 0" class="text-xs text-status-urgent-600">
                   {{ gitStatus.behind }} behind
                 </span>
               </div>
@@ -215,8 +215,8 @@
               :class="[
                 'px-2 py-1 text-xs font-medium rounded-full',
                 gitStatus.sync_status === 'up_to_date'
-                  ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
-                  : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'
+                  ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300'
+                  : 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'
               ]"
             >
               {{ gitStatus.sync_status === 'up_to_date' ? 'Synced' : 'Changes pending' }}
@@ -314,9 +314,9 @@
                   {{ patStatus.configured ? 'Agent-specific PAT' : 'Using Global PAT' }}
                 </p>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  <span v-if="patStatus.configured" class="text-green-600 dark:text-green-400">Custom PAT configured for this agent</span>
+                  <span v-if="patStatus.configured" class="text-status-success-600 dark:text-status-success-400">Custom PAT configured for this agent</span>
                   <span v-else-if="patStatus.has_global" class="text-blue-600 dark:text-blue-400">Using system-wide GitHub PAT from Settings</span>
-                  <span v-else class="text-yellow-600 dark:text-yellow-400">No PAT configured - git operations may fail</span>
+                  <span v-else class="text-status-warning-600 dark:text-status-warning-400">No PAT configured - git operations may fail</span>
                 </p>
               </div>
             </div>
@@ -333,7 +333,7 @@
             <button
               @click="clearPat"
               :disabled="patSaving"
-              class="text-xs text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
+              class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300"
             >
               Clear agent PAT (revert to global)
             </button>
@@ -364,13 +364,13 @@
                   </h3>
                   <div class="mt-4 space-y-4">
                     <!-- Error Message -->
-                    <div v-if="patError" class="rounded-md bg-red-50 dark:bg-red-900/30 p-4">
-                      <p class="text-sm text-red-800 dark:text-red-300">{{ patError }}</p>
+                    <div v-if="patError" class="rounded-md bg-status-danger-50 dark:bg-status-danger-900/30 p-4">
+                      <p class="text-sm text-status-danger-800 dark:text-status-danger-300">{{ patError }}</p>
                     </div>
 
                     <!-- Success Message -->
-                    <div v-if="patSuccess" class="rounded-md bg-green-50 dark:bg-green-900/30 p-4">
-                      <p class="text-sm text-green-800 dark:text-green-300">{{ patSuccess }}</p>
+                    <div v-if="patSuccess" class="rounded-md bg-status-success-50 dark:bg-status-success-900/30 p-4">
+                      <p class="text-sm text-status-success-800 dark:text-status-success-300">{{ patSuccess }}</p>
                     </div>
 
                     <!-- PAT Input -->
@@ -607,11 +607,11 @@ const formatDate = (dateString) => {
 
 const getChangeStatusClass = (status) => {
   switch (status) {
-    case 'M': return 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'  // Modified
-    case 'A': return 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'   // Added
-    case 'D': return 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300'       // Deleted
+    case 'M': return 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'  // Modified
+    case 'A': return 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300'   // Added
+    case 'D': return 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-300'       // Deleted
     case '?': return 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300'     // Untracked
-    case 'R': return 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300' // Renamed
+    case 'R': return 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-800 dark:text-accent-purple-300' // Renamed
     default: return 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300'
   }
 }

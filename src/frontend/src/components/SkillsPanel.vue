@@ -26,7 +26,7 @@
           <button
             @click="saveAssignments"
             :disabled="saving || !hasChanges"
-            class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-status-success-600 hover:bg-status-success-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <svg v-if="saving" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -43,14 +43,14 @@
       </div>
 
       <!-- Library Not Configured -->
-      <div v-else-if="!libraryStatus.configured" class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
+      <div v-else-if="!libraryStatus.configured" class="bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800 rounded-lg p-4">
         <div class="flex">
-          <svg class="h-5 w-5 text-amber-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+          <svg class="h-5 w-5 text-state-autonomous-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
           </svg>
           <div class="ml-3">
-            <h3 class="text-sm font-medium text-amber-800 dark:text-amber-300">Skills Library Not Configured</h3>
-            <p class="mt-1 text-sm text-amber-700 dark:text-amber-400">
+            <h3 class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-300">Skills Library Not Configured</h3>
+            <p class="mt-1 text-sm text-state-autonomous-700 dark:text-state-autonomous-400">
               Configure the skills library URL in Settings to enable skills management.
             </p>
           </div>
@@ -138,12 +138,12 @@
     </div>
 
     <!-- Success Message -->
-    <div v-if="successMessage" class="fixed bottom-4 right-4 z-50 bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg shadow-lg">
+    <div v-if="successMessage" class="fixed bottom-4 right-4 z-50 bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300 px-4 py-3 rounded-lg shadow-lg">
       {{ successMessage }}
     </div>
 
     <!-- Error Message -->
-    <div v-if="errorMessage" class="fixed bottom-4 right-4 z-50 bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg shadow-lg">
+    <div v-if="errorMessage" class="fixed bottom-4 right-4 z-50 bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded-lg shadow-lg">
       {{ errorMessage }}
     </div>
   </div>

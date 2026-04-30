@@ -5,9 +5,9 @@
       <div class="flex items-center space-x-3">
         <div :class="[
           'w-2 h-2 rounded-full',
-          connectionStatus === 'connected' ? 'bg-green-500' :
-          connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-          'bg-red-500'
+          connectionStatus === 'connected' ? 'bg-status-success-500' :
+          connectionStatus === 'connecting' ? 'bg-status-warning-500 animate-pulse' :
+          'bg-status-danger-500'
         ]"></div>
         <span class="text-sm text-gray-300">{{ connectionStatusText }}</span>
       </div>
@@ -59,7 +59,7 @@
         <button
           v-if="connectionStatus === 'disconnected'"
           @click="connect"
-          class="px-3 py-1 text-xs font-medium bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+          class="px-3 py-1 text-xs font-medium bg-status-success-600 hover:bg-status-success-700 text-white rounded-lg transition-colors"
         >
           Connect
         </button>
@@ -67,7 +67,7 @@
         <button
           v-else-if="connectionStatus === 'connected'"
           @click="disconnect"
-          class="px-3 py-1 text-xs font-medium bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+          class="px-3 py-1 text-xs font-medium bg-status-danger-600 hover:bg-status-danger-700 text-white rounded-lg transition-colors"
         >
           Disconnect
         </button>
@@ -83,7 +83,7 @@
     <!-- Error Message -->
     <div
       v-if="errorMessage"
-      class="px-4 py-2 bg-red-900/50 border-t border-red-800 text-red-300 text-sm"
+      class="px-4 py-2 bg-status-danger-900/50 border-t border-status-danger-800 text-status-danger-300 text-sm"
     >
       {{ errorMessage }}
     </div>

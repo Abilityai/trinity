@@ -27,14 +27,14 @@
             :class="[
               'flex items-center px-2.5 py-1 rounded-full text-xs font-medium',
               queueStatus.is_busy
-                ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'
-                : 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'
+                ? 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'
+                : 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300'
             ]"
           >
             <span
               :class="[
                 'w-1.5 h-1.5 rounded-full mr-1.5',
-                queueStatus.is_busy ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'
+                queueStatus.is_busy ? 'bg-status-warning-500 animate-pulse' : 'bg-status-success-500'
               ]"
             ></span>
             {{ queueStatus.is_busy ? 'Busy' : 'Idle' }}
@@ -68,7 +68,7 @@
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Success Rate</p>
-        <p class="text-base font-semibold" :class="successRate >= 90 ? 'text-green-600' : successRate >= 70 ? 'text-yellow-600' : 'text-red-600'">
+        <p class="text-base font-semibold" :class="successRate >= 90 ? 'text-status-success-600' : successRate >= 70 ? 'text-status-warning-600' : 'text-status-danger-600'">
           {{ successRate }}%
         </p>
       </div>
@@ -128,7 +128,7 @@
           Run
         </button>
       </div>
-      <p v-if="agentStatus !== 'running'" class="text-xs text-yellow-600 dark:text-yellow-400 mt-2">
+      <p v-if="agentStatus !== 'running'" class="text-xs text-status-warning-600 dark:text-status-warning-400 mt-2">
         Agent must be running to execute tasks
       </p>
     </div>
@@ -158,9 +158,9 @@
           :ref="el => { if (isHighlightedTask(task.id)) highlightedTaskRef = el }"
           class="p-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
           :class="{
-            'bg-yellow-50/50 dark:bg-yellow-900/10': task.status === 'running',
-            'bg-red-50/30 dark:bg-red-900/10': task.status === 'failed',
-            'bg-orange-50/30 dark:bg-orange-900/10': task.status === 'cancelled',
+            'bg-status-warning-50/50 dark:bg-status-warning-900/10': task.status === 'running',
+            'bg-status-danger-50/30 dark:bg-status-danger-900/10': task.status === 'failed',
+            'bg-status-urgent-50/30 dark:bg-status-urgent-900/10': task.status === 'cancelled',
             'ring-2 ring-indigo-500 ring-inset bg-indigo-50/50 dark:bg-indigo-900/20': isHighlightedTask(task.id)
           }"
         >
@@ -172,24 +172,24 @@
                 <span
                   :class="[
                     'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
-                    task.status === 'success' ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300' :
-                    task.status === 'failed' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' :
-                    task.status === 'cancelled' ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-300' :
-                    task.status === 'running' ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300' :
-                    task.status === 'queued' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300' :
-                    task.status === 'skipped' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300' :
+                    task.status === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' :
+                    task.status === 'failed' ? 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-300' :
+                    task.status === 'cancelled' ? 'bg-status-urgent-100 dark:bg-status-urgent-900/30 text-status-urgent-800 dark:text-status-urgent-300' :
+                    task.status === 'running' ? 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300' :
+                    task.status === 'queued' ? 'bg-state-autonomous-100 dark:bg-state-autonomous-900/30 text-state-autonomous-800 dark:text-state-autonomous-300' :
+                    task.status === 'skipped' ? 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-800 dark:text-accent-purple-300' :
                     'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300'
                   ]"
                 >
                   <span
                     :class="[
                       'w-1.5 h-1.5 mr-1.5 rounded-full',
-                      task.status === 'success' ? 'bg-green-500' :
-                      task.status === 'failed' ? 'bg-red-500' :
-                      task.status === 'cancelled' ? 'bg-orange-500' :
-                      task.status === 'running' ? 'bg-yellow-500 animate-pulse' :
-                      task.status === 'queued' ? 'bg-amber-500' :
-                      task.status === 'skipped' ? 'bg-purple-500' :
+                      task.status === 'success' ? 'bg-status-success-500' :
+                      task.status === 'failed' ? 'bg-status-danger-500' :
+                      task.status === 'cancelled' ? 'bg-status-urgent-500' :
+                      task.status === 'running' ? 'bg-status-warning-500 animate-pulse' :
+                      task.status === 'queued' ? 'bg-state-autonomous-500' :
+                      task.status === 'skipped' ? 'bg-accent-purple-500' :
                       'bg-gray-500'
                     ]"
                   ></span>
@@ -201,8 +201,8 @@
                     'px-1.5 py-0.5 rounded text-xs',
                     task.triggered_by === 'chat' ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300' :
                     task.triggered_by === 'manual' ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' :
-                    task.triggered_by === 'schedule' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' :
-                    task.triggered_by === 'paid' ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300' :
+                    task.triggered_by === 'schedule' ? 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300' :
+                    task.triggered_by === 'paid' ? 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300' :
                     task.triggered_by === 'public' ? 'bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300' :
                     'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
                   ]"
@@ -252,7 +252,7 @@
                 </div>
                 <!-- Error/Response display (from cache or local task) -->
                 <template v-else-if="getTaskDetails(task.id)?.error || getTaskDetails(task.id)?.response || task.error || task.response">
-                  <div v-if="getTaskDetails(task.id)?.error || task.error" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-3 text-sm text-red-700 dark:text-red-300 whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">{{ getTaskDetails(task.id)?.error || task.error }}</div>
+                  <div v-if="getTaskDetails(task.id)?.error || task.error" class="bg-status-danger-50 dark:bg-status-danger-900/20 border border-status-danger-200 dark:border-status-danger-800 rounded p-3 text-sm text-status-danger-700 dark:text-status-danger-300 whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">{{ getTaskDetails(task.id)?.error || task.error }}</div>
                   <div v-else-if="getTaskDetails(task.id)?.response || task.response" class="bg-gray-100 dark:bg-gray-700 rounded p-3 text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">{{ getTaskDetails(task.id)?.response || task.response }}</div>
                 </template>
                 <!-- No details available -->
@@ -273,14 +273,14 @@
                 :class="[
                   'p-1.5 rounded transition-colors flex items-center space-x-1',
                   task.status === 'running'
-                    ? 'text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300 bg-green-50 dark:bg-green-900/20'
+                    ? 'text-status-success-600 dark:text-status-success-400 hover:text-status-success-700 dark:hover:text-status-success-300 bg-status-success-50 dark:bg-status-success-900/20'
                     : 'text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400'
                 ]"
                 :title="task.status === 'running' ? 'View live execution' : 'Open execution details'"
               >
                 <!-- Live indicator for running tasks -->
                 <span v-if="task.status === 'running'" class="flex items-center">
-                  <span class="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse mr-1"></span>
+                  <span class="w-1.5 h-1.5 bg-status-success-500 rounded-full animate-pulse mr-1"></span>
                   <span class="text-xs font-medium">Live</span>
                 </span>
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -313,7 +313,7 @@
                 v-if="task.status === 'running' && task.execution_id"
                 @click="terminateTask(task)"
                 :disabled="terminatingTaskId === task.id"
-                class="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded transition-colors disabled:opacity-50"
+                class="p-1.5 text-gray-400 hover:text-status-danger-600 dark:hover:text-status-danger-400 rounded transition-colors disabled:opacity-50"
                 title="Stop execution"
               >
                 <svg v-if="terminatingTaskId === task.id" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -330,7 +330,7 @@
                 v-if="task.status !== 'running'"
                 @click="rerunTask(task)"
                 :disabled="taskLoading || agentStatus !== 'running'"
-                class="p-1.5 text-gray-400 hover:text-green-600 dark:hover:text-green-400 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                class="p-1.5 text-gray-400 hover:text-status-success-600 dark:hover:text-status-success-400 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Re-run this task"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -341,7 +341,7 @@
               <button
                 v-if="task.status !== 'running'"
                 @click="makeRepeatable(task)"
-                class="p-1.5 text-gray-400 hover:text-purple-600 dark:hover:text-purple-400 rounded transition-colors"
+                class="p-1.5 text-gray-400 hover:text-accent-purple-600 dark:hover:text-accent-purple-400 rounded transition-colors"
                 title="Create schedule from this task"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -403,7 +403,7 @@
                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
               </div>
               <div v-else-if="logError" class="text-center py-8">
-                <p class="text-red-500 dark:text-red-400">{{ logError }}</p>
+                <p class="text-status-danger-500 dark:text-status-danger-400">{{ logError }}</p>
               </div>
               <div v-else-if="logData && !logData.has_log" class="text-center py-8">
                 <p class="text-gray-500 dark:text-gray-400">No execution log available for this task.</p>
@@ -440,15 +440,15 @@
 
                   <!-- Tool Call -->
                   <div v-else-if="entry.type === 'tool-call'" class="flex space-x-3">
-                    <div class="flex-shrink-0 w-8 h-8 bg-amber-100 dark:bg-amber-900/50 rounded-full flex items-center justify-center">
-                      <svg class="w-4 h-4 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div class="flex-shrink-0 w-8 h-8 bg-state-autonomous-100 dark:bg-state-autonomous-900/50 rounded-full flex items-center justify-center">
+                      <svg class="w-4 h-4 text-state-autonomous-600 dark:text-state-autonomous-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                       </svg>
                     </div>
-                    <div class="flex-1 min-w-0 bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3">
+                    <div class="flex-1 min-w-0 bg-state-autonomous-50 dark:bg-state-autonomous-900/20 rounded-lg p-3">
                       <div class="flex items-center space-x-2 mb-1">
-                        <span class="text-xs font-medium text-amber-700 dark:text-amber-300">{{ entry.tool }}</span>
+                        <span class="text-xs font-medium text-state-autonomous-700 dark:text-state-autonomous-300">{{ entry.tool }}</span>
                       </div>
                       <pre class="text-xs text-gray-600 dark:text-gray-400 bg-white/50 dark:bg-black/20 rounded p-2 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{{ entry.input }}</pre>
                     </div>
@@ -456,13 +456,13 @@
 
                   <!-- Tool Result -->
                   <div v-else-if="entry.type === 'tool-result'" class="flex space-x-3">
-                    <div class="flex-shrink-0 w-8 h-8 bg-green-100 dark:bg-green-900/50 rounded-full flex items-center justify-center">
-                      <svg class="w-4 h-4 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div class="flex-shrink-0 w-8 h-8 bg-status-success-100 dark:bg-status-success-900/50 rounded-full flex items-center justify-center">
+                      <svg class="w-4 h-4 text-status-success-600 dark:text-status-success-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                     </div>
-                    <div class="flex-1 min-w-0 bg-green-50 dark:bg-green-900/20 rounded-lg p-3">
-                      <div class="text-xs font-medium text-green-700 dark:text-green-300 mb-1">Result</div>
+                    <div class="flex-1 min-w-0 bg-status-success-50 dark:bg-status-success-900/20 rounded-lg p-3">
+                      <div class="text-xs font-medium text-status-success-700 dark:text-status-success-300 mb-1">Result</div>
                       <pre class="text-xs text-gray-600 dark:text-gray-400 bg-white/50 dark:bg-black/20 rounded p-2 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{{ entry.content }}</pre>
                     </div>
                   </div>
@@ -471,7 +471,7 @@
                   <div v-else-if="entry.type === 'result'" class="bg-gray-100 dark:bg-gray-900 rounded-lg p-3 text-xs border-t-2 border-gray-300 dark:border-gray-600">
                     <div class="flex items-center justify-between text-gray-500 dark:text-gray-400">
                       <div class="flex items-center space-x-3">
-                        <span class="font-semibold text-green-600 dark:text-green-400">Completed</span>
+                        <span class="font-semibold text-status-success-600 dark:text-status-success-400">Completed</span>
                         <span>{{ entry.numTurns }} turns</span>
                       </div>
                       <div class="flex items-center space-x-3 font-mono">
@@ -494,7 +494,7 @@
         v-if="queueStatus?.current_execution"
         @click="forceReleaseQueue"
         :disabled="releaseLoading"
-        class="text-xs text-gray-500 hover:text-red-600 dark:hover:text-red-400 mr-4"
+        class="text-xs text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400 mr-4"
       >
         {{ releaseLoading ? 'Releasing...' : 'Force Release Queue' }}
       </button>
@@ -502,7 +502,7 @@
         v-if="queueStatus?.queue_length > 0"
         @click="clearQueue"
         :disabled="clearLoading"
-        class="text-xs text-gray-500 hover:text-red-600 dark:hover:text-red-400"
+        class="text-xs text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400"
       >
         {{ clearLoading ? 'Clearing...' : 'Clear Queued' }}
       </button>

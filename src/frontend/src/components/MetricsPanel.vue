@@ -146,12 +146,12 @@
       </div>
 
       <!-- No Values Yet Message -->
-      <div v-if="!hasAnyValues" class="mt-4 p-4 bg-yellow-50 dark:bg-yellow-900/30 border border-yellow-200 dark:border-yellow-800 rounded-lg">
-        <div class="flex items-center space-x-2 text-sm text-yellow-700 dark:text-yellow-300">
+      <div v-if="!hasAnyValues" class="mt-4 p-4 bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 rounded-lg">
+        <div class="flex items-center space-x-2 text-sm text-status-warning-700 dark:text-status-warning-300">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span>Metrics are defined but no values have been recorded yet. The agent needs to write to <code class="bg-yellow-100 dark:bg-yellow-900/50 px-1 py-0.5 rounded">metrics.json</code>.</span>
+          <span>Metrics are defined but no values have been recorded yet. The agent needs to write to <code class="bg-status-warning-100 dark:bg-status-warning-900/50 px-1 py-0.5 rounded">metrics.json</code>.</span>
         </div>
       </div>
     </div>

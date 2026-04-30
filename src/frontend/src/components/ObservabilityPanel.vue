@@ -9,7 +9,7 @@
         <div
           :class="[
             'w-2 h-2 rounded-full',
-            observabilityStore.isOperational ? 'bg-green-500' : 'bg-gray-400'
+            observabilityStore.isOperational ? 'bg-status-success-500' : 'bg-gray-400'
           ]"
         ></div>
         <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Observability</h3>
@@ -48,7 +48,7 @@
     </div>
 
     <!-- Enabled but not available -->
-    <div v-else-if="!observabilityStore.available && observabilityStore.error" class="text-xs text-yellow-600 dark:text-yellow-400">
+    <div v-else-if="!observabilityStore.available && observabilityStore.error" class="text-xs text-status-warning-600 dark:text-status-warning-400">
       {{ observabilityStore.error }}
     </div>
 
@@ -127,8 +127,8 @@
             <span
               :class="[
                 'font-medium',
-                item.type === 'added' ? 'text-green-600 dark:text-green-400' :
-                item.type === 'removed' ? 'text-red-600 dark:text-red-400' :
+                item.type === 'added' ? 'text-status-success-600 dark:text-status-success-400' :
+                item.type === 'removed' ? 'text-status-danger-600 dark:text-status-danger-400' :
                 'text-gray-600 dark:text-gray-400'
               ]"
             >
