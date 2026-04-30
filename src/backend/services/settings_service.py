@@ -130,6 +130,27 @@ class SettingsService:
         return os.getenv('SLACK_APP_TOKEN', '')
 
     # =========================================================================
+    # Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)
+    # =========================================================================
+
+    def is_session_tab_enabled(self) -> bool:
+        """
+        Whether the Session tab UI surface is exposed to users.
+
+        Resolves in this order:
+        1. system_settings row 'session_tab_enabled' ("true"/"false")
+        2. SESSION_TAB_ENABLED env var
+        3. Default: False
+
+        The flag gates only the new UI surface and the new
+        ``/api/agents/{name}/session*`` endpoints. Chat is unaffected.
+        """
+        stored = self.get_setting('session_tab_enabled')
+        if stored is not None:
+            return str(stored).lower() in ("true", "1", "yes")
+        return os.getenv('SESSION_TAB_ENABLED', '').lower() in ("true", "1", "yes")
+
+    # =========================================================================
     # GitHub Templates (TMPL-001)
     # =========================================================================
 
@@ -227,6 +248,11 @@ def get_slack_transport_mode() -> str:
 def get_slack_app_token() -> str:
     """Get Slack App-Level Token for Socket Mode."""
     return settings_service.get_slack_app_token()
+
+
+def is_session_tab_enabled() -> bool:
+    """Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)."""
+    return settings_service.is_session_tab_enabled()
 
 
 def get_ops_setting(key: str, as_type: type = str):

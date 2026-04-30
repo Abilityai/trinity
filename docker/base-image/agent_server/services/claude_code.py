@@ -141,17 +141,20 @@ class ClaudeCodeRuntime(AgentRuntime):
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
         Args:
             resume_session_id: Optional session ID to resume (EXEC-023)
+            persist_session: If True, write the JSONL so the next --resume can find it (Session tab)
             images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
-            max_turns, execution_id, resume_session_id, images=images,
+            max_turns, execution_id, resume_session_id,
+            persist_session=persist_session, images=images,
         )
 
 
@@ -160,7 +163,7 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
     Parse stream-json output from Claude Code.
 
     Stream-json format emits one JSON object per line:
-    - {"type": "init", "session_id": "abc123", ...}
+    - {"type": "system", "subtype": "init", "session_id": "abc123", ...}
     - {"type": "user", "message": {...}}
     - {"type": "assistant", "message": {"content": [{"type": "tool_use", ...}, ...]}}
     - {"type": "result", "total_cost_usd": 0.003, ...}
@@ -188,7 +191,11 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
 
         msg_type = msg.get("type")
 
-        if msg_type == "init":
+        # Claude Code emits {"type": "system", "subtype": "init", ...} for the
+        # session-start event; the result event also carries session_id and
+        # serves as a fallback when the init line was missed (e.g. truncated
+        # stream).
+        if msg_type == "system" and msg.get("subtype") == "init":
             metadata.session_id = msg.get("session_id")
 
         elif msg_type == "result":
@@ -197,6 +204,8 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             metadata.duration_ms = msg.get("duration_ms")
             metadata.num_turns = msg.get("num_turns")
             response_text = msg.get("result", response_text)
+            if not metadata.session_id:
+                metadata.session_id = msg.get("session_id")
 
             # Extract token usage from result.usage
             usage = msg.get("usage", {})
@@ -325,7 +334,10 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
 
     msg_type = msg.get("type")
 
-    if msg_type == "init":
+    # Claude Code emits {"type": "system", "subtype": "init", ...} for the
+    # session-start event; the result event also carries session_id and
+    # serves as a fallback when the init line was missed.
+    if msg_type == "system" and msg.get("subtype") == "init":
         metadata.session_id = msg.get("session_id")
 
     elif msg_type == "result":
@@ -334,6 +346,8 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
         metadata.duration_ms = msg.get("duration_ms")
         metadata.num_turns = msg.get("num_turns")
         result_text = msg.get("result", "")
+        if not metadata.session_id:
+            metadata.session_id = msg.get("session_id")
 
         # Detect error results (e.g., max_turns, rate limit, auth failures)
         if msg.get("is_error") and not metadata.error_type:
@@ -1019,6 +1033,7 @@ async def execute_headless_task(
     max_turns: Optional[int] = None,
     execution_id: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    persist_session: bool = False,
     images: Optional[List[Dict]] = None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
@@ -1029,6 +1044,7 @@ async def execute_headless_task(
     - Does NOT use --continue flag (stateless, no conversation context) by default
     - Each call is independent and can run concurrently
     - Can resume previous sessions via resume_session_id (EXEC-023)
+    - Can persist the session JSONL via persist_session=True (Session tab)
 
     Args:
         prompt: The task to execute
@@ -1040,6 +1056,10 @@ async def execute_headless_task(
         max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
         execution_id: Optional execution ID to use for process registry (enables termination tracking)
         resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
+        persist_session: If True, omit ``--no-session-persistence`` so the
+            JSONL is written to ``~/.claude/projects/...`` and a future
+            ``--resume`` can reattach. Default False keeps headless tasks
+            stateless for all existing callers.
 
     Returns: (response_text, execution_log, metadata, session_id)
     """
@@ -1075,8 +1095,13 @@ async def execute_headless_task(
             # Session isolation: prevent headless tasks from writing session files
             # that could collide with interactive /api/chat sessions or other tasks.
             # --no-session-persistence avoids shared state in ~/.claude/projects/
-            # --session-id ensures unique namespace per task execution
-            cmd.append("--no-session-persistence")
+            # --session-id ensures unique namespace per task execution.
+            #
+            # Session tab opt-in (persist_session=True): the caller wants the
+            # JSONL written so the next turn can --resume it. We still pass a
+            # unique --session-id so cold turns don't collide on disk.
+            if not persist_session:
+                cmd.append("--no-session-persistence")
             # Claude Code requires --session-id to be a valid UUID.
             # execution_id is a base64url token (not a UUID), so always generate one.
             cmd.extend(["--session-id", str(uuid.uuid4())])
@@ -1226,7 +1251,13 @@ async def execute_headless_task(
                         # Validate permissionMode on init message (first message from Claude Code).
                         # If permission bypass isn't active, kill immediately instead of timing out
                         # after hours with zero work completed (all tool calls silently denied).
-                        if raw_msg.get("type") == "init" and not permission_mode_validated:
+                        # Claude Code emits {"type": "system", "subtype": "init", ...} — see Appendix B
+                        # of docs/planning/SESSION_TAB_2026-04.md.
+                        if (
+                            raw_msg.get("type") == "system"
+                            and raw_msg.get("subtype") == "init"
+                            and not permission_mode_validated
+                        ):
                             perm_mode = raw_msg.get("permissionMode", "unknown")
                             if perm_mode == "bypassPermissions":
                                 permission_mode_validated = True

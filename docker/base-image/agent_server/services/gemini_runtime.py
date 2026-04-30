@@ -507,6 +507,7 @@ class GeminiRuntime(AgentRuntime):
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """
@@ -518,9 +519,10 @@ class GeminiRuntime(AgentRuntime):
         - Supports tool restrictions and custom system prompts
         - Supports max_turns for runaway prevention
 
-        Note: resume_session_id is not supported by Gemini CLI (ignored).
+        Note: resume_session_id and persist_session are not supported by
+        Gemini CLI (accepted for ABC parity, ignored at runtime).
         """
-        # Note: resume_session_id is ignored - Gemini CLI doesn't support session resume
+        # Note: resume_session_id and persist_session are ignored — Gemini CLI doesn't support resume
         if not self.is_available():
             raise HTTPException(
                 status_code=503,

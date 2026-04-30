@@ -236,6 +236,7 @@ class TaskExecutionService:
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         allowed_tools: Optional[list] = None,
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
@@ -416,6 +417,7 @@ class TaskExecutionService:
                 "timeout_seconds": timeout_seconds,
                 "execution_id": execution_id,
                 "resume_session_id": resume_session_id,
+                "persist_session": persist_session,
                 "images": images or None,
             }
 

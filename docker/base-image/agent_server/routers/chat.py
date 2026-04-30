@@ -129,6 +129,7 @@ async def execute_task(request: ParallelTaskRequest):
         max_turns=request.max_turns,
         execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
         resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
+        persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
         images=request.images,  # Vision images from channel adapters (#562)
     )
 
