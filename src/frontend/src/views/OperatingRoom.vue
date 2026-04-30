@@ -83,8 +83,8 @@
       <div v-if="activeTab === 'needs-response'">
         <!-- Empty state -->
         <div v-if="operatorQueueStore.openItems.length === 0" class="text-center py-16">
-          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 dark:bg-green-900/20 mb-4">
-            <svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-status-success-100 dark:bg-status-success-900/20 mb-4">
+            <svg class="w-8 h-8 text-status-success-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
           </div>

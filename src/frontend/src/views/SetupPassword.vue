@@ -105,13 +105,13 @@
 
           <!-- Password Match Indicator -->
           <div v-if="password && confirmPassword" class="flex items-center text-sm">
-            <svg v-if="passwordsMatch" class="h-4 w-4 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg v-if="passwordsMatch" class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
-            <svg v-else class="h-4 w-4 text-red-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg v-else class="h-4 w-4 text-status-danger-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
-            <span :class="passwordsMatch ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+            <span :class="passwordsMatch ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
               {{ passwordsMatch ? 'Passwords match' : 'Passwords do not match' }}
             </span>
           </div>
@@ -134,26 +134,26 @@
           <!-- Password Requirements Checklist -->
           <div v-if="password" class="space-y-1 text-sm">
             <div v-for="req in passwordRequirements" :key="req.label" class="flex items-center">
-              <svg v-if="req.met" class="h-4 w-4 text-green-500 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg v-if="req.met" class="h-4 w-4 text-status-success-500 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
               </svg>
               <svg v-else class="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <circle cx="12" cy="12" r="10" stroke-width="2" />
               </svg>
-              <span :class="req.met ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'">
+              <span :class="req.met ? 'text-status-success-600 dark:text-status-success-400' : 'text-gray-500 dark:text-gray-400'">
                 {{ req.label }}
               </span>
             </div>
           </div>
 
           <!-- Error Message -->
-          <div v-if="error" class="rounded-md bg-red-50 dark:bg-red-900/30 p-4">
+          <div v-if="error" class="rounded-md bg-status-danger-50 dark:bg-status-danger-900/30 p-4">
             <div class="flex">
-              <svg class="h-5 w-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="h-5 w-5 text-status-danger-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div class="ml-3">
-                <p class="text-sm text-red-700 dark:text-red-300">{{ error }}</p>
+                <p class="text-sm text-status-danger-700 dark:text-status-danger-300">{{ error }}</p>
               </div>
             </div>
           </div>
@@ -223,24 +223,24 @@ const passwordStrengthText = computed(() => {
 
 const passwordStrengthClass = computed(() => {
   const classes = [
-    'text-red-600 dark:text-red-400',
-    'text-red-600 dark:text-red-400',
-    'text-orange-600 dark:text-orange-400',
-    'text-yellow-600 dark:text-yellow-400',
-    'text-green-600 dark:text-green-400',
-    'text-green-600 dark:text-green-400'
+    'text-status-danger-600 dark:text-status-danger-400',
+    'text-status-danger-600 dark:text-status-danger-400',
+    'text-status-urgent-600 dark:text-status-urgent-400',
+    'text-status-warning-600 dark:text-status-warning-400',
+    'text-status-success-600 dark:text-status-success-400',
+    'text-status-success-600 dark:text-status-success-400'
   ]
   return classes[passwordStrength.value] || classes[0]
 })
 
 const passwordStrengthBarClass = computed(() => {
   const classes = [
-    'bg-red-500',
-    'bg-red-500',
-    'bg-orange-500',
-    'bg-yellow-500',
-    'bg-green-500',
-    'bg-green-500'
+    'bg-status-danger-500',
+    'bg-status-danger-500',
+    'bg-status-urgent-500',
+    'bg-status-warning-500',
+    'bg-status-success-500',
+    'bg-status-success-500'
   ]
   return classes[passwordStrength.value] || classes[0]
 })

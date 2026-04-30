@@ -24,7 +24,7 @@
       <div class="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
-            <span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500"></span>
+            <span class="inline-block w-2.5 h-2.5 rounded-full bg-status-success-500"></span>
             <div>
               <p class="text-sm font-medium text-gray-900 dark:text-white">
                 @{{ binding.bot_username }}
@@ -51,7 +51,7 @@
             <button
               @click="disconnectBot"
               :disabled="disconnecting"
-              class="text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 disabled:opacity-50"
+              class="text-sm text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300 disabled:opacity-50"
             >
               {{ disconnecting ? 'Removing...' : 'Disconnect' }}
             </button>
@@ -60,8 +60,8 @@
       </div>
 
       <!-- Webhook Warning -->
-      <div v-if="!binding.webhook_url" class="p-3 rounded-lg text-sm bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300">
-        Bot connected but webhook not registered. Set a <router-link to="/settings" class="underline font-medium hover:text-yellow-800 dark:hover:text-yellow-200">Public URL in Settings</router-link> for Telegram messages to reach this agent.
+      <div v-if="!binding.webhook_url" class="p-3 rounded-lg text-sm bg-status-warning-50 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300">
+        Bot connected but webhook not registered. Set a <router-link to="/settings" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Public URL in Settings</router-link> for Telegram messages to reach this agent.
       </div>
 
       <!-- Group Chats Section -->
@@ -87,7 +87,7 @@
               </div>
               <button
                 @click="removeGroup(group)"
-                class="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400"
+                class="text-xs text-status-danger-500 hover:text-status-danger-700 dark:hover:text-status-danger-400"
               >
                 Remove
               </button>
@@ -196,7 +196,7 @@
     <!-- Messages -->
     <div v-if="message" :class="[
       'mt-3 p-3 rounded-lg text-sm',
-      message.type === 'success' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+      message.type === 'success' ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
     ]">
       {{ message.text }}
     </div>

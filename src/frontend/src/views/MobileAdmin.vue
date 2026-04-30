@@ -43,7 +43,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
             </svg>
           </button>
-          <button @click="handleLogout" class="header-btn text-red-400">
+          <button @click="handleLogout" class="header-btn text-status-danger-400">
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
             </svg>
@@ -86,7 +86,7 @@
                 <div class="agent-info">
                   <div class="agent-name">{{ agent.name }}</div>
                   <div class="agent-meta">
-                    <span class="status-dot" :class="agent.status === 'running' ? 'bg-green-400' : 'bg-gray-500'"></span>
+                    <span class="status-dot" :class="agent.status === 'running' ? 'bg-status-success-400' : 'bg-gray-500'"></span>
                     <span class="text-xs text-gray-400">{{ agent.status }}</span>
                     <span v-if="agent.autonomy_enabled" class="autonomy-badge auto">AUTO</span>
                     <span v-if="agent.type" class="type-badge">{{ agent.type }}</span>
@@ -255,7 +255,7 @@
                 <div class="health-label">Total</div>
               </div>
               <div class="health-card">
-                <div class="health-value text-green-400">{{ fleetSummary.running }}</div>
+                <div class="health-value text-status-success-400">{{ fleetSummary.running }}</div>
                 <div class="health-label">Running</div>
               </div>
               <div class="health-card">
@@ -263,7 +263,7 @@
                 <div class="health-label">Stopped</div>
               </div>
               <div class="health-card">
-                <div class="health-value text-yellow-400">{{ fleetSummary.high_context }}</div>
+                <div class="health-value text-status-warning-400">{{ fleetSummary.high_context }}</div>
                 <div class="health-label">High Ctx</div>
               </div>
             </div>
@@ -319,7 +319,7 @@
           </button>
           <div class="chat-header-info">
             <span class="chat-header-name">{{ chatAgent }}</span>
-            <span class="chat-header-status" :class="chatExecutionStatus === 'running' ? 'text-yellow-400' : ''">
+            <span class="chat-header-status" :class="chatExecutionStatus === 'running' ? 'text-status-warning-400' : ''">
               {{ chatExecutionStatus === 'running' ? 'Thinking...' : 'Ready' }}
             </span>
           </div>

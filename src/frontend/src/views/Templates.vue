@@ -37,7 +37,7 @@
 
         <!-- Error state -->
         <div v-else-if="error" class="text-center py-12">
-          <div class="text-red-500 dark:text-red-400 mb-4">
+          <div class="text-status-danger-500 dark:text-status-danger-400 mb-4">
             <svg class="w-12 h-12 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
