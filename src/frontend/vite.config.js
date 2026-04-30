@@ -17,7 +17,10 @@ export default defineConfig({
     // Allow all hosts - Trinity runs behind a reverse proxy that handles host validation
     allowedHosts: true,
     proxy: {
-      '/api': {
+      // Trailing slash matters: `/api` (no slash) is a prefix that captures
+      // the SPA route `/api-keys` and forwards it to the backend → 404. Use
+      // `/api/` so only proper API paths are proxied.
+      '/api/': {
         target: `http://${backendHost}:8000`,
         changeOrigin: true,
         ws: true,
