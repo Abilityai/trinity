@@ -52,6 +52,7 @@ from routers.templates import router as templates_router
 from routers.sharing import router as sharing_router, set_websocket_manager as set_sharing_ws_manager
 from routers.mcp_keys import router as mcp_keys_router
 from routers.chat import router as chat_router, set_websocket_manager as set_chat_ws_manager
+from routers.sessions import router as sessions_router  # SESSION_TAB_2026-04 Phase 2
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
 from routers.git import router as git_router
@@ -706,6 +707,7 @@ app.include_router(templates_router)
 app.include_router(sharing_router)
 app.include_router(mcp_keys_router)
 app.include_router(chat_router)
+app.include_router(sessions_router)  # SESSION_TAB_2026-04 Phase 2 — gated on is_session_tab_enabled()
 app.include_router(fan_out_router)
 app.include_router(schedules_router)
 app.include_router(git_router)
