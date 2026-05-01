@@ -14,6 +14,7 @@
         >
           <option value="all">All triggers</option>
           <option value="chat">Chat</option>
+          <option value="session">Session</option>
           <option value="manual">Manual</option>
           <option value="schedule">Schedule</option>
           <option value="mcp">MCP</option>
@@ -200,6 +201,7 @@
                   :class="[
                     'px-1.5 py-0.5 rounded text-xs',
                     task.triggered_by === 'chat' ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300' :
+                    task.triggered_by === 'session' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' :
                     task.triggered_by === 'manual' ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' :
                     task.triggered_by === 'schedule' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' :
                     task.triggered_by === 'paid' ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300' :

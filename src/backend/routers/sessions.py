@@ -383,7 +383,7 @@ async def send_session_message(
         result = await service.execute_task(
             agent_name=name,
             message=body.message,
-            triggered_by="chat",
+            triggered_by="session",
             source_user_id=current_user.id,
             source_user_email=user_email,
             model=body.model,
@@ -419,7 +419,7 @@ async def send_session_message(
             result = await service.execute_task(
                 agent_name=name,
                 message=body.message,
-                triggered_by="chat",
+                triggered_by="session",
                 source_user_id=current_user.id,
                 source_user_email=user_email,
                 model=body.model,
