@@ -260,3 +260,24 @@ class SessionOperations:
                 WHERE id = ?
             """, (utc_now_iso(), session_id))
             return cursor.rowcount > 0
+
+    # ---- cleanup support (Phase 4.2) --------------------------------------
+
+    def list_active_claude_session_ids(self, agent_name: str) -> List[str]:
+        """All currently-cached Claude UUIDs for an agent — the keep set.
+
+        The Phase 4.2 cleanup service uses this as the allowlist when reaping
+        orphan JSONLs from ``~/.claude/projects/-home-developer/`` inside the
+        agent container. A JSONL whose UUID is not in this set has no session
+        row referencing it (deleted, reset, or post-fallback orphan) and is
+        safe to delete after the age-guard window.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT cached_claude_session_id
+                FROM agent_sessions
+                WHERE agent_name = ?
+                  AND cached_claude_session_id IS NOT NULL
+            """, (agent_name,))
+            return [row["cached_claude_session_id"] for row in cursor.fetchall()]

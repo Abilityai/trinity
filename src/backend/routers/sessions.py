@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from database import db
 from dependencies import AuthorizedAgent, get_current_user
 from models import User
+from services.session_cleanup_service import get_session_cleanup_service
 from services.settings_service import is_session_tab_enabled
 from services.task_execution_service import get_task_execution_service
 from utils.helpers import utc_now_iso
@@ -512,13 +513,19 @@ async def reset_session_memory(
     """
     _enabled_or_404()
     session = _session_or_404(session_id, current_user, name)
+    prior_uuid = session.cached_claude_session_id
     db.clear_cached_claude_session_id(session.id)
     logger.info(
         "[Session] event=session_reset agent=%s session=%s prior_uuid=%s",
         name,
         session.id,
-        session.cached_claude_session_id,
+        prior_uuid,
     )
+    # Phase 4.2: best-effort synchronous JSONL reap so the user-perceived
+    # latency between "Reset memory" and the actual disk reclaim is small.
+    # Periodic sweep catches anything we miss here. Never raises.
+    if prior_uuid:
+        await get_session_cleanup_service().reap_jsonl(name, prior_uuid)
     refreshed = db.get_session(session.id)
     return _serialize_session(refreshed) if refreshed else _serialize_session(session)
 
@@ -532,12 +539,16 @@ async def delete_session(
     """Delete the session row + its messages. JSONL reaped by Phase 4.2."""
     _enabled_or_404()
     session = _session_or_404(session_id, current_user, name)
+    prior_uuid = session.cached_claude_session_id
     deleted = db.delete_session(session.id)
     logger.info(
         "[Session] event=session_delete agent=%s session=%s prior_uuid=%s success=%s",
         name,
         session.id,
-        session.cached_claude_session_id,
+        prior_uuid,
         deleted,
     )
+    # Phase 4.2: same best-effort reap as reset (the JSONL is now orphaned).
+    if prior_uuid:
+        await get_session_cleanup_service().reap_jsonl(name, prior_uuid)
     return {"deleted": bool(deleted), "session_id": session.id}

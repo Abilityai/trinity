@@ -953,6 +953,9 @@ class DatabaseManager:
     def mark_resume_success(self, session_id: str):
         return self._session_ops.mark_resume_success(session_id)
 
+    def list_active_claude_session_ids(self, agent_name: str):
+        return self._session_ops.list_active_claude_session_ids(agent_name)
+
     # =========================================================================
     # Activity Stream Methods (delegated to db/activities.py)
     # =========================================================================
