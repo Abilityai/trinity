@@ -431,8 +431,8 @@ async function performReset() {
 
 // ----- the turn --------------------------------------------------------------
 
-async function onSubmit(text /* , files */) {
-  if (!text || loading.value || props.agentStatus !== 'running') return
+async function onSubmit(text, files = []) {
+  if ((!text && (!files || files.length === 0)) || loading.value || props.agentStatus !== 'running') return
   error.value = null
 
   // Lazy session creation — first turn from the empty state creates a row.
@@ -454,6 +454,7 @@ async function onSubmit(text /* , files */) {
   try {
     const result = await sessionsStore.sendMessage(props.agentName, sid, text, {
       model: selectedModel.value || undefined,
+      files: files && files.length > 0 ? files : undefined,
     })
     if (result?.fallback_fired) {
       fallbackNotice.value = true

@@ -152,7 +152,7 @@ export const useSessionsStore = defineStore('sessions', {
      * On failure, that synthetic message is rolled back so the input area
      * can re-populate without confusing the conversation log.
      */
-    async sendMessage(agentName, sessionId, text, { model, timeoutSeconds } = {}) {
+    async sendMessage(agentName, sessionId, text, { model, timeoutSeconds, files } = {}) {
       const authStore = useAuthStore()
 
       const optimistic = {
@@ -168,6 +168,10 @@ export const useSessionsStore = defineStore('sessions', {
         const body = { message: text }
         if (model) body.model = model
         if (timeoutSeconds) body.timeout_seconds = timeoutSeconds
+        // Phase 5.2 — file uploads. ChatInput emits an array of
+        // {name, mimetype, size, data_base64}; backend's WebFileUpload
+        // model accepts the same shape.
+        if (files && files.length > 0) body.files = files
 
         const r = await axios.post(
           `/api/agents/${agentName}/sessions/${sessionId}/message`,

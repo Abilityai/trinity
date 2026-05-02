@@ -23,11 +23,21 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from database import db
+from db_models import WebFileUpload
 from dependencies import AuthorizedAgent, get_current_user
 from models import User
+from services.docker_service import get_agent_container
 from services.session_cleanup_service import get_session_cleanup_service
 from services.settings_service import is_session_tab_enabled
 from services.task_execution_service import get_task_execution_service
+from services.upload_service import (
+    decode_web_file,
+    process_file_uploads,
+    WEB_MAX_FILES,
+    WEB_MAX_FILE_SIZE,
+    WEB_MAX_IMAGE_SIZE,
+    WEB_MAX_TOTAL_IMAGE_SIZE,
+)
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -52,6 +62,12 @@ class SessionMessageRequest(BaseModel):
     message: str = Field(..., min_length=1)
     model: Optional[str] = None
     timeout_seconds: Optional[int] = None
+    # File attachments — same shape as ParallelTaskRequest.files (#364).
+    # Images become vision blocks for the model; non-images are written
+    # into the agent workspace and a "[File uploaded by X]: name (size)
+    # saved to path" line is appended to the prompt so the agent can
+    # `Read` them. (Phase 5.2 file-upload parity with Chat.)
+    files: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +377,59 @@ async def send_session_message(
 
     user_email = current_user.email or current_user.username
 
+    # Phase 5.2 — file uploads. Mirror routers/chat.py's pattern: decode
+    # the base64 payloads, write non-images into the agent workspace via
+    # process_file_uploads (which uses Docker put_archive), and pass any
+    # decoded image bytes to execute_task as `images=` so they become
+    # vision blocks on the next API call. The "[File uploaded by X]:
+    # name (size) saved to path" line is appended to the prompt so the
+    # agent has a textual reference even for non-image uploads.
+    image_data: list = []
+    effective_message = body.message
+    if body.files:
+        container = get_agent_container(name)
+        if not container:
+            raise HTTPException(status_code=503, detail="Agent not found")
+        raw_files = []
+        for i, f in enumerate(body.files):
+            if not isinstance(f, dict):
+                continue
+            try:
+                raw_files.append({
+                    "name": f.get("name"),
+                    "mimetype": f.get("mimetype"),
+                    "size": f.get("size"),
+                    "data": decode_web_file(f),
+                    "id": f"f{i}",
+                })
+            except Exception as e:
+                logger.warning("[Session] file %s decode failed: %s", f.get("name"), e)
+        if raw_files:
+            file_descs, _upload_dir, all_writes_failed, image_data = await process_file_uploads(
+                raw_files=raw_files,
+                agent_name=name,
+                container=container,
+                session_id=session.id,
+                uploader=user_email,
+                source="web",
+                max_files=WEB_MAX_FILES,
+                max_file_size=WEB_MAX_FILE_SIZE,
+                max_image_size=WEB_MAX_IMAGE_SIZE,
+                max_total_image_size=WEB_MAX_TOTAL_IMAGE_SIZE,
+            )
+            if all_writes_failed:
+                raise HTTPException(
+                    status_code=502,
+                    detail="File upload failed: could not write to agent workspace.",
+                )
+            if file_descs:
+                effective_message = f"{body.message}\n\n" + "\n".join(file_descs)
+
     # Step 2: persist the user message up front. If everything below fails
     # the message log still reflects what the user typed (vs. a silent loss).
+    # Persist the ORIGINAL user message (without the file_descs append) so
+    # the visible chat log reads naturally. The agent sees effective_message
+    # which has the file references inline.
     db.add_session_message(
         session_id=session.id,
         agent_name=name,
@@ -382,7 +449,7 @@ async def send_session_message(
         # Step 4: cold or resume turn.
         result = await service.execute_task(
             agent_name=name,
-            message=body.message,
+            message=effective_message,
             triggered_by="session",
             source_user_id=current_user.id,
             source_user_email=user_email,
@@ -391,6 +458,7 @@ async def send_session_message(
             resume_session_id=cached_uuid,
             persist_session=True,
             subscription_id=session.subscription_id,
+            images=image_data or None,
         )
 
         # Step 5: resume-failure fallback. Only triggers when we *had* a
@@ -416,9 +484,12 @@ async def send_session_message(
             # Retry once cold. Lock is no longer relevant — the stale UUID
             # is gone, and the new cold turn will write a fresh JSONL with
             # a new UUID (no contention with anyone else by definition).
+            # Use effective_message + image_data so any uploaded files
+            # (already written to the workspace before the first attempt)
+            # are still referenced in the prompt + sent as vision blocks.
             result = await service.execute_task(
                 agent_name=name,
-                message=body.message,
+                message=effective_message,
                 triggered_by="session",
                 source_user_id=current_user.id,
                 source_user_email=user_email,
@@ -427,6 +498,7 @@ async def send_session_message(
                 resume_session_id=None,
                 persist_session=True,
                 subscription_id=session.subscription_id,
+                images=image_data or None,
             )
 
     if result.status != "success":
