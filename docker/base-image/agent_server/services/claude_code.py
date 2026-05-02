@@ -1525,18 +1525,35 @@ async def execute_headless_task(
                     detail=f"Task execution failed (exit code {return_code}): {error_preview[:300]}"
                 )
 
-            # Issue #520: Clean exit (return_code == 0) but the final `result` JSON
-            # line never reached the reader thread — typically because a child
-            # subprocess inherited stdout. metadata.cost_usd / duration_ms stay
-            # None, the watchdog ends up reaping the execution minutes later, and
-            # the agent-server log misleadingly claims "completed successfully".
-            # Surface this as 502 so backend records it as FAILED with a useful
-            # diagnostic rather than dispatching an empty 200.
+            # Issue #520 + Session-tab pipe race recovery: clean exit
+            # (return_code == 0) but the final `result` JSON line never reached
+            # the reader thread — typically because a child subprocess inherited
+            # stdout. metadata.cost_usd / duration_ms stay None.
+            #
+            # Recovery: response_parts is appended to as each assistant message's
+            # text content arrives (independent of the result event). If we have
+            # accumulated text, the assistant DID complete its response — only
+            # the closing-stats line was lost. Synthesize a soft success so the
+            # user gets their reply instead of a 502 + retry-recommended error.
+            # cost/duration stay None in this branch (we don't know what they
+            # were); the backend records the execution as success with null
+            # cost rather than a misleading FAILED.
+            #
+            # Hard failure path stays as-is for the truly empty case (no
+            # assistant text accumulated → nothing to recover).
             empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages), raw_messages=raw_messages)
             if empty_result is not None:
-                status_code, detail = empty_result
-                logger.error(f"[Headless Task] {detail}")
-                raise HTTPException(status_code=status_code, detail=detail)
+                if response_parts:
+                    logger.warning(
+                        f"[Headless Task] Result event lost (stdout pipe race) but "
+                        f"response_parts has {sum(len(p) for p in response_parts)} chars "
+                        f"of assistant content across {len(response_parts)} blocks — "
+                        f"recovering as soft success. raw_messages={len(raw_messages)}"
+                    )
+                else:
+                    status_code, detail = empty_result
+                    logger.error(f"[Headless Task] {detail}")
+                    raise HTTPException(status_code=status_code, detail=detail)
 
             # Build final response text
             response_text = "\n".join(response_parts) if response_parts else ""

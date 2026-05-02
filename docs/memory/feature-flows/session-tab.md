@@ -210,6 +210,20 @@ Playwright spec, marked `@interactive` (real Claude call ~10–60s, opt-in via `
 
 ---
 
+## Known limitations and user-facing caveats
+
+These items are NOT bugs — they are design boundaries we explicitly chose, deferred features, or platform-level concerns that surface in the Session tab. Source these into the user-facing docs (`docs/user-docs/`) when Phase 5.3 lands.
+
+| Limitation | Detail | Mitigation today |
+|---|---|---|
+| **Voice mic not wired into Session** | The voice button is hidden on the Session tab. Voice writes to `chat_sessions` / `chat_messages`, not the Session tables, so a voice session inside the Session tab would silently land in the wrong table and not persist `--resume` memory. Deferred from Phase 3.1. | Use the Chat tab for voice; switch to Session for stateful text turns. Will revisit when there's signal users actually want voice + persistent memory together. |
+| **Per-message file upload not yet supported on Session** | The Session turn endpoint doesn't accept files; ChatPanel does. Drag-drop in the Session tab is currently a no-op. | Use the Chat tab for file-bearing turns. Phase 5.2 will close the parity gap. |
+| **Agent restore from backup may require fresh sessions** | `~/trinity-data/` backup covers the SQLite DB (session rows + messages) but does NOT cover the named workspace Docker volumes that hold the `.claude/projects/<uuid>.jsonl` files. After a DR restore, every session row's `cached_claude_session_id` will point at a JSONL that doesn't exist on the new host. | First turn on every restored session will trigger the resume-failure fallback, which clears the cache and starts the session cold under a fresh UUID. The visible message log is preserved (it's in the DB); only the agent's working memory of those turns is lost. Will be addressed at the platform level (separate issue) when the backup script is extended to cover named volumes. |
+| **Long Session turns may surface phantom errors in browsers** | The Session turn endpoint is synchronous and may legitimately run for the agent's full execution timeout (up to 7200s). The Axios timeout is set to 7260s, but if the browser tab is suspended or the laptop sleeps mid-turn, the user may see a phantom error toast even though the work succeeded server-side. | Refresh the page after the agent's typical completion time — the assistant message will appear if it landed in the DB. A future change to async-mode + SSE polling (THINK-001 pattern) will decouple browser lifetime from task lifetime. |
+| **Stdout pipe race recovery is best-effort** | When a child subprocess inherits Claude Code's stdout, the final `result` event line can be lost. Phase 5.1 added soft-recovery: if `response_parts` accumulated assistant text, the agent server treats the turn as success even without the formal result event. Cost / duration columns will be NULL for these recovered turns. | Recovered turns will not show cost or duration in the Tasks tab. The reply is correct; the metrics are missing. |
+
+---
+
 ## Related Flows
 
 - [persistent-chat-tracking.md](persistent-chat-tracking.md) — the older `chat_sessions` / `chat_messages` system this surface is parallel to.

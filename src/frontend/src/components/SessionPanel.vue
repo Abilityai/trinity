@@ -162,6 +162,44 @@
         </template>
       </ChatMessages>
 
+      <!-- Context-window pressure warnings (Phase 5.1) -->
+      <div
+        v-if="contextPctBucket === 'critical'"
+        class="mx-6 mb-2 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 flex items-start gap-3"
+      >
+        <svg class="w-5 h-5 text-red-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+        </svg>
+        <div class="flex-1">
+          <p class="text-sm font-medium text-red-700 dark:text-red-300">
+            Session context is at {{ contextPct }}% — at or near the model's window
+          </p>
+          <p class="text-xs text-red-600 dark:text-red-400 mt-0.5">
+            Your next message may fail or trigger a memory-loss fallback. Click
+            <strong>Reset memory</strong> to start fresh while keeping the
+            visible message log.
+          </p>
+        </div>
+      </div>
+      <div
+        v-else-if="contextPctBucket === 'warn'"
+        class="mx-6 mb-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 flex items-start gap-3"
+      >
+        <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <p class="text-sm text-amber-700 dark:text-amber-300">
+          Session context is at {{ contextPct }}%. Consider <strong>Reset memory</strong>
+          before your next big task.
+        </p>
+      </div>
+      <div
+        v-else-if="contextPctBucket === 'hint'"
+        class="mx-6 mb-2 px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400"
+      >
+        Session context: {{ contextPct }}% — heavy.
+      </div>
+
       <!-- Error message -->
       <div v-if="error" class="mx-6 mb-2 p-3 rounded-lg bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800">
         <p class="text-sm text-red-600 dark:text-red-400">{{ error }}</p>
@@ -267,6 +305,30 @@ const currentSessionLabel = computed(() => {
   const s = sessions.value.find((x) => x.id === currentSessionId.value)
   if (!s) return 'Current session'
   return formatSessionDate(s.last_message_at || s.started_at)
+})
+
+// Phase 5.1 — context-window pressure warnings.
+// Buckets: < 75 = none, 75–89 = hint, 90–99 = warn, ≥ 100 = critical.
+// Read from the active session row (watermark / max), guarded against
+// missing data so a brand-new session shows nothing.
+const currentSession = computed(() => {
+  if (!currentSessionId.value) return null
+  return sessions.value.find((x) => x.id === currentSessionId.value) || null
+})
+const contextPct = computed(() => {
+  const s = currentSession.value
+  if (!s) return 0
+  const used = s.total_context_used || 0
+  const max = s.total_context_max || 200000
+  if (!max) return 0
+  return Math.min(100, Math.round((used / max) * 100))
+})
+const contextPctBucket = computed(() => {
+  const p = contextPct.value
+  if (p >= 100) return 'critical'
+  if (p >= 90) return 'warn'
+  if (p >= 75) return 'hint'
+  return 'none'
 })
 
 function formatSessionDate(dateStr) {
