@@ -168,15 +168,34 @@ class SessionOperations:
                 tool_calls, execution_time_ms, claude_session_id,
             ))
 
+            # total_context_used is a HIGH-WATERMARK, not the latest value.
+            # Per-turn context oscillates by ~2x between text-only and
+            # tool-call turns because tool turns trigger multiple internal
+            # API calls. Showing the latest would yo-yo the UI; showing the
+            # watermark gives the user a stable upper bound on session
+            # pressure that only goes up.
+            #
+            # Capped at total_context_max as a safety belt against agent-
+            # server bugs that report cumulative-billing token counts (which
+            # can be many multiples of the actual single-call prompt size on
+            # tool-heavy turns). The genuine per-call peak should never
+            # exceed the model's context window — if it does, that's an
+            # accounting error, not a real overflow.
             cursor.execute("""
                 UPDATE agent_sessions
                 SET last_message_at = ?,
                     message_count = message_count + 1,
                     total_cost = total_cost + COALESCE(?, 0),
-                    total_context_used = COALESCE(?, total_context_used),
+                    total_context_used = MIN(
+                        COALESCE(?, total_context_max),
+                        MAX(
+                            COALESCE(total_context_used, 0),
+                            COALESCE(?, 0)
+                        )
+                    ),
                     total_context_max = COALESCE(?, total_context_max)
                 WHERE id = ?
-            """, (now, cost or 0, context_used, context_max, session_id))
+            """, (now, cost or 0, context_max, context_used, context_max, session_id))
 
             cursor.execute("SELECT * FROM agent_session_messages WHERE id = ?", (message_id,))
             return self._row_to_message(cursor.fetchone())

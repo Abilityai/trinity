@@ -174,9 +174,14 @@ export const useSessionsStore = defineStore('sessions', {
           body,
           {
             headers: authStore.authHeader,
-            // Match the backend's task timeout ceiling (TIMEOUT-001 cap is 7200s)
-            // plus a small slack for HTTP overhead.
-            timeout: 305000,
+            // The session turn endpoint is synchronous and may legitimately
+            // run for the agent's full execution timeout. TIMEOUT-001 caps
+            // that at 7200s (2h); we add a 60s slack for HTTP/proxy overhead.
+            // Without this ceiling matching, the browser gives up well
+            // before the backend completes the task — the response still
+            // lands in the DB and shows up after a page refresh, but the
+            // user sees a misleading "failed" toast in the meantime.
+            timeout: 7260000,
           },
         )
 

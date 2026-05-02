@@ -371,27 +371,34 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
             response_parts.clear()
             response_parts.append(result_text)
 
-        # Extract token usage from result.usage
-        usage = msg.get("usage", {})
-        metadata.input_tokens = usage.get("input_tokens", 0)
-        metadata.output_tokens = usage.get("output_tokens", 0)
-        metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
-        metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-
-        # Extract context window and token counts from modelUsage (preferred source)
-        # modelUsage provides per-model breakdown with actual context usage
+        # Pull only model-level facts from the result event (cost, duration,
+        # num_turns are already set above). Token counts in result.usage and
+        # modelUsage.inputTokens are CUMULATIVE across every internal API
+        # call this turn made — for a tool-using turn with 18 iterations,
+        # cache_read in result.usage = 18 × per-call cache_read = 1M+ tokens
+        # of "billing total", which has nothing to do with the prompt size
+        # any single call sent to the model. Overwriting metadata.* with
+        # those values previously made our context-window-pressure metric
+        # grow far beyond the 200K limit even when no individual call was
+        # close to the wall.
+        #
+        # The per-assistant-message handler below tracks the per-API-call
+        # usage; the LATEST assistant message's values represent the FINAL
+        # API call's prompt — which is what determines whether the next
+        # turn will fit.
         model_usage = msg.get("modelUsage", {})
         for model_name, model_data in model_usage.items():
             if "contextWindow" in model_data:
                 metadata.context_window = model_data["contextWindow"]
-            # modelUsage.inputTokens is the authoritative context size (includes all turns)
-            if "inputTokens" in model_data and model_data["inputTokens"] > metadata.input_tokens:
-                metadata.input_tokens = model_data["inputTokens"]
-            if "outputTokens" in model_data and model_data["outputTokens"] > metadata.output_tokens:
-                metadata.output_tokens = model_data["outputTokens"]
             break  # Use first model found
 
-        logger.debug(f"Result message parsed: usage={usage}, modelUsage={model_usage}, input_tokens={metadata.input_tokens}")
+        logger.debug(
+            f"Result message parsed: cost=${metadata.cost_usd}, "
+            f"duration={metadata.duration_ms}ms, num_turns={metadata.num_turns}, "
+            f"context_window={metadata.context_window}, "
+            f"per-call cache_read={metadata.cache_read_tokens} "
+            f"(set by latest assistant message)"
+        )
 
     elif msg_type == "assistant" or msg_type == "user":
         # Detect error classification on assistant messages (e.g., rate_limit, auth errors)
@@ -409,6 +416,23 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
         # tool_use appears in assistant messages, tool_result may appear in either
         message = msg.get("message", {})
         message_content = message.get("content", [])
+
+        # Per-API-call token usage. Each assistant message corresponds to ONE
+        # Claude API call; usage on it is the per-call breakdown (input,
+        # cache_read, cache_creation, output). We OVERWRITE so the LATEST
+        # assistant message wins — that's the final API call's prompt size,
+        # which determines whether the next user turn will fit. Do NOT use
+        # result.usage which is cumulative across all internal calls and
+        # produces nonsense values like cache_read=1.26M for tool-heavy
+        # turns. (parse_stream_json_output's batch path has the equivalent
+        # block at lines 211-215.)
+        if msg_type == "assistant":
+            usage = message.get("usage", {}) or {}
+            if usage:
+                metadata.input_tokens = usage.get("input_tokens", 0)
+                metadata.output_tokens = usage.get("output_tokens", 0)
+                metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+                metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
 
         # Log message structure for debugging activity tracking issues
         if message_content:
