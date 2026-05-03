@@ -68,7 +68,8 @@ services:
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
     networks:
-      - trinity-network
+      - trinity-platform   # Redis, scheduler, vector, OTel
+      - trinity-agent      # Frontend, mcp-server, agent containers
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -99,7 +100,7 @@ services:
     depends_on:
       - backend
     networks:
-      - trinity-network
+      - trinity-agent      # Frontend talks to backend on agent network
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -110,12 +111,14 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    # Loopback-only host port (test suites connect from the dev machine).
+    # External LAN cannot reach Redis even with auth — defense in depth.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     networks:
-      - trinity-network
+      - trinity-platform   # Issue #589: Redis is NOT on agent network
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     # SECURITY: Set REDIS_PASSWORD in .env for production
@@ -147,7 +150,10 @@ services:
     depends_on:
       - backend
     networks:
-      - trinity-network
+      # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
+      # via Docker DNS on the agent network; backend reaches it on platform network.
+      - trinity-platform
+      - trinity-agent
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -182,7 +188,7 @@ services:
       backend:
         condition: service_started
     networks:
-      - trinity-network
+      - trinity-platform   # Scheduler talks only to Redis + backend; never to agents
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -208,7 +214,7 @@ services:
     ports:
       - "8686:8686"  # Vector API (health checks)
     networks:
-      - trinity-network
+      - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -234,7 +240,8 @@ services:
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-network
+      - trinity-platform
+      - trinity-agent      # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"
@@ -251,7 +258,19 @@ volumes:
   trinity-archives:  # Compressed log archives
 
 networks:
-  trinity-network:
+  # Platform-internal network: Redis, scheduler, backend, mcp-server, vector, otel.
+  # Agents NEVER join this network — Issue #589 (Redis lockdown).
+  trinity-platform:
+    driver: bridge
+    name: trinity-platform-network
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+  # Agent-facing network: agents, frontend, plus the bridges that need to reach
+  # them (backend, mcp-server, otel-collector). Name preserved so the three
+  # agent-creation sites in services/agent_service/* and system_agent_service.py
+  # need zero code changes.
+  trinity-agent:
     driver: bridge
     name: trinity-agent-network
     ipam:
