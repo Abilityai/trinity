@@ -265,6 +265,18 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
 
+## Recent Test Additions (2026-05-04)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_database_facade_delegation.py` | AST-based lint guard for the `DatabaseManager` facade (#647) — catches the WEBHOOK-001 regression class where methods exist on the underlying `*Operations` class but the pass-through delegation on `DatabaseManager` is missing, blowing up at runtime with `AttributeError`. Two tests: strict regression check for the four #647 methods (`generate_webhook_token`, `get_schedule_by_webhook_token`, `revoke_webhook_token`, `get_webhook_status`), and a broad scan of every `db.<method>(...)` call site in `routers/` and `services/` guarded by a `KNOWN_FACADE_GAPS` allowlist for 8 unrelated pre-existing gaps. Pure `ast` static analysis — no backend deps required, runs in any Python with pytest. | 2 tests |
+
+**Webhook facade-delegation fix (#647)** — `src/backend/database.py`:
+
+Root cause of all `POST/GET/DELETE /api/agents/{name}/schedules/{id}/webhook` and `POST /api/webhooks/{token}` returning 500 on a live stack since #291 (Nov 2025). WEBHOOK-001 added the four methods to `ScheduleOperations` but never added the matching pass-throughs on the `DatabaseManager` facade — and there's no `__getattr__` proxy. The integration test from PR #643 would have caught it but doesn't run in CI. New unit test runs in any Python (no live stack), would have caught the regression at PR-time.
+
+---
+
 ## Recent Test Additions (2026-04-27)
 
 | Test File | Description | Tests Added |
