@@ -1815,6 +1815,47 @@ def _migrate_agent_sessions_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_session_compact_events(cursor, conn):
+    """Add compact-event observability columns (auto-compact surfacing).
+
+    Claude Code's auto-compact (~85% of the model window) silently summarizes
+    ~170k of conversation into a ~10k summary mid-turn. The events appear in
+    the stream-json output as ``{"type":"system","subtype":"compact_boundary"}``.
+    Capturing them gives users honest signal about what happened to a long-
+    running session beyond the silent latency cost.
+
+    Three additive, nullable columns:
+      - ``agent_session_messages.compact_metadata`` — JSON list of events that
+        fired during the turn that produced this assistant message.
+      - ``agent_sessions.compact_count`` — running tally for fast reads;
+        drives the inline reset hint without scanning per-message rows.
+      - ``schedule_executions.compact_metadata`` — same JSON, denormalized so
+        TasksPanel can render the badge without joining session messages.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_session_messages",
+        "compact_metadata",
+        "ALTER TABLE agent_session_messages ADD COLUMN compact_metadata TEXT",
+        log_msg="Adding compact_metadata column to agent_session_messages...",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sessions",
+        "compact_count",
+        "ALTER TABLE agent_sessions ADD COLUMN compact_count INTEGER DEFAULT 0",
+        log_msg="Adding compact_count column to agent_sessions...",
+    )
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "compact_metadata",
+        "ALTER TABLE schedule_executions ADD COLUMN compact_metadata TEXT",
+        log_msg="Adding compact_metadata column to schedule_executions...",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1869,4 +1910,5 @@ MIGRATIONS = [
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
     ("agent_shared_files", _migrate_agent_shared_files),
     ("agent_sessions_tables", _migrate_agent_sessions_tables),
+    ("session_compact_events", _migrate_session_compact_events),
 ]

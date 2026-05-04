@@ -200,6 +200,8 @@ class ScheduleExecution(BaseModel):
     validated_at: Optional[datetime] = None     # When validation completed
     validation_execution_id: Optional[str] = None  # FK to the validation execution record
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
+    # Auto-compact observability (Bundle B)
+    compact_metadata: Optional[str] = None       # JSON list of compact events fired during this turn
 
 
 # =========================================================================
@@ -299,6 +301,7 @@ class AgentSession(BaseModel):
     cached_claude_session_id: Optional[str] = None
     last_resume_at: Optional[datetime] = None
     consecutive_resume_failures: int = 0
+    compact_count: int = 0  # Running tally of auto-compact events (drives reset-memory hint)
 
 
 class AgentSessionMessage(BaseModel):
@@ -318,6 +321,7 @@ class AgentSessionMessage(BaseModel):
     tool_calls: Optional[str] = None  # JSON array
     execution_time_ms: Optional[int] = None
     claude_session_id: Optional[str] = None  # actual Claude UUID this turn ran under
+    compact_metadata: Optional[str] = None   # JSON list of compact events fired during this turn
 
 
 # =========================================================================

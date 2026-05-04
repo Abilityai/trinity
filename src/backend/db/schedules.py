@@ -155,6 +155,8 @@ class ScheduleOperations:
                 if "validated_at" in row_keys and row["validated_at"] else None,
             validation_execution_id=row["validation_execution_id"] if "validation_execution_id" in row_keys else None,
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
+            # Auto-compact observability (Bundle B)
+            compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
         )
 
     @staticmethod
@@ -999,7 +1001,8 @@ class ScheduleOperations:
         cost: float = None,
         tool_calls: str = None,
         execution_log: str = None,
-        claude_session_id: str = None
+        claude_session_id: str = None,
+        compact_metadata: str = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -1040,12 +1043,12 @@ class ScheduleOperations:
                     UPDATE schedule_executions
                     SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
                         context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
-                        execution_log = ?, claude_session_id = ?
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
                     WHERE id = ?
                 """, (
                     status, to_utc_iso(completed_at), duration_ms, response, error,
                     context_used, context_max, cost, tool_calls, execution_log,
-                    claude_session_id, execution_id,
+                    claude_session_id, compact_metadata, execution_id,
                 ))
             else:
                 # Non-success terminal write: block if already terminal so cleanup
@@ -1054,12 +1057,12 @@ class ScheduleOperations:
                     UPDATE schedule_executions
                     SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
                         context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
-                        execution_log = ?, claude_session_id = ?
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
                     WHERE id = ? AND status NOT IN (?, ?, ?, ?)
                 """, (
                     status, to_utc_iso(completed_at), duration_ms, response, error,
                     context_used, context_max, cost, tool_calls, execution_log,
-                    claude_session_id, execution_id, *_TERMINAL,
+                    claude_session_id, compact_metadata, execution_id, *_TERMINAL,
                 ))
 
             conn.commit()

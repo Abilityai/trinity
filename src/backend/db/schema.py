@@ -192,6 +192,7 @@ TABLES = {
             validated_at TEXT,
             validation_execution_id TEXT,
             validates_execution_id TEXT,
+            compact_metadata TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -265,6 +266,7 @@ TABLES = {
             cached_claude_session_id TEXT,
             last_resume_at TEXT,
             consecutive_resume_failures INTEGER DEFAULT 0,
+            compact_count INTEGER DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """,
@@ -286,6 +288,7 @@ TABLES = {
             tool_calls TEXT,
             execution_time_ms INTEGER,
             claude_session_id TEXT,
+            compact_metadata TEXT,
             FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )

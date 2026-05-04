@@ -484,6 +484,15 @@ class TaskExecutionService:
             sanitized_resp = sanitize_response(response_data.get("response"))
             claude_session_id = response_data.get("session_id") or metadata.get("session_id")
 
+            # Auto-compact events captured by the agent server's stream parser
+            # (Bundle B observability). Serialised once here, persisted on the
+            # execution row + threaded back to the Session router via raw_response
+            # so it can also land on agent_session_messages.
+            compact_events = metadata.get("compact_events") or []
+            compact_metadata_json = (
+                json.dumps(compact_events) if compact_events else None
+            )
+
             # ---- 6. Update execution record ------------------------------
             if execution_id:
                 db.update_execution_status(
@@ -496,6 +505,7 @@ class TaskExecutionService:
                     tool_calls=tool_calls_json,
                     execution_log=execution_log_json,
                     claude_session_id=claude_session_id,
+                    compact_metadata=compact_metadata_json,
                 )
 
             # ---- 7. Complete activity ------------------------------------

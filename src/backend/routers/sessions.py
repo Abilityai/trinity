@@ -117,6 +117,7 @@ def _serialize_session(session) -> dict:
             session.last_resume_at.isoformat() if session.last_resume_at else None
         ),
         "consecutive_resume_failures": session.consecutive_resume_failures,
+        "compact_count": session.compact_count,
     }
 
 
@@ -134,6 +135,9 @@ def _serialize_message(msg) -> dict:
         "tool_calls": json.loads(msg.tool_calls) if msg.tool_calls else None,
         "execution_time_ms": msg.execution_time_ms,
         "claude_session_id": msg.claude_session_id,
+        "compact_metadata": (
+            json.loads(msg.compact_metadata) if msg.compact_metadata else None
+        ),
     }
 
 
@@ -530,6 +534,13 @@ async def send_session_message(
         "cache_read_tokens"
     )
 
+    # Auto-compact events captured by the agent server's stream parser
+    # (Bundle B). Mirrors the JSON the task_execution_service writes to
+    # schedule_executions; lands on agent_session_messages.compact_metadata
+    # plus increments agent_sessions.compact_count for the inline reset hint.
+    compact_events = metadata.get("compact_events") or []
+    compact_metadata_json = json.dumps(compact_events) if compact_events else None
+
     assistant_msg = db.add_session_message(
         session_id=session.id,
         agent_name=name,
@@ -544,6 +555,8 @@ async def send_session_message(
         tool_calls=result.execution_log,
         execution_time_ms=None,
         claude_session_id=real_uuid,
+        compact_metadata=compact_metadata_json,
+        compact_event_count=len(compact_events),
     )
 
     # Refresh the session row so the response reflects the post-turn stats.
@@ -561,6 +574,7 @@ async def send_session_message(
         "context_used": result.context_used,
         "context_max": result.context_max,
         "cache_read_tokens": cache_read_tokens,
+        "compact_events": compact_events,
     }
 
 

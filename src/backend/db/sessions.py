@@ -26,6 +26,7 @@ class SessionOperations:
 
     @staticmethod
     def _row_to_session(row) -> AgentSession:
+        row_keys = row.keys()
         return AgentSession(
             id=row["id"],
             agent_name=row["agent_name"],
@@ -42,10 +43,12 @@ class SessionOperations:
             cached_claude_session_id=row["cached_claude_session_id"],
             last_resume_at=_parse_dt(row["last_resume_at"]),
             consecutive_resume_failures=row["consecutive_resume_failures"],
+            compact_count=(row["compact_count"] or 0) if "compact_count" in row_keys else 0,
         )
 
     @staticmethod
     def _row_to_message(row) -> AgentSessionMessage:
+        row_keys = row.keys()
         return AgentSessionMessage(
             id=row["id"],
             session_id=row["session_id"],
@@ -62,6 +65,7 @@ class SessionOperations:
             tool_calls=row["tool_calls"],
             execution_time_ms=row["execution_time_ms"],
             claude_session_id=row["claude_session_id"],
+            compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
         )
 
     # ---- session lifecycle -------------------------------------------------
@@ -146,8 +150,18 @@ class SessionOperations:
         tool_calls: Optional[str] = None,
         execution_time_ms: Optional[int] = None,
         claude_session_id: Optional[str] = None,
+        compact_metadata: Optional[str] = None,
+        compact_event_count: int = 0,
     ) -> AgentSessionMessage:
-        """Insert a session message and update session aggregate stats."""
+        """Insert a session message and update session aggregate stats.
+
+        ``compact_metadata`` is a JSON-encoded list of CompactEvent dicts (the
+        agent server's stream parser captures them from
+        ``{"type":"system","subtype":"compact_boundary"}`` events). The matching
+        ``compact_event_count`` bumps the session's running ``compact_count``
+        tally so the frontend can drive the inline reset-memory hint without
+        scanning per-message rows.
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             message_id = secrets.token_urlsafe(16)
@@ -158,14 +172,16 @@ class SessionOperations:
                     id, session_id, agent_name, user_id, user_email,
                     role, content, timestamp,
                     cost, context_used, context_max, cache_read_tokens,
-                    tool_calls, execution_time_ms, claude_session_id
+                    tool_calls, execution_time_ms, claude_session_id,
+                    compact_metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 message_id, session_id, agent_name, user_id, user_email,
                 role, content, now,
                 cost, context_used, context_max, cache_read_tokens,
                 tool_calls, execution_time_ms, claude_session_id,
+                compact_metadata,
             ))
 
             # total_context_used reflects the most recent assistant turn's
@@ -185,9 +201,10 @@ class SessionOperations:
                         COALESCE(?, total_context_used),
                         total_context_max
                     ),
-                    total_context_max = COALESCE(?, total_context_max)
+                    total_context_max = COALESCE(?, total_context_max),
+                    compact_count = compact_count + ?
                 WHERE id = ?
-            """, (now, cost or 0, context_used, context_max, session_id))
+            """, (now, cost or 0, context_used, context_max, compact_event_count, session_id))
 
             cursor.execute("SELECT * FROM agent_session_messages WHERE id = ?", (message_id,))
             return self._row_to_message(cursor.fetchone())

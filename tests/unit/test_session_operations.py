@@ -60,6 +60,7 @@ CREATE TABLE agent_sessions (
     cached_claude_session_id TEXT,
     last_resume_at TEXT,
     consecutive_resume_failures INTEGER DEFAULT 0,
+    compact_count INTEGER DEFAULT 0,
     FOREIGN KEY (user_id) REFERENCES users(id)
 )
 """
@@ -81,6 +82,7 @@ CREATE TABLE agent_session_messages (
     tool_calls TEXT,
     execution_time_ms INTEGER,
     claude_session_id TEXT,
+    compact_metadata TEXT,
     FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id)
 )
@@ -247,6 +249,51 @@ def test_total_context_used_reflects_last_reading_not_watermark(session_ops):
         context_used=10_000_000, context_max=200_000,
     )
     assert session_ops.get_session(s.id).total_context_used == 200_000
+
+
+def test_compact_metadata_persists_and_count_accumulates(session_ops):
+    """A turn that observed N compact_boundary events stores the JSON list on
+    the message row AND bumps the session's running compact_count tally —
+    used by the inline reset-memory hint without scanning per-message rows.
+    """
+    import json as _json
+    s = session_ops.create_session("agentX", 1, "alice@example.com")
+
+    events_turn1 = [
+        {"trigger": "auto", "pre_tokens": 170_325, "post_tokens": 12_691,
+         "duration_ms": 110_361, "timestamp": "t1"},
+    ]
+    msg1 = session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "first heavy turn",
+        compact_metadata=_json.dumps(events_turn1),
+        compact_event_count=len(events_turn1),
+    )
+    assert msg1.compact_metadata == _json.dumps(events_turn1)
+    assert session_ops.get_session(s.id).compact_count == 1
+
+    # Turn 2: two compacts in one heavy turn (rare but legal).
+    events_turn2 = [
+        {"trigger": "auto", "pre_tokens": 169_341, "post_tokens": 9_763,
+         "duration_ms": 123_195, "timestamp": "t2"},
+        {"trigger": "auto", "pre_tokens": 167_261, "post_tokens": 14_298,
+         "duration_ms": 113_181, "timestamp": "t3"},
+    ]
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "second heavy turn",
+        compact_metadata=_json.dumps(events_turn2),
+        compact_event_count=len(events_turn2),
+    )
+    assert session_ops.get_session(s.id).compact_count == 3
+
+    # Turn 3: no compact — message stores NULL, session counter stays.
+    msg3 = session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "light turn",
+    )
+    assert msg3.compact_metadata is None
+    assert session_ops.get_session(s.id).compact_count == 3
 
 
 def test_total_context_used_unchanged_when_value_omitted(session_ops):
