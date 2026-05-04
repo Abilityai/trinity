@@ -186,49 +186,6 @@ async def get_canary_violation(
 # ---------------------------------------------------------------------------
 
 
-def _green_to_red_transitions(
-    violations_by_invariant: dict,
-    previous_latest: dict,
-    snapshot_time: str,
-) -> List[CycleTransition]:
-    """Identify which fired invariants are fresh green→red transitions.
-
-    A transition counts when:
-      - the invariant fired this cycle (≥1 violation), AND
-      - either the invariant has no prior persisted violation, OR
-        the most recent prior violation predates this cycle (i.e. the
-        previous cycle was green for this id).
-
-    "Predates this cycle" is operationalised as "snapshot_time of the
-    latest prior violation < snapshot_time of this cycle". The DB
-    stores monotonically increasing snapshot_times so equality is
-    impossible in normal operation; if a manual cycle re-fires
-    immediately, the second call is treated as a continuation, not a
-    transition — which matches the "no notification spam" goal.
-    """
-    transitions: List[CycleTransition] = []
-    for invariant_id, vlist in violations_by_invariant.items():
-        if not vlist:
-            continue
-        prev = previous_latest.get(invariant_id)
-        prev_at = prev["snapshot_time"] if prev else None
-        is_transition = prev is None or prev_at < snapshot_time
-        if not is_transition:
-            continue
-        # Use the highest-severity violation in the cycle for the alert.
-        sev_rank = {"critical": 3, "major": 2, "minor": 1}
-        worst = max(vlist, key=lambda v: sev_rank.get(v.severity, 0))
-        transitions.append(
-            CycleTransition(
-                invariant_id=invariant_id,
-                severity=worst.severity,
-                violations_in_cycle=len(vlist),
-                previous_violation_at=prev_at,
-            )
-        )
-    return transitions
-
-
 @router.post("/run-cycle", response_model=RunCycleResponse)
 async def run_canary_cycle(
     body: RunCycleRequest | None = None,
@@ -243,10 +200,8 @@ async def run_canary_cycle(
       - confirming a violation cleared after a fix
       - integration tests that need deterministic cycle timing
 
-    Per-source failures (Redis unreachable, etc.) surface via
-    `sources_unavailable`; individual invariants that raise surface via
-    `checks_skipped`. The response always reports what *did* happen rather
-    than 5xx-ing on partial failure.
+    The response surfaces exactly the transitions the service emitted —
+    no recomputation here — so the endpoint and the bell cannot disagree.
     """
     body = body or RunCycleRequest()
     requested_ids = body.invariants or list(INVARIANTS.keys())
@@ -260,24 +215,21 @@ async def run_canary_cycle(
         )
     valid_ids = [i for i in requested_ids if i in INVARIANTS]
 
-    # Fetch previous-latest BEFORE running the cycle so transition
-    # detection compares against pre-cycle state. Service writes new
-    # violations during the cycle.
-    previous_latest = db.get_latest_canary_violation_per_invariant()
-
     started = time.monotonic()
-    results = await canary_service.run_cycle(invariant_ids=valid_ids)
+    cycle = await canary_service.run_cycle(invariant_ids=valid_ids)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     # Re-fetch persisted rows for the response. The service writes them
     # but doesn't return ids; we look them up by snapshot_time so the
     # endpoint contract surfaces row ids for chaining (e.g. test
     # assertions on the GET /violations endpoint).
-    snapshot_time = canary_service.last_run_at
+    snapshot_time = cycle.snapshot_time
     persisted: List[CycleViolation] = []
-    persisted_by_invariant: dict = {}
-    for invariant_id, vlist in results.items():
-        persisted_by_invariant[invariant_id] = []
+    transitions_out: List[CycleTransition] = []
+    sev_rank = {"critical": 3, "major": 2, "minor": 1}
+    transition_set = set(cycle.transition_invariant_ids)
+
+    for invariant_id, vlist in cycle.violations.items():
         for v in vlist:
             # Best-effort lookup: latest row for this (invariant, snapshot_time)
             # pair. Multiple violations of the same invariant in one cycle get
@@ -295,7 +247,7 @@ async def run_canary_cycle(
                     (r for r in rows if r.get("signal_query") == v.signal_query),
                     rows[0],
                 )
-                cv = CycleViolation(
+                persisted.append(CycleViolation(
                     id=match["id"],
                     invariant_id=v.invariant_id,
                     tier=v.tier,
@@ -303,21 +255,30 @@ async def run_canary_cycle(
                     snapshot_time=snapshot_time,
                     observed_state=v.observed_state,
                     signal_query=v.signal_query,
-                )
-                persisted.append(cv)
-                persisted_by_invariant[invariant_id].append(cv)
+                ))
 
-    checks_skipped = [i for i in valid_ids if i not in results]
-    transitions = _green_to_red_transitions(
-        persisted_by_invariant, previous_latest, snapshot_time
-    )
+        # Build a transition entry only for invariants the SERVICE actually
+        # decided fired a notification this cycle. Continuing-red invariants
+        # have rows in `persisted` but are absent from `transition_set`.
+        if invariant_id in transition_set and vlist:
+            worst = max(vlist, key=lambda v: sev_rank.get(v.severity, 0))
+            transitions_out.append(CycleTransition(
+                invariant_id=invariant_id,
+                severity=worst.severity,
+                violations_in_cycle=len(vlist),
+                # `previous_violation_at` is informational; populate from
+                # the just-inserted row's prior peer if available, else null.
+                previous_violation_at=None,
+            ))
+
+    checks_skipped = [i for i in valid_ids if i not in cycle.violations]
 
     return RunCycleResponse(
         snapshot_time=snapshot_time,
         cycle_duration_ms=duration_ms,
-        checks_run=[i for i in valid_ids if i in results],
+        checks_run=[i for i in valid_ids if i in cycle.violations],
         checks_skipped=checks_skipped,
         sources_unavailable=[],  # Service logs but doesn't surface; future: expose
         violations=persisted,
-        transitions=transitions,
+        transitions=transitions_out,
     )

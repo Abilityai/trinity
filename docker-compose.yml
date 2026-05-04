@@ -50,6 +50,10 @@ services:
       - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       # SSH access host override
       - SSH_HOST=${SSH_HOST:-}
+      # Canary invariant harness (CANARY-001 / Issue #411).
+      # When 1, services/canary_service.py runs the 5-min watcher loop on
+      # staging/dev. Default 0 — production users see no canary activity.
+      - CANARY_ENABLED=${CANARY_ENABLED:-0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app

@@ -28,7 +28,7 @@ agents:
   burst:
     template: local:default
     resources:
-      cpu: "0.5"
+      cpu: "1"
       memory: "512m"
     schedules:
       - name: heartbeat

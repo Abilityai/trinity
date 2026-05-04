@@ -15,6 +15,30 @@ take the resulting `Snapshot` and return zero-or-more `ViolationReport`s.
 
 Phase 1 scope is S-01, E-02, L-03 — the rest of the design doc's snapshot
 fields are placeholders until their invariants land.
+
+## Why a separate module from the invariants
+
+The three Phase 1 invariants (S-01, E-02, L-03) all read overlapping
+state. Splitting state collection out gives three things:
+
+1. **One consistent view per cycle.** All invariants see the same
+   `Snapshot` instance, so per-check timing drift cannot introduce
+   spurious mismatches — e.g. L-03 reading the SQL `agent_ownership`
+   set after S-01 has already started ZRANGEing on agents that were
+   live a moment earlier.
+2. **No duplicated query code.** New invariants are pure functions
+   `(snapshot) → list[ViolationReport]`; they never re-implement
+   SELECTs or ZRANGEs against live state. This keeps the registry in
+   `invariants/__init__.py` the only file the catalog grows in.
+3. **Test-friendly.** Tests pass synthetic `Snapshot` dataclasses
+   straight in (see `tests/test_canary_invariants.py`) and never
+   need a live Redis or SQLite to exercise the checking logic.
+
+Note: the snapshot is *not* atomic across Redis and SQLite — those
+don't share transactions, and our reads are sequential. The harness
+deliberately accepts sub-second inconsistencies (a real bug persists
+across a 5-minute cycle by definition; transient races self-resolve
+and are not what we're trying to catch).
 """
 
 import logging

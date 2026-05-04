@@ -25,12 +25,32 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional
 
 from canary import collect_snapshot, run_invariants
 from canary.snapshot import ViolationReport
 from database import db
 from db_models import NotificationCreate
+
+
+@dataclass
+class CycleResult:
+    """Outcome of one canary cycle.
+
+    `violations` is the per-invariant list of `ViolationReport`s the
+    deterministic library produced (now persisted to `canary_violations`).
+
+    `transition_invariant_ids` is the subset that fired a notification
+    this cycle — i.e. invariants the service decided were a real
+    green→red flip, not a continuation of an already-known violation.
+    The router exposes this directly to operators so the on-demand
+    `/api/canary/run-cycle` response matches what the bell received.
+    """
+
+    violations: Dict[str, List[ViolationReport]] = field(default_factory=dict)
+    transition_invariant_ids: List[str] = field(default_factory=list)
+    snapshot_time: str = ""
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +64,12 @@ CANARY_INTERVAL_SECONDS = 300
 # Not a real agent — `agent_notifications.agent_name` is a free-text TEXT
 # column with no FK, so this just identifies notifications as canary-sourced.
 CANARY_NOTIFIER_NAME = "canary-harness"
+
+# Redis key holding the snapshot_time of the most recent cycle that ran.
+# Used by transition detection so a continuously-red invariant fires a
+# notification once (on the first cycle that catches it) rather than every
+# cycle thereafter — see `_run_cycle_inner` for the rule.
+REDIS_KEY_LAST_CYCLE = "canary:last_cycle_at"
 
 # Map invariant severity → notification priority (NotificationCreate enum).
 SEVERITY_TO_PRIORITY = {
@@ -143,26 +169,41 @@ class CanaryService:
     async def run_cycle(
         self,
         invariant_ids: Optional[Iterable[str]] = None,
-    ) -> Dict[str, List[ViolationReport]]:
+    ) -> CycleResult:
         """Run one canary cycle. Public so it can be invoked from tests
         or by the operator via `POST /api/canary/run-cycle`.
 
-        Returns the per-invariant violation lists from this cycle.
+        Returns a `CycleResult` carrying the per-invariant violation
+        lists this cycle produced *and* the subset that fired a
+        notification (i.e. green→red transitions). Both pieces of
+        truth come from the same code path the background loop uses,
+        so the on-demand endpoint cannot disagree with the bell.
         """
         if self._lock.locked():
             logger.debug("canary: cycle already in progress, skipping")
-            return {}
+            return CycleResult()
         async with self._lock:
             return await self._run_cycle_inner(invariant_ids)
 
     async def _run_cycle_inner(
         self,
         invariant_ids: Optional[Iterable[str]],
-    ) -> Dict[str, List[ViolationReport]]:
+    ) -> CycleResult:
         # Capture pre-cycle state for green→red transition detection.
-        # Done BEFORE persistence so the "previous" comparison sees the
-        # state as of the prior cycle, not this one.
+        # Two reads BEFORE the cycle runs:
+        #   1. previous_latest — the most recent persisted violation per
+        #      invariant id. Tells us "when was this invariant last red".
+        #   2. prev_cycle_at — snapshot_time of the prior cycle (any cycle,
+        #      regardless of outcome). Tells us "when did we last look".
+        #
+        # An invariant transition (green→red) fires only when (a) the
+        # invariant has violations this cycle AND (b) the previous cycle
+        # was green for it — i.e. the latest stored violation predates
+        # the previous cycle's snapshot. This is the only rule that
+        # silences continuously-red invariants without losing real
+        # green→red flips, including red→green→red.
         previous_latest = db.get_latest_canary_violation_per_invariant()
+        prev_cycle_at = self._read_prev_cycle_at()
 
         # Heavy work — synchronous SQLite + Redis reads. Offload to a thread
         # so we don't block the asyncio loop while sqlite3 is blocking.
@@ -189,19 +230,15 @@ class CanaryService:
                     )
 
         # Detect green→red transitions and emit one notification per.
-        transition_count = 0
+        transition_ids: List[str] = []
         for inv_id, vlist in results.items():
             if not vlist:
                 continue
-            prev = previous_latest.get(inv_id)
-            # Transition rule: previous violation is older than this snapshot
-            # (or absent entirely) → green→red. Same-snapshot rows from a
-            # manual rerun are continuations, not transitions.
-            if prev is not None and prev["snapshot_time"] >= snapshot.snapshot_time:
+            if not self._is_green_to_red(inv_id, previous_latest, prev_cycle_at):
                 continue
             try:
                 await self._emit_transition(inv_id, vlist, snapshot.snapshot_time)
-                transition_count += 1
+                transition_ids.append(inv_id)
             except Exception:
                 logger.exception(
                     "canary: failed to emit transition notification for %s",
@@ -211,18 +248,26 @@ class CanaryService:
         # Update counters + last-run.
         self.cumulative_cycles += 1
         self.cumulative_violations += persisted_count
-        self.cumulative_transitions += transition_count
+        self.cumulative_transitions += len(transition_ids)
         self.last_run_at = snapshot.snapshot_time
+        # Persist this cycle's snapshot_time for the NEXT cycle's transition
+        # check. Done AFTER notifications so a crash mid-emit doesn't
+        # advance the cursor and silence a real transition on retry.
+        self._write_prev_cycle_at(snapshot.snapshot_time)
 
         if persisted_count or snapshot.sources_unavailable:
             logger.info(
                 "canary cycle: violations=%d transitions=%d unavailable=%s",
                 persisted_count,
-                transition_count,
+                len(transition_ids),
                 snapshot.sources_unavailable,
             )
 
-        return results
+        return CycleResult(
+            violations=results,
+            transition_invariant_ids=transition_ids,
+            snapshot_time=snapshot.snapshot_time,
+        )
 
     # ------------------------------------------------------------------
     # Notifications
@@ -276,17 +321,25 @@ class CanaryService:
         violations: List[ViolationReport],
         snapshot_time: str,
     ) -> str:
-        """Human-readable one-liner for the notification body."""
+        """Human-readable one-liner for the notification body.
+
+        Time is intentionally omitted — the panel renders a relative
+        "just now / 4m ago" badge from the row's `created_at` column,
+        and the precise ISO `snapshot_time` is preserved in
+        `metadata.snapshot_time` for forensic correlation back to the
+        `canary_violations` row. Embedding it in the message text would
+        be redundant and crowd the bell.
+        """
         if invariant_id == "S-01":
             agents = sorted({v.observed_state.get("agent_name") for v in violations})
             return (
-                f"Slot–row bijection broke on {len(agents)} agent(s) "
-                f"({', '.join(agents)[:120]}) at {snapshot_time}."
+                f"Slot–row bijection broke on {len(agents)} agent(s): "
+                f"{', '.join(agents)[:160]}."
             )
         if invariant_id == "E-02":
             return (
-                f"{len(violations)} execution(s) reverted from terminal to "
-                f"non-terminal status at {snapshot_time}."
+                f"{len(violations)} execution(s) reverted from terminal "
+                f"to non-terminal status."
             )
         if invariant_id == "L-03":
             ghosts = sorted(
@@ -294,9 +347,76 @@ class CanaryService:
             )
             return (
                 f"{len(ghosts)} ghost agent(s) referenced by orphan rows: "
-                f"{', '.join(ghosts)[:120]} at {snapshot_time}."
+                f"{', '.join(ghosts)[:160]}."
             )
-        return f"{invariant_id} fired {len(violations)} violation(s) at {snapshot_time}."
+        return f"{invariant_id} fired {len(violations)} violation(s)."
+
+    # ------------------------------------------------------------------
+    # Cycle-state side-table (Redis)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _redis():
+        """Redis client shared with the slot service. Lazy import so this
+        module stays loadable in tests without a live Redis."""
+        from services.slot_service import get_slot_service
+
+        return get_slot_service().redis
+
+    def _read_prev_cycle_at(self) -> Optional[str]:
+        """Snapshot_time of the prior cycle, or None on first ever run.
+
+        Falls back to None on any Redis error — that turns the next
+        cycle's transition detection into "all violations are transitions"
+        for that single cycle, which is verbose but never misses a real
+        flip. We chose verbose-on-failure over silent-on-failure because
+        the canary's whole reason to exist is catching transitions.
+        """
+        try:
+            return self._redis().get(REDIS_KEY_LAST_CYCLE)
+        except Exception:
+            logger.exception("canary: failed to read previous-cycle marker")
+            return None
+
+    def _write_prev_cycle_at(self, snapshot_time: str) -> None:
+        """Advance the previous-cycle cursor to this cycle's snapshot_time."""
+        try:
+            self._redis().set(REDIS_KEY_LAST_CYCLE, snapshot_time)
+        except Exception:
+            logger.exception("canary: failed to persist previous-cycle marker")
+
+    @staticmethod
+    def _is_green_to_red(
+        invariant_id: str,
+        previous_latest: dict,
+        prev_cycle_at: Optional[str],
+    ) -> bool:
+        """Decide whether this cycle's violation is a fresh transition.
+
+        Green→red iff the latest persisted violation for this invariant
+        predates the previous cycle's snapshot_time. Cases:
+
+        - First-ever cycle (prev_cycle_at is None): every violation is a
+          transition. Operators expect to be told once when the harness
+          first starts seeing problems.
+        - First-ever violation (previous_latest entry absent): transition.
+        - Continuing-red (latest violation timestamp == prev_cycle_at):
+          continuation, no notification — the previous cycle saw it too.
+        - Red→green→red (latest violation predates prev_cycle_at):
+          transition — there was at least one clean cycle in between.
+        """
+        prev = previous_latest.get(invariant_id)
+        if prev is None:
+            return True
+        if prev_cycle_at is None:
+            return True
+        # `>=` so a same-snapshot replay from an immediate manual rerun
+        # is treated as a continuation rather than re-firing.
+        return prev["snapshot_time"] < prev_cycle_at
+
+    # ------------------------------------------------------------------
+    # WebSocket broadcast
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _broadcast(notification) -> None:
