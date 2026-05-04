@@ -154,3 +154,7 @@ config/agent-templates/**/metrics.json
 .trinity/
 content/
 session-files/
+
+# Local-only working artifacts (never push)
+saved-conversations/
+tests/manual/
