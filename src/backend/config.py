@@ -2,6 +2,7 @@
 Configuration constants for the Trinity backend.
 """
 import os
+from urllib.parse import urlparse
 
 # Email Authentication Mode (Phase 12.4)
 # Set EMAIL_AUTH_ENABLED=true to enable email-based login with verification codes
@@ -30,7 +31,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 # we only validate it here. Splicing fallback removed: a single source of truth
 # avoids silent drift between compose env and Python config.
 REDIS_URL = os.getenv("REDIS_URL", "")
-if not REDIS_URL or "@" not in REDIS_URL:
+_redis_parsed = urlparse(REDIS_URL) if REDIS_URL else None
+if not REDIS_URL or not _redis_parsed or not _redis_parsed.username or not _redis_parsed.password:
     raise RuntimeError(
         "REDIS_URL must include credentials (redis://user:password@host:port). "
         "Generate passwords with: openssl rand -hex 24. "

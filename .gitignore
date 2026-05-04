@@ -154,3 +154,7 @@ config/agent-templates/**/metrics.json
 .trinity/
 content/
 session-files/
+
+# gstack tooling state (skill-local artifacts; project-tracked CSO reports
+# live under docs/security-reports/ instead)
+.gstack/

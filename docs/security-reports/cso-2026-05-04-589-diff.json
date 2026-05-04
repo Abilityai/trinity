@@ -1,0 +1,141 @@
+{
+  "version": "2.0.0",
+  "date": "2026-05-04T10:51:00Z",
+  "mode": "daily",
+  "scope": "diff",
+  "diff_mode": true,
+  "diff_range": "bfa99ef0..HEAD",
+  "diff_label": "PR #589 — Redis auth + network split",
+  "phases_run": [0, 1, 2, 3, 9, 12, 13, 14],
+  "files_changed": 16,
+  "lines_added": 801,
+  "lines_removed": 73,
+  "attack_surface": {
+    "code": {
+      "public_endpoints": 1,
+      "authenticated": 0,
+      "admin": 0,
+      "api": 1,
+      "uploads": 0,
+      "integrations": 0,
+      "background_jobs": 0,
+      "websockets": 0,
+      "note": "PR #589 surface change is webhook rate-limit Redis client only; trigger endpoint contract unchanged"
+    },
+    "infrastructure": {
+      "ci_workflows": 0,
+      "webhook_receivers": 1,
+      "container_configs": 4,
+      "iac_configs": 0,
+      "deploy_targets": 2,
+      "secret_management": "env_vars_with_strict_required",
+      "redis_acl_users": ["default", "backend", "scheduler"],
+      "network_split": ["trinity-platform-network/172.29.0.0/16", "trinity-agent-network/172.28.0.0/16"]
+    }
+  },
+  "findings": [],
+  "supply_chain_summary": {
+    "note": "No new dependencies in this PR — no package.json/requirements.txt/Cargo.toml/etc. changes"
+  },
+  "filter_stats": {
+    "candidates_scanned": 14,
+    "hard_exclusion_filtered": 5,
+    "confidence_gate_filtered": 6,
+    "verification_filtered": 3,
+    "reported": 0
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "tentative": 0},
+  "below_threshold_observations": [
+    {
+      "id": "obs-1",
+      "title": "Webhook rate-limit fail-open on Redis unavailability",
+      "confidence": 6,
+      "phase": 9,
+      "category": "OWASP A04 — Insecure Design",
+      "file": "src/backend/routers/webhooks.py",
+      "status": "RESOLVED",
+      "description": "If Redis is unreachable or auth fails, _check_webhook_rate_limit returned without rate limiting. With Redis down, an attacker holding any valid webhook token could flood /api/webhooks/{token} unbounded.",
+      "resolution": "Two-part hardening. (a) Added in-process secondary rate limiter at 3x the primary limit (30/min default per token, per worker). Engages when _get_redis() returns None OR when a runtime Redis call raises mid-flow. (b) Cached the Redis client at module level — _get_redis() builds via redis.from_url() once and reuses the connection-pool-backed client across requests. Without caching, every webhook call would open a fresh TCP connection and a flood would exhaust Redis maxclients, turning the rate limiter into the DoS amplifier it was meant to prevent. _check_webhook_rate_limit calls _reset_redis_client() on inner exceptions so a stale client (server restart, password rotation) gets evicted and the next call rebuilds cleanly.",
+      "resolution_files": [
+        "src/backend/routers/webhooks.py (added INPROCESS_FALLBACK_LIMIT, _inprocess_buckets, _check_inprocess_rate_limit, _redis_client cache + _reset_redis_client + double-checked-locking init)",
+        "tests/unit/test_webhook_rate_limit_inprocess.py (7 tests: cap, window expiry, token isolation, runtime-error fallback, cache hit, reset clears cache, runtime failure resets client)"
+      ]
+    },
+    {
+      "id": "obs-2",
+      "title": "Webhook token regex permits 20-60 chars",
+      "confidence": 3,
+      "phase": 9,
+      "category": "Defense in depth",
+      "file": "src/backend/routers/webhooks.py:40",
+      "status": "RESOLVED",
+      "description": "_TOKEN_RE = ^[A-Za-z0-9_\\-]{20,60}$ matched lengths far below the actual mint (secrets.token_urlsafe(32) → exactly 43 chars).",
+      "resolution": "Tightened regex to {43} matching the canonical token shape. Verified that src/backend/db/schedules.py:524 generates with token_urlsafe(32) → 43 chars.",
+      "resolution_files": [
+        "src/backend/routers/webhooks.py (_TOKEN_RE)",
+        "tests/unit/test_webhook_rate_limit_inprocess.py::test_token_regex_requires_exact_43_chars"
+      ]
+    },
+    {
+      "id": "obs-3",
+      "title": "Healthcheck passes password as CLI arg",
+      "confidence": 4,
+      "phase": 5,
+      "category": "Defense in depth",
+      "file": "docker-compose.yml, docker-compose.prod.yml, docker/scheduler/docker-compose.test.yml",
+      "status": "RESOLVED",
+      "description": "redis-cli -a $$REDIS_BACKEND_PASSWORD ... exposed the password in /proc/<pid>/cmdline inside the redis container for the healthcheck duration.",
+      "resolution": "Switched all three compose healthchecks to pass the password via REDISCLI_AUTH env var instead of the -a flag. redis-cli reads the env var natively and the password no longer appears in cmdline.",
+      "resolution_files": [
+        "docker-compose.yml (redis healthcheck)",
+        "docker-compose.prod.yml (redis healthcheck)",
+        "docker/scheduler/docker-compose.test.yml (redis healthcheck)"
+      ]
+    }
+  ],
+  "positive_findings": [
+    "Network segmentation enforced: Redis lives only on trinity-platform-network. Agents on trinity-agent-network. Verified by tests/security/test_redis_network_isolation.py acceptance #3 (alpine on agent network → BLOCKED).",
+    "Per-user ACL with -@dangerous: backend and scheduler users blocked from FLUSHALL/CONFIG/SHUTDOWN/DEBUG/MIGRATE/MONITOR. Verified by tests/security/test_redis_network_isolation.py::test_backend_acl_blocks_flushall and ::test_backend_acl_blocks_config_get.",
+    "Two-password design: leaking REDIS_BACKEND_PASSWORD from a compromised platform container does NOT grant admin access. REDIS_PASSWORD held only on the host operator's .env.",
+    "Fail-fast configuration: src/backend/config.py and src/scheduler/config.py raise RuntimeError at import if REDIS_URL lacks credentials. Closes the 'silent fallback to insecure default' class. Verified by tests/unit/test_config_fail_fast.py.",
+    "Compose-level ${VAR:?} guards: docker compose refuses to render without REDIS_PASSWORD and REDIS_BACKEND_PASSWORD. No 'oops, blank var' deploy path.",
+    "Auth-aware healthcheck: pings as the backend ACL user, so a typo'd ACL keeps Redis unhealthy and blocks dependent service startup at boot — not at first user-facing failure.",
+    "Loopback-only host port in dev (127.0.0.1:6379:6379); prod uses expose: only (no host bind).",
+    "Auto-generated passwords on fresh installs: scripts/deploy/start.sh uses openssl rand -hex 24 (192 bits) and refuses to re-key existing redis-data volumes (would lock backend out of own data).",
+    "Webhook rate-limit Redis client switched from redis.Redis(host=,port=) to redis.from_url so embedded credentials are actually used. Caught by tests/integration/test_webhook_rate_limit.py — without this, rate-limiter would silently fail-open in prod.",
+    "AUTH/ACL errors logged at ERROR (with exception class) so misconfig surfaces in alerts; transient errors stay at WARN. Distinguishes 'broken deploy' from 'blip'.",
+    "MCP server gets no REDIS_URL: 'don't hand a credential to a process that has no use for it' (TS code has zero Redis imports). Least-privilege defense.",
+    "Migration doc (docs/migrations/REDIS_AUTH.md) explicitly addresses the agent-container-network-UUID pitfall: detach agents before docker network rm, otherwise stopped containers fail to start with 'network <uuid> not found'.",
+    "Redis healthcheck made depends_on gating: backend and scheduler now wait for service_healthy (was service_started for backend) — Redis must successfully load ACL and respond as 'backend' user before consumers start.",
+    "Test conftest seeds dummy creds via setdefault (won't override real values) so import-time fail-fast doesn't break unrelated tests."
+  ],
+  "trend": {
+    "prior_report_date": "2026-04-30",
+    "prior_report_path": "docs/security-reports/cso-2026-04-30-diff-364.json",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "first_run_for_this_pr"
+  },
+  "remediation": {
+    "obs_resolutions_committed": false,
+    "note": "Resolutions for OBS-1/2/3 applied in working tree; commit before publishing this report."
+  },
+  "verification": {
+    "unit_tests": "PASS — 15/15 (7 webhook rate-limit + 8 config fail-fast)",
+    "live_redis_healthcheck": "PASS — trinity-redis reports healthy with REDISCLI_AUTH form; functional redis-cli ping returns PONG",
+    "integration_test": "DEFERRED — tests/integration/test_webhook_rate_limit.py blocked by unrelated WEBHOOK-001 (#291) facade gap; re-run post-merge of the #291 fix"
+  },
+  "known_blocker": {
+    "issue_ref": "WEBHOOK-001 / #291",
+    "introduced_in_commit": "c630931d (2026-04-24)",
+    "scope": "out-of-scope for this PR",
+    "description": "routers/schedules.py and routers/webhooks.py call db.generate_webhook_token / db.get_schedule_by_webhook_token / db.revoke_webhook_token / db.get_webhook_status, none delegated on DatabaseManager facade. Methods live orphaned in db/schedules.py:518-598. POST /api/agents/{name}/schedules/{id}/webhook currently 500s on any live stack.",
+    "severity": "HIGH functional bug (NOT security)",
+    "action": "File separate bug; re-run integration verification post-merge of that fix"
+  },
+  "housekeeping": {
+    ".gstack_ignored": true,
+    "report_location": "docs/security-reports/ (project convention)"
+  }
+}

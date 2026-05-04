@@ -7,12 +7,14 @@ All configuration is loaded from environment variables with sensible defaults.
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import urlparse
 
 
 def _require_redis_url() -> str:
     """Read REDIS_URL and fail fast if it lacks credentials (Issue #589)."""
     url = os.getenv("REDIS_URL", "")
-    if not url or "@" not in url:
+    parsed = urlparse(url) if url else None
+    if not url or not parsed or not parsed.username or not parsed.password:
         raise RuntimeError(
             "REDIS_URL must include credentials (redis://user:password@host:port). "
             "Generate passwords with: openssl rand -hex 24. "
