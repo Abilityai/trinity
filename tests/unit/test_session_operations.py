@@ -207,6 +207,72 @@ def test_add_session_message_updates_aggregate(session_ops):
     assert refreshed.total_context_max == 200000
 
 
+def test_total_context_used_reflects_last_reading_not_watermark(session_ops):
+    """
+    `total_context_used` must mirror the most recent assistant turn's cache size,
+    not a high-water mark. Claude Code auto-compacts mid-turn (~85% of the model
+    window), which drops the per-turn cache reading sharply on the next turn —
+    a watermark would asymptote near the compact threshold and stop conveying
+    useful information.
+
+    Asserts that a *lower* new value overwrites a *higher* prior value, plus that
+    the existing total_context_max cap (cc5c37bc) still defends against accounting
+    bugs reporting impossible token counts.
+    """
+    s = session_ops.create_session("agentX", 1, "alice@example.com")
+
+    # Heavy assistant turn — pre-compact peak.
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "heavy",
+        context_used=130_000, context_max=200_000,
+    )
+    assert session_ops.get_session(s.id).total_context_used == 130_000
+
+    # Auto-compact fires; next turn's reading drops sharply.
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "post-compact",
+        context_used=15_000, context_max=200_000,
+    )
+    refreshed = session_ops.get_session(s.id)
+    assert refreshed.total_context_used == 15_000, (
+        "total_context_used must reflect the latest reading, not a watermark"
+    )
+
+    # Cap at total_context_max still applies — defends against accounting bugs.
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "impossible",
+        context_used=10_000_000, context_max=200_000,
+    )
+    assert session_ops.get_session(s.id).total_context_used == 200_000
+
+
+def test_total_context_used_unchanged_when_value_omitted(session_ops):
+    """
+    If a turn doesn't report context_used (e.g. the stdout-pipe-race recovered
+    turn from Phase 5.1), the prior value must persist — we should not zero
+    the column.
+    """
+    s = session_ops.create_session("agentX", 1, "alice@example.com")
+
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "first",
+        context_used=42_000, context_max=200_000,
+    )
+    assert session_ops.get_session(s.id).total_context_used == 42_000
+
+    # Turn lands without context_used (None) — the existing value should hold.
+    session_ops.add_session_message(
+        s.id, "agentX", 1, "alice@example.com",
+        "assistant", "second",
+        context_used=None, context_max=None,
+    )
+    assert session_ops.get_session(s.id).total_context_used == 42_000
+
+
 def test_get_session_messages_returns_oldest_first(session_ops):
     s = session_ops.create_session("agentX", 1, "alice@example.com")
     for i in range(3):
