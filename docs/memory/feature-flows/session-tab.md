@@ -1,6 +1,6 @@
 # Feature: Session Tab — `--resume`-default chat surface
 
-> **Status**: ✅ Implemented (2026-05-01) — Phases 1–4 complete, Phase 5 rollout pending. Default off (`session_tab_enabled` flag).
+> **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04). Default ON (`session_tab_enabled` flag, settable to false to disable platform-wide).
 > **Design doc**: [docs/planning/SESSION_TAB_2026-04.md](../../planning/SESSION_TAB_2026-04.md) — read first if you're touching anything in this flow.
 
 ## Overview
@@ -169,6 +169,17 @@ Three fields unique to this surface vs. `chat_sessions` / `chat_messages`:
 | Resume failed with no cached UUID (e.g. truly broken) | 502 from the turn endpoint, NOT a fallback (no point retrying without a UUID) |
 | Resume failed with cached UUID | Fallback fires, retry cold, return success with `fallback_fired: true` so UI can render the "memory expired — starting fresh" inline notice |
 | Concurrent turn on same session | Second request waits up to 30s for the Redis lock; 429 with `retry_after: 5` if the wait exceeds the ceiling |
+
+---
+
+## Security Considerations
+
+| Threat | Mitigation |
+|---|---|
+| **Session-id enumeration / ownership leak (E6)** | Every endpoint that takes a session id returns **404 on mismatch, never 403**. A 403 would confirm the id exists and is owned by someone else; 404 hides existence. Sessions are scoped per-user even within the same agent — the agent owner cannot see other users' sessions on their own agent. |
+| **JSONL corruption from concurrent `--resume` (Anthropic #20992)** | Two simultaneous `--resume <uuid>` invocations against the same JSONL race on writes and produce a corrupt file that breaks all subsequent resumes for that session. Mitigated by a per-`(agent, claude_uuid)` Redis lock (`SET NX EX 300s`, async wait-and-retry with 250ms tick + 30s ceiling, Lua release script that only releases tokens we own). Cold turns skip the lock — there's no shared file yet. |
+| **Cross-session contamination via shared cwd (Anthropic #26964)** | In some Claude Code versions, two sessions running under the same working directory could observe each other's tool outputs through cwd-resident state. Phase 4.3 ships an empirical contamination test (`tests/integration/test_session_cross_contamination.py`) — session B asserts it cannot recall a secret token planted in session A. The test runs as a GA gate on every base-image bump and is currently green on the shipped Claude Code version. |
+| **JSONL prompt-injection persistence** | Because every persisted turn is appended to `~/.claude/projects/-home-developer/<uuid>.jsonl`, any prompt-injected instruction or pasted secret in turn N persists into the agent's working memory for every subsequent resume on that session — the blast radius of a single bad turn is the whole session, not a single message. **Mitigation**: the user-facing **Reset memory** action calls `db.clear_cached_claude_session_id()` and synchronously reaps the JSONL via `session_cleanup_service.reap_jsonl()`. Subsequent turns are cold under a fresh UUID. The visible message log in `agent_session_messages` is preserved (it lives in the DB, not the JSONL). |
 
 ---
 

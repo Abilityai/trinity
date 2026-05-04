@@ -731,7 +731,7 @@ Rate limiting: dual-bucket (120 req/min per IP + 300 req/min per token). Request
 | POST | `/api/agents/{name}/sessions/{id}/reset` | JWT | Clear `cached_claude_session_id` (next turn cold). Best-effort synchronous JSONL reap. |
 | DELETE | `/api/agents/{name}/sessions/{id}` | JWT | Delete the session row + `agent_session_messages`. Best-effort synchronous JSONL reap. |
 
-All endpoints return 404 when `is_session_tab_enabled()` is false (default off — flag at `system_settings.session_tab_enabled` or `SESSION_TAB_ENABLED` env). All endpoints enforce per-user ownership and return 404 (not 403) on mismatch to avoid leaking session-id existence.
+All endpoints return 404 when `is_session_tab_enabled()` is false. The flag at `system_settings.session_tab_enabled` (or `SESSION_TAB_ENABLED` env) is **default ON since GA 2026-05-04**; settable to false to disable platform-wide. All endpoints enforce per-user ownership and return 404 (not 403) on mismatch to avoid leaking session-id existence.
 
 ---
 
