@@ -9,6 +9,18 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _require_redis_url() -> str:
+    """Read REDIS_URL and fail fast if it lacks credentials (Issue #589)."""
+    url = os.getenv("REDIS_URL", "")
+    if not url or "@" not in url:
+        raise RuntimeError(
+            "REDIS_URL must include credentials (redis://user:password@host:port). "
+            "Generate passwords with: openssl rand -hex 24. "
+            "See docs/migrations/REDIS_AUTH.md for details."
+        )
+    return url
+
+
 @dataclass
 class SchedulerConfig:
     """Configuration for the scheduler service."""
@@ -18,10 +30,8 @@ class SchedulerConfig:
         "DATABASE_PATH", "/data/trinity.db"
     ))
 
-    # Redis
-    redis_url: str = field(default_factory=lambda: os.getenv(
-        "REDIS_URL", "redis://redis:6379"
-    ))
+    # Redis — must embed credentials; no fallback default (Issue #589)
+    redis_url: str = field(default_factory=_require_redis_url)
 
     # Lock settings
     lock_timeout: int = field(default_factory=lambda: int(os.getenv(
