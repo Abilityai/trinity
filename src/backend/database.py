@@ -928,12 +928,14 @@ class DatabaseManager:
                             cost: float = None, context_used: int = None,
                             context_max: int = None, cache_read_tokens: int = None,
                             tool_calls: str = None, execution_time_ms: int = None,
-                            claude_session_id: str = None):
+                            claude_session_id: str = None,
+                            compact_metadata: str = None, compact_event_count: int = 0):
         return self._session_ops.add_session_message(
             session_id, agent_name, user_id, user_email, role, content,
             cost=cost, context_used=context_used, context_max=context_max,
             cache_read_tokens=cache_read_tokens, tool_calls=tool_calls,
             execution_time_ms=execution_time_ms, claude_session_id=claude_session_id,
+            compact_metadata=compact_metadata, compact_event_count=compact_event_count,
         )
 
     def get_session_messages(self, session_id: str, limit: int = 100):
