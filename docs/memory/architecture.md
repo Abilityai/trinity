@@ -1494,13 +1494,55 @@ Agent starts → If .credentials.enc exists → Decrypt → Write files
 
 ---
 
+## Network Topology (Issue #589)
+
+Two Docker bridge networks, by design — agents physically cannot route to Redis.
+
+| Network | Subnet | Members |
+|---------|--------|---------|
+| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector |
+| `trinity-agent-network` | 172.28.0.0/16 | agents, frontend |
+
+Bridges (members of **both** networks):
+
+- `backend` — primary HTTP API; talks to Redis on platform side, to agents on agent side
+- `mcp-server` — agents call `http://mcp-server:8080/mcp` via Docker DNS on the agent network; backend reaches it on platform network
+- `otel-collector` — agents push metrics to it
+- `cloudflared` (prod only) — proxies to backend (platform) and public agents (agent)
+
+**Rule:** agents are *never* on `trinity-platform-network`. Adding any new
+service that mounts the agent network must NOT connect to Redis — full stop.
+
+The agent-creation sites in `services/agent_service/crud.py:583`,
+`services/agent_service/lifecycle.py:495`, and
+`services/system_agent_service.py:238` hard-code the network name
+`trinity-agent-network` — that name is preserved across the split, so no
+code changes are required.
+
+**Redis ACL users:**
+
+| User | Auth | Purpose |
+|------|------|---------|
+| `default` | `REDIS_PASSWORD` | Admin / recovery / ad-hoc ops; `+@all` |
+| `backend` | `REDIS_BACKEND_PASSWORD` | Backend container runtime; data ops only, `-@dangerous` |
+| `scheduler` | `REDIS_BACKEND_PASSWORD` | Scheduler container runtime; same access pattern as `backend` |
+
+`backend` and `scheduler` cannot run `FLUSHALL`, `CONFIG`, `SHUTDOWN`,
+`DEBUG`, `MIGRATE`, `REPLICAOF`, `MONITOR`, or other categories under
+`@dangerous`. Both passwords are mandatory in `.env`; `docker compose`
+refuses to render without them, and `src/backend/config.py` /
+`src/scheduler/config.py` raise on import if `REDIS_URL` lacks
+credentials. See `docs/migrations/REDIS_AUTH.md` for the upgrade path.
+
+---
+
 ## Container Security
 
 - Non-root execution (`developer:1000`)
 - `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`
 - `security_opt: no-new-privileges:true`
 - tmpfs `/tmp` with `noexec,nosuid`
-- Isolated network (`172.28.0.0/16`)
+- Isolated network (`172.28.0.0/16` — agents only; Redis lives on the platform network, see "Network Topology" above)
 - No external UI port exposure
 
 ### Internal API Security (C-003)
