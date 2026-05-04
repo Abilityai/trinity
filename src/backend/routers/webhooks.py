@@ -60,19 +60,53 @@ class WebhookTriggerRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_redis():
-    """Return a Redis client, or None if Redis is unavailable."""
+    """Return a Redis client, or None if Redis is unavailable.
+
+    Issue #589: switched from redis.Redis(host=, port=) to redis.from_url so
+    the credentials embedded in REDIS_URL (the `backend` ACL user) are
+    actually used. Auth/ACL errors are logged at ERROR with the exception
+    class so a misconfigured deploy surfaces in alerts instead of via a
+    webhook abuse incident; transient errors stay at WARN. Fail-open
+    behavior is preserved (returns None → rate-limit silently disabled
+    for that request) so a Redis blip doesn't 500 legitimate webhooks.
+    """
     try:
         import redis as _redis
-        r = _redis.Redis(
-            host=os.getenv("REDIS_HOST", "redis"),
-            port=int(os.getenv("REDIS_PORT", "6379")),
-            db=0,
-            socket_connect_timeout=1,
-            socket_timeout=1,
+        from redis.exceptions import (
+            AuthenticationError,
+            AuthenticationWrongNumberOfArgsError,
+            ConnectionError as RedisConnectionError,
+            ResponseError,
+            TimeoutError as RedisTimeoutError,
         )
+        from config import REDIS_URL
+    except Exception as e:  # import-time failure (config.py raises if URL bad)
+        logger.error("Webhook rate-limit: cannot import Redis client/config: %s", e)
+        return None
+
+    try:
+        r = _redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1)
         r.ping()
         return r
-    except Exception:
+    except (AuthenticationError, AuthenticationWrongNumberOfArgsError) as e:
+        logger.error(
+            "Webhook rate-limit Redis AUTH failed (%s) — check REDIS_URL/ACL",
+            type(e).__name__,
+        )
+        return None
+    except ResponseError as e:
+        # NOPERM / WRONGPASS / NOAUTH surface as ResponseError in some redis-py versions
+        msg = str(e).upper()
+        if any(s in msg for s in ("NOAUTH", "NOPERM", "WRONGPASS")):
+            logger.error("Webhook rate-limit Redis ACL/auth error: %s", e)
+        else:
+            logger.warning("Webhook rate-limit Redis ResponseError: %s", e)
+        return None
+    except (RedisConnectionError, RedisTimeoutError) as e:
+        logger.warning("Webhook rate-limit Redis transient error: %s", e)
+        return None
+    except Exception as e:  # last-resort net for unexpected types — still fail-open
+        logger.warning("Webhook rate-limit Redis unexpected error: %s", e)
         return None
 
 
