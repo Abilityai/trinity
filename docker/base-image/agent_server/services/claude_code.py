@@ -167,6 +167,80 @@ def _recover_response_from_jsonl(session_id: Optional[str]) -> Optional[str]:
     return "\n".join(text_parts)
 
 
+def _extract_compact_events_from_jsonl(
+    session_id: Optional[str], since_iso: Optional[str] = None
+) -> List["CompactEvent"]:
+    """Read compact_boundary records out of a Claude Code JSONL.
+
+    Claude Code's `--output-format stream-json --verbose` emits
+    `compact_boundary` events to stdout but strips the `compactMetadata`
+    envelope (we get the event-fired signal but no pre/post/duration
+    detail). The JSONL on disk has the canonical shape:
+
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"trigger":"auto", "preTokens":175061,
+                             "postTokens":5904, "durationMs":73651},
+         "timestamp": "2026-05-04T13:01:56.959Z", ...}
+
+    This helper is called AFTER a turn completes to populate
+    `metadata.compact_events` with the real detail fields. ``since_iso``
+    filters to compact records emitted at or after the given ISO
+    timestamp — used to scope the result to the just-completed turn
+    when the JSONL has compact records from prior turns.
+
+    Returns an empty list when the session_id is missing, the file
+    doesn't exist, or no compact records are present.
+    """
+    if not session_id:
+        return []
+
+    jsonl_path = Path(f"{_JSONL_PROJECTS_DIR}/{session_id}.jsonl")
+    if not jsonl_path.exists():
+        return []
+
+    try:
+        if jsonl_path.stat().st_size > _MAX_JSONL_BYTES_FOR_RECOVERY:
+            with jsonl_path.open("rb") as f:
+                f.seek(-_MAX_JSONL_BYTES_FOR_RECOVERY, os.SEEK_END)
+                f.readline()
+                raw = f.read().decode("utf-8", errors="replace")
+        else:
+            raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[JSONL Compact Extract] Failed to read {jsonl_path}: {e}"
+        )
+        return []
+
+    events: List["CompactEvent"] = []
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "system" or entry.get("subtype") != "compact_boundary":
+            continue
+        ts = entry.get("timestamp")
+        if since_iso and isinstance(ts, str) and ts < since_iso:
+            continue
+        cm = entry.get("compactMetadata") or {}
+        if not isinstance(cm, dict):
+            cm = {}
+        events.append(CompactEvent(
+            trigger=cm.get("trigger"),
+            pre_tokens=cm.get("preTokens"),
+            post_tokens=cm.get("postTokens"),
+            duration_ms=cm.get("durationMs"),
+            timestamp=ts if isinstance(ts, str) else None,
+        ))
+
+    return events
+
+
 # Thread pool for running blocking subprocess operations
 # This allows FastAPI to handle other requests (like /api/activity polling) during execution
 # max_workers=1 ensures only one execution at a time within this container
@@ -330,23 +404,19 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             metadata.session_id = msg.get("session_id")
 
         elif msg_type == "system" and msg.get("subtype") == "compact_boundary":
+            # Detection-only: stdout's stream-json strips the
+            # compactMetadata envelope, so we capture a placeholder event
+            # to preserve the count signal. The authoritative pre/post/
+            # duration values are filled in post-turn from the JSONL via
+            # _extract_compact_events_from_jsonl in execute_headless_task.
             cm = msg.get("compactMetadata", {}) or {}
-            event = CompactEvent(
+            metadata.compact_events.append(CompactEvent(
                 trigger=cm.get("trigger"),
                 pre_tokens=cm.get("preTokens"),
                 post_tokens=cm.get("postTokens"),
                 duration_ms=cm.get("durationMs"),
                 timestamp=msg.get("timestamp"),
-            )
-            metadata.compact_events.append(event)
-            logger.info(
-                f"event=session_auto_compact "
-                f"claude_session_id={metadata.session_id} "
-                f"trigger={event.trigger} "
-                f"pre_tokens={event.pre_tokens} "
-                f"post_tokens={event.post_tokens} "
-                f"duration_ms={event.duration_ms}"
-            )
+            ))
 
         elif msg_type == "result":
             # Final result message with stats
@@ -1352,6 +1422,11 @@ async def execute_headless_task(
         # Use provided execution_id if available (enables termination tracking from backend)
         task_session_id = execution_id or str(uuid.uuid4())
 
+        # Anchor for scoping post-turn JSONL extracts (compact events) to
+        # this turn only — the JSONL accumulates across the resumed
+        # session's lifetime, so we filter records by timestamp >= start.
+        task_start_iso = datetime.utcnow().isoformat() + "Z"
+
         logger.info(f"[Headless Task] Starting task {task_session_id}: {' '.join(cmd[:5])}...")
 
         # Use Popen for real-time streaming.
@@ -1759,6 +1834,29 @@ async def execute_headless_task(
 
             # Use session_id from Claude if available, otherwise use our generated one
             final_session_id = metadata.session_id or task_session_id
+
+            # Authoritative compact_events from the JSONL on disk.
+            # Claude Code's stdout stream-json fires the compact_boundary
+            # event without the compactMetadata envelope, so the parser
+            # branch only learns "a compact happened" but loses the
+            # pre/post/duration fields. The JSONL has the canonical shape;
+            # read it after the turn completes and override whatever
+            # stdout captured. Filtered to records emitted at or after
+            # task_start_iso to scope to this turn's compacts only.
+            jsonl_compacts = _extract_compact_events_from_jsonl(
+                final_session_id, since_iso=task_start_iso
+            )
+            if jsonl_compacts:
+                metadata.compact_events = jsonl_compacts
+                for ev in jsonl_compacts:
+                    logger.info(
+                        f"event=session_auto_compact "
+                        f"claude_session_id={final_session_id} "
+                        f"trigger={ev.trigger} "
+                        f"pre_tokens={ev.pre_tokens} "
+                        f"post_tokens={ev.post_tokens} "
+                        f"duration_ms={ev.duration_ms}"
+                    )
 
             # Log warning if raw_messages is empty (transcript won't be available in UI)
             if len(raw_messages) == 0:

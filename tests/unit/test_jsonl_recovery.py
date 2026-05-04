@@ -29,7 +29,10 @@ if "agent_server" not in sys.modules:
     sys.modules["agent_server"] = _stub
 
 # Module under test
-from agent_server.services.claude_code import _recover_response_from_jsonl  # noqa: E402
+from agent_server.services.claude_code import (  # noqa: E402
+    _recover_response_from_jsonl,
+    _extract_compact_events_from_jsonl,
+)
 from agent_server.services import claude_code as _cc_module  # noqa: E402
 
 
@@ -294,3 +297,179 @@ def test_skips_empty_lines(jsonl_dir):
     )
 
     assert _recover_response_from_jsonl(sid) == "reply"
+
+
+# ===========================================================================
+# _extract_compact_events_from_jsonl — fills in the stdout-stripped detail
+# ===========================================================================
+
+def _compact_boundary(
+    pre_tokens: int = 175061,
+    post_tokens: int = 5904,
+    duration_ms: int = 73651,
+    trigger: str = "auto",
+    timestamp: str = "2026-05-04T13:01:56.959Z",
+) -> str:
+    """Compact_boundary record with the canonical JSONL shape (camelCase
+    detail fields nested under compactMetadata) — the agent server's
+    stdout stream-json strips this envelope, so we read it from disk."""
+    return json.dumps({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+        "compactMetadata": {
+            "trigger": trigger,
+            "preTokens": pre_tokens,
+            "postTokens": post_tokens,
+            "durationMs": duration_ms,
+        },
+        "timestamp": timestamp,
+        "sessionId": "360b49c7-fb3a-49d5-a5bb-8c25378a1486",
+    })
+
+
+def test_compact_extract_canonical_jsonl_shape(jsonl_dir):
+    """The canonical shape: real numeric fields under compactMetadata.
+    Exact pattern from a captured JSONL — recovery must populate every
+    field, not leave them None like the stdout parser does.
+    """
+    sid = "extract-1"
+    _write_jsonl(jsonl_dir, sid, [
+        _user_input("/heavy-task"),
+        _assistant_tool_use("Bash"),
+        _compact_boundary(),
+        _assistant_text("done"),
+    ])
+
+    events = _extract_compact_events_from_jsonl(sid)
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.trigger == "auto"
+    assert ev.pre_tokens == 175061
+    assert ev.post_tokens == 5904
+    assert ev.duration_ms == 73651
+    assert ev.timestamp == "2026-05-04T13:01:56.959Z"
+
+
+def test_compact_extract_filters_by_since_iso(jsonl_dir):
+    """The JSONL accumulates compact_boundary records across every turn
+    of the resumed session. Filtering by since_iso must scope the result
+    to the current turn only.
+    """
+    sid = "extract-since"
+    _write_jsonl(jsonl_dir, sid, [
+        _user_input("turn one"),
+        _compact_boundary(timestamp="2026-05-04T10:00:00.000Z", pre_tokens=170000),
+        _user_input("turn two"),
+        _compact_boundary(timestamp="2026-05-04T11:00:00.000Z", pre_tokens=160000),
+        _user_input("turn three"),
+        _compact_boundary(timestamp="2026-05-04T12:00:00.000Z", pre_tokens=150000),
+    ])
+
+    # Scope to events from turn three onwards.
+    events = _extract_compact_events_from_jsonl(
+        sid, since_iso="2026-05-04T11:30:00.000Z"
+    )
+
+    assert len(events) == 1
+    assert events[0].pre_tokens == 150000
+
+
+def test_compact_extract_includes_boundary_at_exact_since_iso(jsonl_dir):
+    """since_iso uses >= comparison; an event at the exact start time
+    must be included (turn-start anchor races with compact emission)."""
+    sid = "extract-exact"
+    _write_jsonl(jsonl_dir, sid, [
+        _user_input("hello"),
+        _compact_boundary(timestamp="2026-05-04T13:00:00.000Z"),
+    ])
+
+    events = _extract_compact_events_from_jsonl(
+        sid, since_iso="2026-05-04T13:00:00.000Z"
+    )
+
+    assert len(events) == 1
+
+
+def test_compact_extract_returns_empty_when_no_compact_records(jsonl_dir):
+    """A turn with no compact event → empty list, not None or error."""
+    sid = "extract-none"
+    _write_jsonl(jsonl_dir, sid, [
+        _user_input("hello"),
+        _assistant_text("hi back"),
+    ])
+
+    assert _extract_compact_events_from_jsonl(sid) == []
+
+
+def test_compact_extract_returns_empty_when_session_id_missing(jsonl_dir):
+    assert _extract_compact_events_from_jsonl(None) == []
+    assert _extract_compact_events_from_jsonl("") == []
+
+
+def test_compact_extract_returns_empty_when_jsonl_missing(jsonl_dir):
+    assert _extract_compact_events_from_jsonl("does-not-exist") == []
+
+
+def test_compact_extract_handles_multiple_compacts_in_order(jsonl_dir):
+    """A long turn can fire several compacts in a row. All must be
+    captured in the order they appear in the JSONL."""
+    sid = "extract-multi"
+    _write_jsonl(jsonl_dir, sid, [
+        _user_input("very long turn"),
+        _compact_boundary(timestamp="t1", pre_tokens=170000, post_tokens=10000),
+        _compact_boundary(timestamp="t2", pre_tokens=165000, post_tokens=8000),
+        _compact_boundary(timestamp="t3", pre_tokens=160000, post_tokens=6000),
+        _assistant_text("finally done"),
+    ])
+
+    events = _extract_compact_events_from_jsonl(sid)
+
+    assert len(events) == 3
+    assert [e.timestamp for e in events] == ["t1", "t2", "t3"]
+    assert events[0].pre_tokens == 170000
+    assert events[2].pre_tokens == 160000
+
+
+def test_compact_extract_handles_missing_compact_metadata(jsonl_dir):
+    """Defensive: if a future Claude Code version omits compactMetadata
+    or sets it to null, we capture the event with None fields rather
+    than crashing."""
+    sid = "extract-missing-meta"
+    line_no_meta = json.dumps({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "timestamp": "2026-05-04T13:00:00Z",
+        # no compactMetadata
+    })
+    line_null_meta = json.dumps({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "timestamp": "2026-05-04T13:00:01Z",
+        "compactMetadata": None,
+    })
+    _write_jsonl(jsonl_dir, sid, [line_no_meta, line_null_meta])
+
+    events = _extract_compact_events_from_jsonl(sid)
+
+    assert len(events) == 2
+    for ev in events:
+        assert ev.pre_tokens is None
+        assert ev.trigger is None
+
+
+def test_compact_extract_skips_malformed_lines(jsonl_dir):
+    """Tail-truncated JSONLs must not abort the extract."""
+    sid = "extract-malformed"
+    _write_jsonl(jsonl_dir, sid, [
+        _compact_boundary(timestamp="t1"),
+        '{"type": "system", "subtype":',  # truncated
+        _compact_boundary(timestamp="t2"),
+    ])
+
+    events = _extract_compact_events_from_jsonl(sid)
+
+    assert len(events) == 2
+    assert events[0].timestamp == "t1"
+    assert events[1].timestamp == "t2"
