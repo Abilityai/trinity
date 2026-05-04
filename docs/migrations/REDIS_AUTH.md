@@ -41,18 +41,29 @@ so this must be done while Redis is stopped.
 #    network they had at create time.)
 docker compose -f docker-compose.yml down --remove-orphans
 
-# 2. Remove the pre-split agent network. The new compose declares it
+# 2. Detach Trinity-managed agent containers from the old network.
+#    Compose-managed services get fresh network refs on recreation,
+#    but agent containers are created via the Docker SDK outside
+#    compose and store the network's UUID, not its name. Once the
+#    network is removed (step 3), any later `docker start <agent>`
+#    fails with "network <uuid> not found". Disconnecting first
+#    forces re-attachment to the new network on next start.
+for c in $(docker ps -aq --filter "label=trinity.platform=agent"); do
+    docker network disconnect trinity-agent-network "$c" 2>/dev/null || true
+done
+
+# 3. Remove the pre-split agent network. The new compose declares it
 #    with different metadata; Docker refuses to re-use a network with
 #    conflicting labels/subnets.
 docker network rm trinity-agent-network 2>/dev/null || true
 
-# 3. Add both passwords to .env.
+# 4. Add both passwords to .env.
 cat <<EOF >> .env
 REDIS_PASSWORD=$(openssl rand -hex 24)
 REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)
 EOF
 
-# 4. Start the stack. Networks and services are recreated with the
+# 5. Start the stack. Networks and services are recreated with the
 #    new layout; Redis loads the ACL on first boot.
 ./scripts/deploy/start.sh
 ```
@@ -63,7 +74,7 @@ not what's stored. The `default` user with `REDIS_PASSWORD` retains
 full access for ad-hoc ops.
 
 If you want to start from a clean Redis instead, also remove the
-volume **before** step 4:
+volume **before** step 5:
 
 ```bash
 docker volume rm $(basename "$PWD")_redis-data 2>/dev/null \
