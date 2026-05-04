@@ -52,6 +52,15 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 
+# Statuses considered "terminal" for execution rows. Sourced from the
+# `TaskExecutionStatus` enum in models.py (SUCCESS / FAILED / CANCELLED
+# / SKIPPED) — the same set PR #524's CAS state machine treats as
+# write-once. Used by E-02 (phantom reversal detection) and the L-03
+# orphan scan filter.
+TERMINAL_EXECUTION_STATUSES = ("success", "failed", "cancelled", "skipped")
+_TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in TERMINAL_EXECUTION_STATUSES)
+
+
 # Tables whose `agent_name` column references `agent_ownership.agent_name`.
 # Used by L-03 (delete cascades) to scan for orphan rows.
 #
@@ -73,7 +82,7 @@ ORPHAN_SCAN_TABLES = [
     (
         "schedule_executions",
         "agent_name",
-        "status NOT IN ('completed', 'failed', 'cancelled', 'timeout')",
+        f"status NOT IN ({_TERMINAL_SQL_LIST})",
     ),
     ("chat_sessions", "agent_name", "status = 'active'"),
     ("agent_skills", "agent_name", None),
@@ -151,11 +160,6 @@ class Snapshot:
 # ---------------------------------------------------------------------------
 # Collection helpers
 # ---------------------------------------------------------------------------
-
-# Statuses considered "terminal" for execution rows — see PR #524 (the CAS
-# state machine doc). Used by E-02 (phantom reversal detection) and the
-# L-03 orphan scan filter.
-TERMINAL_EXECUTION_STATUSES = ("completed", "failed", "cancelled", "timeout")
 
 
 def _collect_known_agents() -> List[Dict[str, Any]]:

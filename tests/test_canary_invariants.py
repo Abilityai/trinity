@@ -462,7 +462,7 @@ class TestSnapshotCollector:
         _add_agent(canary_db, "a1")
         _add_execution(canary_db, "e-run-1", "a1", "running")
         _add_execution(canary_db, "e-q-1", "a1", "queued")
-        _add_execution(canary_db, "e-done", "a1", "completed")
+        _add_execution(canary_db, "e-done", "a1", "success")
 
         snap = reload_canary["canary"].collect_snapshot()
         assert snap.known_agents == {"a1"}
@@ -501,12 +501,12 @@ class TestSnapshotCollector:
         _add_agent(canary_db, "a1")
         # Recent terminal — included
         _add_execution(
-            canary_db, "e-recent", "a1", "completed",
+            canary_db, "e-recent", "a1", "success",
             completed_at=datetime.utcnow().isoformat(),
         )
         # Old terminal — excluded by 30-min window
         _add_execution(
-            canary_db, "e-old", "a1", "completed",
+            canary_db, "e-old", "a1", "success",
             completed_at="2025-01-01T00:00:00",
         )
         snap = reload_canary["canary"].collect_snapshot()
@@ -603,7 +603,7 @@ class TestInvariantE02:
     def test_holds_on_first_cycle(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1")
         _add_execution(
-            canary_db, "e-done", "a1", "completed",
+            canary_db, "e-done", "a1", "success",
             completed_at=datetime.utcnow().isoformat(),
         )
         snap = reload_canary["canary"].collect_snapshot()
@@ -615,7 +615,7 @@ class TestInvariantE02:
         _add_agent(canary_db, "a1")
         # Cycle 1: e-done is terminal.
         _add_execution(
-            canary_db, "e-done", "a1", "completed",
+            canary_db, "e-done", "a1", "success",
             completed_at=datetime.utcnow().isoformat(),
         )
         snap1 = reload_canary["canary"].collect_snapshot()

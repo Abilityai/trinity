@@ -4,7 +4,7 @@ E-02 — No phantom state reversal (CANARY-001 / Issue #411).
 A `schedule_executions` row that has been observed in a terminal status
 must never appear in a non-terminal status in a later snapshot. Catches
 the bug class behind PR #378 / #403 (phantom stale-slot failures), where
-a completed/failed/cancelled execution silently flips back to running.
+a success/failed/cancelled/skipped execution silently flips back to running.
 
 ## Phase 1 implementation note
 
