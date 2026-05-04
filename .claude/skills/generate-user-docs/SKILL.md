@@ -33,6 +33,7 @@ Read backend routers, frontend views, feature flows, and recent changes to produ
 | Deployment config | `.env.example`, `scripts/deploy/*.sh`, `docker-compose.yml`, `docker-compose.prod.yml`, `deploy.config.example` | Yes | No |
 | Trinity Docs site | `../trinity-docs/app/getting-started/*.tsx` | Yes | No |
 | Abilities repo | `github.com/abilityai/abilities` (README) | Yes | No |
+| Ops agent repo (public) | `github.com/abilityai/trinity-ops-public` (README, CLAUDE.md) | Yes | No |
 | Ops runbook (private, pattern source for ops content) | `../ops-runbook/playbooks/*.md`, `../ops-runbook/instances/_template/scripts/*.sh`, `../ops-runbook/instances/_template/CLAUDE.md` | Yes | No |
 | Git history | `git log --since` | Yes | No |
 | Existing user docs | `docs/user-docs/**/*.md` | Yes | Yes |
@@ -56,7 +57,8 @@ These tutorial-style guides walk users through end-to-end tasks. Keep them in sy
 | `guides/deploying/backup-and-restore.md` | This skill's operational template + ops runbook patterns | Volume-mounted alpine `cp` pattern, retention, daily cron template |
 | `guides/deploying/monitoring.md` | This skill's operational template + ops runbook patterns + `/api/ops/fleet/health` router | Six health probes, fleet-health API, resource thresholds table, common-recovery patterns |
 | `guides/using-trinity.md` | `trinity-docs/app/getting-started/using-trinity/page.tsx` | UI tour: dashboard, agents, monitoring |
-| `guides/building-agents.md` | `trinity-docs/app/getting-started/building-agents/page.tsx` | Create, develop, deploy with abilities |
+| `guides/building-agents.md` | `trinity-docs/app/getting-started/building-agents/page.tsx` + abilities repo README | Create, develop, deploy with abilities; includes abilities plugin marketplace (`/plugin marketplace add abilityai/abilities`), all 5 plugins (create-agent, agent-dev, trinity, dev-methodology, utilities), and agent onboarding via `/trinity:onboard` |
+| `guides/deploying/ops-agent.md` | trinity-ops-public README + CLAUDE.md | Trinity Ops Agent: what it is, how to connect it to an instance via `/trinity:deploy`, day-to-day operations (`/status`, `/diagnose`), and when to use it vs. raw Docker |
 
 **Sync rule**: When the trinity-docs source changes, update the corresponding guide to match. Convert TSX to markdown, preserving structure and content. **Code wins on conflict** — if trinity-docs disagrees with `.env.example`, `scripts/deploy/*.sh`, or `docker-compose.yml`, fix the local guide to match observed repo behavior and note the divergence for upstream.
 
@@ -111,7 +113,8 @@ docs/user-docs/
 │   │   ├── public-access.md          # Cloudflare Tunnel, PUBLIC_CHAT_URL, webhook surface
 │   │   ├── upgrading.md              # Pre-flight → backup → rebuild → restart → verify → rollback
 │   │   ├── backup-and-restore.md     # Volume-mounted alpine cp, retention, daily cron
-│   │   └── monitoring.md             # Six health probes, /api/ops/fleet/health, thresholds
+│   │   ├── monitoring.md             # Six health probes, /api/ops/fleet/health, thresholds
+│   │   └── ops-agent.md              # Trinity Ops Agent: connect, deploy, day-to-day ops
 │   ├── using-trinity.md              # UI tour: dashboard, agents, monitoring
 │   └── building-agents.md            # Create, develop, deploy with abilities
 ├── getting-started/
@@ -138,6 +141,7 @@ docs/user-docs/
 ├── automation/
 │   ├── scheduling.md                 # Cron schedules, execution queue
 │   ├── skills-and-playbooks.md       # Skills library, assignment, playbooks
+│   ├── abilities-marketplace.md      # Plugin marketplace: install abilities, available plugins, onboarding
 │   └── approvals.md                  # Human-in-the-loop approval gates
 ├── operations/
 │   ├── dashboard.md                  # Main dashboard, timeline view
@@ -226,6 +230,10 @@ This identifies what has changed recently and which docs may need updating.
 - Multi-instance management workflows (`source .env && ./scripts/run.sh ...`) — that's an operator-fleet pattern, not a single-instance user pattern.
 
 When in doubt, rewrite the *idea* in localhost form. A production-ops `sshpass -p $PW ssh user@host "sudo docker logs trinity-backend"` becomes the public `docker logs trinity-backend`. The rule survives; the access pattern stays private.
+
+**2i. Abilities repo (for `guides/building-agents.md` and `automation/abilities-marketplace.md`)** — Fetch the README from `github.com/abilityai/abilities`. Extract: what the abilities plugin is, the 5 plugins and what each covers (create-agent, agent-dev, trinity, dev-methodology, utilities), the installation command (`/plugin marketplace add abilityai/abilities`), and agent onboarding flow (`/trinity:onboard`). This is the canonical source for abilities marketplace docs — cover it explicitly in both the building-agents guide and a dedicated `automation/abilities-marketplace.md` page.
+
+**2j. Ops agent repo (for `guides/deploying/ops-agent.md`)** — Fetch the README and CLAUDE.md from `github.com/abilityai/trinity-ops-public`. Extract: what the ops agent does (health checks, log tailing, restarts, updates, rollbacks, diagnostics, agent management), how to connect it to an instance (one `.env` pointed at any server), the `/trinity:deploy` wizard flow, and day-to-day command examples (`/status`, `/diagnose`). Document it as the recommended way to operate a Trinity instance post-deploy, contrasting it with raw Docker commands.
 
 ### Step 3: Generate/Update Documentation
 
@@ -511,6 +519,8 @@ Confirm the expected number of files were created/updated. Report the final coun
 - [ ] Public-safety greps from Step 7 return zero hits across `guides/deploying/`
 - [ ] README.md index is complete and links are valid
 - [ ] Changes reviewed by user before writing
+- [ ] `automation/abilities-marketplace.md` covers the plugin marketplace install command, all 5 abilities plugins, and the `/trinity:onboard` agent setup flow
+- [ ] `guides/deploying/ops-agent.md` covers what the ops agent is, how to connect it via `/trinity:deploy`, and the day-to-day operational commands
 
 ## Error Recovery
 

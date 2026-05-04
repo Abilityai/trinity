@@ -1140,3 +1140,79 @@ class TestMcpUrlSettings:
             assert data["url"] == "https://example.com/mcp"
         finally:
             api_client.delete(self.MCP_URL_ENDPOINT)
+
+
+class TestAgentDefaultResources:
+    """Tests for GET/PUT /api/settings/agent-defaults/resources (RES-001)."""
+
+    ENDPOINT = "/api/settings/agent-defaults/resources"
+
+    def test_get_requires_auth(self, unauthenticated_client: TrinityApiClient):
+        """GET /api/settings/agent-defaults/resources requires authentication."""
+        response = unauthenticated_client.get(self.ENDPOINT, auth=False)
+        assert_status(response, 401)
+
+    def test_put_requires_auth(self, unauthenticated_client: TrinityApiClient):
+        """PUT /api/settings/agent-defaults/resources requires authentication."""
+        response = unauthenticated_client.put(self.ENDPOINT, json={"cpu": "2"}, auth=False)
+        assert_status(response, 401)
+
+    def test_get_returns_defaults(self, api_client: TrinityApiClient):
+        """GET returns current defaults with valid_* enumerations."""
+        response = api_client.get(self.ENDPOINT)
+        assert_status(response, 200)
+        data = assert_json_response(response)
+        assert_has_fields(data, ["cpu", "memory", "valid_cpu_values", "valid_memory_values"])
+        assert data["cpu"] in data["valid_cpu_values"]
+        assert data["memory"] in data["valid_memory_values"]
+
+    def test_put_valid_cpu(self, api_client: TrinityApiClient):
+        """PUT with valid integer CPU value succeeds and persists."""
+        original = api_client.get(self.ENDPOINT).json()
+        try:
+            response = api_client.put(self.ENDPOINT, json={"cpu": "4"})
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert data["cpu"] == "4"
+            assert data["restart_required"] is True
+            # Verify persisted
+            get_response = api_client.get(self.ENDPOINT)
+            assert get_response.json()["cpu"] == "4"
+        finally:
+            api_client.put(self.ENDPOINT, json={"cpu": original["cpu"]})
+
+    def test_put_valid_memory(self, api_client: TrinityApiClient):
+        """PUT with valid memory value succeeds and persists."""
+        original = api_client.get(self.ENDPOINT).json()
+        try:
+            response = api_client.put(self.ENDPOINT, json={"memory": "8g"})
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert data["memory"] == "8g"
+        finally:
+            api_client.put(self.ENDPOINT, json={"memory": original["memory"]})
+
+    def test_put_invalid_cpu_rejected(self, api_client: TrinityApiClient):
+        """PUT with CPU value not in valid list returns 400."""
+        response = api_client.put(self.ENDPOINT, json={"cpu": "3"})
+        assert_status(response, 400)
+
+    def test_put_fractional_cpu_rejected(self, api_client: TrinityApiClient):
+        """PUT with fractional CPU returns 400 (only whole processors accepted)."""
+        response = api_client.put(self.ENDPOINT, json={"cpu": "0.5"})
+        assert_status(response, 400)
+
+    def test_put_invalid_memory_rejected(self, api_client: TrinityApiClient):
+        """PUT with memory value not in valid list returns 400."""
+        response = api_client.put(self.ENDPOINT, json={"memory": "4Gi"})
+        assert_status(response, 400)
+
+    def test_put_partial_update(self, api_client: TrinityApiClient):
+        """PUT with only cpu does not change memory."""
+        original = api_client.get(self.ENDPOINT).json()
+        try:
+            api_client.put(self.ENDPOINT, json={"cpu": "4"})
+            get_response = api_client.get(self.ENDPOINT)
+            assert get_response.json()["memory"] == original["memory"]
+        finally:
+            api_client.put(self.ENDPOINT, json={"cpu": original["cpu"]})

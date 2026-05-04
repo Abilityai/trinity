@@ -41,7 +41,7 @@
         </div>
 
         <!-- Error state -->
-        <div v-else-if="error" class="px-3 py-3 text-xs text-red-500 dark:text-red-400">
+        <div v-else-if="error" class="px-3 py-3 text-xs text-status-danger-500 dark:text-status-danger-400">
           {{ error }}
         </div>
 

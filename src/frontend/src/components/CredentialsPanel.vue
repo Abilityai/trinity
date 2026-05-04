@@ -27,7 +27,7 @@
                 :class="[
                   'inline-flex items-center justify-center w-8 h-8 rounded-full',
                   file.exists
-                    ? 'bg-green-100 dark:bg-green-900/50 text-green-600 dark:text-green-400'
+                    ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-600 dark:text-status-success-400'
                     : 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500'
                 ]"
               >
@@ -72,7 +72,7 @@
             <button
               @click="exportToGit"
               :disabled="agentStatus !== 'running' || exporting || !hasCredentialFiles"
-              class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-status-success-600 hover:bg-status-success-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
               <svg v-if="exporting" class="animate-spin -ml-0.5 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -99,7 +99,7 @@
             </button>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400">
-            <span v-if="hasEncryptedFile" class="text-green-600 dark:text-green-400">
+            <span v-if="hasEncryptedFile" class="text-status-success-600 dark:text-status-success-400">
               .credentials.enc exists
             </span>
             <span v-else class="text-gray-400 dark:text-gray-500">
@@ -129,7 +129,7 @@
             ></textarea>
             <span
               v-if="agentStatus !== 'running'"
-              class="absolute top-2 right-2 px-2 py-1 text-xs bg-yellow-100 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300 rounded"
+              class="absolute top-2 right-2 px-2 py-1 text-xs bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-700 dark:text-status-warning-300 rounded"
             >
               Agent must be running
             </span>
@@ -157,18 +157,18 @@
             v-if="quickInjectResult"
             :class="[
               'p-4 rounded-lg',
-              quickInjectResult.success ? 'bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800'
+              quickInjectResult.success ? 'bg-status-success-50 dark:bg-status-success-900/30 border border-status-success-200 dark:border-status-success-800' : 'bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800'
             ]"
           >
             <div class="flex items-start">
-              <svg v-if="quickInjectResult.success" class="w-5 h-5 text-green-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <svg v-if="quickInjectResult.success" class="w-5 h-5 text-status-success-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
               </svg>
-              <svg v-else class="w-5 h-5 text-red-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <svg v-else class="w-5 h-5 text-status-danger-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
               </svg>
               <div>
-                <p :class="quickInjectResult.success ? 'text-green-800 dark:text-green-300' : 'text-red-800 dark:text-red-300'" class="font-medium">
+                <p :class="quickInjectResult.success ? 'text-status-success-800 dark:text-status-success-300' : 'text-status-danger-800 dark:text-status-danger-300'" class="font-medium">
                   {{ quickInjectResult.message }}
                 </p>
               </div>

@@ -360,18 +360,36 @@ function resizeCanvas() {
   }
 }
 
-onMounted(() => {
-  resizeCanvas()
-  currentSprites = buildSprites(0)
-  initParticles(currentSprites)
-  rafHandle = requestAnimationFrame(renderFrame)
-})
+function startLoop() {
+  if (!currentSprites) {
+    currentSprites = buildSprites(0)
+    initParticles(currentSprites)
+  }
+  if (rafHandle === null) {
+    rafHandle = requestAnimationFrame(renderFrame)
+  }
+}
 
-onUnmounted(() => {
+function stopLoop() {
   if (rafHandle !== null) {
     cancelAnimationFrame(rafHandle)
     rafHandle = null
   }
+}
+
+// The canvas is inside v-if="voice.isActive.value", so canvasEl.value is null
+// until the voice session starts. Watch it to start/stop the RAF loop.
+watch(canvasEl, (canvas) => {
+  if (canvas) {
+    resizeCanvas()
+    startLoop()
+  } else {
+    stopLoop()
+  }
+})
+
+onUnmounted(() => {
+  stopLoop()
 })
 
 // Update hue target when status changes

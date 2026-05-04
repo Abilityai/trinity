@@ -25,7 +25,7 @@
               :class="[
                 'relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
                 canEdit ? 'cursor-pointer' : 'cursor-not-allowed opacity-50',
-                config.enabled ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'
+                config.enabled ? 'bg-status-success-500' : 'bg-gray-300 dark:bg-gray-600'
               ]"
             >
               <span
@@ -40,20 +40,20 @@
 
         <div class="p-4 space-y-4">
           <!-- Read-only notice for shared users -->
-          <div v-if="!canEdit" class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
-            <p class="text-sm text-yellow-800 dark:text-yellow-300">
+          <div v-if="!canEdit" class="bg-status-warning-50 dark:bg-status-warning-900/20 border border-status-warning-200 dark:border-status-warning-800 rounded-lg p-3">
+            <p class="text-sm text-status-warning-800 dark:text-status-warning-300">
               You have view-only access to this agent's payment configuration. Only the agent owner can modify settings.
             </p>
           </div>
 
           <!-- Paid Endpoint URL (show when configured) -->
-          <div v-if="config && config.enabled" class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3">
-            <label class="block text-xs font-medium text-green-700 dark:text-green-400 mb-1">Paid Endpoint</label>
+          <div v-if="config && config.enabled" class="bg-status-success-50 dark:bg-status-success-900/20 border border-status-success-200 dark:border-status-success-800 rounded-lg p-3">
+            <label class="block text-xs font-medium text-status-success-700 dark:text-status-success-400 mb-1">Paid Endpoint</label>
             <div class="flex items-center space-x-2">
-              <code class="flex-1 text-sm text-green-800 dark:text-green-300 break-all">{{ paidEndpointUrl }}</code>
+              <code class="flex-1 text-sm text-status-success-800 dark:text-status-success-300 break-all">{{ paidEndpointUrl }}</code>
               <button
                 @click="copyEndpoint"
-                class="text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300 flex-shrink-0"
+                class="text-status-success-600 hover:text-status-success-700 dark:text-status-success-400 dark:hover:text-status-success-300 flex-shrink-0"
                 title="Copy to clipboard"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -159,7 +159,7 @@
                 type="button"
                 @click="deleteConfig"
                 :disabled="deleting"
-                class="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                class="px-4 py-2 bg-status-danger-600 text-white text-sm font-medium rounded-md hover:bg-status-danger-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {{ deleting ? 'Removing...' : 'Remove' }}
               </button>
@@ -208,8 +208,8 @@
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300">{{ entry.credits_amount ?? '-' }}</td>
                 <td class="px-4 py-2 text-sm text-gray-600 dark:text-gray-300 font-mono">{{ truncateHash(entry.tx_hash) }}</td>
                 <td class="px-4 py-2">
-                  <span v-if="entry.success" class="text-green-600 dark:text-green-400 text-sm">OK</span>
-                  <span v-else class="text-red-600 dark:text-red-400 text-sm" :title="entry.error">Failed</span>
+                  <span v-if="entry.success" class="text-status-success-600 dark:text-status-success-400 text-sm">OK</span>
+                  <span v-else class="text-status-danger-600 dark:text-status-danger-400 text-sm" :title="entry.error">Failed</span>
                 </td>
               </tr>
             </tbody>
@@ -374,9 +374,9 @@ function truncateHash(hash) {
 function actionBadgeClass(action) {
   const classes = {
     verify: 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300',
-    settle: 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300',
-    settle_failed: 'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300',
-    reject: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300',
+    settle: 'bg-status-success-100 text-status-success-700 dark:bg-status-success-900/50 dark:text-status-success-300',
+    settle_failed: 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300',
+    reject: 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-900/50 dark:text-status-warning-300',
   }
   return classes[action] || 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
 }

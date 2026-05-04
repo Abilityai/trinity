@@ -28,7 +28,7 @@
     class="fixed bottom-4 right-4 z-[9999] w-80 bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 overflow-hidden transition-all duration-300"
     :class="[
       { 'h-auto': !isMinimized, 'h-14': isMinimized },
-      isCelebrating ? 'ring-2 ring-green-400 ring-offset-2 animate-celebrate' : ''
+      isCelebrating ? 'ring-2 ring-status-success-400 ring-offset-2 animate-celebrate' : ''
     ]"
   >
     <!-- Header -->
@@ -84,7 +84,7 @@
           class="flex items-start gap-3 p-2 rounded-lg transition-colors"
           :class="[
             item.completed
-              ? 'bg-green-50 dark:bg-green-900/20'
+              ? 'bg-status-success-50 dark:bg-status-success-900/20'
               : isCurrentStep(index)
                 ? 'bg-indigo-50 dark:bg-indigo-900/20 ring-1 ring-indigo-200 dark:ring-indigo-700'
                 : 'opacity-50',
@@ -95,7 +95,7 @@
           <div
             class="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center mt-0.5"
             :class="item.completed
-              ? 'bg-green-500 text-white'
+              ? 'bg-status-success-500 text-white'
               : isCurrentStep(index)
                 ? 'border-2 border-indigo-500 dark:border-indigo-400'
                 : 'border-2 border-gray-300 dark:border-gray-600'"
@@ -106,7 +106,7 @@
             <p
               class="text-sm font-medium"
               :class="item.completed
-                ? 'text-green-700 dark:text-green-400 line-through'
+                ? 'text-status-success-700 dark:text-status-success-400 line-through'
                 : isCurrentStep(index)
                   ? 'text-gray-900 dark:text-white'
                   : 'text-gray-500 dark:text-gray-400'"
@@ -156,7 +156,7 @@
           class="flex items-start gap-3 p-2 rounded-lg transition-colors"
           :class="[
             item.completed
-              ? 'bg-green-50 dark:bg-green-900/20'
+              ? 'bg-status-success-50 dark:bg-status-success-900/20'
               : allRequiredComplete
                 ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50'
                 : 'opacity-40'
@@ -165,7 +165,7 @@
           <div
             class="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center mt-0.5"
             :class="item.completed
-              ? 'bg-green-500 text-white'
+              ? 'bg-status-success-500 text-white'
               : 'border-2 border-gray-300 dark:border-gray-600'"
           >
             <CheckIcon v-if="item.completed" class="h-3 w-3" />
@@ -174,7 +174,7 @@
             <p
               class="text-sm font-medium"
               :class="item.completed
-                ? 'text-green-700 dark:text-green-400 line-through'
+                ? 'text-status-success-700 dark:text-status-success-400 line-through'
                 : allRequiredComplete
                   ? 'text-gray-900 dark:text-white'
                   : 'text-gray-500 dark:text-gray-400'"

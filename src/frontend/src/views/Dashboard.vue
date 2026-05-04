@@ -17,13 +17,13 @@
             <div class="flex items-center min-w-0 overflow-hidden">
               <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
                 <span class="flex items-center space-x-1">
-                  <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                  <span class="font-medium text-green-600 dark:text-green-400">{{ runningCount }}/{{ agents.length }}</span>
+                  <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
+                  <span class="font-medium text-status-success-600 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
                   <span>agents</span>
                 </span>
                 <span class="text-gray-300 dark:text-gray-600">·</span>
                 <span class="flex items-center space-x-1">
-                  <span class="font-medium text-blue-600 dark:text-blue-400">{{ totalCollaborationCount }}</span>
+                  <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ totalCollaborationCount }}</span>
                   <span>messages ({{ timeRangeHours }}h)</span>
                 </span>
                 <!-- Host Telemetry (inline) -->
@@ -60,7 +60,7 @@
                   <button
                     v-if="selectedQuickTags.length > 0"
                     @click="clearQuickTags(); showTagDropdown = false"
-                    class="w-full px-3 py-1.5 text-left text-xs text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-700"
+                    class="w-full px-3 py-1.5 text-left text-xs text-status-danger-600 dark:text-status-danger-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors border-b border-gray-200 dark:border-gray-700"
                   >
                     Clear all
                   </button>
@@ -151,7 +151,7 @@
               <div
                 :class="[
                   'w-2 h-2 rounded-full',
-                  isConnected ? 'bg-green-500' : 'bg-red-500'
+                  isConnected ? 'bg-status-success-500' : 'bg-status-danger-500'
                 ]"
                 :title="isConnected ? 'Connected' : 'Disconnected'"
               ></div>
@@ -356,7 +356,7 @@
       >
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Message History</h3>
-          <span class="text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded-full font-medium">
+          <span class="text-xs bg-status-info-100 dark:bg-status-info-900 text-status-info-800 dark:text-status-info-200 px-2 py-1 rounded-full font-medium">
             {{ totalCollaborationCount }} total
           </span>
         </div>
@@ -364,7 +364,7 @@
         <!-- Real-time feed (last 10) -->
         <div v-if="collaborationHistory.length > 0" class="mb-3 pb-3 border-b border-gray-200 dark:border-gray-700">
           <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2 flex items-center">
-            <svg class="w-3 h-3 mr-1 text-green-500 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
+            <svg class="w-3 h-3 mr-1 text-status-success-500 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
               <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
             </svg>
             Live Feed
@@ -375,7 +375,7 @@
               :key="'live-' + index"
               class="text-xs text-gray-600 dark:text-gray-400 flex items-center space-x-2 animate-fade-in"
             >
-              <svg class="w-3 h-3 text-blue-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <svg class="w-3 h-3 text-status-info-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M12.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-2.293-2.293a1 1 0 010-1.414z" clip-rule="evenodd" />
               </svg>
               <span class="truncate flex-1">

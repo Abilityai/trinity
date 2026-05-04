@@ -54,7 +54,7 @@
           <div v-if="canShare" class="mb-4 p-4 bg-gray-800 rounded-lg text-left">
             <div class="flex items-center justify-between mb-2">
               <span class="text-sm font-medium text-gray-300">Authentication</span>
-              <span v-if="apiKeySetting.restart_required" class="text-xs text-yellow-400">Restart required</span>
+              <span v-if="apiKeySetting.restart_required" class="text-xs text-status-warning-400">Restart required</span>
             </div>
             <div class="space-y-2">
               <label class="flex items-center space-x-3 cursor-pointer">
@@ -89,7 +89,7 @@
           <button
             @click="$emit('start-agent')"
             :disabled="actionLoading"
-            class="bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white text-sm font-medium py-2 px-4 rounded-lg"
+            class="bg-status-success-600 hover:bg-status-success-700 disabled:bg-status-success-400 text-white text-sm font-medium py-2 px-4 rounded-lg"
           >
             {{ actionLoading ? 'Starting...' : 'Start Agent' }}
           </button>

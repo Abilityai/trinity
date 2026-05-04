@@ -62,12 +62,12 @@
                 v-model="editedName"
                 type="text"
                 class="text-2xl font-bold text-gray-900 dark:text-white bg-transparent border-b-2 border-indigo-500 focus:outline-none focus:border-indigo-600 py-0 px-0"
-                :class="{ 'border-red-500': nameError }"
+                :class="{ 'border-status-danger-500': nameError }"
                 @keydown.enter="saveName"
                 @keydown.escape="cancelEditName"
                 @blur="saveName"
               />
-              <span v-if="nameError" class="text-xs text-red-500">{{ nameError }}</span>
+              <span v-if="nameError" class="text-xs text-status-danger-500">{{ nameError }}</span>
             </template>
             <template v-else>
               <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{{ agent.name }}</h1>
@@ -88,7 +88,7 @@
             <!-- Status badge -->
             <span :class="[
               'px-2 py-0.5 text-xs font-medium rounded-full',
-              agent.status === 'running' ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300'
+              agent.status === 'running' ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300'
             ]">
               {{ agent.status }}
             </span>
@@ -97,7 +97,7 @@
             <!-- System agent badge -->
             <span
               v-if="agent.is_system"
-              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300"
+              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300"
               title="System Agent - Platform Orchestrator with full access"
             >
               SYSTEM
@@ -111,10 +111,10 @@
               <span
                 class="px-2 py-0.5 text-xs font-medium rounded-full flex items-center gap-0.5"
                 :class="authStatus.auth_mode === 'subscription'
-                  ? 'bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300'
+                  ? 'bg-state-autonomous-100 dark:bg-state-autonomous-900/50 text-state-autonomous-700 dark:text-state-autonomous-300'
                   : authStatus.auth_mode === 'api_key'
                     ? 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
-                    : 'bg-red-100 dark:bg-red-900/50 text-red-600 dark:text-red-400'"
+                    : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-600 dark:text-status-danger-400'"
                 :title="authStatus.auth_mode === 'subscription'
                   ? `Using subscription: ${authStatus.subscription_name}`
                   : authStatus.auth_mode === 'api_key'
@@ -158,7 +158,7 @@
           <button
             v-if="agent.can_delete"
             @click="$emit('delete')"
-            class="text-gray-400 dark:text-gray-500 hover:text-red-600 dark:hover:text-red-400 p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            class="text-gray-400 dark:text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400 p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
             title="Delete agent"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -223,7 +223,7 @@
             />
             <span
               class="font-mono w-10 text-right"
-              :class="agentStats.cpu_percent > 80 ? 'text-red-500' : agentStats.cpu_percent > 50 ? 'text-yellow-500' : 'text-green-500'"
+              :class="agentStats.cpu_percent > 80 ? 'text-status-danger-500' : agentStats.cpu_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ agentStats.cpu_percent }}%</span>
           </div>
           <!-- Memory -->
@@ -238,7 +238,7 @@
             />
             <span
               class="font-mono w-14 text-right"
-              :class="agentStats.memory_percent > 80 ? 'text-red-500' : agentStats.memory_percent > 50 ? 'text-yellow-500' : 'text-green-500'"
+              :class="agentStats.memory_percent > 80 ? 'text-status-danger-500' : agentStats.memory_percent > 50 ? 'text-status-warning-500' : 'text-status-success-500'"
             >{{ formatBytes(agentStats.memory_used_bytes) }}</span>
           </div>
           <!-- Uptime -->
@@ -272,6 +272,56 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
         </button>
+      </div>
+    </div>
+
+    <!-- TOKEN USAGE ROW: 7-day sparkline + today vs average trend -->
+    <div
+      v-if="tokenStats && (tokenStats.lifetime_executions > 0)"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex items-center space-x-4 text-xs"
+    >
+      <!-- 7-day cost sparkline -->
+      <div class="flex items-center space-x-1.5">
+        <span class="text-gray-400 dark:text-gray-500">7d</span>
+        <SparklineChart
+          :data="tokenCostSparkline"
+          color="#f59e0b"
+          :y-max="tokenCostSparklineMax"
+          :width="56"
+          :height="16"
+        />
+      </div>
+      <!-- Today's cost -->
+      <div class="flex items-center space-x-1">
+        <span class="text-gray-400 dark:text-gray-500">Today</span>
+        <span class="font-mono text-gray-700 dark:text-gray-300">${{ formatCost(tokenStats.cost_24h) }}</span>
+      </div>
+      <!-- Trend vs 7d average -->
+      <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
+        <span
+          :class="trendClass"
+          class="flex items-center space-x-0.5 font-mono"
+          :title="`7d avg: $${formatCost(tokenStats.avg_daily_cost)}/day`"
+        >
+          <!-- Arrow icon -->
+          <svg v-if="tokenStats.trend_cost_pct > 5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
+          </svg>
+          <svg v-else-if="tokenStats.trend_cost_pct < -5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+          </svg>
+          <svg v-else class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14" />
+          </svg>
+          <span>{{ formatTrendPct(tokenStats.trend_cost_pct) }} vs avg</span>
+        </span>
+      </div>
+      <!-- Lifetime cost -->
+      <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
+        <span>Lifetime</span>
+        <span class="font-mono text-gray-600 dark:text-gray-400">${{ formatCost(tokenStats.lifetime_cost) }}</span>
+        <span class="text-gray-300 dark:text-gray-600">·</span>
+        <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
       </div>
     </div>
 
@@ -328,7 +378,7 @@
           :disabled="gitSyncing || gitPulling"
           class="flex-shrink-0 ml-2 inline-flex items-center text-sm font-medium py-1 px-2.5 rounded transition-colors"
           :class="gitHasChanges
-            ? 'bg-orange-600 hover:bg-orange-700 disabled:bg-orange-400 text-white'
+            ? 'bg-status-urgent-600 hover:bg-status-urgent-700 disabled:bg-status-urgent-400 text-white'
             : 'bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:bg-gray-50 dark:disabled:bg-gray-800 text-gray-600 dark:text-gray-300'"
           :title="gitHasChanges ? 'Push changes to GitHub' : 'No changes to push'"
         >
@@ -365,7 +415,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import SparklineChart from './SparklineChart.vue'
@@ -481,6 +531,11 @@ const props = defineProps({
   emotionAvatarUrl: {
     type: String,
     default: null
+  },
+  // Token usage stats (issue #250) — DB-sourced, persists across restarts
+  tokenStats: {
+    type: Object,
+    default: null
   }
 })
 
@@ -540,6 +595,37 @@ function saveName() {
 }
 
 const { formatBytes, formatUptime, formatRelativeTime } = useFormatters()
+
+// Token stats helpers (issue #250)
+const tokenCostSparkline = computed(() => {
+  if (!props.tokenStats?.daily_breakdown) return []
+  return props.tokenStats.daily_breakdown.map(d => d.cost)
+})
+
+const tokenCostSparklineMax = computed(() => {
+  const vals = tokenCostSparkline.value
+  if (!vals.length) return 1
+  return Math.max(...vals, 0.0001)
+})
+
+function formatCost(val) {
+  if (!val || val === 0) return '0.00'
+  if (val < 0.01) return val.toFixed(4)
+  return val.toFixed(2)
+}
+
+function formatTrendPct(pct) {
+  if (!pct) return '—'
+  const abs = Math.abs(pct)
+  return `${abs >= 1 ? Math.round(abs) : abs.toFixed(1)}%`
+}
+
+const trendClass = computed(() => {
+  const pct = props.tokenStats?.trend_cost_pct ?? 0
+  if (pct > 5) return 'text-status-warning-600 dark:text-status-warning-400'
+  if (pct < -5) return 'text-status-success-600 dark:text-status-success-400'
+  return 'text-gray-400 dark:text-gray-500'
+})
 </script>
 
 <style scoped>

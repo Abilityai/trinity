@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from models import User
+from models import User, AgentDefaultResourcesUpdate
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -31,6 +31,10 @@ from services.settings_service import (
     OPS_SETTINGS_DESCRIPTIONS,
     AGENT_QUOTA_DEFAULTS,
     AGENT_QUOTA_DESCRIPTIONS,
+    AGENT_DEFAULT_CPU_KEY,
+    AGENT_DEFAULT_MEMORY_KEY,
+    AGENT_DEFAULT_CPU,
+    AGENT_DEFAULT_MEMORY,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -1232,6 +1236,87 @@ async def update_agent_quotas(
     return {
         "success": True,
         "updated": updated
+    }
+
+
+# ============================================================================
+# Agent Default Resources (RES-001)
+# ============================================================================
+
+VALID_CPU_VALUES = ["1", "2", "4", "8", "16"]
+VALID_MEMORY_VALUES = ["1g", "2g", "4g", "8g", "16g", "32g"]
+
+
+@router.get("/agent-defaults/resources")
+async def get_agent_default_resources(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the system-wide default CPU and memory limits applied to every new agent container.
+
+    Admin-only.
+    """
+    require_admin(current_user)
+
+    cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
+    memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
+
+    return {
+        "cpu": cpu,
+        "memory": memory,
+        "cpu_default": AGENT_DEFAULT_CPU,
+        "memory_default": AGENT_DEFAULT_MEMORY,
+        "valid_cpu_values": VALID_CPU_VALUES,
+        "valid_memory_values": VALID_MEMORY_VALUES,
+        "note": "Changes apply to new agent containers only. Restart existing agents to pick up new defaults."
+    }
+
+
+@router.put("/agent-defaults/resources")
+async def update_agent_default_resources(
+    body: AgentDefaultResourcesUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set the system-wide default CPU and memory limits for new agent containers.
+
+    Admin-only. Only the fields provided are updated.
+    Valid CPU values (number of processors): 1, 2, 4, 8, 16
+    Valid memory values: 1g, 2g, 4g, 8g, 16g, 32g
+    """
+    require_admin(current_user)
+
+    updated = []
+
+    if body.cpu is not None:
+        if body.cpu not in VALID_CPU_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid CPU value. Must be one of: {', '.join(VALID_CPU_VALUES)}"
+            )
+        db.set_setting(AGENT_DEFAULT_CPU_KEY, body.cpu)
+        updated.append("cpu")
+
+    if body.memory is not None:
+        if body.memory not in VALID_MEMORY_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid memory value. Must be one of: {', '.join(VALID_MEMORY_VALUES)}"
+            )
+        db.set_setting(AGENT_DEFAULT_MEMORY_KEY, body.memory)
+        updated.append("memory")
+
+    cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
+    memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
+
+    return {
+        "success": True,
+        "updated": updated,
+        "cpu": cpu,
+        "memory": memory,
+        "restart_required": True
     }
 
 

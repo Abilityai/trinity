@@ -254,10 +254,10 @@ async function fetchCategories() {
 function getCategoryBadgeClass(category) {
   const badges = {
     general: 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300',
-    business: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
-    devops: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300',
+    business: 'bg-status-info-100 dark:bg-status-info-900/30 text-status-info-700 dark:text-status-info-300',
+    devops: 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300',
     analytics: 'bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300',
-    support: 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300',
+    support: 'bg-status-urgent-100 dark:bg-status-urgent-900/30 text-status-urgent-700 dark:text-status-urgent-300',
     content: 'bg-pink-100 dark:bg-pink-900/30 text-pink-700 dark:text-pink-300',
   }
   return badges[category] || badges.general

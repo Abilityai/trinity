@@ -9,6 +9,7 @@ As an agent owner, I want to configure memory and CPU allocation for my agents s
 ## Revision History
 | Date | Change |
 |------|--------|
+| 2026-04-30 | **RES-001**: Added system-wide admin defaults (`GET/PUT /api/settings/agent-defaults/resources`). Container creation now uses 3-tier fallback: per-agent DB limit → system default → hardcoded. Fixed `4Gi`→`4g` bug in crud.py. |
 | 2026-02-18 | **UI-001 Redesign**: AgentHeader restructured into 3 rows. Gear button now at line 150-161 in Row 2 (stats row). Stats display inline with CPU/MEM sparklines. Fixed widths prevent layout jumping. |
 | 2026-01-23 | Updated line numbers for all components; AgentHeader gear icons at 224 and 247; ResourceModal extracted to separate component; useAgentSettings composable at 78-110 |
 | 2026-01-02 | Initial documentation |
@@ -18,8 +19,10 @@ As an agent owner, I want to configure memory and CPU allocation for my agents s
 ## Entry Points
 
 - **UI**: `src/frontend/src/components/AgentHeader.vue:150-161` - Gear icon button in Row 2 (stats row), shown when agent.can_share
-- **API GET**: `GET /api/agents/{name}/resources` - Fetch current limits
-- **API PUT**: `PUT /api/agents/{name}/resources` - Update limits
+- **API GET**: `GET /api/agents/{name}/resources` - Fetch per-agent limits
+- **API PUT**: `PUT /api/agents/{name}/resources` - Update per-agent limits
+- **Admin API GET**: `GET /api/settings/agent-defaults/resources` - Fetch system-wide defaults
+- **Admin API PUT**: `PUT /api/settings/agent-defaults/resources` - Set system-wide defaults (admin-only)
 
 ---
 
@@ -148,7 +151,69 @@ async function saveResourceLimits() {
 
 ## Backend Layer
 
-### Endpoints
+### System-Wide Defaults (RES-001)
+
+**settings.py** (`src/backend/routers/settings.py`) — Admin-only
+
+#### GET /api/settings/agent-defaults/resources
+
+Returns current system defaults with valid value enumerations:
+```json
+{
+  "cpu": "2",
+  "memory": "4g",
+  "cpu_default": "2",
+  "memory_default": "4g",
+  "valid_cpu_values": ["1", "2", "4", "8", "16"],
+  "valid_memory_values": ["1g", "2g", "4g", "8g", "16g", "32g"],
+  "note": "Changes apply to new agent containers only."
+}
+```
+
+#### PUT /api/settings/agent-defaults/resources
+
+Body: `{ "cpu": "4", "memory": "8g" }` (fields optional — only provided fields updated)
+
+- CPU must be a whole number of processors from the valid list (no fractional values)
+- Returns `restart_required: true` — existing containers are unaffected until next start
+- Stored in the `system_settings` table via `db.set_setting("agent_default_cpu", ...)` / `db.set_setting("agent_default_memory", ...)`
+
+**settings_service.py** (`src/backend/services/settings_service.py`)
+
+```python
+AGENT_DEFAULT_CPU_KEY = "agent_default_cpu"
+AGENT_DEFAULT_MEMORY_KEY = "agent_default_memory"
+
+def get_agent_default_resources() -> dict:
+    """Returns {"cpu": "2", "memory": "4g"} — system defaults with safe fallback."""
+```
+
+### Container Creation Fallback Chain
+
+When creating or recreating a container, resources are resolved in this order:
+
+1. **Per-agent DB limit** — `db.get_resource_limits(agent_name)` from `agent_ownership.cpu_limit / memory_limit`
+2. **System default** — `get_agent_default_resources()` from `system_settings` table
+3. **Hardcoded safe value** — `cpu=2`, `memory=4g`
+
+**crud.py** (`src/backend/services/agent_service/crud.py`):
+```python
+mem_limit=config.resources.get('memory') or _get_default_resource('memory'),
+cpu_count=int(config.resources.get('cpu') or _get_default_resource('cpu'))
+```
+
+**lifecycle.py** (`src/backend/services/agent_service/lifecycle.py`):
+```python
+system_defaults = get_agent_default_resources()
+if db_limits:
+    cpu = db_limits.get("cpu") or labels.get("trinity.cpu") or system_defaults["cpu"]
+    memory = db_limits.get("memory") or labels.get("trinity.memory") or system_defaults["memory"]
+else:
+    cpu = labels.get("trinity.cpu") or system_defaults["cpu"]
+    memory = labels.get("trinity.memory") or system_defaults["memory"]
+```
+
+### Per-Agent Endpoints
 
 **agent_config.py** (`src/backend/routers/agent_config.py`)
 

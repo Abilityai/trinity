@@ -1,28 +1,41 @@
 """
-Unit tests for Slack rich text formatting (#223).
+Unit tests for Slack rich text formatting (#223 → re-targeted #293).
 
-Tests the format_response chain: markdown → Slack mrkdwn via slackify-markdown.
+Originally tested the third-party `slackify-markdown` library directly.
+After #293 replaced that library with our own `services.slack_mrkdwn`
+renderer (because slackify-markdown 0.2.2 dropped nested-list indent,
+swallowed blank lines before headings, prefixed only the first blockquote
+line, and passed tables through verbatim), these tests were re-targeted
+at the new renderer.
 
-Module: src/backend/adapters/slack_adapter.py
-Issue: https://github.com/abilityai/trinity/issues/223
+For the comprehensive #293 test suite covering all five bug categories,
+see `tests/unit/test_slack_mrkdwn.py`. This file remains as the smaller
+inline-formatting smoke test originally written for #223.
+
+Module: src/backend/services/slack_mrkdwn.py
+Issues: https://github.com/abilityai/trinity/issues/223
+        https://github.com/abilityai/trinity/issues/293
 """
+
+import sys
+from pathlib import Path
 
 import pytest
 
-try:
-    from slackify_markdown.slackify import SlackifyMarkdown
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
-    def slackify(text):
-        return SlackifyMarkdown(text).slackify()
-
-    HAS_SLACKIFY = True
-except ImportError:
-    HAS_SLACKIFY = False
+from services.slack_mrkdwn import to_slack_mrkdwn
 
 
-@pytest.mark.skipif(not HAS_SLACKIFY, reason="slackify-markdown not installed")
+def slackify(text):
+    """Compat shim: keep the old test method names readable."""
+    return to_slack_mrkdwn(text)
+
+
 class TestSlackifyMarkdown:
-    """Test slackify-markdown converts standard markdown to Slack mrkdwn."""
+    """Test our renderer converts standard markdown to Slack mrkdwn."""
 
     def test_bold(self):
         assert "*bold*" in slackify("**bold**")
@@ -90,14 +103,12 @@ class TestSlackifyMarkdown:
 class TestFormatResponseContract:
     """Test the format_response contract: default is passthrough, Slack overrides."""
 
-    @pytest.mark.skipif(not HAS_SLACKIFY, reason="slackify-markdown not installed")
     def test_slack_does_not_passthrough(self):
         """Slack's format_response must change the text (not passthrough)."""
         text = "**bold** and [link](https://example.com)"
         result = slackify(text)
         assert result != text  # Slack adapter must transform, not passthrough
 
-    @pytest.mark.skipif(not HAS_SLACKIFY, reason="slackify-markdown not installed")
     def test_slack_override_converts(self):
         """Slack's format_response converts markdown to mrkdwn."""
         text = "**bold** and [link](https://example.com)"

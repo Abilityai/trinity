@@ -244,6 +244,20 @@
       "added": "2026-04-29",
       "categories": ["backend", "unit", "upload", "files", "chat"],
       "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) — 14 tests"
+    },
+    {
+      "file": "unit/test_slack_mrkdwn.py",
+      "feature": "Issue #293",
+      "added": "2026-05-01",
+      "categories": ["backend", "unit", "slack", "channels", "formatting"],
+      "description": "Unit tests for the Slack mrkdwn renderer that replaces slackify-markdown 0.2.2 (#293): nested-list indentation preserved (2-3 levels, mixed bullet/ordered), blank line before headings (H1-H6), blockquote `>` prefix on every line (multi-line + softbreak continuation), table conversion to fenced code-block with column alignment, horizontal rule emits visible separator. Plus inline formatting regression coverage (bold, italic, strikethrough, links with/without label, image-as-link, code blocks with language fence stripping), real agent response patterns (status report, code review, blockquoted attribution), edge cases (empty/None/non-string input, HTML-as-literal-text). Pairs with tests/unit/test_slack_rich_text.py (13 tests, retargeted to new renderer)."
+    },
+    {
+      "file": "test_site_proxy.py",
+      "feature": "SITE-001",
+      "added": "2026-05-03",
+      "categories": ["backend", "api", "public-links", "proxy"],
+      "description": "Tests for agent website proxy (#633): site link creation, link_type field, URL format, token validation (invalid/wrong-type/disabled), 502 when web server not running, redirect on missing trailing slash."
     }
   ]
 }

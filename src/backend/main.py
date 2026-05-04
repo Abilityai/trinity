@@ -66,6 +66,7 @@ from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
 from routers.public import router as public_router
 from routers.files import router as files_router  # FILES-001 — outbound file downloads
+from routers.site import router as site_router  # SITE-001 — agent website proxy
 from routers.setup import router as setup_router, get_setup_token as get_setup_setup_token
 from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
@@ -741,6 +742,7 @@ app.include_router(ops_router)
 app.include_router(public_links_router)
 app.include_router(public_router)
 app.include_router(files_router)  # FILES-001: /api/files/{id} — token-gated downloads
+app.include_router(site_router)   # SITE-001: /site/{token}/{path} — agent website proxy
 app.include_router(setup_router)
 app.include_router(telemetry_router)
 app.include_router(logs_router)

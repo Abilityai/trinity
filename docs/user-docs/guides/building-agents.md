@@ -124,5 +124,6 @@ Wizard-created agents include everything needed for Trinity:
 
 ## See Also
 
+- [Abilities Marketplace](../automation/abilities-marketplace.md) — All 5 plugins, skill reference, four-step workflow
 - [Creating Agents](../agents/creating-agents.md) — UI-based agent creation
 - [Skills and Playbooks](../automation/skills-and-playbooks.md) — How skills work in Trinity

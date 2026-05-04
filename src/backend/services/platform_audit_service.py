@@ -40,6 +40,7 @@ class AuditEventType(str, Enum):
     MCP_OPERATION = "mcp_operation"
     GIT_OPERATION = "git_operation"
     PROACTIVE_MESSAGE = "proactive_message"  # Issue #321
+    SITE_ACCESS = "site_access"  # SITE-001: agent website proxy visits
     SYSTEM = "system"
 
 

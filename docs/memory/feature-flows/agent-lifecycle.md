@@ -66,6 +66,7 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 - Lines 38-43: RunningStateToggle (size: sm) in Row 1 (changed from lg to sm on 2026-02-18)
 - Lines 65-70: AutonomyToggle (size: sm) in Row 2 (changed from md to sm on 2026-02-18)
 - Lines 74-79: ReadOnlyToggle (size: sm) in Row 2 (changed from md to sm on 2026-02-18)
+- **TOKEN USAGE ROW** (2026-05-03, #250): 4th row between stats and git; shows 7-day SparklineChart (amber, 56×16), today's cost, trend vs 7-day avg (warning/success/gray), lifetime totals. `v-if="tokenStats && tokenStats.lifetime_executions > 0"` — hidden for new agents. Prop: `:token-stats` from AgentDetail.vue.
 - Emits `toggle` event instead of separate `start`/`stop`
 
 **Agent Node (Dashboard)** - `src/frontend/src/components/AgentNode.vue`
@@ -524,6 +525,7 @@ async def get_agent_logs_endpoint(agent_name: AuthorizedAgentByName, request: Re
 | `GET /api/agents/context-stats` | :157-160 | Context window stats and activity state for all accessible agents |
 | `GET /api/agents/execution-stats` | :163-229 | Task counts, success rates, costs, schedule counts. Params: `hours` (default 24), `include_7d` (boolean for 7-day dual stats) |
 | `GET /api/agents/autonomy-status` | :232-237 | Autonomy status for all accessible agents |
+| `GET /api/agents/{name}/token-stats` | — | Per-agent cost/token stats from `schedule_executions`: lifetime, 24h, 7d, daily breakdown (7 items), trend % vs avg (#250) |
 | `GET /api/agents/slots` | :240-265 | Slot state (`max`/`active`) for all agents. Returns `BulkSlotState` model with timestamp |
 
 #### Queue Management Endpoints

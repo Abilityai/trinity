@@ -24,7 +24,7 @@
     <!-- Template Info Display -->
     <div v-else>
       <!-- Header Section -->
-      <div class="bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/30 dark:to-purple-900/30 rounded-lg p-6 border border-indigo-100 dark:border-indigo-800">
+      <div class="bg-gradient-to-r from-indigo-50 to-accent-purple-50 dark:from-indigo-900/30 dark:to-accent-purple-900/30 rounded-lg p-6 border border-indigo-100 dark:border-indigo-800">
         <div class="flex items-start justify-between">
           <div>
             <h2 class="text-2xl font-bold text-gray-900 dark:text-white">
@@ -152,15 +152,15 @@
           <div
             v-for="command in templateInfo.commands"
             :key="getItemName(command)"
-            class="flex items-start space-x-3 px-3 py-2 bg-purple-50 dark:bg-purple-900/30 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/50 cursor-pointer transition-colors"
+            class="flex items-start space-x-3 px-3 py-2 bg-accent-purple-50 dark:bg-accent-purple-900/30 rounded-lg hover:bg-accent-purple-100 dark:hover:bg-accent-purple-900/50 cursor-pointer transition-colors"
             @click="handleCommandClick(command)"
             title="Click to run this command"
           >
-            <span class="text-sm font-mono font-medium text-purple-800 dark:text-purple-300 flex-shrink-0">/{{ getItemName(command) }}</span>
-            <p v-if="getItemDescription(command)" class="text-xs text-purple-600 dark:text-purple-400 mt-0.5 flex-1">
+            <span class="text-sm font-mono font-medium text-accent-purple-800 dark:text-accent-purple-300 flex-shrink-0">/{{ getItemName(command) }}</span>
+            <p v-if="getItemDescription(command)" class="text-xs text-accent-purple-600 dark:text-accent-purple-400 mt-0.5 flex-1">
               {{ getItemDescription(command) }}
             </p>
-            <svg class="w-4 h-4 text-purple-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-4 h-4 text-accent-purple-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
             </svg>
           </div>
@@ -179,10 +179,10 @@
           <div
             v-for="server in templateInfo.mcp_servers"
             :key="getItemName(server)"
-            class="flex items-start space-x-3 px-3 py-2 bg-yellow-50 dark:bg-yellow-900/30 rounded-lg"
+            class="flex items-start space-x-3 px-3 py-2 bg-status-warning-50 dark:bg-status-warning-900/30 rounded-lg"
           >
-            <span class="text-sm font-mono font-medium text-yellow-800 dark:text-yellow-300 flex-shrink-0">{{ getItemName(server) }}</span>
-            <p v-if="getItemDescription(server)" class="text-xs text-yellow-700 dark:text-yellow-400 mt-0.5">
+            <span class="text-sm font-mono font-medium text-status-warning-800 dark:text-status-warning-300 flex-shrink-0">{{ getItemName(server) }}</span>
+            <p v-if="getItemDescription(server)" class="text-xs text-status-warning-700 dark:text-status-warning-400 mt-0.5">
               {{ getItemDescription(server) }}
             </p>
           </div>
@@ -223,7 +223,7 @@
           <span
             v-for="capability in templateInfo.capabilities"
             :key="capability"
-            class="px-3 py-1 bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-300 text-sm font-medium rounded-full"
+            class="px-3 py-1 bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300 text-sm font-medium rounded-full"
           >
             {{ formatCapability(capability) }}
           </span>
@@ -262,7 +262,7 @@
           <span
             v-for="tool in templateInfo.tools"
             :key="tool"
-            class="px-3 py-1 bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300 text-sm font-medium rounded-full"
+            class="px-3 py-1 bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300 text-sm font-medium rounded-full"
           >
             {{ tool }}
           </span>

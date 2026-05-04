@@ -682,6 +682,20 @@ async def get_agent_stats_endpoint(
     return await get_agent_stats_logic(agent_name, current_user)
 
 
+@router.get("/{agent_name}/token-stats")
+async def get_agent_token_stats(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Get token usage statistics for an agent.
+
+    Returns lifetime totals, 24h and 7d windows, a 7-day daily breakdown,
+    and a trend percentage comparing today vs the 7-day daily average.
+    Sourced entirely from the database — persists across agent restarts.
+    """
+    return db.get_agent_token_stats(agent_name)
+
+
 # ============================================================================
 # Queue Endpoints
 # ============================================================================

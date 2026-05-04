@@ -72,7 +72,7 @@
     </div>
 
     <!-- Error message -->
-    <p v-if="error" class="mt-1 text-xs text-red-500">{{ error }}</p>
+    <p v-if="error" class="mt-1 text-xs text-status-danger-500">{{ error }}</p>
   </div>
 </template>
 

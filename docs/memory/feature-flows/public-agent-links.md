@@ -1,6 +1,6 @@
 # Feature Flow: Public Agent Links (12.2)
 
-**Last Updated**: 2026-04-29
+**Last Updated**: 2026-05-03
 
 ## Overview
 
@@ -314,6 +314,8 @@ import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } 
 
 > **Note (2026-04-13)**: `PublicLinkCreate`, `PublicLinkUpdate`, `PublicLink`, and `PublicLinkWithUrl` no longer carry a `require_email` field. The owner UI sets email-required-ness via the agent-level Channel Access Policy (see [unified-channel-access-control.md](unified-channel-access-control.md)), not per-link. `PublicLinkInfo.require_email` remains but is populated from `agent_ownership.require_email`.
 
+> **Note (SITE-001, 2026-05-03)**: `PublicLinkCreate` now accepts an optional `link_type: str = "chat"` field (`"chat"` or `"site"`). `PublicLink` and `PublicLinkWithUrl` carry `link_type: str`. `_build_public_url()` and `_build_external_url()` accept `link_type` and emit `/site/{token}/` (with trailing slash) for site links instead of `/chat/{token}`.
+
 ## Database Schema
 
 ### agent_public_links
@@ -329,6 +331,7 @@ import { getStatusFromStreamEvent, MIN_LABEL_DISPLAY_MS, HEARTBEAT_TIMEOUT_MS } 
 | enabled | INTEGER | 1=active, 0=disabled |
 | name | TEXT | Optional friendly name |
 | require_email | INTEGER | **DEPRECATED (2026-04-13)** — retained for the legacy `slack_link_connections` join in `db/slack.py`; no longer read by public web chat. Source of truth is `agent_ownership.require_email`. Migration `public_link_require_email_unified` ORed any legacy `1` values into the agent-level flag. |
+| type | TEXT | `'chat'` (default) or `'site'` (SITE-001). Added by migration `public_links_type`. |
 
 ### public_link_verifications
 
@@ -464,10 +467,11 @@ PUBLIC_CHAT_URL=
 | `src/backend/db/schema.py` | Table definitions including `public_user_memory` (lines 360-371) and index (line 694) |
 | `src/backend/db/migrations.py` | Migration #28 `_migrate_public_user_memory_table`; `_migrate_public_link_require_email_unified` (2026-04-13) — ORs legacy per-link `require_email=1` into `agent_ownership.require_email=1` |
 | `src/backend/services/platform_prompt_service.py` | `format_user_memory_block()` helper (line 97) |
-| `src/backend/routers/public_links.py` | Owner CRUD endpoints (206 lines) |
-| `src/backend/routers/public_links.py:30-39` | URL builders: `_build_public_url()`, `_build_external_url()` |
+| `src/backend/routers/public_links.py` | Owner CRUD endpoints; `_build_public_url()` / `_build_external_url()` now accept `link_type` and emit `/site/{token}/` for site links |
+| `src/backend/routers/public_links.py:30-39` | URL builders: `_build_public_url(token, link_type)`, `_build_external_url(token, link_type)` |
 | `src/backend/routers/public_links.py:42-61` | `_link_to_response()` - converts DB dict to API model |
 | `src/backend/routers/public.py` | Public endpoints (764 lines, includes THINK-001 async mode, SSE proxy, status polling) |
+| `src/backend/routers/site.py` | **SITE-001**: reverse-proxy router for `type='site'` links (see section below) |
 | `src/backend/services/task_execution_service.py` | Unified task execution lifecycle (EXEC-024) |
 | `src/backend/services/email_service.py` | Email sending service |
 | `src/backend/db_models.py:301-374` | Pydantic models |
@@ -484,9 +488,10 @@ PUBLIC_CHAT_URL=
 | `src/frontend/src/views/PublicChat.vue` | Public chat page (786 lines, THINK-001 SSE streaming + shared components) |
 | `src/frontend/src/components/chat/index.js` | Shared component exports (ChatMessages, ChatInput, ChatBubble, ChatLoadingIndicator) |
 | `src/frontend/src/utils/execution-status.js` | Shared status mapping utilities (THINK-001) |
-| `src/frontend/src/components/PublicLinksPanel.vue` | Owner panel (503 lines) |
+| `src/frontend/src/components/PublicLinksPanel.vue` | Owner panel — now includes Chat/Website type selector in create modal, "Website" badge on site links |
 | `src/frontend/src/components/SharingPanel.vue` | Embeds PublicLinksPanel (lines 82-83, 92) |
 | `src/frontend/src/router/index.js:18-22` | Route definition |
+| `src/frontend/nginx.conf` | **SITE-001**: `location /site/` block added to proxy site link requests to backend |
 
 ### Tests
 
@@ -1479,6 +1484,119 @@ const scrollToBottom = () => {
 1. **Container**: `flex-1 overflow-y-auto flex flex-col` - Takes available space, allows scrolling, arranges children vertically
 2. **Spacer**: `flex-1` empty div - Expands to fill available space, pushing content down
 3. **Content**: Messages wrapper with fixed content - Stays at bottom of container
+
+---
+
+## Agent Website Proxy (SITE-001 / Issue #633)
+
+**Status**: Implemented (2026-05-03)
+
+A public link with `type='site'` reverse-proxies HTTP requests to a web server running inside the agent container on port 3000. This allows agents to serve a full website or web app through a Trinity-managed public URL, with the same token-based access control used by chat links.
+
+### Architecture
+
+```
+Browser → nginx /site/{token}/{path}
+        → backend:8000/site/{token}/{path}
+        → routers/site.py: validate token (type=site, enabled, not expired)
+        → rate limit: Redis per-IP + per-token
+        → httpx.AsyncClient.stream() → http://agent-{name}:3000/{path}
+        → StreamingResponse back to browser
+```
+
+### Entry Points
+
+- **UI**: `src/frontend/src/components/PublicLinksPanel.vue` — "Website" option in link type selector in create modal; "Website" badge rendered on site link rows
+- **nginx**: `src/frontend/nginx.conf` — `location /site/` proxy block routes requests to backend
+- **Redirect**: `GET /site/{token}` → 301 to `/site/{token}/` (trailing-slash normalisation)
+- **Proxy**: `GET /site/{token}/{path:path}` — main streaming handler
+
+### Backend Layer
+
+#### Endpoints (`src/backend/routers/site.py`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/site/{token}` | 301 redirect to `/site/{token}/` |
+| GET | `/site/{token}/{path:path}` | Validate, rate-limit, proxy to agent port 3000, stream response |
+
+#### Request Handling
+
+1. Look up `agent_public_links` row by `token` — must have `type='site'`, `enabled=1`, and not be past `expires_at`.
+2. Rate-limit check: Redis counters for per-IP and per-token request rates (429 on breach).
+3. SSRF guard: `agent_name` validated against `^[a-z0-9][a-z0-9\-]*$` before URL construction.
+4. Strip sensitive inbound headers: `Authorization`, `Cookie`, `X-Internal-Secret`.
+5. Open `httpx.AsyncClient.stream()` to `http://agent-{agent_name}:3000/{path}` forwarding method, path, query string, and sanitised headers.
+6. Strip hop-by-hop and security-overriding response headers: `Content-Security-Policy`, `X-Frame-Options`, `Server`, `X-Powered-By`, plus standard hop-by-hop headers.
+7. Return `StreamingResponse` with upstream status code and cleaned response headers.
+8. Log `site_link_visit` audit event (`AuditEventType.SITE_ACCESS`).
+
+#### Error Responses
+
+| Condition | Status | Notes |
+|-----------|--------|-------|
+| Token missing / wrong type / disabled | 401 | Constant-time `INVALID_LINK_MESSAGE` to prevent token enumeration |
+| Token expired | 410 | Separate path from disabled to give user actionable feedback |
+| Rate limit exceeded (IP or token) | 429 | |
+| Agent web server unreachable (`ConnectError`, `TimeoutException`) | 502 | Agent not running or port 3000 not open |
+| WebSocket upgrade | Not supported | httpx does not support the `Upgrade` header; proxying WebSocket connections from agent web servers is out of scope |
+
+### Database Changes
+
+#### `agent_public_links` schema
+
+A `type TEXT NOT NULL DEFAULT 'chat'` column was added by migration `public_links_type` in `src/backend/db/migrations.py`. All existing rows default to `'chat'`. Valid values: `'chat'`, `'site'`.
+
+Relevant DB-layer changes in `src/backend/db/public_links.py`:
+- `create_public_link()` accepts a `link_type` parameter passed through from the router.
+- All `SELECT` queries include the `type` column at position 8 in `_row_to_link()`.
+
+#### Pydantic Models (`src/backend/db_models.py`)
+
+| Field | Model | Description |
+|-------|-------|-------------|
+| `link_type: str = "chat"` | `PublicLinkCreate` | Accepted values: `"chat"`, `"site"` |
+| `link_type: str` | `PublicLink` | Persisted type of the link |
+| `link_type: str` | `PublicLinkWithUrl` | Surfaced to UI for badge rendering |
+
+### URL Format
+
+| Link Type | Internal URL | External URL (if `PUBLIC_CHAT_URL` set) |
+|-----------|-------------|----------------------------------------|
+| `chat` | `{FRONTEND_URL}/chat/{token}` | `{PUBLIC_CHAT_URL}/chat/{token}` |
+| `site` | `{FRONTEND_URL}/site/{token}/` | `{PUBLIC_CHAT_URL}/site/{token}/` |
+
+The trailing slash on site URLs is intentional: it ensures relative asset paths in the agent's HTML are resolved correctly under the `/site/{token}/` prefix.
+
+### Security Notes
+
+- **SSRF mitigation**: Agent name is validated against `^[a-z0-9][a-z0-9\-]*$` before interpolation into the upstream URL. Requests never escape the internal Docker network.
+- **Header stripping (inbound)**: `Authorization`, `Cookie`, `X-Internal-Secret` are removed before forwarding to prevent credential leakage into the agent web process.
+- **Header stripping (outbound)**: `Content-Security-Policy`, `X-Frame-Options`, `Server`, `X-Powered-By`, and all hop-by-hop headers are stripped from the upstream response so the agent web server cannot override Trinity-level security policies or expose internal server details.
+- **Token enumeration**: All invalid/disabled/wrong-type tokens return the same `INVALID_LINK_MESSAGE` constant with the same 401 status. Expired tokens return 410.
+- **WebSocket not supported**: The `Upgrade` / `Connection: Upgrade` flow is not proxied (httpx limitation). Document this limitation for template authors.
+- **Audit trail**: Every proxied request logs a `site_access` audit event via `PlatformAuditService`.
+
+### Audit Events
+
+| Event Type | Action | Trigger |
+|------------|--------|---------|
+| `site_access` | `site_link_visit` | Each proxied request through a site link |
+
+### Frontend Changes
+
+**`PublicLinksPanel.vue`**:
+- Create modal now shows a "Link Type" selector with two options: "Chat" (default) and "Website".
+- Existing link rows render a "Website" badge (distinct styling from the chat link display) when `link.link_type === 'site'`.
+- The selected `link_type` is passed in the `POST /api/agents/{name}/public-links` payload as `link_type`.
+
+**`src/frontend/nginx.conf`**:
+- A `location /site/` block proxies requests matching `/site/` to the backend, mirroring the existing `/api/` and `/chat/` proxy rules. This ensures the Vite dev server and production nginx both route site link traffic to the backend.
+
+### Related Flows
+
+- [public-agent-links.md](public-agent-links.md) — chat links (type='chat') share the same `agent_public_links` table and owner management UI
+- [audit-trail.md](audit-trail.md) — `SITE_ACCESS` event type added to `AuditEventType`
 
 ### Scroll Behavior
 

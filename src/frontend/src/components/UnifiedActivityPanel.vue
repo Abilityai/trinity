@@ -11,7 +11,7 @@
             <span
               :class="[
                 'w-2 h-2 rounded-full',
-                activity.status === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-gray-400 dark:bg-gray-500'
+                activity.status === 'running' ? 'bg-status-info-500 animate-pulse' : 'bg-gray-400 dark:bg-gray-500'
               ]"
             ></span>
             <span class="text-sm text-gray-600 dark:text-gray-300">
@@ -88,8 +88,8 @@
             <span
               :class="[
                 'w-2 h-2 rounded-full flex-shrink-0',
-                entry.status === 'running' ? 'bg-blue-500 animate-pulse' :
-                entry.success ? 'bg-green-500' : 'bg-red-500'
+                entry.status === 'running' ? 'bg-status-info-500 animate-pulse' :
+                entry.success ? 'bg-status-success-500' : 'bg-status-danger-500'
               ]"
             ></span>
 
@@ -146,8 +146,8 @@
             <span
               :class="[
                 'w-2 h-2 rounded-full',
-                selectedEntry.status === 'running' ? 'bg-blue-500 animate-pulse' :
-                selectedEntry.success ? 'bg-green-500' : 'bg-red-500'
+                selectedEntry.status === 'running' ? 'bg-status-info-500 animate-pulse' :
+                selectedEntry.success ? 'bg-status-success-500' : 'bg-status-danger-500'
               ]"
             ></span>
             <span class="font-medium text-gray-900 dark:text-white">{{ selectedEntry.tool }}</span>
@@ -172,7 +172,7 @@
             </span>
             <span v-if="selectedEntry.success !== null">
               Status:
-              <span :class="selectedEntry.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+              <span :class="selectedEntry.success ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'">
                 {{ selectedEntry.success ? 'Success' : 'Error' }}
               </span>
             </span>

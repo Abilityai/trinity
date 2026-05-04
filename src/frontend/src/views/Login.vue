@@ -19,7 +19,7 @@
       <!-- Error State -->
       <div v-else-if="authError" class="bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900 p-8">
         <div class="text-center">
-          <div class="text-red-500 text-5xl mb-4">⚠️</div>
+          <div class="text-status-danger-500 text-5xl mb-4">⚠️</div>
           <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-4">Access Denied</h3>
           <p class="text-gray-600 dark:text-gray-400 mb-6">{{ authError }}</p>
           <button

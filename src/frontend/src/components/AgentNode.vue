@@ -8,7 +8,7 @@
       'backdrop-blur-sm',
       // System agent gets distinct purple styling with transparency
       isSystemAgent
-        ? 'bg-purple-50/80 dark:bg-purple-900/30 border-purple-200 dark:border-purple-700/50'
+        ? 'bg-accent-purple-50/80 dark:bg-accent-purple-900/30 border-accent-purple-200 dark:border-accent-purple-700/50'
         : 'bg-white/80 dark:bg-gray-800/80 border-gray-200/60 dark:border-gray-700/50'
     ]"
     style="width: 320px; min-height: 180px;"
@@ -23,7 +23,7 @@
     <!-- Avatar on left edge (50% in, 50% out) -->
     <div class="absolute left-0 top-5 z-10 -translate-x-1/2">
       <div class="rounded-full border-2 shadow-md overflow-hidden"
-           :class="isSystemAgent ? 'border-purple-400 dark:border-purple-500' : 'border-indigo-400 dark:border-indigo-500'"
+           :class="isSystemAgent ? 'border-accent-purple-400 dark:border-accent-purple-500' : 'border-indigo-400 dark:border-indigo-500'"
       >
         <AgentAvatar :name="data.label" :avatar-url="data.avatarUrl" size="xl" />
       </div>
@@ -46,7 +46,7 @@
           <!-- System agent badge -->
           <span
             v-if="isSystemAgent"
-            class="ml-2 px-1.5 py-0.5 text-xs font-semibold rounded bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 flex-shrink-0"
+            class="ml-2 px-1.5 py-0.5 text-xs font-semibold rounded bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 flex-shrink-0"
             title="System Agent - Platform Orchestrator"
           >
             SYSTEM
@@ -206,7 +206,7 @@
       <router-link
         v-else
         to="/system-agent"
-        class="nodrag w-full px-3 py-2 bg-purple-50 dark:bg-purple-900/30 hover:bg-purple-100 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-purple-200 dark:border-purple-700 hover:border-purple-300 dark:hover:border-purple-600 mt-auto text-center block"
+        class="nodrag w-full px-3 py-2 bg-accent-purple-50 dark:bg-accent-purple-900/30 hover:bg-accent-purple-100 dark:hover:bg-accent-purple-900/50 text-accent-purple-700 dark:text-accent-purple-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-accent-purple-200 dark:border-accent-purple-700 hover:border-accent-purple-300 dark:hover:border-accent-purple-600 mt-auto text-center block"
       >
         System Dashboard
       </router-link>
@@ -280,8 +280,8 @@ const activityStateLabel = computed(() => {
 
 const activityStateColor = computed(() => {
   const state = activityState.value
-  if (state === 'active') return 'text-green-600 dark:text-green-400'
-  if (state === 'idle') return 'text-green-600 dark:text-green-400'
+  if (state === 'active') return 'text-status-success-600 dark:text-status-success-400'
+  if (state === 'idle') return 'text-status-success-600 dark:text-status-success-400'
   return 'text-gray-500 dark:text-gray-400'
 })
 
@@ -337,30 +337,30 @@ const successRate7d = computed(() => {
 
 const successBarColor = computed(() => {
   const percent = successBarPercent.value
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 })
 
 const successBarColorText = computed(() => {
   const percent = successBarPercent.value
-  if (percent >= 90) return 'text-green-600 dark:text-green-400'
-  if (percent >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (percent >= 90) return 'text-status-success-600 dark:text-status-success-400'
+  if (percent >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 })
 
 const successBarColor7d = computed(() => {
   const percent = successRate7d.value
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 })
 
 const successBarColorText7d = computed(() => {
   const percent = successRate7d.value
-  if (percent >= 90) return 'text-green-600 dark:text-green-400'
-  if (percent >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (percent >= 90) return 'text-status-success-600 dark:text-status-success-400'
+  if (percent >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 })
 
 // Execution stats
@@ -375,9 +375,9 @@ const hasExecutionStats = computed(() => {
 const successRateColorClass = computed(() => {
   if (!executionStats.value) return 'text-gray-500 dark:text-gray-400'
   const rate = executionStats.value.successRate
-  if (rate >= 80) return 'text-green-600 dark:text-green-400'
-  if (rate >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (rate >= 80) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 })
 
 const lastExecutionDisplay = computed(() => {

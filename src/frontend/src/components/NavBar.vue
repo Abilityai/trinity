@@ -47,7 +47,7 @@
               <span
                 v-if="combinedOpsCount > 0"
                 class="ml-1 inline-flex items-center justify-center px-1.5 py-0.5 text-xs font-bold leading-none text-white rounded-full"
-                :class="hasCriticalOpsItem ? 'bg-red-500 animate-pulse' : 'bg-orange-500'"
+                :class="hasCriticalOpsItem ? 'bg-status-danger-500 animate-pulse' : 'bg-status-urgent-500'"
               >
                 {{ combinedOpsCount > 99 ? '99+' : combinedOpsCount }}
               </span>
@@ -74,7 +74,7 @@
         <div class="flex items-center space-x-4">
           <!-- WebSocket Status -->
           <span class="text-sm text-gray-500 dark:text-gray-400">
-            <span class="inline-block h-2 w-2 rounded-full mr-1" :class="isConnected ? 'bg-green-400' : 'bg-gray-400 dark:bg-gray-600'"></span>
+            <span class="inline-block h-2 w-2 rounded-full mr-1" :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"></span>
             {{ isConnected ? 'Connected' : 'Disconnected' }}
           </span>
 

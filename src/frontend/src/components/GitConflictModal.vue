@@ -9,8 +9,8 @@
         <div class="px-4 pt-5 pb-4 sm:p-6">
           <!-- Header with icon -->
           <div class="flex items-start">
-            <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30">
-              <svg class="h-6 w-6 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-status-warning-100 dark:bg-status-warning-900/30">
+              <svg class="h-6 w-6 text-status-warning-600 dark:text-status-warning-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
@@ -54,16 +54,16 @@
 
             <button
               @click="$emit('resolve', 'force_reset')"
-              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-red-500 dark:hover:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors group"
+              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-status-danger-500 dark:hover:border-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 transition-colors group"
             >
-              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 group-hover:bg-red-200 dark:group-hover:bg-red-900/50">
+              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-600 dark:text-status-danger-400 group-hover:bg-status-danger-200 dark:group-hover:bg-status-danger-900/50">
                 <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                 </svg>
               </div>
               <div class="ml-4 text-left">
                 <p class="text-sm font-medium text-gray-900 dark:text-white">Force Replace Local</p>
-                <p class="text-xs text-red-600 dark:text-red-400 mt-0.5">Discard all local changes and reset to remote (destructive!)</p>
+                <p class="text-xs text-status-danger-600 dark:text-status-danger-400 mt-0.5">Discard all local changes and reset to remote (destructive!)</p>
               </div>
             </button>
           </div>
@@ -87,16 +87,16 @@
 
             <button
               @click="$emit('resolve', 'force_push')"
-              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-red-500 dark:hover:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors group"
+              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-status-danger-500 dark:hover:border-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 transition-colors group"
             >
-              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 group-hover:bg-red-200 dark:group-hover:bg-red-900/50">
+              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-600 dark:text-status-danger-400 group-hover:bg-status-danger-200 dark:group-hover:bg-status-danger-900/50">
                 <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
                 </svg>
               </div>
               <div class="ml-4 text-left">
                 <p class="text-sm font-medium text-gray-900 dark:text-white">Force Push</p>
-                <p class="text-xs text-red-600 dark:text-red-400 mt-0.5">Overwrite remote with your local changes (destructive!)</p>
+                <p class="text-xs text-status-danger-600 dark:text-status-danger-400 mt-0.5">Overwrite remote with your local changes (destructive!)</p>
               </div>
             </button>
           </div>
@@ -124,8 +124,8 @@
       <div class="inline-block align-middle bg-white dark:bg-gray-800 rounded-lg text-left shadow-xl transform transition-all sm:max-w-lg sm:w-full">
         <div class="px-4 pt-5 pb-4 sm:p-6">
           <div class="flex items-start">
-            <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 dark:bg-yellow-900/30">
-              <svg class="h-6 w-6 text-yellow-600 dark:text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div class="flex-shrink-0 flex items-center justify-center h-10 w-10 rounded-full bg-status-warning-100 dark:bg-status-warning-900/30">
+              <svg class="h-6 w-6 text-status-warning-600 dark:text-status-warning-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
@@ -164,16 +164,16 @@
 
             <button
               @click="$emit('resolve', 'force_push')"
-              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-red-500 dark:hover:border-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors group"
+              class="w-full flex items-start p-4 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-status-danger-500 dark:hover:border-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 transition-colors group"
             >
-              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 group-hover:bg-red-200 dark:group-hover:bg-red-900/50">
+              <div class="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-600 dark:text-status-danger-400 group-hover:bg-status-danger-200 dark:group-hover:bg-status-danger-900/50">
                 <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
                 </svg>
               </div>
               <div class="ml-4 text-left">
                 <p class="text-sm font-medium text-gray-900 dark:text-white">Force push anyway</p>
-                <p class="text-xs text-red-600 dark:text-red-400 mt-0.5">
+                <p class="text-xs text-status-danger-600 dark:text-status-danger-400 mt-0.5">
                   Overwrites the remote working branch with your local history. Does NOT bring in
                   {{ pullBranchLabel }}'s commits. Destructive.
                 </p>

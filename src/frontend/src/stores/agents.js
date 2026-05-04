@@ -328,6 +328,14 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    async getAgentTokenStats(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/token-stats`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     async getAgentInfo(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/info`, {

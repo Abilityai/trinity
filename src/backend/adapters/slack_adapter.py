@@ -112,13 +112,17 @@ class SlackAdapter(ChannelAdapter):
         return None
 
     def format_response(self, text: str) -> str:
-        """Convert standard markdown to Slack mrkdwn format."""
+        """Convert standard markdown to Slack mrkdwn format.
+
+        Uses our own renderer (#293) — the third-party slackify-markdown
+        library dropped nested-list indent, swallowed blank lines before
+        headings, prefixed only the first blockquote line, and passed
+        tables through unchanged. See `services.slack_mrkdwn` for the
+        replacement and `tests/unit/test_slack_mrkdwn.py` for coverage.
+        """
         try:
-            from slackify_markdown.slackify import SlackifyMarkdown
-            return SlackifyMarkdown(text).slackify()
-        except ImportError:
-            logger.warning("slackify-markdown not installed, sending plain text")
-            return text
+            from services.slack_mrkdwn import to_slack_mrkdwn
+            return to_slack_mrkdwn(text)
         except Exception as e:
             logger.warning(f"Slack markdown conversion failed, sending plain text: {e}")
             return text

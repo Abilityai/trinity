@@ -29,13 +29,19 @@ from services.template_service import (
     generate_credential_files,
 )
 from services import git_service
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role
+from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources
 from services.github_service import GitHubService, GitHubError
 from utils.helpers import sanitize_agent_name, utc_now_iso
 from .helpers import validate_base_image
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 
 logger = logging.getLogger(__name__)
+
+
+def _get_default_resource(key: str) -> str:
+    """Return system-default cpu or memory, falling back to hardcoded safe value."""
+    defaults = get_agent_default_resources()
+    return defaults.get(key, "2" if key == "cpu" else "4g")
 
 
 def get_platform_version() -> str:
@@ -611,8 +617,8 @@ async def create_agent_internal(
                 # Always apply noexec,nosuid to /tmp for security
                 tmpfs={'/tmp': 'noexec,nosuid,size=100m'},
                 network='trinity-agent-network',
-                mem_limit=config.resources.get('memory', '4Gi'),
-                cpu_count=int(config.resources.get('cpu', '2'))
+                mem_limit=config.resources.get('memory') or _get_default_resource('memory'),
+                cpu_count=int(config.resources.get('cpu') or _get_default_resource('cpu'))
             )
 
             agent_status = get_agent_status_from_container(container)

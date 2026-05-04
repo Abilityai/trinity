@@ -9,12 +9,12 @@
     </div>
 
     <!-- Agent Not Running -->
-    <div v-if="agentStatus !== 'running'" class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-6 text-center">
-      <svg class="mx-auto h-10 w-10 text-amber-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <div v-if="agentStatus !== 'running'" class="bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800 rounded-lg p-6 text-center">
+      <svg class="mx-auto h-10 w-10 text-state-autonomous-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
       </svg>
-      <p class="text-amber-800 dark:text-amber-300 font-medium">Agent Not Running</p>
-      <p class="text-sm text-amber-700 dark:text-amber-400 mt-1">Start the agent to view and run playbooks.</p>
+      <p class="text-state-autonomous-800 dark:text-state-autonomous-300 font-medium">Agent Not Running</p>
+      <p class="text-sm text-state-autonomous-700 dark:text-state-autonomous-400 mt-1">Start the agent to view and run playbooks.</p>
     </div>
 
     <!-- Loading State -->
@@ -23,17 +23,17 @@
     </div>
 
     <!-- Error State -->
-    <div v-else-if="error" class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+    <div v-else-if="error" class="bg-status-danger-50 dark:bg-status-danger-900/20 border border-status-danger-200 dark:border-status-danger-800 rounded-lg p-4">
       <div class="flex">
-        <svg class="h-5 w-5 text-red-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+        <svg class="h-5 w-5 text-status-danger-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
           <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
         </svg>
         <div class="ml-3">
-          <h3 class="text-sm font-medium text-red-800 dark:text-red-300">Failed to load playbooks</h3>
-          <p class="mt-1 text-sm text-red-700 dark:text-red-400">{{ error }}</p>
+          <h3 class="text-sm font-medium text-status-danger-800 dark:text-status-danger-300">Failed to load playbooks</h3>
+          <p class="mt-1 text-sm text-status-danger-700 dark:text-status-danger-400">{{ error }}</p>
           <button
             @click="loadPlaybooks"
-            class="mt-2 text-sm text-red-600 dark:text-red-400 hover:text-red-500 underline"
+            class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-500 underline"
           >
             Try again
           </button>
@@ -71,8 +71,8 @@
               v-if="skill.automation"
               :class="[
                 'px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider',
-                skill.automation === 'autonomous' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' :
-                skill.automation === 'gated' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300' :
+                skill.automation === 'autonomous' ? 'bg-state-autonomous-100 dark:bg-state-autonomous-900/30 text-state-autonomous-700 dark:text-state-autonomous-300' :
+                skill.automation === 'gated' ? 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300' :
                 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
               ]"
             >
@@ -99,7 +99,7 @@
             <button
               @click="runSkill(skill)"
               :disabled="!skill.user_invocable || running === skill.name"
-              class="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+              class="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-status-success-600 hover:bg-status-success-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-status-success-500 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
             >
               <svg v-if="running === skill.name" class="animate-spin -ml-0.5 mr-1.5 h-3 w-3" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -156,10 +156,10 @@
     </template>
 
     <!-- Toast Notifications -->
-    <div v-if="successMessage" class="fixed bottom-4 right-4 z-50 bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg shadow-lg">
+    <div v-if="successMessage" class="fixed bottom-4 right-4 z-50 bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300 px-4 py-3 rounded-lg shadow-lg">
       {{ successMessage }}
     </div>
-    <div v-if="errorMessage" class="fixed bottom-4 right-4 z-50 bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded-lg shadow-lg">
+    <div v-if="errorMessage" class="fixed bottom-4 right-4 z-50 bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded-lg shadow-lg">
       {{ errorMessage }}
     </div>
   </div>

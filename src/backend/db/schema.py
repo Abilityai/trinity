@@ -398,6 +398,7 @@ TABLES = {
             enabled INTEGER DEFAULT 1,
             name TEXT,
             require_email INTEGER DEFAULT 0,
+            type TEXT NOT NULL DEFAULT 'chat',
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE,
             FOREIGN KEY (created_by) REFERENCES users(id)
         )

@@ -6,6 +6,8 @@ The main Dashboard at `/` provides a real-time agent network graph and timeline 
 
 ### Graph View (default)
 
+![Trinity Dashboard — Graph view showing 13 agents as a live network](../images/dashboard-graph-view.png)
+
 1. Shows all agents as draggable nodes in a network graph (Vue Flow).
 2. Node colors indicate status: running (green), stopped (gray).
 3. Animated edges appear when agents communicate (3-second animation).
@@ -13,17 +15,20 @@ The main Dashboard at `/` provides a real-time agent network graph and timeline 
 5. Drag nodes to rearrange -- positions persist in localStorage.
 6. Host telemetry (CPU/memory/disk) is displayed in the header.
 7. Capacity meter shows parallel execution slot usage.
+8. Tag clouds group agents visually — click a cloud to filter to that group.
 
 ### Timeline View
 
-1. Toggle between Graph and Timeline via the mode switch.
+![Trinity Dashboard — Timeline view showing scheduled executions across all agents](../images/dashboard-timeline-view.png)
+
+1. Toggle between Graph and Timeline via the mode switch in the top-right.
 2. Timeline shows execution boxes per agent, arranged chronologically.
-3. Color-coded by trigger type: manual (blue), schedule (purple), MCP (orange), chat (green).
-4. Collaboration arrows connect related executions between agents.
-5. Live streaming: running executions show progress in real-time.
+3. Color-coded by trigger type: Manual (green), MCP (teal), Scheduled (purple), Agent-Triggered (blue), Paid (yellow), Public (white).
+4. Each row shows the agent's success rate, total cost, and parallel slot count.
+5. Live streaming: running executions show progress in real-time with a "Live" indicator.
 6. Time range filter: 1h, 6h, 24h, 7d, or custom.
-7. Quick tag filters for focusing on specific agent groups.
-8. Filter persistence: time range and tag selections persist across sessions.
+7. **Active only** toggle hides agents with no recent activity.
+8. **Jump to Now** snaps the view to the current time.
 
 ### Tag Clouds
 

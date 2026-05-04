@@ -345,6 +345,28 @@ def get_skills_library_branch() -> str:
     return settings_service.get_setting('skills_library_branch', 'main')
 
 
+# ============================================================================
+# Agent Default Resources (RES-001)
+# ============================================================================
+
+AGENT_DEFAULT_CPU_KEY = "agent_default_cpu"
+AGENT_DEFAULT_MEMORY_KEY = "agent_default_memory"
+AGENT_DEFAULT_CPU = "2"
+AGENT_DEFAULT_MEMORY = "4g"
+
+
+def get_agent_default_resources() -> dict:
+    """
+    Get system-wide default CPU and memory for new agent containers.
+
+    Returns dict with 'cpu' (number of processors, string) and 'memory' (e.g. '4g').
+    These are used as fallback when no per-agent resource limits are configured.
+    """
+    cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
+    memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
+    return {"cpu": cpu or AGENT_DEFAULT_CPU, "memory": memory or AGENT_DEFAULT_MEMORY}
+
+
 # GitHub Templates (TMPL-001)
 def get_github_templates() -> Optional[List[dict]]:
     """Get admin-configured GitHub templates, or None for defaults."""

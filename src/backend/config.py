@@ -44,6 +44,9 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "")  # Set in .env or docker-compose fo
 # When set, enables "Copy External Link" button in PublicLinksPanel
 PUBLIC_CHAT_URL = os.getenv("PUBLIC_CHAT_URL", "")
 
+# Fixed convention: agent web servers listen on this port (SITE-001)
+SITE_PORT = 3000
+
 # Email Service Configuration (for public link verification)
 EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "resend")  # "console", "smtp", "sendgrid", "resend"
 SMTP_HOST = os.getenv("SMTP_HOST", "")

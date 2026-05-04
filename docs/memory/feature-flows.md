@@ -11,7 +11,10 @@
 
 | Date | ID | Feature | Flow |
 |------|-----|---------|------|
-| 2026-05-01 | SESSION_TAB_2026-04 | Session tab — `--resume`-default chat surface. New `agent_sessions`/`agent_session_messages` tables, six `/api/agents/{name}/sessions*` endpoints, `SessionPanel.vue` + `stores/sessions.js`, parser fix + `persist_session` plumbed through agent stack, resume-failure fallback, Redis lock per `(agent, claude_uuid)`, JSONL cleanup service. Default off (`session_tab_enabled` flag) until Phase 5 rollout. | [session-tab.md](feature-flows/session-tab.md) |
+| 2026-05-03 | SITE-001 (#633) | Agent website proxy — `type='site'` public links reverse-proxy to agent port 3000 via `routers/site.py`; nginx `/site/` block; per-IP + per-token rate limit; SSRF guard; header stripping; `site_access` audit event | [public-agent-links.md](feature-flows/public-agent-links.md) |
+| 2026-05-03 | #250 | Token usage display — per-agent cost/token stats (24h, 7d, lifetime) from `schedule_executions` DB, shown in AgentHeader as amber sparkline + today's cost + trend vs 7-day average | [token-usage-display.md](feature-flows/token-usage-display.md) |
+| 2026-05-01 | SESSION_TAB_2026-04 | Session tab — `--resume`-default chat surface. New `agent_sessions`/`agent_session_messages` tables, six `/api/agents/{name}/sessions*` endpoints, `SessionPanel.vue` + `stores/sessions.js`, parser fix + `persist_session` plumbed through agent stack, resume-failure fallback, Redis lock per `(agent, claude_uuid)`, JSONL cleanup service, JSONL fallback recovery for stdout pipe race, JSONL-side compact event capture, validator canonical-trinity allowance. Default off (`session_tab_enabled` flag) until Phase 5 rollout. | [session-tab.md](feature-flows/session-tab.md) |
+| 2026-05-01 | #293 | fix(slack): replace `slackify-markdown 0.2.2` with own `services.slack_mrkdwn` renderer — fixes 5 layout bugs that produced "ugly" output: nested-list flattening, headings crammed against preceding content, blockquote `>` only on first line, raw-pipe table passthrough, dropped `---` rules. 35 unit tests + 13 ported. | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-04-29 | #584 | feat(slack): UI + API to change Slack DM-default agent — `set_slack_dm_default()` DB method (single-tx clear-then-set), `PUT /api/agents/{name}/slack/channel/dm-default` (owner-only, audit-logged), "Make default" button + tooltip in `SlackChannelPanel.vue`, unbind refuses 409 when target is DM default with siblings remaining | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-04-30 | #598 | sec: AISEC-C2 Layer 2 — restored `.mcp.json` post-deploy editing via structure validation (`services.mcp_validator`). Closed schema, command/transport allowlists, SSRF guard for http/sse, reserved env-ref blocklist, literal-secret detection. 88 unit tests + 22 integration tests. UI placeholder updated; `trinity` server name reserved. | [credential-injection.md](feature-flows/credential-injection.md) |
 | 2026-04-30 | #590 | sec: AISEC-C2 Layer 1 — backend `ALLOWED_CREDENTIAL_PATHS` tightened; backend `update_agent_file_logic` adds defense-in-depth deny check before proxy; agent-server `EDIT_PROTECTED_PATHS` adds `.mcp.json` and `.credentials.enc`. | [credential-injection.md](feature-flows/credential-injection.md), [file-browser.md](feature-flows/file-browser.md) |
@@ -175,6 +178,7 @@
 | Agent Logs & Telemetry | [agent-logs-telemetry.md](feature-flows/agent-logs-telemetry.md) | Live metrics in AgentHeader |
 | Agent Dashboard | [agent-dashboard.md](feature-flows/agent-dashboard.md) | Agent-defined dashboard via dashboard.yaml |
 | Dynamic Dashboards | [dynamic-dashboards.md](feature-flows/dynamic-dashboards.md) | Historical widget values with sparklines (DASH-001) |
+| Token Usage Display | [token-usage-display.md](feature-flows/token-usage-display.md) | Per-agent cost/token stats from DB in AgentHeader: sparkline, today vs 7-day avg trend (#250) |
 
 ### Agent Detail UI
 
@@ -220,7 +224,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
-| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links with optional email verification |
+| Public Agent Links | [public-agent-links.md](feature-flows/public-agent-links.md) | Shareable public links: chat (type='chat') and website proxy (type='site', SITE-001) |
 | Slack Integration | [slack-integration.md](feature-flows/slack-integration.md) | Slack as delivery channel for public links (SLACK-001) |
 | Slack Channel Routing | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) | Channel adapter abstraction + multi-agent Slack routing (SLACK-002) |
 | Slack File Sharing | [slack-file-sharing.md](feature-flows/slack-file-sharing.md) | Inbound file uploads: images via vision, text via container (SLACK-FILES) |
@@ -284,7 +288,7 @@
 | Autonomy Mode | [autonomy-mode.md](feature-flows/autonomy-mode.md) | Agent autonomous operation toggle |
 | AutonomyToggle Component | [autonomy-toggle-component.md](feature-flows/autonomy-toggle-component.md) | Reusable Vue toggle component |
 | Read-Only Mode | [read-only-mode.md](feature-flows/read-only-mode.md) | Code protection via hooks (CFG-007) |
-| Agent Resource Allocation | [agent-resource-allocation.md](feature-flows/agent-resource-allocation.md) | Per-agent memory/CPU limits |
+| Agent Resource Allocation | [agent-resource-allocation.md](feature-flows/agent-resource-allocation.md) | Per-agent memory/CPU limits + system-wide admin defaults (RES-001) |
 | Container Capabilities | [container-capabilities.md](feature-flows/container-capabilities.md) | Full capabilities mode |
 | Model Selection | [model-selection.md](feature-flows/model-selection.md) | LLM model selection for terminal, tasks, and schedules |
 | Agent Quotas | [agent-quotas.md](feature-flows/agent-quotas.md) | Per-role agent creation limits (QUOTA-001) |

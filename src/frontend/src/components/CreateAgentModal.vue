@@ -35,9 +35,9 @@
                 </div>
 
                 <!-- Error state -->
-                <div v-else-if="templatesError" class="mt-2 p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
-                  <p class="text-sm text-red-600 dark:text-red-400">{{ templatesError }}</p>
-                  <button @click="fetchTemplates" type="button" class="mt-1 text-sm text-red-700 dark:text-red-300 underline">
+                <div v-else-if="templatesError" class="mt-2 p-3 bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800 rounded-lg">
+                  <p class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ templatesError }}</p>
+                  <button @click="fetchTemplates" type="button" class="mt-1 text-sm text-status-danger-700 dark:text-status-danger-300 underline">
                     Try again
                   </button>
                 </div>
@@ -187,7 +187,7 @@
               </div>
             </div>
 
-            <div v-if="error" class="mt-4 text-red-600 dark:text-red-400 text-sm">
+            <div v-if="error" class="mt-4 text-status-danger-600 dark:text-status-danger-400 text-sm">
               {{ error }}
             </div>
           </div>

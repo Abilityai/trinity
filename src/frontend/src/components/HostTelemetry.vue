@@ -72,10 +72,10 @@ function formatMemory(usedGb, totalGb) {
 
 function getColorClass(percent) {
   if (percent === null || percent === undefined) return 'text-gray-400'
-  if (percent < 50) return 'text-green-500 dark:text-green-400'
-  if (percent < 75) return 'text-yellow-500 dark:text-yellow-400'
-  if (percent < 90) return 'text-orange-500 dark:text-orange-400'
-  return 'text-red-500 dark:text-red-400'
+  if (percent < 50) return 'text-status-success-500 dark:text-status-success-400'
+  if (percent < 75) return 'text-status-warning-500 dark:text-status-warning-400'
+  if (percent < 90) return 'text-status-urgent-500 dark:text-status-urgent-400'
+  return 'text-status-danger-500 dark:text-status-danger-400'
 }
 
 onMounted(async () => {
@@ -110,7 +110,7 @@ onUnmounted(() => {
 
       <!-- Memory -->
       <span class="stat-item">
-        <span class="dot bg-purple-500"></span>
+        <span class="dot bg-accent-purple-500"></span>
         <span class="stat-label">Mem</span>
         <SparklineChart
           :data="memHistory"
@@ -126,13 +126,13 @@ onUnmounted(() => {
 
       <!-- Disk -->
       <span class="stat-item">
-        <span class="dot bg-green-500"></span>
+        <span class="dot bg-status-success-500"></span>
         <span class="stat-label">Disk</span>
         <span class="disk-bar">
           <span
             class="disk-fill"
             :style="{ width: `${hostStats?.disk?.percent || 0}%` }"
-            :class="hostStats?.disk?.percent > 90 ? 'bg-red-500' : hostStats?.disk?.percent > 75 ? 'bg-orange-500' : 'bg-green-500'"
+            :class="hostStats?.disk?.percent > 90 ? 'bg-status-danger-500' : hostStats?.disk?.percent > 75 ? 'bg-status-urgent-500' : 'bg-status-success-500'"
           ></span>
         </span>
         <span class="stat-value" :class="getColorClass(hostStats?.disk?.percent)">{{ formatPercent(hostStats?.disk?.percent) }}%</span>

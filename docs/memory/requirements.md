@@ -746,6 +746,25 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Database Tables**: `public_user_memory`
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
+### 15.1a-3 Agent Website Proxy (SITE-001)
+- **Status**: ✅ Implemented (2026-05-03)
+- **Requirement ID**: SITE-001
+- **GitHub Issue**: #633
+- **Priority**: P2
+- **Description**: Expose an agent's internal web server (e.g., a Next.js or React app running on port 3000) publicly via a `site`-type public link at `/site/{token}/{path}`. All HTTP methods, query strings, and bodies are reverse-proxied; responses are streamed.
+- **Key Features**:
+  - `site`-type public link token validated by the existing `agent_public_links` table
+  - Dual-bucket rate limiting (120 req/min per IP, 300 req/min per token)
+  - SSRF defense: agent name validated; upstream always resolves to `http://agent-{name}:3000`
+  - Sensitive request headers stripped (`authorization`, `cookie`, `x-internal-secret`)
+  - Hop-by-hop and server-banner response headers stripped
+  - Audit event `SITE_ACCESS / site_link_visit` on every proxied request (fire-and-forget)
+  - 401 invalid token, 410 expired, 429 rate limit, 502 agent unreachable
+- **API Endpoints**:
+  - `GET /site/{token}` — redirect to `/site/{token}/`
+  - `GET/POST/… /site/{token}/{path}` — proxy to agent port 3000
+- **Flow**: `docs/memory/feature-flows/public-agent-links.md`
+
 ### 15.1b Slack Integration for Public Links (SLACK-001)
 - **Status**: ✅ Implemented (2026-02-25)
 - **Requirement ID**: SLACK-001
@@ -1048,8 +1067,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 ## 16. Advanced Features
 
 ### 16.1 Agent Resource Allocation
-- **Status**: ✅ Implemented (2026-01-02)
-- **Description**: Per-agent memory and CPU configuration
+- **Status**: ✅ Implemented (2026-01-02; RES-001 system defaults 2026-04-30)
+- **Description**: Per-agent memory and CPU configuration; system-wide admin defaults as fleet-level ceiling
+- **Key Features**: 3-tier fallback (per-agent DB override → system default → hardcoded safe value); admin `GET/PUT /api/settings/agent-defaults/resources`; CPU as whole processors (1/2/4/8/16); memory as Docker-native strings (1g–32g)
 - **Flow**: `docs/memory/feature-flows/agent-resource-allocation.md`
 
 ### 16.1a Read-Only Mode

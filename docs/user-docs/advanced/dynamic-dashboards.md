@@ -13,12 +13,15 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 
 ## How It Works
 
+![Agent Dashboard tab showing a knowledge base overview with live metrics and trend indicators](../images/dynamic-dashboard-example.png)
+
 1. The agent writes a `dashboard.yaml` file to its workspace.
 2. The file defines widgets with `type`, `title`, `value`, and optional configuration fields.
-3. Open the agent detail page and select the Dashboard tab to see the widgets.
+3. Open the agent detail page and select the **Dashboard** tab to see the widgets.
 4. Auto-refresh updates values as the agent modifies the YAML file.
-5. Historical values are tracked automatically -- sparklines appear for metrics with enough data points.
-6. A Platform Metrics section appears at the bottom of every dashboard. This section is auto-injected and not controlled by the YAML file.
+5. Historical values are tracked automatically — sparklines appear for metrics with enough data points.
+6. Trend indicators (↑/↓) show percentage change from previous values.
+7. A Platform Metrics section appears at the bottom of every dashboard. This section is auto-injected and not controlled by the YAML file.
 
 ## For Agents
 

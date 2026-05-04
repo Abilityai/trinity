@@ -93,7 +93,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
         </svg>
         <span class="max-w-[120px] truncate">{{ f.name }}</span>
-        <button type="button" @click="removeFile(idx)" class="ml-0.5 hover:text-red-500 transition-colors" title="Remove">
+        <button type="button" @click="removeFile(idx)" class="ml-0.5 hover:text-status-danger-500 transition-colors" title="Remove">
           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
           </svg>
@@ -171,7 +171,7 @@
         :disabled="disabled || voiceActive"
         class="p-2 rounded-lg transition-colors shrink-0"
         :class="voiceActive
-          ? 'bg-red-500 hover:bg-red-600 text-white'
+          ? 'bg-status-danger-500 hover:bg-status-danger-600 text-white'
           : 'bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/30 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-50'"
         :title="voiceActive ? 'Voice session active' : 'Start voice conversation'"
       >

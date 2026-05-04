@@ -12,13 +12,13 @@
         <div v-if="notification"
           :class="[
             'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
-            notification.type === 'success' ? 'bg-green-100 dark:bg-green-900/50 border border-green-400 dark:border-green-700 text-green-700 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300'
+            notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
           {{ notification.message }}
         </div>
 
-        <div v-if="error && !agent" class="bg-red-100 dark:bg-red-900/50 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded mb-4">
+        <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
           {{ error }}
         </div>
 
@@ -47,6 +47,7 @@
             :git-behind="gitBehind"
             :tags="agentTags"
             :all-tags="allTags"
+            :token-stats="tokenStats"
             @toggle="toggleRunning"
             @delete="deleteAgent"
             @toggle-autonomy="toggleAutonomy"
@@ -82,7 +83,7 @@
                   ]"
                 >
                   {{ tab.label }}
-                  <span v-if="tab.badge" class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 rounded-full leading-none">
+                  <span v-if="tab.badge" class="ml-1.5 px-1.5 py-0.5 text-[10px] font-semibold bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300 rounded-full leading-none">
                     {{ tab.badge }}
                   </span>
                 </button>
@@ -323,6 +324,9 @@ const allTags = ref([])
 const authStatus = ref(null)
 const availableSubscriptions = ref(null)
 const subscriptionChanging = ref(false)
+
+// Token usage stats (issue #250) — DB-sourced, persists across restarts
+const tokenStats = ref(null)
 
 // Resume mode state (EXEC-023)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
@@ -842,6 +846,16 @@ async function loadAvailableSubscriptions() {
   }
 }
 
+async function loadTokenStats() {
+  if (!agent.value?.name) return
+  try {
+    tokenStats.value = await agentsStore.getAgentTokenStats(agent.value.name)
+  } catch (err) {
+    // Non-critical — don't block render
+    tokenStats.value = null
+  }
+}
+
 async function changeSubscription(subscriptionName) {
   if (!agent.value?.name) return
   subscriptionChanging.value = true
@@ -876,6 +890,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     agentTags.value = []
     // Reset auth status for new agent
     authStatus.value = null
+    tokenStats.value = null
     // DEPRECATED: Terminal tab hidden (candidate for removal)
     // if (terminalRef.value?.disconnect) {
     //   terminalRef.value.disconnect()
@@ -887,6 +902,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     await loadResourceLimits()
     await loadTags()
     await loadAuthStatus()
+    await loadTokenStats()
     // Load avatar identity for new agent (AVATAR-001)
     await loadAvatarIdentity()
     // Check if new agent has dashboard (only when running)
@@ -975,6 +991,7 @@ onMounted(async () => {
     loadAuthStatus(),
     loadAvailableSubscriptions(),
     sessionsStore.loadFeatureFlags(),  // SESSION_TAB_2026-04 Phase 3
+    loadTokenStats(),
     ...(agent.value?.status === 'running' ? [checkDashboardExists()] : [])
   ])
   startEmotionCycling()

@@ -44,13 +44,16 @@ class PublicLinkOperations:
         agent_name: str,
         created_by: str,
         name: Optional[str] = None,
-        expires_at: Optional[str] = None
+        expires_at: Optional[str] = None,
+        link_type: str = "chat",
     ) -> dict:
         """Create a new public link for an agent.
 
         Email verification is agent-level (agent_ownership.require_email).
         The legacy `require_email` column on agent_public_links is left at
         its DEFAULT (0) and read by the Slack legacy connection join only.
+
+        link_type: 'chat' (default) or 'site' (live web-server proxy, SITE-001)
         """
         link_id = secrets.token_urlsafe(16)
         token = secrets.token_urlsafe(24)
@@ -60,9 +63,9 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO agent_public_links
-                (id, agent_name, token, created_by, created_at, expires_at, enabled, name)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-            """, (link_id, agent_name, token, created_by, now, expires_at, name))
+                (id, agent_name, token, created_by, created_at, expires_at, enabled, name, type)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """, (link_id, agent_name, token, created_by, now, expires_at, name, link_type))
             conn.commit()
 
         return self.get_public_link(link_id)
@@ -73,7 +76,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE id = ?
             """, (link_id,))
@@ -90,7 +93,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE token = ?
             """, (token,))
@@ -107,7 +110,7 @@ class PublicLinkOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, agent_name, token, created_by, created_at, expires_at,
-                       enabled, name
+                       enabled, name, type
                 FROM agent_public_links
                 WHERE agent_name = ?
                 ORDER BY created_at DESC
@@ -594,4 +597,5 @@ class PublicLinkOperations:
             "expires_at": row[5],
             "enabled": bool(row[6]),
             "name": row[7],
+            "type": row[8] if len(row) > 8 else "chat",
         }

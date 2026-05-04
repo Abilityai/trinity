@@ -476,3 +476,9 @@ class SharedFilesList(BaseModel):
     files: List[SharedFileInfo]
     total_bytes: int
     quota_bytes: int
+
+
+class AgentDefaultResourcesUpdate(BaseModel):
+    """Body for PUT /api/settings/agent-defaults/resources (RES-001)."""
+    cpu: Optional[str] = None
+    memory: Optional[str] = None

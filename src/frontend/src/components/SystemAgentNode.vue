@@ -1,13 +1,13 @@
 <template>
   <div
-    class="px-5 py-4 rounded-xl border-2 shadow-lg bg-gradient-to-br from-white to-purple-50/50 dark:from-gray-800 dark:to-purple-900/20 border-purple-300 dark:border-purple-600/50 relative flex flex-col"
+    class="px-5 py-4 rounded-xl border-2 shadow-lg bg-gradient-to-br from-white to-accent-purple-50/50 dark:from-gray-800 dark:to-accent-purple-900/20 border-accent-purple-300 dark:border-accent-purple-600/50 relative flex flex-col"
     style="width: 400px; min-height: 130px;"
   >
     <!-- Connection handles -->
     <Handle
       type="target"
       :position="Position.Top"
-      class="!w-3 !h-3 !border-2 !bg-purple-400 !border-white dark:!border-gray-800"
+      class="!w-3 !h-3 !border-2 !bg-accent-purple-400 !border-white dark:!border-gray-800"
     />
 
     <!-- Content -->
@@ -16,14 +16,14 @@
       <div class="flex items-center justify-between mb-3">
         <div class="flex items-center space-x-3">
           <!-- Trinity icon -->
-          <div class="w-9 h-9 rounded-lg bg-purple-500 dark:bg-purple-600 flex items-center justify-center shadow">
+          <div class="w-9 h-9 rounded-lg bg-accent-purple-500 dark:bg-accent-purple-600 flex items-center justify-center shadow">
             <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
             </svg>
           </div>
           <div>
             <div class="text-base font-semibold text-gray-800 dark:text-gray-100">Trinity System Agent</div>
-            <div class="text-xs text-purple-500 dark:text-purple-400">Platform Orchestrator</div>
+            <div class="text-xs text-accent-purple-500 dark:text-accent-purple-400">Platform Orchestrator</div>
           </div>
         </div>
 
@@ -33,7 +33,7 @@
             :class="[
               'px-2 py-0.5 text-xs font-medium rounded-full',
               isRunning
-                ? 'bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400'
+                ? 'bg-status-success-100 text-status-success-600 dark:bg-status-success-900/40 dark:text-status-success-400'
                 : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
             ]"
           >
@@ -42,7 +42,7 @@
           <div
             :class="[
               'w-2 h-2 rounded-full',
-              isRunning ? 'bg-green-500 active-pulse' : 'bg-gray-400'
+              isRunning ? 'bg-status-success-500 active-pulse' : 'bg-gray-400'
             ]"
           ></div>
         </div>
@@ -77,7 +77,7 @@
       <!-- Action button -->
       <router-link
         to="/system-agent"
-        class="nodrag w-full px-3 py-2 bg-purple-50 dark:bg-purple-900/30 hover:bg-purple-100 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-purple-200 dark:border-purple-700 hover:border-purple-300 dark:hover:border-purple-600 text-center block"
+        class="nodrag w-full px-3 py-2 bg-accent-purple-50 dark:bg-accent-purple-900/30 hover:bg-accent-purple-100 dark:hover:bg-accent-purple-900/50 text-accent-purple-700 dark:text-accent-purple-300 rounded-lg text-xs font-semibold transition-all duration-200 border border-accent-purple-200 dark:border-accent-purple-700 hover:border-accent-purple-300 dark:hover:border-accent-purple-600 text-center block"
       >
         System Dashboard
       </router-link>
@@ -86,7 +86,7 @@
     <Handle
       type="source"
       :position="Position.Bottom"
-      class="!w-3 !h-3 !border-2 !bg-purple-400 !border-white dark:!border-gray-800"
+      class="!w-3 !h-3 !border-2 !bg-accent-purple-400 !border-white dark:!border-gray-800"
     />
   </div>
 </template>
@@ -119,9 +119,9 @@ const hasExecutionStats = computed(() => {
 const successRateColorClass = computed(() => {
   if (!executionStats.value) return 'text-gray-500 dark:text-gray-400'
   const rate = executionStats.value.successRate
-  if (rate >= 80) return 'text-green-600 dark:text-green-400'
-  if (rate >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (rate >= 80) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 })
 
 // Success rate bar
@@ -132,16 +132,16 @@ const successBarPercent = computed(() => {
 
 const successBarColor = computed(() => {
   const percent = successBarPercent.value
-  if (percent >= 90) return 'bg-green-500'
-  if (percent >= 50) return 'bg-yellow-500'
-  return 'bg-red-500'
+  if (percent >= 90) return 'bg-status-success-500'
+  if (percent >= 50) return 'bg-status-warning-500'
+  return 'bg-status-danger-500'
 })
 
 const successBarColorText = computed(() => {
   const percent = successBarPercent.value
-  if (percent >= 90) return 'text-green-600 dark:text-green-400'
-  if (percent >= 50) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+  if (percent >= 90) return 'text-status-success-600 dark:text-status-success-400'
+  if (percent >= 50) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
 })
 </script>
 

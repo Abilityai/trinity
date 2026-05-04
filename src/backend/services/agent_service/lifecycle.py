@@ -23,7 +23,7 @@ from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
 from services.agent_service.helpers import validate_base_image
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities
+from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches
 from .file_sharing import check_public_folder_mount_matches
@@ -383,14 +383,15 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
 
-    # Get resource limits - check DB for overrides, fallback to labels/defaults
+    # Get resource limits: per-agent DB override → container labels → system defaults → hardcoded
     db_limits = db.get_resource_limits(agent_name)
+    system_defaults = get_agent_default_resources()
     if db_limits:
-        cpu = db_limits.get("cpu") or labels.get("trinity.cpu", "2")
-        memory = db_limits.get("memory") or labels.get("trinity.memory", "4g")
+        cpu = db_limits.get("cpu") or labels.get("trinity.cpu") or system_defaults["cpu"]
+        memory = db_limits.get("memory") or labels.get("trinity.memory") or system_defaults["memory"]
     else:
-        cpu = labels.get("trinity.cpu", "2")
-        memory = labels.get("trinity.memory", "4g")
+        cpu = labels.get("trinity.cpu") or system_defaults["cpu"]
+        memory = labels.get("trinity.memory") or system_defaults["memory"]
 
     # Update labels with new resource limits for future reference
     labels["trinity.cpu"] = cpu

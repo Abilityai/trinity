@@ -39,7 +39,7 @@
       <div class="text-xs text-gray-400 dark:text-gray-500 mt-1 text-right">{{ identityPrompt.length }}/500</div>
 
       <!-- Error message -->
-      <p v-if="error" class="text-sm text-red-500 mt-2">{{ error }}</p>
+      <p v-if="error" class="text-sm text-status-danger-500 mt-2">{{ error }}</p>
 
       <!-- Actions -->
       <div class="flex items-center justify-between mt-4">
@@ -47,7 +47,7 @@
           v-if="currentAvatarUrl"
           @click="removeAvatar"
           :disabled="generating || removing"
-          class="text-sm text-red-500 hover:text-red-600 disabled:text-gray-400 transition-colors"
+          class="text-sm text-status-danger-500 hover:text-status-danger-600 disabled:text-gray-400 transition-colors"
         >
           {{ removing ? 'Removing...' : 'Remove Avatar' }}
         </button>

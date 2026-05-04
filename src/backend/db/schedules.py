@@ -1897,3 +1897,100 @@ class ScheduleOperations:
             """, (validates_execution_id,))
             row = cursor.fetchone()
             return self._row_to_schedule_execution(row) if row else None
+
+    def get_agent_token_stats(self, agent_name: str) -> Dict:
+        """Get token usage statistics for an agent: lifetime, 24h, 7d, and 7-day daily breakdown.
+
+        Used for the agent detail token usage display (issue #250).
+        """
+        from datetime import datetime, timezone, timedelta
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cutoff_24h = iso_cutoff(24)
+            cutoff_7d = iso_cutoff(168)
+
+            # Lifetime + 24h + 7d in one pass
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as lifetime_executions,
+                    SUM(COALESCE(cost, 0)) as lifetime_cost,
+                    SUM(COALESCE(context_used, 0)) as lifetime_context_tokens,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(cost, 0) ELSE 0 END) as cost_24h,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(context_used, 0) ELSE 0 END) as context_tokens_24h,
+                    SUM(CASE WHEN started_at > ? THEN 1 ELSE 0 END) as executions_24h,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(cost, 0) ELSE 0 END) as cost_7d,
+                    SUM(CASE WHEN started_at > ? THEN COALESCE(context_used, 0) ELSE 0 END) as context_tokens_7d,
+                    SUM(CASE WHEN started_at > ? THEN 1 ELSE 0 END) as executions_7d
+                FROM schedule_executions
+                WHERE agent_name = ?
+                  AND status IN ('success', 'failed')
+            """, (cutoff_24h, cutoff_24h, cutoff_24h, cutoff_7d, cutoff_7d, cutoff_7d, agent_name))
+
+            row = cursor.fetchone()
+
+            lifetime_cost = round(row["lifetime_cost"] or 0, 6)
+            lifetime_context_tokens = row["lifetime_context_tokens"] or 0
+            lifetime_executions = row["lifetime_executions"] or 0
+            cost_24h = round(row["cost_24h"] or 0, 6)
+            context_tokens_24h = row["context_tokens_24h"] or 0
+            executions_24h = row["executions_24h"] or 0
+            cost_7d = round(row["cost_7d"] or 0, 6)
+            context_tokens_7d = row["context_tokens_7d"] or 0
+            executions_7d = row["executions_7d"] or 0
+
+            # Per-day breakdown for last 7 days
+            cursor.execute("""
+                SELECT
+                    DATE(started_at) as day,
+                    SUM(COALESCE(cost, 0)) as day_cost,
+                    SUM(COALESCE(context_used, 0)) as day_context_tokens,
+                    COUNT(*) as day_executions
+                FROM schedule_executions
+                WHERE agent_name = ?
+                  AND started_at > ?
+                  AND status IN ('success', 'failed')
+                GROUP BY DATE(started_at)
+                ORDER BY day ASC
+            """, (agent_name, cutoff_7d))
+
+            raw_days = {row["day"]: row for row in cursor.fetchall()}
+
+            # Build complete 7-day series (fill gaps with zero)
+            now_utc = datetime.now(timezone.utc)
+            daily_breakdown = []
+            for i in range(6, -1, -1):
+                d = (now_utc - timedelta(days=i)).strftime("%Y-%m-%d")
+                if d in raw_days:
+                    r = raw_days[d]
+                    daily_breakdown.append({
+                        "date": d,
+                        "cost": round(r["day_cost"] or 0, 6),
+                        "context_tokens": r["day_context_tokens"] or 0,
+                        "executions": r["day_executions"] or 0,
+                    })
+                else:
+                    daily_breakdown.append({"date": d, "cost": 0.0, "context_tokens": 0, "executions": 0})
+
+            # Trend: today vs 7d daily average (excluding today to avoid comparison bias)
+            avg_daily_cost = cost_7d / 7.0 if cost_7d > 0 else 0.0
+            if avg_daily_cost > 0:
+                trend_pct = round(((cost_24h - avg_daily_cost) / avg_daily_cost) * 100, 1)
+            else:
+                trend_pct = 0.0
+
+            return {
+                "lifetime_cost": lifetime_cost,
+                "lifetime_context_tokens": lifetime_context_tokens,
+                "lifetime_executions": lifetime_executions,
+                "cost_24h": cost_24h,
+                "context_tokens_24h": context_tokens_24h,
+                "executions_24h": executions_24h,
+                "cost_7d": cost_7d,
+                "context_tokens_7d": context_tokens_7d,
+                "executions_7d": executions_7d,
+                "avg_daily_cost": round(avg_daily_cost, 6),
+                "trend_cost_pct": trend_pct,
+                "daily_breakdown": daily_breakdown,
+            }

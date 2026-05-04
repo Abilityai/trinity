@@ -20,12 +20,17 @@
     <a href="#features">Features</a> &bull;
     <a href="https://youtu.be/SWpNphnuPpQ">Demo Video</a> &bull;
     <a href="#documentation">Docs</a> &bull;
-    <a href="#community--support">Community</a>
+    <a href="#community--support">Community</a> &bull;
+    <a href="https://github.com/abilityai/trinity-ops-public">Ops Agent</a>
   </p>
 
   <br/>
   <a href="https://youtu.be/SWpNphnuPpQ">
     <img src="https://img.shields.io/badge/▶_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube" alt="Watch the Demo">
+  </a>
+  &nbsp;
+  <a href="https://github.com/abilityai/trinity-ops-public">
+    <img src="https://img.shields.io/badge/🤖_Ops_Agent-GitHub-black?style=for-the-badge&logo=github" alt="Trinity Ops Agent">
   </a>
   <br/><br/>
   <img src="docs/assets/screenshots/graph-view-fleet.png" alt="Trinity Agent Fleet — Graph View" width="800"/>
