@@ -190,3 +190,112 @@ def test_streaming_parser_init_wins_over_later_result():
     )
 
     assert metadata.session_id == _REAL_UUID
+
+
+# ---------------------------------------------------------------------------
+# compact_boundary capture — Claude Code's auto-compact event mid-turn.
+# ---------------------------------------------------------------------------
+
+def _compact_boundary_line(
+    pre_tokens: int = 170_325,
+    post_tokens: int = 12_691,
+    duration_ms: int = 110_361,
+    trigger: str = "auto",
+    timestamp: str = "2026-05-03T09:49:49.226Z",
+) -> str:
+    """A compact_boundary event as Claude Code emits it (real shape, taken
+    from a captured JSONL on agent-testfix)."""
+    return json.dumps({
+        "type": "system",
+        "subtype": "compact_boundary",
+        "content": "Conversation compacted",
+        "compactMetadata": {
+            "trigger": trigger,
+            "preTokens": pre_tokens,
+            "postTokens": post_tokens,
+            "durationMs": duration_ms,
+        },
+        "timestamp": timestamp,
+        "sessionId": _REAL_UUID,
+    })
+
+
+def test_batch_parser_captures_single_compact_event():
+    """compact_boundary lines must populate metadata.compact_events with the
+    full pre/post/duration/trigger payload for downstream observability."""
+    output = "\n".join([
+        _system_init_line(),
+        _compact_boundary_line(),
+        _result_line(),
+    ])
+
+    _, _, metadata = parse_stream_json_output(output)
+
+    assert len(metadata.compact_events) == 1
+    ev = metadata.compact_events[0]
+    assert ev.trigger == "auto"
+    assert ev.pre_tokens == 170_325
+    assert ev.post_tokens == 12_691
+    assert ev.duration_ms == 110_361
+    assert ev.timestamp == "2026-05-03T09:49:49.226Z"
+
+
+def test_batch_parser_captures_multiple_compact_events_in_order():
+    """A long heavy turn can fire more than one compact. All must land in
+    compact_events in the order observed."""
+    output = "\n".join([
+        _system_init_line(),
+        _compact_boundary_line(pre_tokens=170_325, post_tokens=12_691, timestamp="t1"),
+        _compact_boundary_line(pre_tokens=169_341, post_tokens=9_763, timestamp="t2"),
+        _result_line(),
+    ])
+
+    _, _, metadata = parse_stream_json_output(output)
+
+    assert len(metadata.compact_events) == 2
+    assert [e.timestamp for e in metadata.compact_events] == ["t1", "t2"]
+    assert metadata.compact_events[0].pre_tokens == 170_325
+    assert metadata.compact_events[1].pre_tokens == 169_341
+
+
+def test_batch_parser_compact_events_empty_when_none_fired():
+    """A normal turn with no compact must leave compact_events empty (not
+    populated with a sentinel or null entry)."""
+    output = "\n".join([_system_init_line(), _result_line()])
+
+    _, _, metadata = parse_stream_json_output(output)
+
+    assert metadata.compact_events == []
+
+
+def test_streaming_parser_captures_compact_event():
+    metadata = ExecutionMetadata()
+    response_parts: list[str] = []
+    execution_log: list = []
+
+    process_stream_line(
+        _compact_boundary_line(),
+        execution_log, metadata, {}, response_parts,
+    )
+
+    assert len(metadata.compact_events) == 1
+    assert metadata.compact_events[0].trigger == "auto"
+    assert metadata.compact_events[0].pre_tokens == 170_325
+
+
+def test_compact_event_round_trips_through_model_dump():
+    """ExecutionMetadata.model_dump() must serialize compact_events so the
+    HTTP response from the agent server carries them to the backend."""
+    output = "\n".join([
+        _system_init_line(),
+        _compact_boundary_line(),
+        _result_line(),
+    ])
+
+    _, _, metadata = parse_stream_json_output(output)
+    dumped = metadata.model_dump()
+
+    assert "compact_events" in dumped
+    assert isinstance(dumped["compact_events"], list)
+    assert len(dumped["compact_events"]) == 1
+    assert dumped["compact_events"][0]["pre_tokens"] == 170_325

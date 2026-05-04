@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import HTTPException
 
-from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from ..state import agent_state
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .runtime_adapter import AgentRuntime
@@ -198,6 +198,25 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
         if msg_type == "system" and msg.get("subtype") == "init":
             metadata.session_id = msg.get("session_id")
 
+        elif msg_type == "system" and msg.get("subtype") == "compact_boundary":
+            cm = msg.get("compactMetadata", {}) or {}
+            event = CompactEvent(
+                trigger=cm.get("trigger"),
+                pre_tokens=cm.get("preTokens"),
+                post_tokens=cm.get("postTokens"),
+                duration_ms=cm.get("durationMs"),
+                timestamp=msg.get("timestamp"),
+            )
+            metadata.compact_events.append(event)
+            logger.info(
+                f"event=session_auto_compact "
+                f"claude_session_id={metadata.session_id} "
+                f"trigger={event.trigger} "
+                f"pre_tokens={event.pre_tokens} "
+                f"post_tokens={event.post_tokens} "
+                f"duration_ms={event.duration_ms}"
+            )
+
         elif msg_type == "result":
             # Final result message with stats
             metadata.cost_usd = msg.get("total_cost_usd")
@@ -339,6 +358,25 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
     # serves as a fallback when the init line was missed.
     if msg_type == "system" and msg.get("subtype") == "init":
         metadata.session_id = msg.get("session_id")
+
+    elif msg_type == "system" and msg.get("subtype") == "compact_boundary":
+        cm = msg.get("compactMetadata", {}) or {}
+        event = CompactEvent(
+            trigger=cm.get("trigger"),
+            pre_tokens=cm.get("preTokens"),
+            post_tokens=cm.get("postTokens"),
+            duration_ms=cm.get("durationMs"),
+            timestamp=msg.get("timestamp"),
+        )
+        metadata.compact_events.append(event)
+        logger.info(
+            f"event=session_auto_compact "
+            f"claude_session_id={metadata.session_id} "
+            f"trigger={event.trigger} "
+            f"pre_tokens={event.pre_tokens} "
+            f"post_tokens={event.post_tokens} "
+            f"duration_ms={event.duration_ms}"
+        )
 
     elif msg_type == "result":
         # Final result message with stats

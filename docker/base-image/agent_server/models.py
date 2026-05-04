@@ -74,6 +74,22 @@ class ExecutionLogEntry(BaseModel):
     timestamp: str
 
 
+class CompactEvent(BaseModel):
+    """One Claude Code auto-compact event observed in the stream-json output.
+
+    Claude Code emits ``{"type":"system","subtype":"compact_boundary"}`` mid-turn
+    when its conversation history reaches ~85% of the model window. The compact
+    summarizes ~170k tokens of history into a ~10k summary in place. Capturing
+    these events gives users honest signal about session state beyond the
+    silent latency cost.
+    """
+    trigger: Optional[str] = None       # "auto" | "manual"
+    pre_tokens: Optional[int] = None
+    post_tokens: Optional[int] = None
+    duration_ms: Optional[int] = None
+    timestamp: Optional[str] = None
+
+
 class ExecutionMetadata(BaseModel):
     """Metadata about the Claude Code execution"""
     cost_usd: Optional[float] = None
@@ -90,6 +106,7 @@ class ExecutionMetadata(BaseModel):
     context_window: int = 200000  # Default max context
     error_type: Optional[str] = None  # Error classification from Claude Code (e.g., "rate_limit")
     error_message: Optional[str] = None  # Human-readable error message from Claude Code
+    compact_events: List[CompactEvent] = []  # Auto-compact events observed mid-turn
 
 
 # ============================================================================
