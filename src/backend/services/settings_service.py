@@ -139,8 +139,11 @@ class SettingsService:
 
         Resolves in this order:
         1. system_settings row 'session_tab_enabled' ("true"/"false")
-        2. SESSION_TAB_ENABLED env var
-        3. Default: False
+        2. SESSION_TAB_ENABLED env var (only honored as "false"/"0"/"no" to opt out)
+        3. Default: True (GA — Phase 5.3, 2026-05-04)
+
+        Admins can opt out by setting ``session_tab_enabled=false`` in
+        system_settings or by exporting ``SESSION_TAB_ENABLED=false``.
 
         The flag gates only the new UI surface and the new
         ``/api/agents/{name}/session*`` endpoints. Chat is unaffected.
@@ -148,7 +151,10 @@ class SettingsService:
         stored = self.get_setting('session_tab_enabled')
         if stored is not None:
             return str(stored).lower() in ("true", "1", "yes")
-        return os.getenv('SESSION_TAB_ENABLED', '').lower() in ("true", "1", "yes")
+        env_val = os.getenv('SESSION_TAB_ENABLED', '').strip().lower()
+        if env_val in ("false", "0", "no"):
+            return False
+        return True
 
     # =========================================================================
     # GitHub Templates (TMPL-001)
