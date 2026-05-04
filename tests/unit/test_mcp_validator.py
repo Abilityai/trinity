@@ -110,7 +110,121 @@ class TestAisecC2Reproduction:
 
 class TestServerName:
     def test_trinity_reserved(self):
+        # Stdio shape under the trinity name → still rejected.
+        # The allowance is only for the canonical http+url+headers shape.
         cfg = _wrap({"trinity": {"command": "npx"}})
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_canonical_shape_allowed(self):
+        """Owners must be able to save .mcp.json with the auto-injected
+        trinity entry intact (e.g. when adding/editing other servers).
+        Also covers the bearer-rotation case: editing the API key value
+        keeps the entry's shape canonical, so the save succeeds.
+        """
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {
+                    "Authorization": "Bearer trinity_mcp_RFgk9a2e4ccfqw2oQK6wcuhro8-mLD_C7FOeOJrWx74"
+                }
+            }
+        })
+        validate_mcp_config(cfg)  # must not raise
+
+    def test_trinity_canonical_passes_with_other_servers(self):
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {"Authorization": "Bearer trinity_mcp_abc123"}
+            },
+            "context7": {
+                "command": "npx",
+                "args": ["-y", "@upstash/context7-mcp@latest"]
+            }
+        })
+        validate_mcp_config(cfg)
+
+    def test_trinity_with_extra_field_rejected(self):
+        """Closed shape: extra fields under trinity break the canonical
+        allowance and fall through to the reserved-name reject."""
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {"Authorization": "Bearer trinity_mcp_abc"},
+                "env": {"FOO": "bar"}  # extra field → not canonical
+            }
+        })
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_with_extra_header_rejected(self):
+        """Only Authorization is allowed; extra headers (X-Pwn etc.)
+        fall through to the reserved-name reject."""
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {
+                    "Authorization": "Bearer trinity_mcp_abc",
+                    "X-Custom": "anything"
+                }
+            }
+        })
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_with_wrong_url_rejected(self):
+        """SSRF/redirection guard: only the configured Trinity MCP URL
+        (or the documented default) is accepted under trinity."""
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "https://evil.com/mcp",
+                "headers": {"Authorization": "Bearer trinity_mcp_abc"}
+            }
+        })
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_with_non_bearer_auth_rejected(self):
+        """Auth must be Bearer trinity_mcp_*; other schemes fall through."""
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {"Authorization": "Basic dXNlcjpwYXNz"}
+            }
+        })
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_with_non_trinity_token_rejected(self):
+        """Bearer token must match the trinity_mcp_ prefix shape;
+        injecting a stolen sk-ant-* or other token here is rejected."""
+        cfg = _wrap({
+            "trinity": {
+                "type": "http",
+                "url": "http://mcp-server:8080/mcp",
+                "headers": {"Authorization": "Bearer sk-ant-stolen-key"}
+            }
+        })
+        with pytest.raises(McpValidationError, match="reserved"):
+            validate_mcp_config(cfg)
+
+    def test_trinity_with_stdio_redefinition_rejected(self):
+        """The original attack: redefine trinity as stdio to gain shell
+        access. Hits the reserved-name reject (canonical-shape check
+        requires type=http)."""
+        cfg = _wrap({
+            "trinity": {
+                "command": "npx",
+                "args": ["-y", "@evil/malicious-mcp"]
+            }
+        })
         with pytest.raises(McpValidationError, match="reserved"):
             validate_mcp_config(cfg)
 

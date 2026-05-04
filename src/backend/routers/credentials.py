@@ -7,7 +7,6 @@ The old Redis-based credential system has been removed. Credentials are now:
 2. Exported to encrypted .credentials.enc files (can be committed to git)
 3. Imported from .credentials.enc files on agent startup
 """
-import json
 import logging
 import os
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -41,44 +40,6 @@ router = APIRouter(prefix="/api", tags=["credentials"])
 # executable behavior. `.mcp.json.template` remains BLOCKED because the
 # envsubst flow it feeds doesn't sanitize attacker-controlled JSON.
 ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
-
-
-def _strip_reserved_trinity_entry(content: str) -> tuple[str, bool]:
-    """Strip the auto-injected ``mcpServers.trinity`` entry from a
-    .mcp.json content string before it goes through the validator.
-
-    The agent server's ``inject_trinity_mcp_if_configured()`` writes
-    ``mcpServers.trinity`` on every agent start where ``TRINITY_MCP_API_KEY``
-    is set. The credentials editor in the UI loads the actual file
-    content, so it always contains that auto-injected entry. The
-    validator's ``RESERVED_SERVER_NAMES = {"trinity"}`` rule (defense
-    against attacker-controlled redefinition) then rejects every save
-    with the error ``"MCP server name 'trinity' is reserved by Trinity"``,
-    making the legitimate "edit other MCP servers" flow unusable.
-
-    Stripping is safe: the agent re-injects the canonical trinity entry
-    from env vars on next startup. The user can't lose it by leaving it
-    out of the saved file.
-
-    Returns ``(content, stripped)`` where ``stripped`` indicates whether
-    a trinity entry was actually removed. On any JSON parse failure the
-    content is returned unchanged so the validator can produce its
-    proper error message.
-    """
-    try:
-        parsed = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
-        return content, False
-
-    if not isinstance(parsed, dict):
-        return content, False
-
-    servers = parsed.get("mcpServers")
-    if not isinstance(servers, dict) or "trinity" not in servers:
-        return content, False
-
-    servers.pop("trinity", None)
-    return json.dumps(parsed, indent=2), True
 
 
 # ============================================================================
@@ -252,20 +213,11 @@ async def inject_credentials(
     # before forwarding to the agent. Closes the RCE-by-config bypass while
     # restoring the legitimate post-deploy MCP server editing flow.
     #
-    # Strip the auto-injected mcpServers.trinity entry before validation —
-    # see _strip_reserved_trinity_entry for the why.
+    # The validator special-cases the auto-injected `trinity` entry: it
+    # accepts the canonical Trinity-MCP shape (so owners can rotate their
+    # bearer token) but rejects any other shape under that name (so
+    # attackers can't redefine trinity as a stdio shell-injection vector).
     if ".mcp.json" in request_body.files:
-        stripped_content, did_strip = _strip_reserved_trinity_entry(
-            request_body.files[".mcp.json"]
-        )
-        if did_strip:
-            request_body.files[".mcp.json"] = stripped_content
-            logger.info(
-                f".mcp.json: stripped reserved 'trinity' entry before "
-                f"validation for agent {agent_name} (will be re-injected "
-                f"by the agent on next start)"
-            )
-
         try:
             validate_mcp_config(request_body.files[".mcp.json"])
         except McpValidationError as e:
