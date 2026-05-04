@@ -13,8 +13,8 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}  # Optional - set for production
+      # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
@@ -64,7 +64,7 @@ services:
       - trinity-archives:/data/archives  # Log archives storage
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
     networks:
@@ -120,17 +120,79 @@ services:
     networks:
       - trinity-platform   # Issue #589: Redis is NOT on agent network
     environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-    # SECURITY: Set REDIS_PASSWORD in .env for production
-    command: >
-      sh -c '
-        if [ -n "$REDIS_PASSWORD" ]; then
-          redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
-        else
-          echo "WARNING: Redis running without authentication"
-          redis-server --appendonly yes
-        fi
-      '
+      # Two passwords by design: leaking the runtime password from a
+      # compromised platform container does NOT grant admin (FLUSHALL,
+      # CONFIG, SHUTDOWN). See docs/migrations/REDIS_AUTH.md.
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+      - "REDIS_BACKEND_PASSWORD=${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+    # Additive ACL — start from zero, allow only what the runtime needs.
+    # `+@all -X` is rejected: it includes commands Redis hasn't shipped yet.
+    # NB: each `--user` rule must be its own argv (Redis CLI parser).
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      # default — admin user, full access (used for ACL bootstrap and ad-hoc ops)
+      - --user
+      - default
+      - "on"
+      - ">${REDIS_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@all"
+      # backend — runtime user for backend container
+      - --user
+      - backend
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+      # scheduler — same access pattern as backend; separate user for traceability
+      - --user
+      - scheduler
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+    # Healthcheck pings as the `backend` ACL user so a typo'd ACL keeps
+    # Redis unhealthy and gates dependent services (broken-ACL caught at
+    # boot, not after first user-facing failure).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --user backend -a $$REDIS_BACKEND_PASSWORD --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   mcp-server:
     build:
@@ -172,7 +234,8 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      - REDIS_URL=redis://redis:6379
+      # Scheduler uses the same `backend` ACL user (identical access patterns).
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
       - LOG_LEVEL=${SCHEDULER_LOG_LEVEL:-INFO}
       - LOCK_TIMEOUT=600
@@ -184,7 +247,7 @@ services:
       - trinity-data:/data
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       backend:
         condition: service_started
     networks:

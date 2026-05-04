@@ -22,7 +22,8 @@ services:
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      - REDIS_URL=redis://redis:6379
+      # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - SLACK_CLIENT_ID=${SLACK_CLIENT_ID}
@@ -129,12 +130,81 @@ services:
       - redis-data:/data
     networks:
       - trinity-platform   # Issue #589: Redis is NOT on agent network
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    environment:
+      # Two passwords by design — see docs/migrations/REDIS_AUTH.md.
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+      - "REDIS_BACKEND_PASSWORD=${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+    # Additive ACL — start from zero, allow only what the runtime needs.
+    # `+@all -X` is rejected: it includes commands Redis hasn't shipped yet.
+    # NB: each `--user` rule must be its own argv (Redis CLI parser).
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      # default — admin user, full access (used for ACL bootstrap and ad-hoc ops)
+      - --user
+      - default
+      - "on"
+      - ">${REDIS_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@all"
+      # backend — runtime user for backend container
+      - --user
+      - backend
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+      # scheduler — same access pattern as backend; separate user for traceability
+      - --user
+      - scheduler
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+    # Healthcheck pings as the `backend` ACL user so a typo'd ACL keeps
+    # Redis unhealthy and gates dependent services.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        - CMD-SHELL
+        - redis-cli --user backend -a $$REDIS_BACKEND_PASSWORD --no-auth-warning ping | grep -q PONG
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 5s
 
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
@@ -146,7 +216,8 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      - REDIS_URL=redis://redis:6379
+      # Scheduler uses the same `backend` ACL user (identical access patterns).
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
       - LOG_LEVEL=${SCHEDULER_LOG_LEVEL:-INFO}
       - LOCK_TIMEOUT=600
@@ -213,11 +284,10 @@ services:
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
       - TRINITY_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
-      - REDIS_URL=redis://redis:6379
+      # No REDIS_URL: src/mcp-server/ (TypeScript) has zero Redis imports.
+      # Don't hand a credential to a process that has no use for it.
     depends_on:
       backend:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     networks:
       # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
