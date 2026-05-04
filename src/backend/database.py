@@ -697,6 +697,19 @@ class DatabaseManager:
     def delete_schedule(self, schedule_id: str, username: str):
         return self._schedule_ops.delete_schedule(schedule_id, username)
 
+    # Webhook token management (WEBHOOK-001, #291)
+    def generate_webhook_token(self, schedule_id: str):
+        return self._schedule_ops.generate_webhook_token(schedule_id)
+
+    def get_schedule_by_webhook_token(self, token: str):
+        return self._schedule_ops.get_schedule_by_webhook_token(token)
+
+    def revoke_webhook_token(self, schedule_id: str):
+        return self._schedule_ops.revoke_webhook_token(schedule_id)
+
+    def get_webhook_status(self, schedule_id: str):
+        return self._schedule_ops.get_webhook_status(schedule_id)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 
