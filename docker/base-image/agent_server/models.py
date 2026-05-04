@@ -107,6 +107,7 @@ class ExecutionMetadata(BaseModel):
     error_type: Optional[str] = None  # Error classification from Claude Code (e.g., "rate_limit")
     error_message: Optional[str] = None  # Human-readable error message from Claude Code
     compact_events: List[CompactEvent] = []  # Auto-compact events observed mid-turn
+    recovered_from_jsonl: bool = False  # Stdout race + JSONL fallback fired (response from disk, not stream)
 
 
 # ============================================================================
