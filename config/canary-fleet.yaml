@@ -1,0 +1,58 @@
+# Canary Invariant Harness — load-generator fleet (CANARY-001 / Issue #411).
+#
+# This manifest defines the synthetic agents that the canary watcher
+# observes. Without traffic, every invariant holds trivially and the
+# harness produces no signal. The fleet is what makes the harness useful.
+#
+# Deploy on staging/dev with:
+#
+#     curl -sS -X POST -H "Authorization: Bearer <admin-token>" \
+#       -H "Content-Type: application/json" \
+#       -d "{\"manifest\": $(jq -Rs . < config/canary-fleet.yaml)}" \
+#       http://localhost:8000/api/systems/deploy
+#
+# The watcher service (src/backend/services/canary_service.py) runs every
+# 5 min independently of this fleet — it'll just observe trivially-green
+# state until the fleet generates load.
+#
+# Permissions are explicitly empty (preset: none) — fleet members observe
+# their own orchestration, not each other.
+
+name: canary-fleet
+description: Canary harness load generators (Issue #411 Phase 1)
+
+agents:
+  # Constant slot churn — fires every minute (cron's minimum). Exercises
+  # S-01 (slot–row bijection) and E-02 (no phantom reversal) by producing
+  # a steady stream of acquire / release cycles.
+  burst:
+    template: local:default
+    resources:
+      cpu: "0.5"
+      memory: "512m"
+    schedules:
+      - name: heartbeat
+        cron: "* * * * *"  # every minute
+        message: "Reply only with the literal string: ok"
+        timezone: UTC
+        description: Constant load to exercise slot–row bijection (S-01) and reversal (E-02)
+
+  # Long-running task with a non-default execution timeout, so S-03
+  # (slot TTL ≥ timeout + 300) has anything to check, and E-01
+  # (no overdue running rows) has long-lived rows to scrutinize.
+  long:
+    template: local:default
+    resources:
+      cpu: "1"
+      memory: "1g"
+    schedules:
+      - name: long-task
+        cron: "*/5 * * * *"  # every 5 min
+        message: "Run a small sleep then echo done. Use the bash tool."
+        timezone: UTC
+        description: Longer-lived slot for S-03/E-01/E-06 exercise (Phase 2)
+
+# No cross-agent permissions — the canary fleet observes the orchestration
+# layer, not each other.
+permissions:
+  preset: none

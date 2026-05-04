@@ -1978,6 +1978,51 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ---
 
+## 31. Canary Invariant Harness (CANARY-001)
+
+### 31.1 Continuous Orchestration-Invariant Watcher (CANARY-001 — Phase 1)
+- **Implements**: Issue #411 — first three invariants (S-01, E-02, L-03)
+- **Description**: Background watcher service that runs deterministic
+  orchestration-invariant checks against live platform state every 5
+  minutes. Persists violations to a queryable table and emits
+  notifications on green→red transitions. Catches the bug class behind
+  PRs #378, #403, #129, #226 — race conditions and cross-component state
+  drift that unit tests miss.
+- **Architecture**: deterministic Python library (`src/backend/canary/`)
+  shared between the watcher service (`services/canary_service.py`) and
+  the on-demand admin endpoint (`POST /api/canary/run-cycle`). Library
+  reads state but writes nothing; service writes violations and emits
+  notifications.
+- **Phase 1 invariants**:
+  - **S-01** Slot–row bijection (Redis ZRANGE vs SQL running rows, drain
+    sentinels filtered)
+  - **E-02** No phantom reversal (terminal executions stay terminal,
+    detected via Redis-backed state comparison)
+  - **L-03** Delete cascades (no orphan rows referencing removed agents
+    in any cross-cutting table; no orphan Redis slot keys)
+- **Storage**: `canary_violations` table; observed_state JSON column.
+- **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
+  default. Production deployment is staging/dev — the harness watches
+  there, not in user-facing prod.
+- **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
+  (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
+  the existing `/api/systems/deploy` endpoint. Without the fleet, the
+  watcher reports trivially-green cycles with no signal.
+- **Notifications**: one notification per green→red transition emitted
+  via `db.create_notification(...)` with `notification_type="alert"` and
+  `category="canary"`. Severity → priority: critical → urgent, major →
+  high, minor → normal. No notification on continuing-red cycles.
+- **Determinism**: invariant checks are pure functions
+  `check(snapshot) → list[ViolationReport]`. Same snapshot input always
+  yields the same output. No LLM reasoning anywhere in the canary path.
+- **Phase 2 (deferred)**: S-02, S-03, E-01, E-05, E-06, B-01, B-02,
+  G-01, R-01 (per the catalog at
+  `docs/testing/orchestration-invariant-catalog.md`). Each adds as a new
+  file under `src/backend/canary/invariants/` and a registry entry; the
+  service and API surface stay unchanged.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

@@ -404,6 +404,7 @@ Services that run continuously in the backend process:
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
 | **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. (BACKLOG-001 / CAPACITY-CONSOLIDATE #428) |
 | **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
+| **Canary Watcher** | `canary_service.py` | Continuous orchestration-invariant harness (CANARY-001 / Issue #411). Every 5 min: `collect_snapshot()` over Redis × SQLite × agent registries, runs deterministic invariant library (S-01, E-02, L-03 in Phase 1), persists violations to `canary_violations`, emits one notification per green→red transition. Disabled by default; enable on staging/dev with `CANARY_ENABLED=1`. |
 
 The **agent server** also runs a 15-min `auto_sync` heartbeat loop (gated
 by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
@@ -673,6 +674,49 @@ audit. Phase 2b: auth, sharing, credentials, settings, rename, request-ID
 middleware. Phase 3: MCP tool call audit via transparent wrapper (all 66+
 tools, zero per-tool code). Phase 4: hash chain verification, CSV/JSON
 export, enable/disable toggle. Issue #20 can be closed.
+
+### Canary Invariant Harness (CANARY-001 — Phase 1, NEW: 2026-05-04)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/canary/violations` | Admin | List violations (filters: invariant_id, severity, tier, start_time, end_time, limit, offset) |
+| GET | `/api/canary/violations/stats` | Admin | Aggregate counts by invariant_id and severity |
+| GET | `/api/canary/violations/{id}` | Admin | Single violation by row id |
+| POST | `/api/canary/run-cycle` | Admin | Run one cycle on demand (delegates to the same `CanaryService.run_cycle()` invoked by the 5-min background loop). Optional body filters which invariants to run. Returns `{snapshot_time, cycle_duration_ms, checks_run, checks_skipped, violations[], transitions[]}`. |
+
+**Storage**: `canary_violations` table in main SQLite DB. JSON-encoded
+`observed_state` column carries invariant-specific payload.
+
+**Phase 1 invariants** (S-01, E-02, L-03):
+- **S-01 — Slot–row bijection**: per agent, set of execution_ids in
+  `agent:slots:{name}` (Redis ZSET, drain sentinels filtered) equals set
+  of execution_ids in `schedule_executions WHERE status='running'`.
+  Severity: critical. Catches PR #378/#403 bug class.
+- **E-02 — No phantom reversal**: an execution row that was in a
+  terminal status in the previous cycle must not appear non-terminal in
+  this snapshot. Phase 1 uses Redis-backed state comparison (key
+  `canary:e02:terminal_seen`) instead of Vector log diff for simplicity.
+  Severity: critical.
+- **L-03 — Delete cascades**: no live row in any cross-cutting table
+  (agent_sharing, agent_schedules, schedule_executions [non-terminal],
+  agent_skills, agent_tags, agent_shared_files, agent_public_links,
+  pending operator_queue, pending access_requests, agent-scoped
+  mcp_api_keys, active chat_sessions) may reference an `agent_name` not
+  in `agent_ownership`; no Redis `agent:slots:{name}` for missing agent.
+  Severity: critical for orphaned `schedule_executions` or Redis slots,
+  major otherwise. Catches Issue #129 bug class.
+
+**Fleet**: `config/canary-fleet.yaml` — synthetic load generators
+(`canary-fleet-burst`, `canary-fleet-long`) deployed via the existing
+systems-deploy API. Without traffic the harness produces trivially-green
+checks; the fleet is what gives the watcher something to watch on
+staging/dev.
+
+**Architecture**: deterministic library (`src/backend/canary/`) shared
+between the 5-min watcher service and the on-demand admin endpoint.
+Library reads state but writes nothing; service writes violations and
+emits notifications. No LLM reasoning anywhere — the canary's value
+depends on determinism.
 
 ### Nevermined Payments (NVM-001)
 
@@ -1282,6 +1326,36 @@ BEGIN SELECT RAISE(ABORT, 'Audit log entries cannot be deleted within retention 
 - Append-only via SQLite triggers (UPDATE blocked unconditionally, DELETE blocked within 365-day retention)
 - Cross-cutting platform audit for lifecycle, auth, MCP, credentials events
 - Phase 1 ships infrastructure only; write integration into routers happens in Phase 2
+
+**canary_violations:** (CANARY-001 / Issue #411 — Phase 1, NEW: 2026-05-04)
+```sql
+CREATE TABLE canary_violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invariant_id TEXT NOT NULL,            -- 'S-01', 'E-02', 'L-03', ...
+    tier TEXT NOT NULL,                    -- 'A' | 'B'
+    severity TEXT NOT NULL,                -- 'critical' | 'major' | 'minor'
+    snapshot_time TEXT NOT NULL,           -- ISO 8601 UTC
+    observed_state TEXT NOT NULL,          -- JSON, invariant-specific
+    signal_query TEXT,                     -- the check that fired (debugging aid)
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_canary_violations_invariant
+    ON canary_violations(invariant_id, snapshot_time DESC);
+CREATE INDEX idx_canary_violations_severity
+    ON canary_violations(severity, snapshot_time DESC);
+CREATE INDEX idx_canary_violations_snapshot
+    ON canary_violations(snapshot_time DESC);
+```
+
+**canary_violations Features:**
+- Append-only in practice (no UPDATE / DELETE in the read API surface).
+- One row per fired check per cycle. `observed_state` carries
+  invariant-specific JSON (slot diffs, ghost agent names, terminal-status
+  reversals).
+- Read via `GET /api/canary/violations`; `GET /api/canary/violations/stats`
+  drives the dashboard tiles.
+- Populated by `services/canary_service.py` on a 5-min loop or on-demand
+  via `POST /api/canary/run-cycle`.
 
 ### Redis
 

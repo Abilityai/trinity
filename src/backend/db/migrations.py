@@ -38,6 +38,7 @@ Migration Order (as of 2026-02-28):
 31. scheduler_retry_support - RETRY-001 scheduler retry mechanism
 32. validation_support - VALIDATE-001 post-execution business validation
 33. agent_git_config_pat - #347 per-agent GitHub PAT support
+34. canary_violations_table - CANARY-001 / Issue #411 invariant harness violations
 """
 import logging
 import sqlite3
@@ -1756,6 +1757,44 @@ def _migrate_public_links_type(cursor, conn):
     conn.commit()
 
 
+def _migrate_canary_violations_table(cursor, conn):
+    """Create canary_violations table + indexes (CANARY-001 / Issue #411 — Phase 1).
+
+    Stores orchestration-invariant violations recorded by the continuous
+    canary harness. Schema is also defined in db/schema.py for fresh
+    installs; this migration handles existing installs.
+    """
+    cursor.execute("PRAGMA table_info(canary_violations)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS canary_violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invariant_id TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            snapshot_time TEXT NOT NULL,
+            observed_state TEXT NOT NULL,
+            signal_query TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+
+    for ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_canary_violations_invariant "
+        "ON canary_violations(invariant_id, snapshot_time DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_canary_violations_severity "
+        "ON canary_violations(severity, snapshot_time DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_canary_violations_snapshot "
+        "ON canary_violations(snapshot_time DESC)",
+    ]:
+        cursor.execute(ddl)
+
+    conn.commit()
+    print("Created canary_violations table with indexes (CANARY-001)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -1810,4 +1849,5 @@ MIGRATIONS = [
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
     ("agent_shared_files", _migrate_agent_shared_files),
     ("public_links_type", _migrate_public_links_type),
+    ("canary_violations_table", _migrate_canary_violations_table),
 ]

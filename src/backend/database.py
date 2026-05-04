@@ -132,6 +132,7 @@ from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
+from db.canary import CanaryOperations
 from db.sync_state import SyncStateOperations
 
 
@@ -287,6 +288,7 @@ class DatabaseManager:
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
+        self._canary_ops = CanaryOperations()
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
 
     # =========================================================================
@@ -1842,6 +1844,49 @@ class DatabaseManager:
     def prune_audit_log(self, retention_days: int) -> int:
         """Delete audit_log entries older than ``retention_days``. Returns count removed."""
         return self._audit_ops.prune_audit_log(retention_days)
+
+    # =========================================================================
+    # Canary Invariant Violations (CANARY-001 / Issue #411 — Phase 1)
+    # =========================================================================
+
+    def insert_canary_violation(
+        self,
+        invariant_id: str,
+        tier: str,
+        severity: str,
+        snapshot_time: str,
+        observed_state: dict,
+        signal_query: str = None,
+    ) -> int:
+        """Insert a violation row from the canary harness; returns row id."""
+        return self._canary_ops.insert_violation(
+            invariant_id=invariant_id,
+            tier=tier,
+            severity=severity,
+            snapshot_time=snapshot_time,
+            observed_state=observed_state,
+            signal_query=signal_query,
+        )
+
+    def list_canary_violations(self, **filters):
+        """Query violations with optional filters (newest first). See CanaryOperations."""
+        return self._canary_ops.list_violations(**filters)
+
+    def count_canary_violations(self, **filters):
+        """Count violations matching filters (independent of limit/offset)."""
+        return self._canary_ops.count_violations(**filters)
+
+    def get_canary_violation(self, violation_id: int):
+        """Fetch a single violation by id."""
+        return self._canary_ops.get_violation(violation_id)
+
+    def get_latest_canary_violation_per_invariant(self):
+        """Latest violation per invariant_id; used for green→red transition detection."""
+        return self._canary_ops.get_latest_per_invariant()
+
+    def get_canary_stats(self, start_time: str = None, end_time: str = None):
+        """Aggregate canary violation counts by invariant_id and severity."""
+        return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
 
 
 # Global database manager instance

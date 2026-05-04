@@ -71,6 +71,7 @@ from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
 from routers.agent_dashboard import router as agent_dashboard_router
 from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
+from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router
 from routers.tags import router as tags_router
@@ -112,6 +113,11 @@ from services.sync_health_service import sync_health_service
 
 # Import cleanup service
 from services.cleanup_service import cleanup_service, set_cleanup_ws_manager
+from services.canary_service import (
+    canary_service,
+    set_canary_ws_manager,
+    set_canary_filtered_ws_manager,
+)  # CANARY-001 / Issue #411
 
 
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -406,6 +412,16 @@ async def lifespan(app: FastAPI):
             print(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
+    # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
+    # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
+    # gates internally; the start() call is a no-op when not enabled.
+    set_canary_ws_manager(manager)
+    set_canary_filtered_ws_manager(filtered_manager)
+    try:
+        canary_service.start()
+    except Exception as e:
+        print(f"Error starting canary service: {e}")
+
     # BACKLOG-001 / CAPACITY-CONSOLIDATE (#428): instantiate the unified
     # CapacityManager (this also wires the slot-release → backlog-drain
     # callback internally) and spawn the 60s maintenance loop. The
@@ -611,6 +627,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error stopping sync health service: {e}")
 
+    # Shutdown canary service (CANARY-001 / Issue #411)
+    try:
+        canary_service.stop()
+        print("Canary service stopped")
+    except Exception as e:
+        print(f"Error stopping canary service: {e}")
+
     # Shutdown operator queue sync service
     try:
         operator_queue_service.stop()
@@ -725,6 +748,7 @@ app.include_router(telemetry_router)
 app.include_router(logs_router)
 app.include_router(agent_dashboard_router)
 app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase 1)
+app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
 app.include_router(tags_router)  # Agent Tags (ORG-001)
