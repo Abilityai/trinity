@@ -68,18 +68,25 @@
         </div>
 
         <!-- Reset memory button (Phase 3.4) — only when an active session exists -->
-        <button
-          v-if="currentSessionId"
-          @click="confirmReset"
-          :disabled="loading"
-          class="inline-flex items-center px-3 py-1.5 text-sm font-medium text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-colors"
-          title="Clear working memory (keeps message history)"
-        >
-          <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          Reset memory
-        </button>
+        <div v-if="currentSessionId" class="flex flex-col items-end">
+          <button
+            @click="confirmReset"
+            :disabled="loading"
+            class="inline-flex items-center px-3 py-1.5 text-sm font-medium text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-colors"
+            title="Clear working memory (keeps message history)"
+          >
+            <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            Reset memory
+          </button>
+          <p
+            v-if="showCompactHint"
+            class="text-xs italic text-gray-500 dark:text-gray-400 mt-1 max-w-xs text-right"
+          >
+            Compacted {{ currentSession.compact_count }} times — consider starting fresh for sharper responses.
+          </p>
+        </div>
 
         <!-- New Session button -->
         <button
@@ -267,6 +274,21 @@ const currentSessionLabel = computed(() => {
   const s = sessions.value.find((x) => x.id === currentSessionId.value)
   if (!s) return 'Current session'
   return formatSessionDate(s.last_message_at || s.started_at)
+})
+
+const currentSession = computed(() => {
+  if (!currentSessionId.value) return null
+  return sessions.value.find((x) => x.id === currentSessionId.value) || null
+})
+
+// Inline reset-memory hint threshold. Claude Code auto-compacts at ~85% of
+// the model window; each compact compresses ~170k of history into ~10k of
+// summary, and stacked compacts degrade response quality. Surfacing the
+// "consider starting fresh" suggestion at >5 keeps the hint quiet for
+// normal use and visible only when fidelity is genuinely at risk.
+const COMPACT_HINT_THRESHOLD = 5
+const showCompactHint = computed(() => {
+  return (currentSession.value?.compact_count ?? 0) > COMPACT_HINT_THRESHOLD
 })
 
 function formatSessionDate(dateStr) {
