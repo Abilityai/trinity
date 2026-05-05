@@ -13,8 +13,8 @@ services:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
-      - REDIS_URL=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}  # Optional - set for production
+      # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
@@ -64,11 +64,12 @@ services:
       - trinity-archives:/data/archives  # Log archives storage
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
     networks:
-      - trinity-network
+      - trinity-platform   # Redis, scheduler, vector, OTel
+      - trinity-agent      # Frontend, mcp-server, agent containers
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -99,7 +100,7 @@ services:
     depends_on:
       - backend
     networks:
-      - trinity-network
+      - trinity-agent      # Frontend talks to backend on agent network
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -110,24 +111,90 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    # Loopback-only host port (test suites connect from the dev machine).
+    # External LAN cannot reach Redis even with auth — defense in depth.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     networks:
-      - trinity-network
+      - trinity-platform   # Issue #589: Redis is NOT on agent network
     environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-    # SECURITY: Set REDIS_PASSWORD in .env for production
-    command: >
-      sh -c '
-        if [ -n "$REDIS_PASSWORD" ]; then
-          redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
-        else
-          echo "WARNING: Redis running without authentication"
-          redis-server --appendonly yes
-        fi
-      '
+      # Two passwords by design: leaking the runtime password from a
+      # compromised platform container does NOT grant admin (FLUSHALL,
+      # CONFIG, SHUTDOWN). See docs/migrations/REDIS_AUTH.md.
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+      - "REDIS_BACKEND_PASSWORD=${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env (generate openssl rand -hex 24)}"
+    # Additive ACL — start from zero, allow only what the runtime needs.
+    # `+@all -X` is rejected: it includes commands Redis hasn't shipped yet.
+    # NB: each `--user` rule must be its own argv (Redis CLI parser).
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      # default — admin user, full access (used for ACL bootstrap and ad-hoc ops)
+      - --user
+      - default
+      - "on"
+      - ">${REDIS_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@all"
+      # backend — runtime user for backend container
+      - --user
+      - backend
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+      # scheduler — same access pattern as backend; separate user for traceability
+      - --user
+      - scheduler
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+    # Healthcheck pings as the `backend` ACL user so a typo'd ACL keeps
+    # Redis unhealthy and gates dependent services (broken-ACL caught at
+    # boot, not after first user-facing failure).
+    # Password passed via REDISCLI_AUTH env var (not -a flag) so it does
+    # not appear in /proc/<pid>/cmdline during the healthcheck (CSO OBS-3).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_BACKEND_PASSWORD" redis-cli --user backend --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   mcp-server:
     build:
@@ -147,7 +214,10 @@ services:
     depends_on:
       - backend
     networks:
-      - trinity-network
+      # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
+      # via Docker DNS on the agent network; backend reaches it on platform network.
+      - trinity-platform
+      - trinity-agent
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -166,7 +236,8 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      - REDIS_URL=redis://redis:6379
+      # Scheduler uses the same `backend` ACL user (identical access patterns).
+      - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
       - LOG_LEVEL=${SCHEDULER_LOG_LEVEL:-INFO}
       - LOCK_TIMEOUT=600
@@ -178,11 +249,11 @@ services:
       - trinity-data:/data
     depends_on:
       redis:
-        condition: service_started
+        condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       backend:
         condition: service_started
     networks:
-      - trinity-network
+      - trinity-platform   # Scheduler talks only to Redis + backend; never to agents
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -208,7 +279,7 @@ services:
     ports:
       - "8686:8686"  # Vector API (health checks)
     networks:
-      - trinity-network
+      - trinity-platform   # Vector reads via Docker socket, not network — platform side
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -234,7 +305,8 @@ services:
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
     networks:
-      - trinity-network
+      - trinity-platform
+      - trinity-agent      # Agents push metrics directly to the collector
     labels:
       - "trinity.platform=infrastructure"
       - "trinity.service=otel-collector"
@@ -251,7 +323,19 @@ volumes:
   trinity-archives:  # Compressed log archives
 
 networks:
-  trinity-network:
+  # Platform-internal network: Redis, scheduler, backend, mcp-server, vector, otel.
+  # Agents NEVER join this network — Issue #589 (Redis lockdown).
+  trinity-platform:
+    driver: bridge
+    name: trinity-platform-network
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+  # Agent-facing network: agents, frontend, plus the bridges that need to reach
+  # them (backend, mcp-server, otel-collector). Name preserved so the three
+  # agent-creation sites in services/agent_service/* and system_agent_service.py
+  # need zero code changes.
+  trinity-agent:
     driver: bridge
     name: trinity-agent-network
     ipam:

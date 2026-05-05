@@ -157,6 +157,43 @@ docker logs agent-myagent
 - Check if `trinity-agent-base` image exists: `docker images | grep trinity-agent-base`
 - Rebuild: `./scripts/deploy/build-base-image.sh`
 
+**Stale platform images after a `git pull` (issue #557)**
+
+Symptom: `start.sh` finishes with "Trinity Agent Platform - Ready!", but
+the UI shows "Disconnected" and `curl http://localhost:8000/health`
+returns connection refused. `docker compose ps` shows `trinity-backend`
+as `Up`, yet the backend logs are full of:
+
+```
+File "/app/main.py", line N, in <module>
+    from <some_package> import <something>
+ModuleNotFoundError: No module named '<some_package>'
+```
+
+Cause: backend source is bind-mounted from your working tree, but the
+**Python environment is baked into the platform image at build time**.
+After a `git pull` that adds a new dependency to
+`docker/backend/Dockerfile`, `docker/scheduler/requirements.txt`,
+`src/frontend/package.json`, or `src/mcp-server/package.json`, the new
+source runs against the old image's environment and the import fails.
+Compose keeps respawning the crash-looping worker, so port 8000 never
+binds.
+
+Fix: rebuild the affected platform images and restart, then `start.sh`
+will boot a healthy stack.
+
+```bash
+docker compose build      # or: docker compose build backend frontend mcp-server scheduler
+docker compose up -d
+```
+
+If you frequently pull `dev`, alias this to a single command in your
+shell — Trinity does not currently auto-detect the staleness on
+`start.sh` because the cost of doing so on every cold start is too high
+relative to how rarely the failure occurs (see #557 for the discussion).
+A future `scripts/deploy/upgrade.sh` will wrap backup + rebuild + start
++ verify for the explicit upgrade path.
+
 **Redis connection errors**
 - Ensure Redis is running: `docker compose ps redis`
 - Check Redis logs: `docker compose logs redis`

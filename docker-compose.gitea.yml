@@ -27,7 +27,7 @@ services:
       - gitea-data:/var/lib/gitea
       - gitea-config:/etc/gitea
     networks:
-      - trinity-network
+      - trinity-agent-network
     labels:
       - "trinity.platform=dev-infra"
       - "trinity.service=gitea"

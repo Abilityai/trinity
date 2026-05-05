@@ -17,11 +17,27 @@ import signal
 import sys
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 from aiohttp import web
 
 from .config import config
 from .service import SchedulerService
+
+
+def _redact_redis_url(url: str) -> str:
+    """Strip the password from a redis:// URL before logging (Issue #589)."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.password:
+            return url
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        netloc = f"{parsed.username}:***@{host}" if parsed.username else f":***@{host}"
+        return urlunparse(parsed._replace(netloc=netloc))
+    except Exception:
+        return "redis://***"
 
 # Configure logging
 logging.basicConfig(
@@ -54,7 +70,7 @@ class SchedulerApp:
         logger.info("Trinity Scheduler Service Starting")
         logger.info("=" * 60)
         logger.info(f"Database: {config.database_path}")
-        logger.info(f"Redis: {config.redis_url}")
+        logger.info(f"Redis: {_redact_redis_url(config.redis_url)}")
         logger.info(f"Health server: {config.health_host}:{config.health_port}")
         logger.info("=" * 60)
 

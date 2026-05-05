@@ -120,6 +120,18 @@ async def voice_stop(
     current_user: User = Depends(get_current_user),
 ):
     """End a voice session and save the transcript to chat messages."""
+    # Ownership gate (#600): the path agent and the JWT user must both match
+    # the session before any mutation happens — otherwise any authenticated
+    # user with access to ANY agent could end and persist a transcript onto
+    # someone else's session by passing its 128-bit id in the body.
+    preview = voice_service.get_session(request.voice_session_id)
+    if not preview:
+        raise HTTPException(status_code=404, detail="Voice session not found")
+    if preview.agent_name != name:
+        raise HTTPException(status_code=403, detail="Voice session does not belong to this agent")
+    if preview.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+
     session = await voice_service.end_session(request.voice_session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Voice session not found")
@@ -197,16 +209,38 @@ async def voice_websocket(
         return
 
     # Authenticate via query param token (WebSocket can't use Authorization header)
-    if token:
-        from jose import jwt, JWTError
-        from config import SECRET_KEY, ALGORITHM
-        try:
-            jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        except JWTError:
-            await websocket.close(code=4001, reason="Invalid token")
-            return
-    else:
+    if not token:
         await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    from jose import jwt, JWTError
+    from config import SECRET_KEY, ALGORITHM
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    username = payload.get("sub")
+    if not username:
+        await websocket.close(code=4001, reason="Invalid token claims")
+        return
+
+    user = db.get_user_by_username(username)
+    if not user:
+        await websocket.close(code=4001, reason="Unknown user")
+        return
+
+    # Ownership gate (#600): JWT user must own the voice session, or be admin.
+    # Without this check, anyone holding a valid JWT who learns the 128-bit
+    # session id (logs, browser inspection, XSS) can hijack the audio stream
+    # and write tool calls under the victim's identity.
+    if user["id"] != session.user_id and user.get("role") != "admin":
+        logger.warning(
+            "voice_ws ownership rejected: user_id=%s tried to attach to session owned by user_id=%s",
+            user["id"], session.user_id,
+        )
+        await websocket.close(code=4003, reason="Not authorized for this voice session")
         return
 
     await websocket.accept()

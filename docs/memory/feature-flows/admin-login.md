@@ -152,17 +152,22 @@ async loginWithCredentials(username, password) {
 }
 ```
 
-`setupAxiosAuth()` method (lines 116-122):
+`setupAxiosAuth()` method:
 ```javascript
 setupAxiosAuth() {
   if (this.token) {
     // Set Authorization header for all axios requests
     axios.defaults.headers.common['Authorization'] = `Bearer ${this.token}`
-    // Set token as cookie for nginx auth_request validation
-    document.cookie = `token=${this.token}; path=/; max-age=1800; SameSite=Strict`
   }
 }
 ```
+
+The token is *not* mirrored into `document.cookie`. An earlier version did
+mirror for a hypothetical nginx `auth_request` validation, but no
+deployment ever wired up that directive — the cookie was dead code with
+real attack surface (no `HttpOnly` possible on JS-set cookies, no
+`Secure` flag over HTTP, auto-attached as a CSRF vector). Removed in
+#188 / PR #642.
 
 ### Session Persistence
 
@@ -568,7 +573,6 @@ JWT token payload for admin login:
 |------|---------|-----|----------|
 | JWT Token | localStorage | `token` | Until logout/expiry |
 | User Profile | localStorage | `auth0_user` | Until logout |
-| Token Cookie | document.cookie | `token` | 30 minutes (nginx) |
 | Admin Password | SQLite | `users.password_hash` | Permanent |
 | Setup Status | SQLite | `system_settings.setup_completed` | Permanent |
 

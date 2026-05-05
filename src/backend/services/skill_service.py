@@ -31,6 +31,15 @@ logger = logging.getLogger(__name__)
 # Local path for skills library clone
 SKILLS_LIBRARY_PATH = Path("/data/skills-library")
 
+# Issue #184 (UnderDefense pentest 3.3.1): override git's default
+# User-Agent (`git/<version> (libcurl/...)`) on every HTTP-bearing git
+# subcommand so outbound requests don't fingerprint the backend stack.
+# The SSRF allowlist (#179) already locks the destination to github.com,
+# but defense-in-depth: even if the allowlist is ever loosened, the UA
+# stays generic. Constant intentionally has no version suffix to avoid
+# yet another version string drifting against VERSION / package.json.
+_GIT_HTTP_UA_ARGS = ["-c", "http.useragent=Trinity-Skills-Sync"]
+
 class SkillService:
     """
     Service for managing skills library and skill assignments.
@@ -127,7 +136,10 @@ class SkillService:
         """Clone the skills library repository."""
         self.library_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ["git", "clone", "--branch", branch, "--depth", "1", url, str(self.library_path)]
+        cmd = [
+            "git", *_GIT_HTTP_UA_ARGS,
+            "clone", "--branch", branch, "--depth", "1", url, str(self.library_path),
+        ]
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
@@ -146,7 +158,7 @@ class SkillService:
         try:
             # Fetch and reset to remote branch
             subprocess.run(
-                ["git", "fetch", "origin", branch],
+                ["git", *_GIT_HTTP_UA_ARGS, "fetch", "origin", branch],
                 cwd=self.library_path,
                 check=True,
                 capture_output=True,

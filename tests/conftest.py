@@ -18,6 +18,18 @@ Configuration:
 collect_ignore = ["test_archive_security.py"]
 
 # ---------------------------------------------------------------------------
+# Issue #589: backend config now raises at import-time if REDIS_URL lacks
+# credentials. Set a dummy creds-bearing URL BEFORE any backend module is
+# imported (the preload calls below trigger transitive `import config` for
+# many tests). Real Redis tests under tests/security/ override these via
+# their own conftest from .env.
+# ---------------------------------------------------------------------------
+import os as _os_589
+_os_589.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
+_os_589.environ.setdefault("REDIS_PASSWORD", "test")
+_os_589.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+
+# ---------------------------------------------------------------------------
 # Pre-load src/backend/models as the canonical `models` in sys.modules
 # BEFORE any test file is collected.
 #
@@ -174,6 +186,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: mark test as slow running (chat execution)")
     config.addinivalue_line("markers", "requires_agent: test requires a running agent")
     config.addinivalue_line("markers", "unit: unit tests that don't need backend")
+    config.addinivalue_line("markers", "integration: tests requiring a running Docker stack (#589)")
 
 
 def pytest_addoption(parser):

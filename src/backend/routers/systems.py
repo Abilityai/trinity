@@ -9,7 +9,7 @@ from fastapi.responses import PlainTextResponse
 
 from models import User, AgentConfig, SystemDeployRequest, SystemDeployResponse
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, require_role
 from services.system_service import (
     parse_manifest,
     validate_manifest,
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/api/systems", tags=["systems"])
 async def deploy_system(
     body: SystemDeployRequest,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role("creator"))
 ):
     """
     Deploy a multi-agent system from YAML manifest.

@@ -2,6 +2,7 @@
 Configuration constants for the Trinity backend.
 """
 import os
+from urllib.parse import urlparse
 
 # Email Authentication Mode (Phase 12.4)
 # Set EMAIL_AUTH_ENABLED=true to enable email-based login with verification codes
@@ -25,18 +26,18 @@ SECRET_KEY = _secret_key
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 
-# Redis URL - supports password via REDIS_PASSWORD env var or in URL
-_redis_password = os.getenv("REDIS_PASSWORD", "")
-_redis_base_url = os.getenv("REDIS_URL", "redis://redis:6379")
-if _redis_password and "://@" not in _redis_base_url and "://:" not in _redis_base_url:
-    # Insert password into URL if not already present
-    if "://" in _redis_base_url:
-        scheme, rest = _redis_base_url.split("://", 1)
-        REDIS_URL = f"{scheme}//:{_redis_password}@{rest}"
-    else:
-        REDIS_URL = _redis_base_url
-else:
-    REDIS_URL = _redis_base_url
+# Redis URL — must include credentials (Issue #589).
+# docker-compose builds the URL with the `backend` ACL user + REDIS_BACKEND_PASSWORD;
+# we only validate it here. Splicing fallback removed: a single source of truth
+# avoids silent drift between compose env and Python config.
+REDIS_URL = os.getenv("REDIS_URL", "")
+_redis_parsed = urlparse(REDIS_URL) if REDIS_URL else None
+if not REDIS_URL or not _redis_parsed or not _redis_parsed.username or not _redis_parsed.password:
+    raise RuntimeError(
+        "REDIS_URL must include credentials (redis://user:password@host:port). "
+        "Generate passwords with: openssl rand -hex 24. "
+        "See docs/migrations/REDIS_AUTH.md for details."
+    )
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "")  # Set in .env or docker-compose for OAuth redirects
 
