@@ -149,18 +149,13 @@ async def list_notifications(
                 detail=f"Invalid priorities: {', '.join(invalid)}"
             )
 
-    # Filter to notifications from agents the user can access. Admins see
-    # everything (including platform-sourced notifications like the canary
-    # harness, whose agent_name is a synthetic identifier not registered
-    # as a real Docker agent — see services/canary_service.CANARY_NOTIFIER_NAME).
-    is_admin = current_user.role == "admin"
-    accessible_agent_names = (
-        None if is_admin else {a['name'] for a in get_accessible_agents(current_user)}
-    )
+    # Filter to notifications from agents the user can access
+    accessible_agent_names = {a['name'] for a in get_accessible_agents(current_user)}
 
-    # If filtering by specific agent, verify access (admins skip the check)
-    if agent_name and accessible_agent_names is not None and agent_name not in accessible_agent_names:
-        raise HTTPException(status_code=403, detail="Access denied to agent")
+    # If filtering by specific agent, verify access
+    if agent_name:
+        if agent_name not in accessible_agent_names:
+            raise HTTPException(status_code=403, detail="Access denied to agent")
 
     notifications = db.list_notifications(
         agent_name=agent_name,
@@ -169,11 +164,9 @@ async def list_notifications(
         limit=limit * 2 if not agent_name else limit  # Fetch extra for filtering
     )
 
-    # Filter to only accessible agents' notifications (admins skip)
-    if not agent_name and accessible_agent_names is not None:
+    # Filter to only accessible agents' notifications
+    if not agent_name:
         notifications = [n for n in notifications if n.agent_name in accessible_agent_names][:limit]
-    else:
-        notifications = notifications[:limit]
 
     return NotificationList(
         count=len(notifications),
