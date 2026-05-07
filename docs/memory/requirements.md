@@ -2011,15 +2011,15 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Implements**: Issue #411 — first three invariants (S-01, E-02, L-03)
 - **Description**: Background watcher service that runs deterministic
   orchestration-invariant checks against live platform state every 5
-  minutes. Persists violations to a queryable table and emits
-  notifications on green→red transitions. Catches the bug class behind
-  PRs #378, #403, #129, #226 — race conditions and cross-component state
-  drift that unit tests miss.
+  minutes. Persists violations to a queryable table and classifies
+  green→red transitions for an external alert sink. Catches the bug
+  class behind PRs #378, #403, #129, #226 — race conditions and
+  cross-component state drift that unit tests miss.
 - **Architecture**: deterministic Python library (`src/backend/canary/`)
   shared between the watcher service (`services/canary_service.py`) and
   the on-demand admin endpoint (`POST /api/canary/run-cycle`). Library
-  reads state but writes nothing; service writes violations and emits
-  notifications.
+  reads state but writes nothing; service writes violations and
+  classifies transitions.
 - **Phase 1 invariants**:
   - **S-01** Slot–row bijection (Redis ZRANGE vs SQL running rows, drain
     sentinels filtered)
@@ -2035,10 +2035,13 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
   watcher reports trivially-green cycles with no signal.
-- **Notifications**: one notification per green→red transition emitted
-  via `db.create_notification(...)` with `notification_type="alert"` and
-  `category="canary"`. Severity → priority: critical → urgent, major →
-  high, minor → normal. No notification on continuing-red cycles.
+- **Alert sink**: Phase 1 ships with no external alert sink wired.
+  Green→red transitions are logged and persisted to `canary_violations`;
+  the dashboard-notifications path (writing `agent_notifications` rows
+  via `db.create_notification`) was rejected on the product call. The
+  `_emit_transition` seam in `canary_service.py` is preserved as a
+  no-op stub so a follow-up PR can plug Slack in as a single-file
+  change. No alert on continuing-red cycles.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.
