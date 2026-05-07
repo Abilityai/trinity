@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import HTTPException
 
-from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from ..state import agent_state
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .runtime_adapter import AgentRuntime
@@ -35,6 +35,211 @@ from ..utils.subprocess_pgroup import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# JSONL fallback recovery (stdout pipe race — final safety net)
+# ---------------------------------------------------------------------------
+#
+# Claude Code persists every turn to ~/.claude/projects/<dir>/<uuid>.jsonl
+# via a side-channel that's INDEPENDENT of stdout. When a tool subprocess
+# (or MCP grandchild) inherits claude's stdout fd and wedges the agent
+# server's reader thread, the stream-json result event is lost — but the
+# JSONL on disk usually contains the completed turn.
+#
+# The Phase 5.1 soft-recovery (response_parts != [] → synthesize success)
+# only fires when stdout managed to deliver at least one assistant text
+# block before the wedge. For races that fire mid-tool-call (zero text
+# emitted), response_parts is empty and the soft-recovery falls through
+# to a hard 502.
+#
+# This helper is the next layer down: when stdout failed AND
+# response_parts is empty, read the JSONL and pull the assistant text
+# emitted during the just-completed turn. The data is authoritative
+# (Claude Code's own session record), so when the read succeeds we can
+# synthesize a full soft-success response and surface
+# `metadata.recovered_from_jsonl = True` for observability.
+#
+# Recovery is bounded: we only walk forward from the most recent user
+# input message (string content, not a tool_result), so prior turns'
+# text never leaks into this turn's response.
+
+_JSONL_PROJECTS_DIR = "/home/developer/.claude/projects/-home-developer"
+_MAX_JSONL_BYTES_FOR_RECOVERY = 10 * 1024 * 1024  # 10MB cap on read
+
+
+def _recover_response_from_jsonl(session_id: Optional[str]) -> Optional[str]:
+    """Try to recover an assistant text response from a Claude Code JSONL.
+
+    Returns the concatenated text of all assistant.text blocks emitted
+    after the most recent user-input message in the JSONL, or None when:
+      - session_id is missing
+      - the JSONL file doesn't exist or can't be read
+      - no user-input boundary is found (shouldn't happen in practice)
+      - no assistant text was emitted after the boundary (Claude died
+        mid-tool-call before writing any text — genuinely incomplete).
+
+    The boundary uses the shape difference between user inputs (string
+    content) and tool_results (list-of-dicts content) — Claude Code
+    records them with different types in the JSONL.
+    """
+    if not session_id:
+        return None
+
+    jsonl_path = Path(f"{_JSONL_PROJECTS_DIR}/{session_id}.jsonl")
+    if not jsonl_path.exists():
+        return None
+
+    try:
+        if jsonl_path.stat().st_size > _MAX_JSONL_BYTES_FOR_RECOVERY:
+            # Cap read size — turns rarely produce more than a few hundred
+            # KB; pathological JSONLs shouldn't hang recovery indefinitely.
+            with jsonl_path.open("rb") as f:
+                f.seek(-_MAX_JSONL_BYTES_FOR_RECOVERY, os.SEEK_END)
+                # Skip the partial first line after seeking mid-file.
+                f.readline()
+                raw = f.read().decode("utf-8", errors="replace")
+        else:
+            raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[JSONL Recovery] Failed to read {jsonl_path}: {e}"
+        )
+        return None
+
+    lines = raw.strip().split("\n")
+
+    # Walk backward to find the boundary: the most recent user-INPUT
+    # message (content is a string, not a list). tool_result entries
+    # also have type=user but their content is a list of dicts.
+    boundary_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "user":
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            boundary_idx = i
+            break
+
+    if boundary_idx is None:
+        return None
+
+    # Collect assistant.text blocks emitted after the boundary. Skip
+    # tool_use blocks (no user-facing text), thinking blocks (model's
+    # internal reasoning, never shown), and any non-list content.
+    text_parts: List[str] = []
+    for line in lines[boundary_idx + 1:]:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text") or ""
+                if text:
+                    text_parts.append(text)
+
+    if not text_parts:
+        return None
+
+    return "\n".join(text_parts)
+
+
+def _extract_compact_events_from_jsonl(
+    session_id: Optional[str], since_iso: Optional[str] = None
+) -> List["CompactEvent"]:
+    """Read compact_boundary records out of a Claude Code JSONL.
+
+    Claude Code's `--output-format stream-json --verbose` emits
+    `compact_boundary` events to stdout but strips the `compactMetadata`
+    envelope (we get the event-fired signal but no pre/post/duration
+    detail). The JSONL on disk has the canonical shape:
+
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"trigger":"auto", "preTokens":175061,
+                             "postTokens":5904, "durationMs":73651},
+         "timestamp": "2026-05-04T13:01:56.959Z", ...}
+
+    This helper is called AFTER a turn completes to populate
+    `metadata.compact_events` with the real detail fields. ``since_iso``
+    filters to compact records emitted at or after the given ISO
+    timestamp — used to scope the result to the just-completed turn
+    when the JSONL has compact records from prior turns.
+
+    Returns an empty list when the session_id is missing, the file
+    doesn't exist, or no compact records are present.
+    """
+    if not session_id:
+        return []
+
+    jsonl_path = Path(f"{_JSONL_PROJECTS_DIR}/{session_id}.jsonl")
+    if not jsonl_path.exists():
+        return []
+
+    try:
+        if jsonl_path.stat().st_size > _MAX_JSONL_BYTES_FOR_RECOVERY:
+            with jsonl_path.open("rb") as f:
+                f.seek(-_MAX_JSONL_BYTES_FOR_RECOVERY, os.SEEK_END)
+                f.readline()
+                raw = f.read().decode("utf-8", errors="replace")
+        else:
+            raw = jsonl_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[JSONL Compact Extract] Failed to read {jsonl_path}: {e}"
+        )
+        return []
+
+    events: List["CompactEvent"] = []
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "system" or entry.get("subtype") != "compact_boundary":
+            continue
+        ts = entry.get("timestamp")
+        if since_iso and isinstance(ts, str) and ts < since_iso:
+            continue
+        cm = entry.get("compactMetadata") or {}
+        if not isinstance(cm, dict):
+            cm = {}
+        events.append(CompactEvent(
+            trigger=cm.get("trigger"),
+            pre_tokens=cm.get("preTokens"),
+            post_tokens=cm.get("postTokens"),
+            duration_ms=cm.get("durationMs"),
+            timestamp=ts if isinstance(ts, str) else None,
+        ))
+
+    return events
+
 
 # Thread pool for running blocking subprocess operations
 # This allows FastAPI to handle other requests (like /api/activity polling) during execution
@@ -141,17 +346,20 @@ class ClaudeCodeRuntime(AgentRuntime):
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """Execute Claude Code in headless mode for parallel tasks.
 
         Args:
             resume_session_id: Optional session ID to resume (EXEC-023)
+            persist_session: If True, write the JSONL so the next --resume can find it (Session tab)
             images: Optional list of vision images: [{"media_type": str, "data": base64_str}] (#562)
         """
         return await execute_headless_task(
             prompt, model, allowed_tools, system_prompt, timeout_seconds,
-            max_turns, execution_id, resume_session_id, images=images,
+            max_turns, execution_id, resume_session_id,
+            persist_session=persist_session, images=images,
         )
 
 
@@ -160,7 +368,7 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
     Parse stream-json output from Claude Code.
 
     Stream-json format emits one JSON object per line:
-    - {"type": "init", "session_id": "abc123", ...}
+    - {"type": "system", "subtype": "init", "session_id": "abc123", ...}
     - {"type": "user", "message": {...}}
     - {"type": "assistant", "message": {"content": [{"type": "tool_use", ...}, ...]}}
     - {"type": "result", "total_cost_usd": 0.003, ...}
@@ -188,8 +396,27 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
 
         msg_type = msg.get("type")
 
-        if msg_type == "init":
+        # Claude Code emits {"type": "system", "subtype": "init", ...} for the
+        # session-start event; the result event also carries session_id and
+        # serves as a fallback when the init line was missed (e.g. truncated
+        # stream).
+        if msg_type == "system" and msg.get("subtype") == "init":
             metadata.session_id = msg.get("session_id")
+
+        elif msg_type == "system" and msg.get("subtype") == "compact_boundary":
+            # Detection-only: stdout's stream-json strips the
+            # compactMetadata envelope, so we capture a placeholder event
+            # to preserve the count signal. The authoritative pre/post/
+            # duration values are filled in post-turn from the JSONL via
+            # _extract_compact_events_from_jsonl in execute_headless_task.
+            cm = msg.get("compactMetadata", {}) or {}
+            metadata.compact_events.append(CompactEvent(
+                trigger=cm.get("trigger"),
+                pre_tokens=cm.get("preTokens"),
+                post_tokens=cm.get("postTokens"),
+                duration_ms=cm.get("durationMs"),
+                timestamp=msg.get("timestamp"),
+            ))
 
         elif msg_type == "result":
             # Final result message with stats
@@ -197,6 +424,8 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             metadata.duration_ms = msg.get("duration_ms")
             metadata.num_turns = msg.get("num_turns")
             response_text = msg.get("result", response_text)
+            if not metadata.session_id:
+                metadata.session_id = msg.get("session_id")
 
             # Extract token usage from result.usage
             usage = msg.get("usage", {})
@@ -325,8 +554,30 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
 
     msg_type = msg.get("type")
 
-    if msg_type == "init":
+    # Claude Code emits {"type": "system", "subtype": "init", ...} for the
+    # session-start event; the result event also carries session_id and
+    # serves as a fallback when the init line was missed.
+    if msg_type == "system" and msg.get("subtype") == "init":
         metadata.session_id = msg.get("session_id")
+
+    elif msg_type == "system" and msg.get("subtype") == "compact_boundary":
+        cm = msg.get("compactMetadata", {}) or {}
+        event = CompactEvent(
+            trigger=cm.get("trigger"),
+            pre_tokens=cm.get("preTokens"),
+            post_tokens=cm.get("postTokens"),
+            duration_ms=cm.get("durationMs"),
+            timestamp=msg.get("timestamp"),
+        )
+        metadata.compact_events.append(event)
+        logger.info(
+            f"event=session_auto_compact "
+            f"claude_session_id={metadata.session_id} "
+            f"trigger={event.trigger} "
+            f"pre_tokens={event.pre_tokens} "
+            f"post_tokens={event.post_tokens} "
+            f"duration_ms={event.duration_ms}"
+        )
 
     elif msg_type == "result":
         # Final result message with stats
@@ -334,6 +585,8 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
         metadata.duration_ms = msg.get("duration_ms")
         metadata.num_turns = msg.get("num_turns")
         result_text = msg.get("result", "")
+        if not metadata.session_id:
+            metadata.session_id = msg.get("session_id")
 
         # Detect error results (e.g., max_turns, rate limit, auth failures)
         if msg.get("is_error") and not metadata.error_type:
@@ -357,27 +610,34 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
             response_parts.clear()
             response_parts.append(result_text)
 
-        # Extract token usage from result.usage
-        usage = msg.get("usage", {})
-        metadata.input_tokens = usage.get("input_tokens", 0)
-        metadata.output_tokens = usage.get("output_tokens", 0)
-        metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
-        metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
-
-        # Extract context window and token counts from modelUsage (preferred source)
-        # modelUsage provides per-model breakdown with actual context usage
+        # Pull only model-level facts from the result event (cost, duration,
+        # num_turns are already set above). Token counts in result.usage and
+        # modelUsage.inputTokens are CUMULATIVE across every internal API
+        # call this turn made — for a tool-using turn with 18 iterations,
+        # cache_read in result.usage = 18 × per-call cache_read = 1M+ tokens
+        # of "billing total", which has nothing to do with the prompt size
+        # any single call sent to the model. Overwriting metadata.* with
+        # those values previously made our context-window-pressure metric
+        # grow far beyond the 200K limit even when no individual call was
+        # close to the wall.
+        #
+        # The per-assistant-message handler below tracks the per-API-call
+        # usage; the LATEST assistant message's values represent the FINAL
+        # API call's prompt — which is what determines whether the next
+        # turn will fit.
         model_usage = msg.get("modelUsage", {})
         for model_name, model_data in model_usage.items():
             if "contextWindow" in model_data:
                 metadata.context_window = model_data["contextWindow"]
-            # modelUsage.inputTokens is the authoritative context size (includes all turns)
-            if "inputTokens" in model_data and model_data["inputTokens"] > metadata.input_tokens:
-                metadata.input_tokens = model_data["inputTokens"]
-            if "outputTokens" in model_data and model_data["outputTokens"] > metadata.output_tokens:
-                metadata.output_tokens = model_data["outputTokens"]
             break  # Use first model found
 
-        logger.debug(f"Result message parsed: usage={usage}, modelUsage={model_usage}, input_tokens={metadata.input_tokens}")
+        logger.debug(
+            f"Result message parsed: cost=${metadata.cost_usd}, "
+            f"duration={metadata.duration_ms}ms, num_turns={metadata.num_turns}, "
+            f"context_window={metadata.context_window}, "
+            f"per-call cache_read={metadata.cache_read_tokens} "
+            f"(set by latest assistant message)"
+        )
 
     elif msg_type == "assistant" or msg_type == "user":
         # Detect error classification on assistant messages (e.g., rate_limit, auth errors)
@@ -395,6 +655,23 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
         # tool_use appears in assistant messages, tool_result may appear in either
         message = msg.get("message", {})
         message_content = message.get("content", [])
+
+        # Per-API-call token usage. Each assistant message corresponds to ONE
+        # Claude API call; usage on it is the per-call breakdown (input,
+        # cache_read, cache_creation, output). We OVERWRITE so the LATEST
+        # assistant message wins — that's the final API call's prompt size,
+        # which determines whether the next user turn will fit. Do NOT use
+        # result.usage which is cumulative across all internal calls and
+        # produces nonsense values like cache_read=1.26M for tool-heavy
+        # turns. (parse_stream_json_output's batch path has the equivalent
+        # block at lines 211-215.)
+        if msg_type == "assistant":
+            usage = message.get("usage", {}) or {}
+            if usage:
+                metadata.input_tokens = usage.get("input_tokens", 0)
+                metadata.output_tokens = usage.get("output_tokens", 0)
+                metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
+                metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
 
         # Log message structure for debugging activity tracking issues
         if message_content:
@@ -617,19 +894,31 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                 for line in iter(process.stdout.readline, ''):
                     if not line:
                         break
+                    # Issue #630: per-line try/except so one bad line does
+                    # not kill the reader and cost us the result line later
+                    # in the stream.
                     try:
-                        raw_msg = json.loads(line.strip())
-                        if not isinstance(raw_msg, dict):
-                            # stream-json can emit string literals; skip them
-                            continue
-                        # SECURITY: Sanitize credentials from output before storing
-                        raw_msg = sanitize_dict(raw_msg)
-                        raw_messages.append(raw_msg)
-                        registry.publish_log_entry(execution_id, raw_msg)
-                    except json.JSONDecodeError:
-                        pass
-                    sanitized_line = sanitize_subprocess_line(line)
-                    process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                        try:
+                            raw_msg = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            raw_msg = None
+
+                        if isinstance(raw_msg, dict):
+                            # SECURITY: Sanitize credentials from output before storing
+                            raw_msg = sanitize_dict(raw_msg)
+                            raw_messages.append(raw_msg)
+                            try:
+                                registry.publish_log_entry(execution_id, raw_msg)
+                            except Exception as pub_err:  # noqa: BLE001
+                                logger.warning(
+                                    f"publish_log_entry failed (continuing): {pub_err}"
+                                )
+                        sanitized_line = sanitize_subprocess_line(line)
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                    except Exception as line_err:  # noqa: BLE001
+                        logger.warning(
+                            f"Per-line stdout processing error (continuing): {line_err}"
+                        )
             except Exception as e:
                 logger.error(f"Error reading Claude output: {e}")
 
@@ -943,6 +1232,82 @@ def _classify_signal_exit(
     return (504, detail)
 
 
+def _recover_metadata_from_raw_messages(
+    metadata: Optional['ExecutionMetadata'],
+    raw_messages: Optional[List[Dict]],
+) -> bool:
+    """Back-fill ``metadata`` from a ``{"type": "result"}`` entry in
+    ``raw_messages`` when ``process_stream_line`` failed to populate it.
+
+    Issue #630: even when the reader thread successfully appends the result
+    line to ``raw_messages``, ``process_stream_line`` may not run for that
+    line if the reader is interrupted between the append and the parse
+    (registry publish raising, permission-validation re-raise, any other
+    in-loop exception). In that case ``metadata.cost_usd`` /
+    ``duration_ms`` stay ``None`` even though Claude completed cleanly and
+    the final stats are sitting in ``raw_messages[-1]``.
+
+    This recovery pass scans ``raw_messages`` from the end (the result line
+    is always last) and copies the fields ``process_stream_line`` would
+    have set: ``cost_usd``, ``duration_ms``, ``num_turns``, and the token
+    counters from ``usage`` / ``modelUsage``. ``error_type`` / response
+    text are not back-filled — those drive control flow and would change
+    behaviour beyond this defensive recovery.
+
+    Returns ``True`` if recovery populated metadata, ``False`` otherwise.
+    Safe to call when metadata is already populated — short-circuits.
+    """
+    if metadata is None or not raw_messages:
+        return False
+    if metadata.cost_usd is not None or metadata.duration_ms is not None:
+        return False
+
+    for msg in reversed(raw_messages):
+        if not isinstance(msg, dict) or msg.get("type") != "result":
+            continue
+
+        cost = msg.get("total_cost_usd")
+        dur = msg.get("duration_ms")
+        if cost is None and dur is None:
+            return False  # malformed result entry — nothing to recover
+
+        metadata.cost_usd = cost
+        metadata.duration_ms = dur
+        metadata.num_turns = msg.get("num_turns")
+
+        usage = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
+        if usage:
+            metadata.input_tokens = usage.get("input_tokens", metadata.input_tokens) or metadata.input_tokens
+            metadata.output_tokens = usage.get("output_tokens", metadata.output_tokens) or metadata.output_tokens
+            metadata.cache_creation_tokens = (
+                usage.get("cache_creation_input_tokens", metadata.cache_creation_tokens)
+                or metadata.cache_creation_tokens
+            )
+            metadata.cache_read_tokens = (
+                usage.get("cache_read_input_tokens", metadata.cache_read_tokens)
+                or metadata.cache_read_tokens
+            )
+
+        model_usage = msg.get("modelUsage", {})
+        if isinstance(model_usage, dict):
+            for _, model_data in model_usage.items():
+                if not isinstance(model_data, dict):
+                    continue
+                if "contextWindow" in model_data:
+                    metadata.context_window = model_data["contextWindow"]
+                model_in = model_data.get("inputTokens")
+                if isinstance(model_in, int) and model_in > metadata.input_tokens:
+                    metadata.input_tokens = model_in
+                model_out = model_data.get("outputTokens")
+                if isinstance(model_out, int) and model_out > metadata.output_tokens:
+                    metadata.output_tokens = model_out
+                break  # first model wins, mirrors process_stream_line
+
+        return True
+
+    return False
+
+
 def _classify_empty_result(
     metadata: Optional['ExecutionMetadata'] = None,
     raw_message_count: int = 0,
@@ -972,6 +1337,13 @@ def _classify_empty_result(
     None (populated only by that line). Derive honest counts from
     raw_messages when available so the 502 detail is accurate. (#531)
 
+    Issue #630: before classifying, attempt
+    ``_recover_metadata_from_raw_messages`` — covers the case where the
+    result line *was* parsed and appended to raw_messages but
+    process_stream_line failed to run for it (reader-thread exit between
+    append and parse). When recovery succeeds, metadata is populated and
+    the function falls through to the success path.
+
     Returns ``(status_code, detail)`` for empty-result exits, or ``None``
     if metadata looks well-formed (caller proceeds with the normal
     response-building path).
@@ -979,6 +1351,14 @@ def _classify_empty_result(
     if metadata is None:
         return None
     if metadata.cost_usd is not None or metadata.duration_ms is not None:
+        return None
+
+    if _recover_metadata_from_raw_messages(metadata, raw_messages):
+        logger.warning(
+            "[Headless Task] Recovered result metadata from raw_messages "
+            "(stream parser missed the result line; cost=%s duration=%sms turns=%s)",
+            metadata.cost_usd, metadata.duration_ms, metadata.num_turns,
+        )
         return None
 
     # tool_count is accumulated per-message during parsing (line ~1467), so
@@ -1019,6 +1399,7 @@ async def execute_headless_task(
     max_turns: Optional[int] = None,
     execution_id: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    persist_session: bool = False,
     images: Optional[List[Dict]] = None,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
@@ -1029,6 +1410,7 @@ async def execute_headless_task(
     - Does NOT use --continue flag (stateless, no conversation context) by default
     - Each call is independent and can run concurrently
     - Can resume previous sessions via resume_session_id (EXEC-023)
+    - Can persist the session JSONL via persist_session=True (Session tab)
 
     Args:
         prompt: The task to execute
@@ -1040,6 +1422,10 @@ async def execute_headless_task(
         max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
         execution_id: Optional execution ID to use for process registry (enables termination tracking)
         resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
+        persist_session: If True, omit ``--no-session-persistence`` so the
+            JSONL is written to ``~/.claude/projects/...`` and a future
+            ``--resume`` can reattach. Default False keeps headless tasks
+            stateless for all existing callers.
 
     Returns: (response_text, execution_log, metadata, session_id)
     """
@@ -1075,8 +1461,13 @@ async def execute_headless_task(
             # Session isolation: prevent headless tasks from writing session files
             # that could collide with interactive /api/chat sessions or other tasks.
             # --no-session-persistence avoids shared state in ~/.claude/projects/
-            # --session-id ensures unique namespace per task execution
-            cmd.append("--no-session-persistence")
+            # --session-id ensures unique namespace per task execution.
+            #
+            # Session tab opt-in (persist_session=True): the caller wants the
+            # JSONL written so the next turn can --resume it. We still pass a
+            # unique --session-id so cold turns don't collide on disk.
+            if not persist_session:
+                cmd.append("--no-session-persistence")
             # Claude Code requires --session-id to be a valid UUID.
             # execution_id is a base64url token (not a UUID), so always generate one.
             cmd.extend(["--session-id", str(uuid.uuid4())])
@@ -1133,6 +1524,11 @@ async def execute_headless_task(
         permission_mode_validated = False  # Track whether init message confirmed bypassPermissions
         # Use provided execution_id if available (enables termination tracking from backend)
         task_session_id = execution_id or str(uuid.uuid4())
+
+        # Anchor for scoping post-turn JSONL extracts (compact events) to
+        # this turn only — the JSONL accumulates across the resumed
+        # session's lifetime, so we filter records by timestamp >= start.
+        task_start_iso = datetime.utcnow().isoformat() + "Z"
 
         logger.info(f"[Headless Task] Starting task {task_session_id}: {' '.join(cmd[:5])}...")
 
@@ -1211,46 +1607,75 @@ async def execute_headless_task(
                     if auth_abort_event.is_set():
                         logger.info(f"[Headless Task] Stdout loop exiting due to auth abort")
                         break
-                    # Capture raw JSON for full execution log
-                    try:
-                        raw_msg = json.loads(line.strip())
-                        if not isinstance(raw_msg, dict):
-                            # stream-json can emit string literals; skip them
-                            continue
-                        # SECURITY: Sanitize credentials from output before storing
-                        raw_msg = sanitize_dict(raw_msg)
-                        raw_messages.append(raw_msg)
-                        # Publish to live streaming subscribers
-                        registry.publish_log_entry(task_session_id, raw_msg)
 
-                        # Validate permissionMode on init message (first message from Claude Code).
-                        # If permission bypass isn't active, kill immediately instead of timing out
-                        # after hours with zero work completed (all tool calls silently denied).
-                        if raw_msg.get("type") == "init" and not permission_mode_validated:
-                            perm_mode = raw_msg.get("permissionMode", "unknown")
-                            if perm_mode == "bypassPermissions":
-                                permission_mode_validated = True
-                                logger.info(f"[Headless Task] Permission mode confirmed: {perm_mode}")
-                            else:
-                                logger.error(
-                                    f"[Headless Task] CRITICAL: Permission bypass not active! "
-                                    f"permissionMode={perm_mode} (expected bypassPermissions). "
-                                    f"Killing process tree to prevent silent timeout. "
-                                    f"Task: {task_session_id}"
+                    # Issue #630: each line is processed inside a per-line
+                    # try/except so a single failure (publish_log_entry
+                    # raising, process_stream_line tripping on weird input,
+                    # any non-RuntimeError exception) does not kill the
+                    # reader. If the reader exits early the result line
+                    # later in the stream is lost and the execution is
+                    # misclassified as "completed without a result message".
+                    # RuntimeError (permission-mode failure) is intentional
+                    # — keep the existing fast-fail behaviour.
+                    try:
+                        try:
+                            raw_msg = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            raw_msg = None
+
+                        if isinstance(raw_msg, dict):
+                            # SECURITY: Sanitize credentials from output before storing
+                            raw_msg = sanitize_dict(raw_msg)
+                            raw_messages.append(raw_msg)
+                            # Publish to live streaming subscribers — isolate
+                            # so subscriber-side breakage cannot back-pressure
+                            # the reader.
+                            try:
+                                registry.publish_log_entry(task_session_id, raw_msg)
+                            except Exception as pub_err:  # noqa: BLE001
+                                logger.warning(
+                                    f"[Headless Task] publish_log_entry failed (continuing): {pub_err}"
                                 )
-                                _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
-                                raise RuntimeError(
-                                    f"Permission bypass failed: permissionMode={perm_mode}. "
-                                    f"This may be caused by a stale Claude Code session process "
-                                    f"or project settings overriding the CLI flag. "
-                                    f"Try restarting the agent container."
-                                )
-                    except json.JSONDecodeError:
-                        pass
-                    # SECURITY: Sanitize the line before processing
-                    sanitized_line = sanitize_subprocess_line(line)
-                    # Process each line for metadata/tool tracking
-                    process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+
+                            # Validate permissionMode on init message (first message from Claude Code).
+                            # If permission bypass isn't active, kill immediately instead of timing out
+                            # after hours with zero work completed (all tool calls silently denied).
+                            # Claude Code emits {"type": "system", "subtype": "init", ...} — see Appendix B
+                            # of docs/planning/SESSION_TAB_2026-04.md.
+                            if (
+                                raw_msg.get("type") == "system"
+                                and raw_msg.get("subtype") == "init"
+                                and not permission_mode_validated
+                            ):
+                                perm_mode = raw_msg.get("permissionMode", "unknown")
+                                if perm_mode == "bypassPermissions":
+                                    permission_mode_validated = True
+                                    logger.info(f"[Headless Task] Permission mode confirmed: {perm_mode}")
+                                else:
+                                    logger.error(
+                                        f"[Headless Task] CRITICAL: Permission bypass not active! "
+                                        f"permissionMode={perm_mode} (expected bypassPermissions). "
+                                        f"Killing process tree to prevent silent timeout. "
+                                        f"Task: {task_session_id}"
+                                    )
+                                    _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid)
+                                    raise RuntimeError(
+                                        f"Permission bypass failed: permissionMode={perm_mode}. "
+                                        f"This may be caused by a stale Claude Code session process "
+                                        f"or project settings overriding the CLI flag. "
+                                        f"Try restarting the agent container."
+                                    )
+
+                        # SECURITY: Sanitize the line before processing
+                        sanitized_line = sanitize_subprocess_line(line)
+                        # Process each line for metadata/tool tracking
+                        process_stream_line(sanitized_line, execution_log, metadata, tool_start_times, response_parts)
+                    except RuntimeError:
+                        raise  # Re-raise permission-mode failures
+                    except Exception as line_err:  # noqa: BLE001
+                        logger.warning(
+                            f"[Headless Task] Per-line stdout processing error (continuing): {line_err}"
+                        )
             except RuntimeError:
                 raise  # Re-raise permission mode failures
             except Exception as e:
@@ -1470,18 +1895,52 @@ async def execute_headless_task(
                     detail=f"Task execution failed (exit code {return_code}): {error_preview[:300]}"
                 )
 
-            # Issue #520: Clean exit (return_code == 0) but the final `result` JSON
-            # line never reached the reader thread — typically because a child
-            # subprocess inherited stdout. metadata.cost_usd / duration_ms stay
-            # None, the watchdog ends up reaping the execution minutes later, and
-            # the agent-server log misleadingly claims "completed successfully".
-            # Surface this as 502 so backend records it as FAILED with a useful
-            # diagnostic rather than dispatching an empty 200.
+            # Issue #520 + Session-tab pipe race recovery: clean exit
+            # (return_code == 0) but the final `result` JSON line never reached
+            # the reader thread — typically because a child subprocess inherited
+            # stdout. metadata.cost_usd / duration_ms stay None.
+            #
+            # Recovery: response_parts is appended to as each assistant message's
+            # text content arrives (independent of the result event). If we have
+            # accumulated text, the assistant DID complete its response — only
+            # the closing-stats line was lost. Synthesize a soft success so the
+            # user gets their reply instead of a 502 + retry-recommended error.
+            # cost/duration stay None in this branch (we don't know what they
+            # were); the backend records the execution as success with null
+            # cost rather than a misleading FAILED.
+            #
+            # Hard failure path stays as-is for the truly empty case (no
+            # assistant text accumulated → nothing to recover).
             empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages), raw_messages=raw_messages)
             if empty_result is not None:
-                status_code, detail = empty_result
-                logger.error(f"[Headless Task] {detail}")
-                raise HTTPException(status_code=status_code, detail=detail)
+                if response_parts:
+                    logger.warning(
+                        f"[Headless Task] Result event lost (stdout pipe race) but "
+                        f"response_parts has {sum(len(p) for p in response_parts)} chars "
+                        f"of assistant content across {len(response_parts)} blocks — "
+                        f"recovering as soft success. raw_messages={len(raw_messages)}"
+                    )
+                else:
+                    # Phase 5.1's soft-recovery requires accumulated text from
+                    # stdout. When the pipe race fires mid-tool-call, no text
+                    # was ever emitted to stdout — but Claude Code's JSONL on
+                    # disk usually contains the completed turn. Read it as
+                    # the authoritative ground truth before giving up.
+                    recovered_text = _recover_response_from_jsonl(metadata.session_id)
+                    if recovered_text:
+                        logger.warning(
+                            f"[Headless Task] Stdout race lost the response "
+                            f"(raw_messages={len(raw_messages)}, no text in stream), but "
+                            f"recovered {len(recovered_text)} chars from JSONL "
+                            f"(session_id={metadata.session_id}) — "
+                            f"surfacing as soft success."
+                        )
+                        response_parts.append(recovered_text)
+                        metadata.recovered_from_jsonl = True
+                    else:
+                        status_code, detail = empty_result
+                        logger.error(f"[Headless Task] {detail}")
+                        raise HTTPException(status_code=status_code, detail=detail)
 
             # Build final response text
             response_text = "\n".join(response_parts) if response_parts else ""
@@ -1501,6 +1960,29 @@ async def execute_headless_task(
 
             # Use session_id from Claude if available, otherwise use our generated one
             final_session_id = metadata.session_id or task_session_id
+
+            # Authoritative compact_events from the JSONL on disk.
+            # Claude Code's stdout stream-json fires the compact_boundary
+            # event without the compactMetadata envelope, so the parser
+            # branch only learns "a compact happened" but loses the
+            # pre/post/duration fields. The JSONL has the canonical shape;
+            # read it after the turn completes and override whatever
+            # stdout captured. Filtered to records emitted at or after
+            # task_start_iso to scope to this turn's compacts only.
+            jsonl_compacts = _extract_compact_events_from_jsonl(
+                final_session_id, since_iso=task_start_iso
+            )
+            if jsonl_compacts:
+                metadata.compact_events = jsonl_compacts
+                for ev in jsonl_compacts:
+                    logger.info(
+                        f"event=session_auto_compact "
+                        f"claude_session_id={final_session_id} "
+                        f"trigger={ev.trigger} "
+                        f"pre_tokens={ev.pre_tokens} "
+                        f"post_tokens={ev.post_tokens} "
+                        f"duration_ms={ev.duration_ms}"
+                    )
 
             # Log warning if raw_messages is empty (transcript won't be available in UI)
             if len(raw_messages) == 0:

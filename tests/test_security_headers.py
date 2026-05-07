@@ -22,6 +22,29 @@ class TestSecurityHeaders:
         assert response.headers.get("referrer-policy") == "strict-origin-when-cross-origin"
         assert response.headers.get("permissions-policy") == "camera=(), microphone=(), geolocation=(), payment=()"
         assert response.headers.get("cross-origin-resource-policy") == "same-origin"
+        # Issue #549: X-Frame-Options + COOP added to FastAPI responses so
+        # API surfaces (Swagger, direct curl) match the frontend baseline.
+        assert response.headers.get("x-frame-options") == "DENY"
+        assert response.headers.get("cross-origin-opener-policy") == "same-origin"
+
+    def test_hsts_absent_on_plain_http(self, api_client):
+        """#549: HSTS must NOT be set on plain-HTTP responses — emitting it
+        over HTTP is misleading (browsers ignore per RFC 6797) and could
+        break any future http-only path on the same host."""
+        response = api_client.get("/api/health")
+        assert response.headers.get("strict-transport-security") is None
+
+    def test_hsts_set_when_x_forwarded_proto_https(self, api_client):
+        """#549: when an upstream TLS terminator signals HTTPS via
+        X-Forwarded-Proto, HSTS should fire so browsers pin the policy."""
+        response = api_client._client.get(
+            "/api/health",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        hsts = response.headers.get("strict-transport-security")
+        assert hsts is not None
+        assert "max-age=31536000" in hsts
+        assert "includeSubDomains" in hsts
 
     def test_server_header_stripped(self, api_client):
         """API responses should not expose the server technology."""

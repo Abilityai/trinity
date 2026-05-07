@@ -190,6 +190,27 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Spec**: `docs/requirements/DYNAMIC_THINKING_STATUS.md`
 - **Flow**: `docs/memory/feature-flows/authenticated-chat-tab.md`
 
+### 5.8 Session Tab — `--resume`-default Chat Surface (SESSION_TAB_2026-04)
+- **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04)
+- **Requirement ID**: SESSION_TAB_2026-04
+- **GitHub Issue**: #651
+- **Description**: New Agent Detail tab that lives alongside the existing Chat tab. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>`, preserving tool-result memory, mid-skill state, and reasoning state across messages — strictly more capable than Chat's stateless text-replay model.
+- **Key Features**:
+  - New `agent_sessions` and `agent_session_messages` tables, strictly parallel to `chat_sessions`/`chat_messages` (no shared state, no FK between them)
+  - Six endpoints under `/api/agents/{name}/sessions*` (create, list, get, message, reset, delete)
+  - `SessionPanel.vue` + `stores/sessions.js` reuse Chat sub-components for visual parity
+  - Stream-json parser fix recognises `{"type":"system","subtype":"init"}` (Phase 1.3)
+  - `persist_session` flag plumbed through `ParallelTaskRequest → AgentRuntime → ClaudeCodeRuntime`
+  - Resume-failure fallback: clears cache, retries cold once on missing JSONL (Anthropic upstream #39667 / #53417)
+  - Per-`(agent, claude_uuid)` Redis lock (`SET NX EX 300s`, 30s wait ceiling) prevents JSONL corruption (Anthropic #20992)
+  - Per-user ownership returns 404 on mismatch (does not leak session-id existence — E6)
+  - JSONL cleanup service: synchronous best-effort reap on reset/delete + 6h periodic sweep with 1h race guard
+  - JSONL-side fallback recovery for stdout pipe race + JSONL-side compact event capture
+  - Cross-session contamination empirical gate (`test_session_cross_contamination.py`, Anthropic #26964)
+- **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
+- **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
+- **Flow**: `docs/memory/feature-flows/session-tab.md`
+
 ---
 
 ## 6. Activity Monitoring

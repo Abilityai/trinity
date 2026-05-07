@@ -139,7 +139,30 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
         dict with injection status
     """
     import asyncio
-    from services.credential_encryption import get_credential_encryption_service
+    from database import db
+    from services.credential_encryption import (
+        CredentialsFileNotFoundError,
+        get_credential_encryption_service,
+    )
+
+    # #612: subscription-mode agents authenticate via CLAUDE_CODE_OAUTH_TOKEN
+    # env var set at container creation (SUB-002). They do not need (and
+    # typically do not have) a .credentials.enc file. Attempting the import
+    # would either silently succeed-noop or surface a misleading "failed"
+    # status that prompts operators to take corrective action (re-assigning
+    # the subscription, recreating the container) — when nothing is wrong.
+    # Short-circuit to a clear skipped status before the import path runs.
+    if db.get_agent_subscription_id(agent_name):
+        logger.debug(
+            f"Skipping .credentials.enc import for {agent_name}: "
+            f"subscription mode (auth via CLAUDE_CODE_OAUTH_TOKEN env var)"
+        )
+        return {
+            "status": "skipped",
+            "reason": "subscription_mode",
+            "detail": "agent authenticates via CLAUDE_CODE_OAUTH_TOKEN; "
+                      "file-based credential injection is not used",
+        }
 
     try:
         encryption_service = get_credential_encryption_service()
@@ -163,11 +186,20 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
             else:
                 return {"status": "skipped", "reason": "no_credentials_enc_file"}
 
+        except CredentialsFileNotFoundError:
+            # #612: ``.credentials.enc`` is absent. Common case for fresh
+            # agents that haven't been through an export cycle yet — a clean
+            # skip, not a failure. (Was previously caught by a fragile
+            # substring match against the error message; the explicit
+            # subclass makes the intent unambiguous.)
+            logger.debug(f"No .credentials.enc found for agent {agent_name}")
+            return {"status": "skipped", "reason": "no_credentials_enc_file"}
+
         except ValueError as e:
-            # .credentials.enc doesn't exist - this is normal for new agents
-            if "not found" in str(e).lower():
-                logger.debug(f"No .credentials.enc found for agent {agent_name}")
-                return {"status": "skipped", "reason": "no_credentials_enc_file"}
+            # Other ValueError shapes (encrypted blob malformed, decrypt
+            # failure, …) — keep retrying because some of them are
+            # transient (e.g. agent HTTP not yet ready under multi-agent
+            # cold start, #406).
             last_error = str(e)
 
         except Exception as e:

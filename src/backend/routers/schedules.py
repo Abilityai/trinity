@@ -151,6 +151,8 @@ class ExecutionSummary(BaseModel):
     # Validation tracking (small) - VALIDATE-001
     business_status: Optional[str] = None  # pending_validation, validated, failed_validation, skipped
     validation_execution_id: Optional[str] = None
+    # Auto-compact observability (Bundle B) - small JSON list
+    compact_metadata: Optional[str] = None
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -201,6 +203,8 @@ class ExecutionResponse(BaseModel):
     validated_at: Optional[datetime] = None
     validation_execution_id: Optional[str] = None
     validates_execution_id: Optional[str] = None
+    # Auto-compact observability (Bundle B)
+    compact_metadata: Optional[str] = None
 
     class Config:
         from_attributes = True

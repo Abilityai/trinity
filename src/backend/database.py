@@ -108,6 +108,7 @@ from db.agents import AgentOperations
 from db.mcp_keys import McpKeyOperations
 from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
+from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
@@ -264,6 +265,7 @@ class DatabaseManager:
         self._mcp_key_ops = McpKeyOperations(self._user_ops)
         self._schedule_ops = ScheduleOperations(self._user_ops, self._agent_ops)
         self._chat_ops = ChatOperations()
+        self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
@@ -699,6 +701,19 @@ class DatabaseManager:
     def delete_schedule(self, schedule_id: str, username: str):
         return self._schedule_ops.delete_schedule(schedule_id, username)
 
+    # Webhook token management (WEBHOOK-001, #291)
+    def generate_webhook_token(self, schedule_id: str):
+        return self._schedule_ops.generate_webhook_token(schedule_id)
+
+    def get_schedule_by_webhook_token(self, token: str):
+        return self._schedule_ops.get_schedule_by_webhook_token(token)
+
+    def revoke_webhook_token(self, schedule_id: str):
+        return self._schedule_ops.revoke_webhook_token(schedule_id)
+
+    def get_webhook_status(self, schedule_id: str):
+        return self._schedule_ops.get_webhook_status(schedule_id)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 
@@ -764,9 +779,10 @@ class DatabaseManager:
 
     def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
                                 context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None):
+                                claude_session_id: str = None, compact_metadata: str = None):
         return self._schedule_ops.update_execution_status(execution_id, status, response, error,
-                                                          context_used, context_max, cost, tool_calls, execution_log, claude_session_id)
+                                                          context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
+                                                          compact_metadata)
 
     def mark_execution_dispatched(self, execution_id: str) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id)
@@ -902,6 +918,61 @@ class DatabaseManager:
 
     def delete_chat_session(self, session_id: str):
         return self._chat_ops.delete_chat_session(session_id)
+
+    # =========================================================================
+    # Agent Session Operations (Session tab — delegated to db/sessions.py)
+    # =========================================================================
+
+    def create_session(self, agent_name: str, user_id: int, user_email: str,
+                       subscription_id: str = None):
+        return self._session_ops.create_session(
+            agent_name, user_id, user_email, subscription_id=subscription_id
+        )
+
+    def get_session(self, session_id: str):
+        return self._session_ops.get_session(session_id)
+
+    def list_sessions(self, agent_name: str, user_id: int = None, status: str = None):
+        return self._session_ops.list_sessions(agent_name, user_id=user_id, status=status)
+
+    def delete_session(self, session_id: str):
+        return self._session_ops.delete_session(session_id)
+
+    def add_session_message(self, session_id: str, agent_name: str, user_id: int,
+                            user_email: str, role: str, content: str,
+                            cost: float = None, context_used: int = None,
+                            context_max: int = None, cache_read_tokens: int = None,
+                            tool_calls: str = None, execution_time_ms: int = None,
+                            claude_session_id: str = None,
+                            compact_metadata: str = None, compact_event_count: int = 0):
+        return self._session_ops.add_session_message(
+            session_id, agent_name, user_id, user_email, role, content,
+            cost=cost, context_used=context_used, context_max=context_max,
+            cache_read_tokens=cache_read_tokens, tool_calls=tool_calls,
+            execution_time_ms=execution_time_ms, claude_session_id=claude_session_id,
+            compact_metadata=compact_metadata, compact_event_count=compact_event_count,
+        )
+
+    def get_session_messages(self, session_id: str, limit: int = 100):
+        return self._session_ops.get_session_messages(session_id, limit=limit)
+
+    def get_cached_claude_session_id(self, session_id: str):
+        return self._session_ops.get_cached_claude_session_id(session_id)
+
+    def update_cached_claude_session_id(self, session_id: str, claude_session_id: str):
+        return self._session_ops.update_cached_claude_session_id(session_id, claude_session_id)
+
+    def clear_cached_claude_session_id(self, session_id: str):
+        return self._session_ops.clear_cached_claude_session_id(session_id)
+
+    def mark_resume_failure(self, session_id: str):
+        return self._session_ops.mark_resume_failure(session_id)
+
+    def mark_resume_success(self, session_id: str):
+        return self._session_ops.mark_resume_success(session_id)
+
+    def list_active_claude_session_ids(self, agent_name: str):
+        return self._session_ops.list_active_claude_session_ids(agent_name)
 
     # =========================================================================
     # Activity Stream Methods (delegated to db/activities.py)

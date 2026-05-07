@@ -110,6 +110,7 @@ class AgentRuntime(ABC):
         max_turns: Optional[int] = None,
         execution_id: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
         """
@@ -120,6 +121,7 @@ class AgentRuntime(ABC):
         - Batch processing without context pollution
         - Parallel task execution
         - Resuming previous sessions (EXEC-023)
+        - Session tab turns where the JSONL must persist for the next --resume
 
         Args:
             prompt: Task description
@@ -130,6 +132,10 @@ class AgentRuntime(ABC):
             max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
             execution_id: Optional execution ID for process registry (enables termination tracking)
             resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
+            persist_session: If True, omit ``--no-session-persistence`` so the
+                JSONL is written and a future ``--resume`` can reattach.
+                Default False preserves stateless headless behavior for all
+                existing callers (schedules, MCP, fan-out, webhooks).
 
         Returns:
             Tuple of (response_text, execution_log, metadata, session_id)

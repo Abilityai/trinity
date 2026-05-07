@@ -155,6 +155,9 @@ config/agent-templates/**/metrics.json
 content/
 session-files/
 
+# Local-only working artifacts (never push)
+saved-conversations/
+tests/manual/
 # gstack tooling state (skill-local artifacts; project-tracked CSO reports
 # live under docs/security-reports/ instead)
 .gstack/

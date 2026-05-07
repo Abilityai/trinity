@@ -38,6 +38,18 @@ ENCRYPTION_KEY_ENV = "CREDENTIAL_ENCRYPTION_KEY"
 DEFAULT_CREDENTIAL_FILES = [".env", ".mcp.json"]
 
 
+class CredentialsFileNotFoundError(ValueError):
+    """Raised by ``import_to_agent`` when ``.credentials.enc`` is absent.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` callers (the
+    admin import endpoint at ``routers/credentials.py``) keep working
+    unchanged — that path *should* surface a 400 because the operator
+    explicitly asked for an import. Distinct type lets the auto-import on
+    startup (``inject_assigned_credentials``) treat it as a non-error skip
+    rather than logging a misleading "failed" status. (#612)
+    """
+
+
 class CredentialEncryptionService:
     """
     Service for encrypting and decrypting credential files.
@@ -294,7 +306,12 @@ class CredentialEncryptionService:
 
         encrypted = files.get(".credentials.enc")
         if not encrypted:
-            raise ValueError("No .credentials.enc file found in agent workspace")
+            # #612: distinguish "no encrypted file" from other decode/IO
+            # failures so the auto-import startup path can skip silently
+            # while the admin-triggered import still surfaces a 400.
+            raise CredentialsFileNotFoundError(
+                "No .credentials.enc file found in agent workspace"
+            )
 
         # Decrypt
         credential_files = self.decrypt(encrypted)

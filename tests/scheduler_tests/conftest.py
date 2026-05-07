@@ -298,7 +298,7 @@ def test_config(initialized_db: str):
     from scheduler.config import SchedulerConfig
     return SchedulerConfig(
         database_path=initialized_db,
-        redis_url="redis://localhost:6379",
+        redis_url="redis://test:test@localhost:6379",
         lock_timeout=60,
         lock_auto_renewal=False,
         health_port=8099,

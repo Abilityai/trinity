@@ -200,6 +200,8 @@ class ScheduleExecution(BaseModel):
     validated_at: Optional[datetime] = None     # When validation completed
     validation_execution_id: Optional[str] = None  # FK to the validation execution record
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
+    # Auto-compact observability (Bundle B)
+    compact_metadata: Optional[str] = None       # JSON list of compact events fired during this turn
 
 
 # =========================================================================
@@ -276,6 +278,50 @@ class ChatMessage(BaseModel):
     source: Optional[str] = "text"  # "text" or "voice" (VOICE-003)
     subscription_id: Optional[str] = None  # SUB-004: snapshotted at record time
     output_tokens: Optional[int] = None  # SUB-004: output tokens for this message
+
+
+# =========================================================================
+# Session Tab Models (--resume-default surface; parallel to ChatSession)
+# =========================================================================
+
+class AgentSession(BaseModel):
+    """Persistent session that owns a Claude Code --resume UUID."""
+    id: str
+    agent_name: str
+    user_id: int
+    user_email: str
+    started_at: datetime
+    last_message_at: datetime
+    message_count: int = 0
+    total_cost: float = 0.0
+    total_context_used: int = 0
+    total_context_max: int = 200000
+    status: str = "active"  # "active" | "archived" | "reset"
+    subscription_id: Optional[str] = None
+    cached_claude_session_id: Optional[str] = None
+    last_resume_at: Optional[datetime] = None
+    consecutive_resume_failures: int = 0
+    compact_count: int = 0  # Running tally of auto-compact events (drives reset-memory hint)
+
+
+class AgentSessionMessage(BaseModel):
+    """A single message in an agent session (Session tab)."""
+    id: str
+    session_id: str
+    agent_name: str
+    user_id: int
+    user_email: str
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: datetime
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    tool_calls: Optional[str] = None  # JSON array
+    execution_time_ms: Optional[int] = None
+    claude_session_id: Optional[str] = None  # actual Claude UUID this turn ran under
+    compact_metadata: Optional[str] = None   # JSON list of compact events fired during this turn
 
 
 # =========================================================================

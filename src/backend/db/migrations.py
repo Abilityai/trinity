@@ -1743,6 +1743,120 @@ def _migrate_agent_shared_files(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sessions_tables(cursor, conn):
+    """Create agent_sessions + agent_session_messages tables (Session tab).
+
+    The Session tab is a parallel surface to Chat that uses
+    ``claude --print --resume <uuid>`` to preserve tool memory and reasoning
+    state across turns. Each ``agent_sessions`` row owns one Claude Code
+    JSONL via ``cached_claude_session_id``. See
+    ``docs/planning/SESSION_TAB_2026-04.md``.
+
+    Schema lives independently from ``chat_sessions`` / ``chat_messages``;
+    no foreign keys or shared columns. Cleanup on session delete cascades
+    to messages.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            last_message_at TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            total_cost REAL DEFAULT 0.0,
+            total_context_used INTEGER DEFAULT 0,
+            total_context_max INTEGER DEFAULT 200000,
+            status TEXT DEFAULT 'active',
+            subscription_id TEXT,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_session_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_email TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            cost REAL,
+            context_used INTEGER,
+            context_max INTEGER,
+            cache_read_tokens INTEGER,
+            tool_calls TEXT,
+            execution_time_ms INTEGER,
+            claude_session_id TEXT,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent_user "
+        "ON agent_sessions(agent_name, user_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_sessions_status "
+        "ON agent_sessions(status)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_session "
+        "ON agent_session_messages(session_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_session_messages_user "
+        "ON agent_session_messages(user_id)"
+    )
+    conn.commit()
+
+
+def _migrate_session_compact_events(cursor, conn):
+    """Add compact-event observability columns (auto-compact surfacing).
+
+    Claude Code's auto-compact (~85% of the model window) silently summarizes
+    ~170k of conversation into a ~10k summary mid-turn. The events appear in
+    the stream-json output as ``{"type":"system","subtype":"compact_boundary"}``.
+    Capturing them gives users honest signal about what happened to a long-
+    running session beyond the silent latency cost.
+
+    Three additive, nullable columns:
+      - ``agent_session_messages.compact_metadata`` — JSON list of events that
+        fired during the turn that produced this assistant message.
+      - ``agent_sessions.compact_count`` — running tally for fast reads;
+        drives the inline reset hint without scanning per-message rows.
+      - ``schedule_executions.compact_metadata`` — same JSON, denormalized so
+        TasksPanel can render the badge without joining session messages.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_session_messages",
+        "compact_metadata",
+        "ALTER TABLE agent_session_messages ADD COLUMN compact_metadata TEXT",
+        log_msg="Adding compact_metadata column to agent_session_messages...",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sessions",
+        "compact_count",
+        "ALTER TABLE agent_sessions ADD COLUMN compact_count INTEGER DEFAULT 0",
+        log_msg="Adding compact_count column to agent_sessions...",
+    )
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "compact_metadata",
+        "ALTER TABLE schedule_executions ADD COLUMN compact_metadata TEXT",
+        log_msg="Adding compact_metadata column to schedule_executions...",
+    )
+    conn.commit()
+
+
 def _migrate_public_links_type(cursor, conn):
     """Add type column to agent_public_links for SITE-001.
 
@@ -1848,6 +1962,8 @@ MIGRATIONS = [
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
     ("agent_shared_files", _migrate_agent_shared_files),
+    ("agent_sessions_tables", _migrate_agent_sessions_tables),
+    ("session_compact_events", _migrate_session_compact_events),
     ("public_links_type", _migrate_public_links_type),
     ("canary_violations_table", _migrate_canary_violations_table),
 ]

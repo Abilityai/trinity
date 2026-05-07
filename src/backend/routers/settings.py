@@ -104,6 +104,29 @@ async def get_all_settings(
         raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
 
 
+@router.get("/feature-flags")
+async def get_public_feature_flags(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Public-safe feature flags for the authenticated user.
+
+    Unlike ``/api/settings/{key}`` (admin-only), this endpoint exposes a
+    curated allowlist of UI-relevant flags so the frontend can decide
+    which optional surfaces to render. Currently:
+
+    - ``session_tab_enabled`` — gates the Session tab in AgentDetail.
+      Reads through ``services.settings_service.is_session_tab_enabled()``
+      so the resolution order (DB → env → False default) stays in one place.
+
+    Auth required (any role) — these flags reveal nothing sensitive but we
+    still keep them out of the unauthenticated surface.
+    """
+    return {
+        "session_tab_enabled": settings_service.is_session_tab_enabled(),
+    }
+
+
 # ============================================================================
 # API Keys Management Endpoints
 # NOTE: These routes MUST be defined BEFORE the /{key} catch-all route

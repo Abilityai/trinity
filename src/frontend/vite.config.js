@@ -5,8 +5,51 @@ import path from 'path'
 // Use localhost for local dev, backend for Docker
 const backendHost = process.env.DOCKER_ENV ? 'backend' : 'localhost'
 
+// Issue #549: dev-mode security headers. Production nginx adds these via
+// security-headers.conf; without this plugin, `npm run dev` serves HTML
+// without any security headers and devs miss CSP-violation regressions
+// until prod. Mirrors security-headers.conf as closely as Vite's
+// JS-runtime-emitted asset model allows. HSTS is intentionally NOT set
+// here — dev runs over HTTP and HSTS would force the dev box's hostname
+// to HTTPS in the browser HSTS cache, breaking any subsequent HTTP work
+// on the same port.
+const devSecurityHeaders = {
+  'X-Frame-Options': 'SAMEORIGIN',
+  'X-Content-Type-Options': 'nosniff',
+  'X-XSS-Protection': '0',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=(), payment=()',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  // Vite injects HMR client + inline module preloads; 'unsafe-inline' on
+  // script-src is needed in dev only. Production CSP in security-headers.conf
+  // is stricter (no script 'unsafe-inline').
+  'Content-Security-Policy':
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; " +
+    "font-src 'self'; " +
+    "connect-src 'self' ws: wss:; " +
+    "frame-ancestors 'self'; " +
+    "base-uri 'self'; " +
+    "form-action 'self'",
+}
+
+const securityHeadersPlugin = {
+  name: 'trinity-security-headers',
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      for (const [name, value] of Object.entries(devSecurityHeaders)) {
+        res.setHeader(name, value)
+      }
+      next()
+    })
+  },
+}
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), securityHeadersPlugin],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

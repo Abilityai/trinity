@@ -14,6 +14,7 @@
         >
           <option value="all">All triggers</option>
           <option value="chat">Chat</option>
+          <option value="session">Session</option>
           <option value="manual">Manual</option>
           <option value="schedule">Schedule</option>
           <option value="mcp">MCP</option>
@@ -200,6 +201,7 @@
                   :class="[
                     'px-1.5 py-0.5 rounded text-xs',
                     task.triggered_by === 'chat' ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300' :
+                    task.triggered_by === 'session' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300' :
                     task.triggered_by === 'manual' ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' :
                     task.triggered_by === 'schedule' ? 'bg-accent-purple-100 dark:bg-accent-purple-900/30 text-accent-purple-700 dark:text-accent-purple-300' :
                     task.triggered_by === 'paid' ? 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300' :
@@ -208,6 +210,14 @@
                   ]"
                 >
                   {{ task.triggered_by }}
+                </span>
+                <!-- Auto-compact badge (Bundle B) — fires when Claude Code summarized history mid-turn -->
+                <span
+                  v-if="taskCompactCount(task) > 0"
+                  class="px-1.5 py-0.5 rounded text-xs bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300"
+                  :title="taskCompactTooltip(task)"
+                >
+                  compacted{{ taskCompactCount(task) > 1 ? ` ×${taskCompactCount(task)}` : '' }}
                 </span>
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
@@ -1112,6 +1122,36 @@ function getContextBarColor(used, max) {
   if (percent < 75) return 'bg-status-warning-500'
   if (percent < 90) return 'bg-status-urgent-500'
   return 'bg-status-danger-500'
+}
+
+// Auto-compact observability (Bundle B). The agent server captures
+// `compact_boundary` events from Claude Code's stream-json output and persists
+// them as a JSON list on schedule_executions.compact_metadata. Each event has
+// {trigger, pre_tokens, post_tokens, duration_ms, timestamp}.
+function _parseCompactEvents(task) {
+  if (!task?.compact_metadata) return []
+  try {
+    const parsed = JSON.parse(task.compact_metadata)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function taskCompactCount(task) {
+  return _parseCompactEvents(task).length
+}
+
+function taskCompactTooltip(task) {
+  const events = _parseCompactEvents(task)
+  if (events.length === 0) return ''
+  const lines = events.map((e, i) => {
+    const pre = e.pre_tokens ?? '?'
+    const post = e.post_tokens ?? '?'
+    const dur = e.duration_ms ? `${(e.duration_ms / 1000).toFixed(1)}s` : '?'
+    return `#${i + 1}: ${pre} → ${post} tokens (${dur})`
+  })
+  return `Conversation auto-compacted mid-turn:\n${lines.join('\n')}`
 }
 
 // Start polling

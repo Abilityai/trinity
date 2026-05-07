@@ -212,6 +212,11 @@ async def inject_credentials(
     # AISEC-C2 / #590 Layer 2 (#598): structure-validate .mcp.json content
     # before forwarding to the agent. Closes the RCE-by-config bypass while
     # restoring the legitimate post-deploy MCP server editing flow.
+    #
+    # The validator special-cases the auto-injected `trinity` entry: it
+    # accepts the canonical Trinity-MCP shape (so owners can rotate their
+    # bearer token) but rejects any other shape under that name (so
+    # attackers can't redefine trinity as a stdio shell-injection vector).
     if ".mcp.json" in request_body.files:
         try:
             validate_mcp_config(request_body.files[".mcp.json"])

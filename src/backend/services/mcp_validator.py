@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import socket
 from typing import Mapping
@@ -71,8 +72,55 @@ MAX_SERVER_COUNT = 32
 _SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 # Reserved server names — owners cannot overwrite Trinity's auto-injected
-# entry, which would break agent-to-agent collaboration.
+# entry with a different SHAPE (which would break agent-to-agent
+# collaboration or open an RCE-by-config vector). The trinity entry IS
+# allowed through if its shape matches what the agent server's
+# inject_trinity_mcp_if_configured() writes — this lets owners legitimately
+# update the bearer token (e.g. rotating their MCP API key) without
+# tripping the reserved-name reject. See _is_canonical_trinity_entry.
 RESERVED_SERVER_NAMES = frozenset({"trinity"})
+
+# Canonical Trinity-MCP entry shape (mirrors
+# docker/base-image/agent_server/services/trinity_mcp.py:_inject_claude_mcp).
+# url is whatever the agent's TRINITY_MCP_URL env points to; we accept both
+# the runtime value (so admins can override it cluster-wide) and the
+# documented default for fresh installs.
+_TRINITY_DEFAULT_URL = "http://mcp-server:8080/mcp"
+_TRINITY_BEARER_RE = re.compile(r"^Bearer\s+trinity_mcp_[A-Za-z0-9_-]{1,200}$")
+
+
+def _is_canonical_trinity_entry(server: dict) -> bool:
+    """Return True iff ``server`` looks exactly like the Trinity-injected
+    entry: only ``type``, ``url``, ``headers`` keys; ``type=http``; ``url``
+    matches the configured Trinity MCP URL; ``headers`` contains only
+    ``Authorization`` with a ``Bearer trinity_mcp_…`` token of the right
+    shape.
+
+    Strict allowlist — any extra key, any wrong value, any extra header,
+    any non-bearer auth scheme is rejected. Owners who want to redefine
+    trinity with a different shape (e.g. as a stdio server) hit the
+    reserved-name reject; the canonical shape is the only escape.
+    """
+    if set(server.keys()) != {"type", "url", "headers"}:
+        return False
+    if server.get("type") != "http":
+        return False
+
+    url = server.get("url")
+    if not isinstance(url, str):
+        return False
+    expected_url = os.getenv("TRINITY_MCP_URL", _TRINITY_DEFAULT_URL)
+    if url not in (expected_url, _TRINITY_DEFAULT_URL):
+        return False
+
+    headers = server.get("headers")
+    if not isinstance(headers, dict) or list(headers.keys()) != ["Authorization"]:
+        return False
+    auth = headers.get("Authorization")
+    if not isinstance(auth, str) or not _TRINITY_BEARER_RE.match(auth):
+        return False
+
+    return True
 
 # Allowed values for the `transport` field. `stdio` is implicit when only
 # `command` is present (we set transport explicitly during validation).
@@ -502,13 +550,20 @@ def _validate_entry(server_name: str, server: object) -> None:
             f"MCP server name '{server_name}' invalid; must match "
             f"^[a-zA-Z0-9_-]{{1,64}}$"
         )
-    if server_name in RESERVED_SERVER_NAMES:
-        raise McpValidationError(
-            f"MCP server name '{server_name}' is reserved by Trinity"
-        )
     if not isinstance(server, dict):
         raise McpValidationError(
             f"MCP server '{server_name}' must be a JSON object"
+        )
+    if server_name in RESERVED_SERVER_NAMES:
+        # Allow the reserved trinity entry through ONLY if its shape
+        # matches the agent server's auto-inject — owners legitimately
+        # need to edit the bearer token to rotate their MCP API key.
+        # Any other shape (different url, extra headers, redefined as
+        # stdio, etc.) hits the reserved-name reject.
+        if server_name == "trinity" and _is_canonical_trinity_entry(server):
+            return
+        raise McpValidationError(
+            f"MCP server name '{server_name}' is reserved by Trinity"
         )
 
     transport = _resolve_transport(server_name, server)

@@ -258,6 +258,13 @@
       "added": "2026-05-03",
       "categories": ["backend", "api", "public-links", "proxy"],
       "description": "Tests for agent website proxy (#633): site link creation, link_type field, URL format, token validation (invalid/wrong-type/disabled), 502 when web server not running, redirect on missing trailing slash."
+    },
+    {
+      "file": "unit/test_database_facade_delegation.py",
+      "feature": "Issue #647 / WEBHOOK-001 facade gap",
+      "added": "2026-05-04",
+      "categories": ["backend", "unit", "database", "webhooks", "lint"],
+      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI — would have caught WEBHOOK-001 before #291 landed."
     }
   ]
 }

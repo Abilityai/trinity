@@ -52,6 +52,7 @@ from routers.templates import router as templates_router
 from routers.sharing import router as sharing_router, set_websocket_manager as set_sharing_ws_manager
 from routers.mcp_keys import router as mcp_keys_router
 from routers.chat import router as chat_router, set_websocket_manager as set_chat_ws_manager
+from routers.sessions import router as sessions_router  # SESSION_TAB_2026-04 Phase 2
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
 from routers.git import router as git_router
@@ -402,6 +403,19 @@ async def lifespan(app: FastAPI):
             print(f"Error starting cleanup service: {e}")
     asyncio.create_task(_start_cleanup_delayed())
 
+    # SESSION_TAB_2026-04 Phase 4.2: periodic JSONL reaper for the Session
+    # tab. Stagger +7.5s to offset from cleanup_service so they don't both
+    # hit Docker at the same instant. Default poll = 6h, race-guard = 1h.
+    async def _start_session_cleanup_delayed():
+        await asyncio.sleep(7.5)
+        try:
+            from services.session_cleanup_service import get_session_cleanup_service
+            get_session_cleanup_service().start()
+            print("Session cleanup service started (staggered +7.5s)")
+        except Exception as e:
+            print(f"Error starting session cleanup service: {e}")
+    asyncio.create_task(_start_session_cleanup_delayed())
+
     # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
     async def _start_sync_health_delayed():
         await asyncio.sleep(5)
@@ -592,6 +606,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error stopping cleanup service: {e}")
 
+    # Shutdown session cleanup service (Phase 4.2)
+    try:
+        from services.session_cleanup_service import get_session_cleanup_service
+        get_session_cleanup_service().stop()
+        print("Session cleanup service stopped")
+    except Exception as e:
+        print(f"Error stopping session cleanup service: {e}")
+
     # Shutdown Slack transport
     try:
         slack_transport = getattr(app.state, 'slack_transport', None)
@@ -705,15 +727,43 @@ async def add_request_id(request: Request, call_next):
 
 
 # Security headers middleware — covers API responses when accessed directly (dev mode)
-# or through nginx proxy. X-Frame-Options is omitted here to avoid conflicting with
-# nginx's SAMEORIGIN value on proxied responses.
+# or through nginx proxy.
+#
+# Issue #549 (UnderDefense pentest 3.4.2): FastAPI responses lacked
+# X-Frame-Options, Cross-Origin-Opener-Policy, and HSTS. The frontend
+# proxy adds those for HTML/asset responses, but API responses shown to
+# tools like Swagger UI / direct curl were unprotected. Add them here so
+# API responses match the frontend baseline. CSP is intentionally NOT
+# set on API responses — they're JSON, not rendered, and a strict CSP
+# can spuriously block legitimate Swagger / docs interactions.
+#
+# HSTS is gated on the connection actually being HTTPS (request scheme
+# or X-Forwarded-Proto from a trusted reverse proxy) so local HTTP dev
+# still works without forcing browsers to upgrade and pin a stale
+# header.
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+
+    # HSTS only when we know the wire is HTTPS — checking both the
+    # direct scheme and the X-Forwarded-Proto header set by upstream
+    # reverse proxies (uvicorn launched with --proxy-headers honours it).
+    is_https = (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    )
+    if is_https:
+        # 1 year, includeSubDomains. preload intentionally omitted —
+        # opting in is a one-way commitment that ops should make
+        # explicitly via the load balancer rather than at the app.
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
     return response
 
 
@@ -730,6 +780,7 @@ app.include_router(templates_router)
 app.include_router(sharing_router)
 app.include_router(mcp_keys_router)
 app.include_router(chat_router)
+app.include_router(sessions_router)  # SESSION_TAB_2026-04 Phase 2 — gated on is_session_tab_enabled()
 app.include_router(fan_out_router)
 app.include_router(schedules_router)
 app.include_router(git_router)
