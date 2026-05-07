@@ -54,6 +54,10 @@ services:
       # When 1, services/canary_service.py runs the 5-min watcher loop on
       # staging/dev. Default 0 — production users see no canary activity.
       - CANARY_ENABLED=${CANARY_ENABLED:-0}
+      # Slack alert sink for canary green→red transitions. URL is the
+      # credential — leaking it lets anyone post to that one channel.
+      # Unset = canary cycles run silently (still persists violations).
+      - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app

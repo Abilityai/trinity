@@ -2035,13 +2035,17 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
   watcher reports trivially-green cycles with no signal.
-- **Alert sink**: Phase 1 ships with no external alert sink wired.
-  Green→red transitions are logged and persisted to `canary_violations`;
-  the dashboard-notifications path (writing `agent_notifications` rows
-  via `db.create_notification`) was rejected on the product call. The
-  `_emit_transition` seam in `canary_service.py` is preserved as a
-  no-op stub so a follow-up PR can plug Slack in as a single-file
-  change. No alert on continuing-red cycles.
+- **Alert sink**: Slack via incoming webhook URL configured by the
+  `CANARY_SLACK_WEBHOOK_URL` env var (admin-side, no Settings UI — the
+  audience is operators with shell access on staging/dev). Each
+  green→red transition fires exactly one webhook POST with a Block Kit
+  payload (severity emoji header, rendered violation summary, context
+  line with snapshot_time + violation count + "last red Xm ago"
+  badge). Unset = silent sink: cycles still run, violations still
+  persist to `canary_violations`, only the outbound POST is skipped.
+  Continuing-red invariants don't re-post. The dashboard-notifications
+  path (writing `agent_notifications` rows via `db.create_notification`)
+  was rejected on the product call.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.

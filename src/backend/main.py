@@ -114,11 +114,7 @@ from services.sync_health_service import sync_health_service
 
 # Import cleanup service
 from services.cleanup_service import cleanup_service, set_cleanup_ws_manager
-from services.canary_service import (
-    canary_service,
-    set_canary_ws_manager,
-    set_canary_filtered_ws_manager,
-)  # CANARY-001 / Issue #411
+from services.canary_service import canary_service  # CANARY-001 / Issue #411
 
 
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -429,8 +425,6 @@ async def lifespan(app: FastAPI):
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
-    set_canary_ws_manager(manager)
-    set_canary_filtered_ws_manager(filtered_manager)
     try:
         canary_service.start()
     except Exception as e:

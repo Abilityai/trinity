@@ -1,5 +1,5 @@
 """
-Canary watcher service (CANARY-001 / Issue #411 — Phase 1).
+Canary watcher service (CANARY-001 / Issue #411).
 
 Runs in the backend process. Every 5 minutes:
 
@@ -7,8 +7,8 @@ Runs in the backend process. Every 5 minutes:
 2. `run_invariants(snapshot)` — apply S-01 / E-02 / L-03 (Phase 1 set).
 3. Persist any violations to `canary_violations`.
 4. Detect green→red transitions per invariant against the previously-stored
-   latest violation; the alert sink hook is a stub in Phase 1 (Slack lands
-   in a follow-up PR).
+   latest violation; fire one Slack alert per transition via incoming
+   webhook (`CANARY_SLACK_WEBHOOK_URL` env var; unset = silent sink).
 
 Modeled on `services/cleanup_service.py` — single asyncio task, idempotent
 start/stop, lock-guarded re-entrancy. Disabled by default; enable per
@@ -23,7 +23,6 @@ are deployed via the canary-fleet manifest.
 """
 
 import asyncio
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -32,7 +31,6 @@ from typing import Dict, Iterable, List, Optional
 from canary import collect_snapshot, run_invariants
 from canary.snapshot import ViolationReport
 from database import db
-from db_models import NotificationCreate
 
 
 @dataclass
@@ -58,6 +56,12 @@ class CycleResult:
     violations: Dict[str, List[ViolationReport]] = field(default_factory=dict)
     persisted_violation_ids: Dict[str, List[Optional[int]]] = field(default_factory=dict)
     transition_invariant_ids: List[str] = field(default_factory=list)
+    # snapshot_time of the most recent prior violation per transitioning
+    # invariant — used by the alert sink to render "last red 2h ago" and
+    # by the run-cycle endpoint to surface `previous_violation_at`. Only
+    # populated for invariants in `transition_invariant_ids`. Value is
+    # `None` if this is the first-ever violation for that invariant.
+    previous_violation_at: Dict[str, Optional[str]] = field(default_factory=dict)
     snapshot_time: str = ""
 
 logger = logging.getLogger(__name__)
@@ -68,42 +72,11 @@ logger = logging.getLogger(__name__)
 # 5 min the backend reconciles state").
 CANARY_INTERVAL_SECONDS = 300
 
-# Synthetic agent_name used as the source for canary notifications.
-# Not a real agent — `agent_notifications.agent_name` is a free-text TEXT
-# column with no FK, so this just identifies notifications as canary-sourced.
-CANARY_NOTIFIER_NAME = "canary-harness"
-
 # Redis key holding the snapshot_time of the most recent cycle that ran.
 # Used by transition detection so a continuously-red invariant fires a
 # notification once (on the first cycle that catches it) rather than every
 # cycle thereafter — see `_run_cycle_inner` for the rule.
 REDIS_KEY_LAST_CYCLE = "canary:last_cycle_at"
-
-# Map invariant severity → notification priority (NotificationCreate enum).
-SEVERITY_TO_PRIORITY = {
-    "critical": "urgent",
-    "major": "high",
-    "minor": "normal",
-}
-
-# WebSocket manager (injected from main.py) — broadcasts notifications live
-# so the Operating Room notifications panel updates without a poll. Retained
-# (alongside `_broadcast`) so the follow-up Slack PR can re-wire whichever
-# sink it picks. Mirrors cleanup_service / notifications router pattern.
-_ws_manager = None
-_filtered_ws_manager = None
-
-
-def set_canary_ws_manager(manager):
-    """Inject the main WebSocket manager (called from main.py on startup)."""
-    global _ws_manager
-    _ws_manager = manager
-
-
-def set_canary_filtered_ws_manager(manager):
-    """Inject the filtered WebSocket manager (Trinity Connect)."""
-    global _filtered_ws_manager
-    _filtered_ws_manager = manager
 
 
 class CanaryService:
@@ -248,13 +221,27 @@ class CanaryService:
 
         # Detect green→red transitions and emit one notification per.
         transition_ids: List[str] = []
+        previous_violation_at: Dict[str, Optional[str]] = {}
         for inv_id, vlist in results.items():
             if not vlist:
                 continue
             if not self._is_green_to_red(inv_id, previous_latest, prev_cycle_at):
                 continue
+            # Capture the prior snapshot_time BEFORE emit so the alert
+            # sink can render "last red Xm ago". `previous_latest` was
+            # loaded pre-cycle (line ~214) and is None when this is the
+            # first-ever violation for the invariant — pass that through
+            # honestly rather than papering over with the current cycle.
+            prev = previous_latest.get(inv_id) or {}
+            previous_violation_at[inv_id] = prev.get("snapshot_time")
             try:
-                await self._emit_transition(inv_id, vlist, snapshot.snapshot_time)
+                await self._emit_transition(
+                    inv_id,
+                    vlist,
+                    snapshot.snapshot_time,
+                    previous_violation_at[inv_id],
+                    persisted_ids.get(inv_id, []),
+                )
                 transition_ids.append(inv_id)
             except Exception:
                 logger.exception(
@@ -284,6 +271,7 @@ class CanaryService:
             violations=results,
             persisted_violation_ids=persisted_ids,
             transition_invariant_ids=transition_ids,
+            previous_violation_at=previous_violation_at,
             snapshot_time=snapshot.snapshot_time,
         )
 
@@ -291,42 +279,309 @@ class CanaryService:
     # Notifications
     # ------------------------------------------------------------------
 
+    # Severity → Slack emoji. Common monitoring convention; rendered in
+    # the header block so the alert is scannable at a glance even with
+    # the channel collapsed in the sidebar.
+    _SEVERITY_EMOJI = {
+        "critical": "🚨",
+        "major": "⚠️",
+        "minor": "🟡",
+    }
+
+    # Friendly invariant names — paired with the catalog at
+    # docs/testing/orchestration-invariant-catalog.md. The bare ID
+    # (S-01, E-02, …) is opaque to anyone not steeped in the catalog;
+    # the name is what makes the Slack alert immediately interpretable.
+    _INVARIANT_NAMES = {
+        "S-01": "Slot–row bijection",
+        "E-02": "Phantom execution reversal",
+        "L-03": "Delete cascades",
+    }
+
+    # One-line runbook hint per invariant. Kept short on purpose —
+    # the alert is the entry point, the catalog has the full prose.
+    # Tells the on-call where to start looking, not what to do.
+    _INVARIANT_RUNBOOKS = {
+        "S-01": (
+            "Redis slot ZSET diverged from running schedule_executions rows. "
+            "Inspect for crashed `slot.release()` calls; `cleanup_service` "
+            "should reconcile within one cycle."
+        ),
+        "E-02": (
+            "An execution went terminal then non-terminal. Look for retry "
+            "logic that resurrects completed rows or a status-write race."
+        ),
+        "L-03": (
+            "An agent was deleted but a referencing row wasn't cascaded. "
+            "Check the delete handler for the table(s) listed above."
+        ),
+    }
+
     async def _emit_transition(
         self,
         invariant_id: str,
         violations: List[ViolationReport],
         snapshot_time: str,
+        previous_violation_at: Optional[str],
+        persisted_ids: List[Optional[int]],
     ) -> None:
-        """Fire alerts for a green→red transition.
+        """Fire a Slack alert for a green→red transition.
 
-        Phase 1 ships with no alert sink wired — dashboard notifications
-        were dropped per product call (vybe), and Slack is the planned
-        replacement in a follow-up PR. The transition is still detected
-        and counted so behavior stays stable; this hook is the single
-        seam the next PR plugs into.
+        Reads the webhook URL from the `CANARY_SLACK_WEBHOOK_URL` env var.
+        If unset, logs at debug and returns — green→red detection still
+        runs and rows are still persisted to `canary_violations`, the
+        sink is just silent. Mirrors the `CANARY_ENABLED` env-gating
+        pattern for the watcher itself.
 
-        The original notification helpers — `_render_message`, `_broadcast`,
-        and `_severity_rank` — were intentionally retained alongside the
-        ws-manager setters so the next PR is a one-file change.
+        The webhook URL is the credential. We don't echo it in any log
+        line. Failures are logged and swallowed so a hung webhook can't
+        break the cycle — `slack_service.post_webhook` already enforces
+        a 5s timeout.
         """
-        await self._notify_transition_stub(invariant_id, violations, snapshot_time)
+        webhook_url = os.getenv("CANARY_SLACK_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            # Emit a structured debug line so operators can confirm the
+            # transition was *detected* even when alerts are silent.
+            worst = max(violations, key=lambda v: _severity_rank(v.severity))
+            logger.debug(
+                "canary transition (slack disabled — set CANARY_SLACK_WEBHOOK_URL): "
+                "%s severity=%s violations_in_cycle=%d snapshot_time=%s",
+                invariant_id,
+                worst.severity,
+                len(violations),
+                snapshot_time,
+            )
+            return
 
-    async def _notify_transition_stub(
-        self,
+        worst = max(violations, key=lambda v: _severity_rank(v.severity))
+        text, blocks = self._build_slack_payload(
+            invariant_id,
+            violations,
+            snapshot_time,
+            previous_violation_at,
+            worst.severity,
+            persisted_ids,
+        )
+
+        # Lazy import — avoids dragging the SlackService init (and its
+        # httpx client) into test paths that exercise the canary library
+        # without the wider services tree.
+        from services.slack_service import slack_service
+
+        success, error = await slack_service.post_webhook(webhook_url, text, blocks=blocks)
+        if not success:
+            logger.warning(
+                "canary slack webhook failed for %s: %s (cycle continues, row persisted)",
+                invariant_id,
+                error,
+            )
+        else:
+            logger.info(
+                "canary slack alert sent: %s severity=%s violations_in_cycle=%d",
+                invariant_id,
+                worst.severity,
+                len(violations),
+            )
+
+    @classmethod
+    def _build_slack_payload(
+        cls,
         invariant_id: str,
         violations: List[ViolationReport],
         snapshot_time: str,
-    ) -> None:
-        """Placeholder alert sink — replaced by Slack in the next PR."""
-        worst = max(violations, key=lambda v: _severity_rank(v.severity))
-        logger.info(
-            "canary transition (alert sink not wired): %s severity=%s "
-            "violations_in_cycle=%d snapshot_time=%s",
-            invariant_id,
-            worst.severity,
-            len(violations),
-            snapshot_time,
-        )
+        previous_violation_at: Optional[str],
+        severity: str,
+        persisted_ids: List[Optional[int]],
+    ) -> tuple:
+        """Compose the Slack message text + Block Kit blocks.
+
+        Layout: header → summary → forensic detail → runbook hint →
+        context (snapshot_time, count, last red, row ids). Tests
+        identify blocks by `type` rather than index so adding/removing
+        sections doesn't break them.
+
+        Returns `(text, blocks)` — `text` is the fallback used by
+        clients that don't render blocks (notifications, screen
+        readers).
+        """
+        emoji = cls._SEVERITY_EMOJI.get(severity, "•")
+        name = cls._INVARIANT_NAMES.get(invariant_id, invariant_id)
+        body = cls._render_message(invariant_id, violations, snapshot_time)
+        forensic = cls._render_forensic(invariant_id, violations)
+        runbook = cls._INVARIANT_RUNBOOKS.get(invariant_id)
+        last_red = cls._format_last_red(previous_violation_at, snapshot_time)
+        row_ref = cls._format_row_refs(persisted_ids)
+
+        text = f"{emoji} canary {invariant_id} {name} ({severity}): {body}"
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{emoji} {invariant_id} {name} — {severity}",
+                    "emoji": True,
+                },
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": body},
+            },
+        ]
+        if forensic:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": forensic},
+            })
+        if runbook:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"_{runbook}_"},
+            })
+        # Context line: row refs first if present (most actionable),
+        # then snapshot_time + count + last-red badge.
+        ctx_parts: List[str] = []
+        if row_ref:
+            ctx_parts.append(row_ref)
+        ctx_parts.extend([
+            f"`{snapshot_time}`",
+            f"{len(violations)} violation(s) this cycle",
+            last_red,
+        ])
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": " · ".join(ctx_parts)}
+            ],
+        })
+        return text, blocks
+
+    @classmethod
+    def _render_forensic(
+        cls,
+        invariant_id: str,
+        violations: List[ViolationReport],
+    ) -> Optional[str]:
+        """Per-invariant rendering of the forensic detail.
+
+        The shape of `observed_state` differs per invariant — there's
+        no useful generic rendering. Each branch picks the fields that
+        actually help triage, in a Slack-mrkdwn format. Truncated to
+        keep the message scannable; full state is in the violation
+        row referenced by id in the context line.
+
+        Returns `None` when the rendering would be empty — caller
+        omits the block entirely rather than emit an empty one.
+        """
+        if invariant_id == "L-03":
+            tables: set = set()
+            refs: list = []
+            for v in violations:
+                obs = v.observed_state or {}
+                tables.update(obs.get("tables_hit") or [])
+                for r in obs.get("sample_refs") or []:
+                    refs.append(r)
+            lines: List[str] = []
+            if tables:
+                lines.append(f"*Tables hit:* {', '.join(sorted(tables))}")
+            if refs:
+                lines.append("*Sample refs:*")
+                for r in refs[:5]:
+                    lines.append(
+                        f"  • `{r.get('table')}.{r.get('column')}` "
+                        f"(row `{r.get('row_id')}`)"
+                    )
+                if len(refs) > 5:
+                    lines.append(f"  • _… +{len(refs) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "S-01":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                redis_n = obs.get("redis_slot_count", "?")
+                sql_n = obs.get("sql_running_count", "?")
+                in_redis_only = obs.get("in_redis_only") or []
+                in_sql_only = obs.get("in_sql_only") or []
+                line = f"*{agent}*: redis={redis_n} vs sql={sql_n}"
+                diff_bits: List[str] = []
+                if in_redis_only:
+                    diff_bits.append(
+                        f"redis-only: `{', '.join(in_redis_only[:3])}`"
+                        + (f" +{len(in_redis_only) - 3}" if len(in_redis_only) > 3 else "")
+                    )
+                if in_sql_only:
+                    diff_bits.append(
+                        f"sql-only: `{', '.join(in_sql_only[:3])}`"
+                        + (f" +{len(in_sql_only) - 3}" if len(in_sql_only) > 3 else "")
+                    )
+                if diff_bits:
+                    line += "\n  " + " · ".join(diff_bits)
+                lines.append(line)
+            if len(violations) > 5:
+                lines.append(f"_… +{len(violations) - 5} more agent(s)_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "E-02":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                eid = obs.get("execution_id", "?")
+                prev = obs.get("previous_status", "?")
+                curr = obs.get("current_status", "?")
+                lines.append(f"  • `{eid}`: *{prev}* → *{curr}*")
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        return None
+
+    @staticmethod
+    def _format_row_refs(persisted_ids: List[Optional[int]]) -> Optional[str]:
+        """Render "violation #21" / "violations #21,#22,#23" / range form.
+
+        Drops `None` slots (insert failures). Returns `None` when no
+        rows persisted — caller skips the row-ref segment entirely
+        rather than emit "violation None".
+        """
+        ids = [i for i in (persisted_ids or []) if i is not None]
+        if not ids:
+            return None
+        if len(ids) == 1:
+            return f"violation #{ids[0]}"
+        if len(ids) <= 3:
+            return f"violations {', '.join(f'#{i}' for i in ids)}"
+        # 4+: collapse to range with count to keep the line tidy.
+        return f"violations #{min(ids)}–#{max(ids)} ({len(ids)} total)"
+
+    @staticmethod
+    def _format_last_red(
+        previous_violation_at: Optional[str],
+        snapshot_time: str,
+    ) -> str:
+        """Render "last red Xm ago" / "first red" for the context block.
+
+        Best-effort: if either timestamp fails to parse we fall back to
+        "first red" rather than crash the alert. Slack will render the
+        block fine without the badge.
+        """
+        if not previous_violation_at:
+            return "first red for this invariant"
+        try:
+            from datetime import datetime
+            prev = datetime.fromisoformat(previous_violation_at.replace("Z", "+00:00"))
+            now = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
+            delta = now - prev
+            secs = int(delta.total_seconds())
+            if secs < 60:
+                return f"last red {secs}s ago"
+            if secs < 3600:
+                return f"last red {secs // 60}m ago"
+            if secs < 86400:
+                return f"last red {secs // 3600}h ago"
+            return f"last red {secs // 86400}d ago"
+        except Exception:
+            return "first red for this invariant"
 
     @staticmethod
     def _render_message(
@@ -426,40 +681,6 @@ class CanaryService:
         # `>=` so a same-snapshot replay from an immediate manual rerun
         # is treated as a continuation rather than re-firing.
         return prev["snapshot_time"] < prev_cycle_at
-
-    # ------------------------------------------------------------------
-    # WebSocket broadcast
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    async def _broadcast(notification) -> None:
-        """Push the notification to UI clients via WebSocket.
-
-        Mirrors the routers/notifications._broadcast_notification flow but
-        is in-process (the canary service has no HTTP entry point of its
-        own). Failures are logged and swallowed — the row is already
-        persisted, so the panel will pick it up on next render.
-        """
-        if _ws_manager is None and _filtered_ws_manager is None:
-            return  # WS not wired (e.g. in tests)
-        event = {
-            "type": "agent_notification",
-            "notification_id": notification.id,
-            "agent_name": notification.agent_name,
-            "notification_type": notification.notification_type,
-            "title": notification.title,
-            "priority": notification.priority,
-            "category": notification.category,
-            "timestamp": notification.created_at,
-        }
-        try:
-            if _ws_manager is not None:
-                await _ws_manager.broadcast(json.dumps(event))
-            if _filtered_ws_manager is not None:
-                await _filtered_ws_manager.broadcast_filtered(event)
-        except Exception:
-            logger.exception("canary: ws broadcast failed; row persisted, ignoring")
-
 
 def _severity_rank(severity: str) -> int:
     """Higher = worse. Used to pick the loudest violation for a transition."""

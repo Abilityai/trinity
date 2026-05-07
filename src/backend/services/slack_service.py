@@ -266,6 +266,50 @@ class SlackService:
             logger.error(f"Failed to send Slack message: {e}")
             return False, str(e)
 
+    async def post_webhook(
+        self,
+        webhook_url: str,
+        text: str,
+        blocks: Optional[list] = None,
+        timeout_seconds: float = 5.0,
+    ) -> Tuple[bool, Optional[str]]:
+        """Post to a Slack incoming webhook URL.
+
+        Used by the canary alert sink (CANARY-001 Phase 2). Distinct from
+        `send_message` which uses an OAuth bot token: webhooks are
+        URL-as-credential, single-channel, fire-and-forget. Slack's
+        response is HTTP 200 with body "ok", or non-200 with an error
+        string — we surface the body verbatim so the admin Test button
+        can show "invalid_token" / "channel_not_found" verbatim.
+
+        Short timeout (5s default) so a hung webhook can't stall the
+        canary cycle. Caller still wraps in its own try/except — this
+        already returns `(False, error)` on httpx errors.
+        """
+        if not webhook_url:
+            return False, "webhook_url not configured"
+        payload: dict = {"text": text}
+        if blocks:
+            payload["blocks"] = blocks
+        try:
+            response = await self.client.post(
+                webhook_url,
+                json=payload,
+                timeout=timeout_seconds,
+            )
+            if response.status_code != 200:
+                # Slack returns body like "invalid_token" / "no_service" for
+                # webhook errors; preserve verbatim for the admin Test UI.
+                body = (response.text or "").strip() or f"HTTP {response.status_code}"
+                logger.warning(f"Slack webhook post failed: {body}")
+                return False, body
+            return True, None
+        except httpx.TimeoutException:
+            return False, f"timeout after {timeout_seconds}s"
+        except Exception as e:
+            logger.error(f"Slack webhook post error: {e}")
+            return False, str(e)
+
     async def get_user_email(
         self,
         bot_token: str,

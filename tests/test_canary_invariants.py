@@ -802,25 +802,13 @@ class TestRunner:
 def canary_service(canary_db, fake_redis, reload_canary, monkeypatch):
     """Build a CanaryService bound to the test fixtures.
 
-    Routes db calls through the real `CanaryOperations` (already wired
-    to the temp SQLite via `canary_db`) and replaces `db.create_notification`
-    with a counting recorder so transitions can be asserted directly.
+    Routes the two `db.*` calls canary_service makes through the real
+    `CanaryOperations` (already wired to the temp SQLite via
+    `canary_db`). The Slack alert path is observed via the
+    `slack_capture` fixture below — this fixture leaves it alone.
     """
     db_canary = reload_canary["db_canary"]
     canary_ops = db_canary.CanaryOperations()
-
-    notification_calls: List[Dict[str, Any]] = []
-
-    class _StubNotification:
-        # _broadcast is a no-op when both ws managers are None (test default),
-        # so we only need a placeholder return value.
-        id = "stub-notification-id"
-        agent_name = "canary-harness"
-        notification_type = "alert"
-        title = ""
-        priority = "high"
-        category = "canary"
-        created_at = "2026-04-30T12:00:00Z"
 
     class _FakeDB:
         def get_latest_canary_violation_per_invariant(self):
@@ -829,21 +817,9 @@ def canary_service(canary_db, fake_redis, reload_canary, monkeypatch):
         def insert_canary_violation(self, **kwargs):
             return canary_ops.insert_violation(**kwargs)
 
-        def create_notification(self, agent_name, data):
-            notification_calls.append({"agent_name": agent_name, "data": data})
-            return _StubNotification()
-
     fake_database = types.ModuleType("database")
     fake_database.db = _FakeDB()
     monkeypatch.setitem(sys.modules, "database", fake_database)
-
-    class _NotificationCreate:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
-    fake_db_models = types.ModuleType("db_models")
-    fake_db_models.NotificationCreate = _NotificationCreate
-    monkeypatch.setitem(sys.modules, "db_models", fake_db_models)
 
     # Drop any cached canary_service so it picks up the stubs above.
     sys.modules.pop("services.canary_service", None)
@@ -852,7 +828,6 @@ def canary_service(canary_db, fake_redis, reload_canary, monkeypatch):
 
     return {
         "service": CanaryService(),
-        "notification_calls": notification_calls,
         "canary_ops": canary_ops,
     }
 
@@ -869,15 +844,7 @@ class TestCanaryService:
     def test_first_cycle_violation_classifies_as_transition(
         self, canary_db, canary_service
     ):
-        """First cycle that sees a violation classifies it as a green→red flip.
-
-        Phase 1 has no alert sink wired (dashboard notifications dropped per
-        product decision; Slack arrives in a follow-up PR), so we assert on
-        the structural classification — `transition_invariant_ids` and the
-        cumulative counter — instead of a notification side-effect. We also
-        pin `db.create_notification` to zero calls so a future regression
-        that re-adds the dashboard alert path trips this test.
-        """
+        """First cycle that sees a violation classifies it as a green→red flip."""
         _add_agent(canary_db, "real")
         _add_orphan_sharing(canary_db, "ghost-1")  # triggers L-03
 
@@ -886,9 +853,6 @@ class TestCanaryService:
 
         assert result.transition_invariant_ids == ["L-03"]
         assert svc.cumulative_transitions == 1
-        assert canary_service["notification_calls"] == [], (
-            "dashboard notification path must stay severed in Phase 1"
-        )
 
     def test_continuing_red_does_not_re_classify(self, canary_db, canary_service):
         """Same orphan, three cycles → 3 violations persisted, 1 transition.
@@ -970,4 +934,332 @@ class TestCanaryService:
         terminal_seen = fake_redis.hkeys("canary:e02:terminal_seen")
         assert "e-real-success" in terminal_seen, (
             "'success' must be in TERMINAL_EXECUTION_STATUSES"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Slack alert sink (CANARY-001 Phase 2)
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the env-gated Slack webhook emit path. The pure
+# message-building helpers (_build_slack_payload, _format_last_red) are
+# tested without any fixtures — they're static/classmethods. The
+# `_emit_transition` integration path piggybacks on the existing
+# `canary_service` fixture and stubs the slack_service module so we can
+# observe the outbound call without touching httpx.
+
+
+class TestCanarySlackPayload:
+    """Pure rendering tests for the Slack payload builder.
+
+    Takes the `canary_service` fixture for its side-effect — importing
+    `services.canary_service` reaches `from database import db` at module
+    top, which triggers production DB init unless `database` is stubbed.
+    The fixture already does that stubbing; we ignore its return value.
+    """
+
+    def test_format_last_red_first_red_when_none(self, canary_service):
+        from services.canary_service import CanaryService
+        assert (
+            CanaryService._format_last_red(None, "2026-05-04T12:00:00Z")
+            == "first red for this invariant"
+        )
+
+    def test_format_last_red_seconds(self, canary_service):
+        from services.canary_service import CanaryService
+        out = CanaryService._format_last_red(
+            "2026-05-04T11:59:30Z", "2026-05-04T12:00:00Z"
+        )
+        assert out == "last red 30s ago"
+
+    def test_format_last_red_minutes(self, canary_service):
+        from services.canary_service import CanaryService
+        out = CanaryService._format_last_red(
+            "2026-05-04T11:55:00Z", "2026-05-04T12:00:00Z"
+        )
+        assert out == "last red 5m ago"
+
+    def test_format_last_red_hours(self, canary_service):
+        from services.canary_service import CanaryService
+        out = CanaryService._format_last_red(
+            "2026-05-04T10:00:00Z", "2026-05-04T12:30:00Z"
+        )
+        assert out == "last red 2h ago"
+
+    def test_format_last_red_falls_back_on_garbage(self, canary_service):
+        from services.canary_service import CanaryService
+        out = CanaryService._format_last_red("not-a-timestamp", "2026-05-04T12:00:00Z")
+        assert out == "first red for this invariant"
+
+    def test_build_payload_severity_emoji(self, canary_service):
+        from services.canary_service import CanaryService
+        from canary.snapshot import ViolationReport
+
+        v = ViolationReport(
+            invariant_id="S-01",
+            tier="A",
+            severity="critical",
+            observed_state={"agent_name": "alpha"},
+        )
+        text, blocks = CanaryService._build_slack_payload(
+            "S-01", [v], "2026-05-04T12:00:00Z", None, "critical", [42],
+        )
+        assert text.startswith("🚨")
+        assert "S-01" in text
+        # Header block uses the same emoji + friendly name.
+        header = blocks[0]
+        assert header["type"] == "header"
+        assert "🚨" in header["text"]["text"]
+        assert "Slot–row bijection" in header["text"]["text"]
+
+    def test_build_payload_includes_last_red_badge(self, canary_service):
+        from services.canary_service import CanaryService
+        from canary.snapshot import ViolationReport
+
+        v = ViolationReport(
+            invariant_id="L-03",
+            tier="A",
+            severity="major",
+            observed_state={"ghost_agent_name": "ghost-1"},
+        )
+        _, blocks = CanaryService._build_slack_payload(
+            "L-03",
+            [v],
+            "2026-05-04T12:00:00Z",
+            "2026-05-04T11:55:00Z",
+            "major",
+            [21],
+        )
+        # Context is the last block; assert by type, not index, so
+        # added/removed sections don't break this test.
+        ctx = next(b for b in blocks if b["type"] == "context")
+        assert "last red 5m ago" in ctx["elements"][0]["text"]
+        assert "violation #21" in ctx["elements"][0]["text"]
+
+    def test_build_payload_l03_forensic_block(self, canary_service):
+        from services.canary_service import CanaryService
+        from canary.snapshot import ViolationReport
+
+        v = ViolationReport(
+            invariant_id="L-03",
+            tier="A",
+            severity="major",
+            observed_state={
+                "ghost_agent_name": "ghost-1",
+                "tables_hit": ["agent_sharing", "agent_schedules"],
+                "sample_refs": [
+                    {"table": "agent_sharing", "column": "agent_name", "row_id": "5"},
+                    {"table": "agent_schedules", "column": "agent_name", "row_id": "9"},
+                ],
+            },
+        )
+        _, blocks = CanaryService._build_slack_payload(
+            "L-03", [v], "2026-05-04T12:00:00Z", None, "major", [21],
+        )
+        sections = [b for b in blocks if b["type"] == "section"]
+        forensic_text = " ".join(s["text"]["text"] for s in sections)
+        assert "agent_sharing" in forensic_text
+        assert "agent_schedules" in forensic_text
+        assert "row `5`" in forensic_text
+        assert "row `9`" in forensic_text
+
+    def test_build_payload_includes_runbook_hint(self, canary_service):
+        from services.canary_service import CanaryService
+        from canary.snapshot import ViolationReport
+
+        v = ViolationReport(
+            invariant_id="L-03",
+            tier="A",
+            severity="major",
+            observed_state={"ghost_agent_name": "ghost-1"},
+        )
+        _, blocks = CanaryService._build_slack_payload(
+            "L-03", [v], "2026-05-04T12:00:00Z", None, "major", [21],
+        )
+        all_text = " ".join(
+            b["text"]["text"] for b in blocks if b.get("text")
+        )
+        assert "deleted" in all_text  # runbook hint mentions delete handler
+
+    def test_format_row_refs_variants(self, canary_service):
+        from services.canary_service import CanaryService
+        assert CanaryService._format_row_refs([]) is None
+        assert CanaryService._format_row_refs([None]) is None
+        assert CanaryService._format_row_refs([21]) == "violation #21"
+        assert (
+            CanaryService._format_row_refs([21, 22, 23])
+            == "violations #21, #22, #23"
+        )
+        assert (
+            CanaryService._format_row_refs([21, 22, 23, 24, 25])
+            == "violations #21–#25 (5 total)"
+        )
+        # Drops Nones (insert failures) before counting.
+        assert CanaryService._format_row_refs([21, None, 23]) == "violations #21, #23"
+
+
+@pytest.fixture
+def slack_capture(monkeypatch):
+    """Replace services.slack_service.slack_service with a recorder.
+
+    The lazy `from services.slack_service import slack_service` inside
+    `_emit_transition` resolves through `sys.modules`, so seeding the
+    module entry up-front captures every call without a live httpx
+    client.
+    """
+    calls: List[Dict[str, Any]] = []
+    return_value: Dict[str, Any] = {"value": (True, None)}
+
+    class _Recorder:
+        async def post_webhook(self, webhook_url, text, blocks=None, timeout_seconds=5.0):
+            calls.append({
+                "url": webhook_url,
+                "text": text,
+                "blocks": blocks,
+                "timeout": timeout_seconds,
+            })
+            return return_value["value"]
+
+    fake = types.ModuleType("services.slack_service")
+    fake.slack_service = _Recorder()
+    monkeypatch.setitem(sys.modules, "services.slack_service", fake)
+
+    return {"calls": calls, "return_value": return_value}
+
+
+class TestCanarySlackEmit:
+    """Integration tests for `_emit_transition` against a recorded sink."""
+
+    def test_no_webhook_url_skips_silently(
+        self, canary_db, canary_service, slack_capture, monkeypatch
+    ):
+        """No env var = no POST. Cycle still runs, violation still persists."""
+        monkeypatch.delenv("CANARY_SLACK_WEBHOOK_URL", raising=False)
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+        result = _run(svc.run_cycle())
+
+        assert result.transition_invariant_ids == ["L-03"]
+        assert slack_capture["calls"] == [], "no webhook URL must not POST"
+        # Violation still persisted.
+        ops = canary_service["canary_ops"]
+        assert ops.count_violations(invariant_id="L-03") == 1
+
+    def test_webhook_url_set_fires_one_post_per_transition(
+        self, canary_db, canary_service, slack_capture, monkeypatch
+    ):
+        """With env var set, exactly one webhook POST per transition."""
+        monkeypatch.setenv(
+            "CANARY_SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/TEST/TEST/TEST",
+        )
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+        _run(svc.run_cycle())
+
+        assert len(slack_capture["calls"]) == 1
+        call = slack_capture["calls"][0]
+        assert call["url"] == "https://hooks.slack.com/services/TEST/TEST/TEST"
+        assert "L-03" in call["text"]
+        # Block layout has grown beyond the original 3 — assert by type
+        # rather than count so future copy edits don't trip this test.
+        block_types = [b["type"] for b in call["blocks"]]
+        assert block_types[0] == "header"
+        assert block_types[-1] == "context"
+        assert "section" in block_types
+
+    def test_continuing_red_does_not_re_post(
+        self, canary_db, canary_service, slack_capture, monkeypatch
+    ):
+        """Three cycles with the same red invariant = one webhook POST.
+
+        Mirrors `test_continuing_red_does_not_re_classify` — green→red
+        gating runs upstream of the sink, so the sink also fires once.
+        """
+        monkeypatch.setenv(
+            "CANARY_SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/TEST/TEST/TEST",
+        )
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+        _run(svc.run_cycle())
+        _run(svc.run_cycle())
+        _run(svc.run_cycle())
+
+        assert len(slack_capture["calls"]) == 1, (
+            "continuing-red must POST once, not every cycle"
+        )
+
+    def test_webhook_failure_swallowed_cycle_continues(
+        self, canary_db, canary_service, slack_capture, monkeypatch
+    ):
+        """A failing webhook must not break cycle accounting.
+
+        The row is already persisted before `_emit_transition` runs;
+        a hung Slack endpoint can't roll that back. We assert the
+        transition is still counted and the violation is still in the
+        DB even when the recorder returns a failure tuple.
+        """
+        monkeypatch.setenv(
+            "CANARY_SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/TEST/TEST/TEST",
+        )
+        slack_capture["return_value"]["value"] = (False, "invalid_token")
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+        result = _run(svc.run_cycle())
+
+        assert result.transition_invariant_ids == ["L-03"]
+        assert svc.cumulative_transitions == 1
+        ops = canary_service["canary_ops"]
+        assert ops.count_violations(invariant_id="L-03") == 1
+        # Recorder still saw the call — failure happened on Slack's side.
+        assert len(slack_capture["calls"]) == 1
+
+    def test_previous_violation_at_threaded_into_payload(
+        self, canary_db, canary_service, slack_capture, monkeypatch
+    ):
+        """red→green→red: second-red POST carries the prior snapshot_time
+        so the alert can render "last red Xm ago".
+        """
+        monkeypatch.setenv(
+            "CANARY_SLACK_WEBHOOK_URL",
+            "https://hooks.slack.com/services/TEST/TEST/TEST",
+        )
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+
+        # Cycle 1: first-ever transition → "first red" badge.
+        _run(svc.run_cycle())
+        first_ctx = next(
+            b for b in slack_capture["calls"][0]["blocks"] if b["type"] == "context"
+        )["elements"][0]["text"]
+        assert "first red" in first_ctx
+
+        # Cycle 2: clean → green.
+        c = _conn(canary_db)
+        c.execute("DELETE FROM agent_sharing WHERE agent_name='ghost-1'")
+        c.commit()
+        c.close()
+        _run(svc.run_cycle())
+        # Cycle 3: re-introduce → second transition.
+        _add_orphan_sharing(canary_db, "ghost-1")
+        _run(svc.run_cycle())
+
+        assert len(slack_capture["calls"]) == 2
+        second_ctx = next(
+            b for b in slack_capture["calls"][1]["blocks"] if b["type"] == "context"
+        )["elements"][0]["text"]
+        assert "last red" in second_ctx, (
+            "second transition must carry the prior snapshot_time"
         )

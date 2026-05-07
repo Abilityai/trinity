@@ -253,9 +253,11 @@ async def run_canary_cycle(
                 invariant_id=invariant_id,
                 severity=worst.severity,
                 violations_in_cycle=len(vlist),
-                # `previous_violation_at` is informational; populate from
-                # the just-inserted row's prior peer if available, else null.
-                previous_violation_at=None,
+                # The service captured this from `previous_latest` BEFORE
+                # the cycle's inserts, so it's the prior cycle's tail —
+                # not the row we just wrote. `None` means first-ever
+                # violation for this invariant.
+                previous_violation_at=cycle.previous_violation_at.get(invariant_id),
             ))
 
     checks_skipped = [i for i in valid_ids if i not in cycle.violations]
