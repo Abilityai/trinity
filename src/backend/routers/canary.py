@@ -219,10 +219,10 @@ async def run_canary_cycle(
     cycle = await canary_service.run_cycle(invariant_ids=valid_ids)
     duration_ms = int((time.monotonic() - started) * 1000)
 
-    # Re-fetch persisted rows for the response. The service writes them
-    # but doesn't return ids; we look them up by snapshot_time so the
-    # endpoint contract surfaces row ids for chaining (e.g. test
-    # assertions on the GET /violations endpoint).
+    # Row ids come straight from the service via `persisted_violation_ids`
+    # (index-aligned with `cycle.violations`); no re-query needed. A `None`
+    # slot means the insert failed — we drop those from the response rather
+    # than surface a stale row.
     snapshot_time = cycle.snapshot_time
     persisted: List[CycleViolation] = []
     transitions_out: List[CycleTransition] = []
@@ -230,32 +230,19 @@ async def run_canary_cycle(
     transition_set = set(cycle.transition_invariant_ids)
 
     for invariant_id, vlist in cycle.violations.items():
-        for v in vlist:
-            # Best-effort lookup: latest row for this (invariant, snapshot_time)
-            # pair. Multiple violations of the same invariant in one cycle get
-            # distinct rows so we still surface them, just not by direct id.
-            rows = db.list_canary_violations(
-                invariant_id=invariant_id,
-                start_time=snapshot_time,
-                end_time=snapshot_time,
-                limit=100,
-            )
-            if rows:
-                # Match by signal_query when present (uniquely identifies the
-                # specific check that fired); fall back to ordering otherwise.
-                match = next(
-                    (r for r in rows if r.get("signal_query") == v.signal_query),
-                    rows[0],
-                )
-                persisted.append(CycleViolation(
-                    id=match["id"],
-                    invariant_id=v.invariant_id,
-                    tier=v.tier,
-                    severity=v.severity,
-                    snapshot_time=snapshot_time,
-                    observed_state=v.observed_state,
-                    signal_query=v.signal_query,
-                ))
+        ids = cycle.persisted_violation_ids.get(invariant_id, [])
+        for v, row_id in zip(vlist, ids):
+            if row_id is None:
+                continue
+            persisted.append(CycleViolation(
+                id=row_id,
+                invariant_id=v.invariant_id,
+                tier=v.tier,
+                severity=v.severity,
+                snapshot_time=snapshot_time,
+                observed_state=v.observed_state,
+                signal_query=v.signal_query,
+            ))
 
         # Build a transition entry only for invariants the SERVICE actually
         # decided fired a notification this cycle. Continuing-red invariants

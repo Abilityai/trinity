@@ -46,9 +46,16 @@ class CycleResult:
     green→red flip, not a continuation of an already-known violation.
     The router exposes this directly to operators so the on-demand
     `/api/canary/run-cycle` response matches what the bell received.
+
+    `persisted_violation_ids` is index-aligned with `violations`: for
+    each `ViolationReport` in `violations[inv_id][i]`, the row id
+    returned by `insert_canary_violation` is at
+    `persisted_violation_ids[inv_id][i]` — or `None` if the insert
+    failed. Lets the router surface row ids without re-querying.
     """
 
     violations: Dict[str, List[ViolationReport]] = field(default_factory=dict)
+    persisted_violation_ids: Dict[str, List[Optional[int]]] = field(default_factory=dict)
     transition_invariant_ids: List[str] = field(default_factory=list)
     snapshot_time: str = ""
 
@@ -211,10 +218,15 @@ class CanaryService:
         results = await asyncio.to_thread(run_invariants, snapshot, invariant_ids)
 
         persisted_count = 0
+        # Index-aligned with `results[inv_id]` — `None` slot means insert
+        # failed. The router uses these ids directly instead of re-querying
+        # by (invariant_id, snapshot_time).
+        persisted_ids: Dict[str, List[Optional[int]]] = {}
         for inv_id, vlist in results.items():
+            inv_ids: List[Optional[int]] = []
             for v in vlist:
                 try:
-                    db.insert_canary_violation(
+                    row_id = db.insert_canary_violation(
                         invariant_id=v.invariant_id,
                         tier=v.tier,
                         severity=v.severity,
@@ -222,12 +234,15 @@ class CanaryService:
                         observed_state=v.observed_state,
                         signal_query=v.signal_query,
                     )
+                    inv_ids.append(row_id)
                     persisted_count += 1
                 except Exception:
+                    inv_ids.append(None)
                     logger.exception(
                         "canary: failed to persist violation %s; continuing",
                         v.invariant_id,
                     )
+            persisted_ids[inv_id] = inv_ids
 
         # Detect green→red transitions and emit one notification per.
         transition_ids: List[str] = []
@@ -265,6 +280,7 @@ class CanaryService:
 
         return CycleResult(
             violations=results,
+            persisted_violation_ids=persisted_ids,
             transition_invariant_ids=transition_ids,
             snapshot_time=snapshot.snapshot_time,
         )
