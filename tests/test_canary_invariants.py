@@ -69,6 +69,7 @@ class FakeRedis:
     def __init__(self):
         self._zsets: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._hashes: Dict[str, Dict[str, str]] = defaultdict(dict)
+        self._strings: Dict[str, str] = {}
 
     # ZSET ------------------------------------------------------------------
 
@@ -142,6 +143,17 @@ class FakeRedis:
         keys = list(self._zsets.keys()) + list(self._hashes.keys())
         matched = [k for k in keys if fnmatch.fnmatch(k, match)]
         return 0, matched
+
+    # STRING ----------------------------------------------------------------
+    # Used by CanaryService for the previous-cycle snapshot_time cursor
+    # (REDIS_KEY_LAST_CYCLE) — see services/canary_service.py.
+
+    def get(self, key: str):
+        return self._strings.get(key)
+
+    def set(self, key: str, value: str) -> bool:
+        self._strings[key] = str(value)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -765,3 +777,190 @@ class TestRunner:
         results = reload_canary["canary"].run_invariants(snap, ids=["NOPE", "L-03"])
         assert "NOPE" not in results
         assert "L-03" in results
+
+
+# ---------------------------------------------------------------------------
+# CanaryService.run_cycle orchestration
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the orchestrator that ties snapshot collection,
+# invariant evaluation, persistence, and green→red transition detection
+# together. The deterministic-library tests above cover individual parts;
+# these cover the wiring — which is where the demo-driven bugs lived:
+#
+#   - e7c11b2e: `_is_green_to_red` was firing on every continuing-red
+#     cycle. Fixed via a Redis previous-cycle cursor.
+#   - ef40cf98: `TERMINAL_EXECUTION_STATUSES` listed wrong strings
+#     ("completed"/"timeout") so E-02's Redis side-table never seeded
+#     against real-world `success` rows.
+#
+# Both bugs passed the unit suite and were caught only by hand-driven
+# demo runs. This class is the regression net.
+
+
+@pytest.fixture
+def canary_service(canary_db, fake_redis, reload_canary, monkeypatch):
+    """Build a CanaryService bound to the test fixtures.
+
+    Routes db calls through the real `CanaryOperations` (already wired
+    to the temp SQLite via `canary_db`) and replaces `db.create_notification`
+    with a counting recorder so transitions can be asserted directly.
+    """
+    db_canary = reload_canary["db_canary"]
+    canary_ops = db_canary.CanaryOperations()
+
+    notification_calls: List[Dict[str, Any]] = []
+
+    class _StubNotification:
+        # _broadcast is a no-op when both ws managers are None (test default),
+        # so we only need a placeholder return value.
+        id = "stub-notification-id"
+        agent_name = "canary-harness"
+        notification_type = "alert"
+        title = ""
+        priority = "high"
+        category = "canary"
+        created_at = "2026-04-30T12:00:00Z"
+
+    class _FakeDB:
+        def get_latest_canary_violation_per_invariant(self):
+            return canary_ops.get_latest_per_invariant()
+
+        def insert_canary_violation(self, **kwargs):
+            return canary_ops.insert_violation(**kwargs)
+
+        def create_notification(self, agent_name, data):
+            notification_calls.append({"agent_name": agent_name, "data": data})
+            return _StubNotification()
+
+    fake_database = types.ModuleType("database")
+    fake_database.db = _FakeDB()
+    monkeypatch.setitem(sys.modules, "database", fake_database)
+
+    class _NotificationCreate:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    fake_db_models = types.ModuleType("db_models")
+    fake_db_models.NotificationCreate = _NotificationCreate
+    monkeypatch.setitem(sys.modules, "db_models", fake_db_models)
+
+    # Drop any cached canary_service so it picks up the stubs above.
+    sys.modules.pop("services.canary_service", None)
+
+    from services.canary_service import CanaryService
+
+    return {
+        "service": CanaryService(),
+        "notification_calls": notification_calls,
+        "canary_ops": canary_ops,
+    }
+
+
+def _run(coro):
+    """Run a coroutine to completion in a fresh event loop."""
+    import asyncio as _asyncio
+    return _asyncio.run(coro)
+
+
+class TestCanaryService:
+    """End-to-end tests for `CanaryService.run_cycle()`."""
+
+    def test_first_cycle_violation_fires_one_notification(
+        self, canary_db, canary_service
+    ):
+        """First cycle that sees a violation emits exactly one notification."""
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")  # triggers L-03
+
+        result = _run(canary_service["service"].run_cycle())
+
+        assert "L-03" in result.transition_invariant_ids
+        assert len(canary_service["notification_calls"]) == 1
+        call = canary_service["notification_calls"][0]
+        assert call["agent_name"] == "canary-harness"
+        assert "L-03" in call["data"].title
+
+    def test_continuing_red_does_not_re_fire(self, canary_db, canary_service):
+        """Same orphan, three cycles → 3 violations persisted, 1 notification.
+
+        Regression for e7c11b2e: transition detection was firing on every
+        continuing-red cycle. The fix uses a Redis previous-cycle cursor
+        so a continuously-red invariant rings the bell exactly once.
+        """
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+        _run(svc.run_cycle())
+        _run(svc.run_cycle())
+        _run(svc.run_cycle())
+
+        # All three cycles still persist the violation — the forensic
+        # record is intact even when the bell stays quiet.
+        ops = canary_service["canary_ops"]
+        assert ops.count_violations(invariant_id="L-03") == 3
+        assert len(canary_service["notification_calls"]) == 1, (
+            "continuing-red must not re-notify on every cycle"
+        )
+
+    def test_red_green_red_fires_twice(self, canary_db, canary_service):
+        """red → green → red emits two notifications.
+
+        A clean cycle in the middle "re-arms" the invariant; the next
+        violation is a fresh transition, not a continuation.
+        """
+        _add_agent(canary_db, "real")
+        _add_orphan_sharing(canary_db, "ghost-1")
+
+        svc = canary_service["service"]
+
+        # Cycle 1: red.
+        _run(svc.run_cycle())
+        assert len(canary_service["notification_calls"]) == 1
+
+        # Cycle 2: clean it up → green.
+        c = _conn(canary_db)
+        c.execute("DELETE FROM agent_sharing WHERE agent_name='ghost-1'")
+        c.commit()
+        c.close()
+        _run(svc.run_cycle())
+        assert len(canary_service["notification_calls"]) == 1, (
+            "green cycle must not emit"
+        )
+
+        # Cycle 3: re-introduce → red again.
+        _add_orphan_sharing(canary_db, "ghost-1")
+        _run(svc.run_cycle())
+
+        assert len(canary_service["notification_calls"]) == 2, (
+            "red→green→red must fire on the second red transition"
+        )
+
+    def test_terminal_status_set_seeds_e02_side_table(
+        self, canary_db, canary_service, fake_redis
+    ):
+        """Regression for ef40cf98 — the terminal-status-set typo.
+
+        `TERMINAL_EXECUTION_STATUSES` previously listed
+        ("completed", "failed", "cancelled", "timeout"), but Trinity
+        actually writes ("success", "failed", "cancelled", "skipped").
+        With the wrong list, a `success` row never made it into
+        `canary:e02:terminal_seen`, so a later reversal of the same id
+        would go undetected. This test fails against the pre-fix list.
+        """
+        _add_agent(canary_db, "real")
+        _add_execution(
+            canary_db,
+            "e-real-success",
+            "real",
+            "success",
+            completed_at=datetime.utcnow().isoformat(),
+        )
+
+        _run(canary_service["service"].run_cycle())
+
+        terminal_seen = fake_redis.hkeys("canary:e02:terminal_seen")
+        assert "e-real-success" in terminal_seen, (
+            "'success' must be in TERMINAL_EXECUTION_STATUSES"
+        )
