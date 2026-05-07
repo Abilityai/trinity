@@ -43,7 +43,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-def iso_cutoff(hours: int) -> str:
+def iso_cutoff(hours: int = 0, *, minutes: int = 0) -> str:
     """
     Compute a past-cutoff ISO timestamp in the same format as utc_now_iso().
 
@@ -58,16 +58,23 @@ def iso_cutoff(hours: int) -> str:
             "SELECT COUNT(*) FROM events WHERE occurred_at > ?",
             (iso_cutoff(2),)
         )
+        cursor.execute(
+            "SELECT COUNT(*) FROM events WHERE occurred_at > ?",
+            (iso_cutoff(minutes=30),)
+        )
 
     Args:
         hours: Hours in the past (positive). `iso_cutoff(0)` ≈ `utc_now_iso()`.
+        minutes: Additional minutes in the past (positive, keyword-only).
+            Combine with `hours` for arbitrary windows, or use alone for
+            sub-hour windows.
 
     Returns:
         ISO timestamp matching the format of utc_now_iso().
     """
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
-        '%Y-%m-%dT%H:%M:%S.%fZ'
-    )
+    return (
+        datetime.now(timezone.utc) - timedelta(hours=hours, minutes=minutes)
+    ).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
 def to_utc_iso(dt: datetime) -> str:

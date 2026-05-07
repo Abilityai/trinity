@@ -82,3 +82,58 @@ class TestLexicographicOrdering:
         assert cutoff[10] == "T"
         # And is comparable lexicographically with a fresh now
         assert cutoff < utc_now_iso()
+
+
+class TestMinutesKwarg:
+    """`minutes=` keyword extends iso_cutoff to sub-hour windows.
+
+    Added when wiring CANARY-001 E-02's 30-minute terminal-row window
+    onto iso_cutoff (snapshot._collect_terminal_executions).
+    """
+
+    def test_minutes_only_returns_sub_hour_cutoff(self):
+        cutoff = iso_cutoff(minutes=30)
+        # Same canonical format
+        assert len(cutoff) == 27
+        assert cutoff.endswith("Z")
+        assert cutoff[10] == "T"
+        # ~30 minutes before now (±1s for test runtime)
+        dt = parse_iso_timestamp(cutoff)
+        delta = (utc_now() - dt).total_seconds()
+        assert 30 * 60 - 1 < delta < 30 * 60 + 1
+
+    def test_minutes_is_keyword_only(self):
+        # Positional second arg must NOT bind to minutes — it should
+        # raise TypeError. This pins the signature so future refactors
+        # don't accidentally make `iso_cutoff(2, 30)` mean "2h30m".
+        import pytest
+        with pytest.raises(TypeError):
+            iso_cutoff(2, 30)  # type: ignore[misc]
+
+    def test_hours_and_minutes_combine(self):
+        cutoff = iso_cutoff(1, minutes=15)
+        dt = parse_iso_timestamp(cutoff)
+        delta = (utc_now() - dt).total_seconds()
+        # 1h15m == 4500s
+        assert 4500 - 1 < delta < 4500 + 1
+
+    def test_minutes_zero_equals_hours_only(self):
+        # Generated within the same wall-clock millisecond — strings may
+        # differ in the last digit, but should be within 1s of each other.
+        a = iso_cutoff(2)
+        b = iso_cutoff(2, minutes=0)
+        da = parse_iso_timestamp(a)
+        db = parse_iso_timestamp(b)
+        assert abs((da - db).total_seconds()) < 1
+
+    def test_larger_minutes_means_earlier_timestamp(self):
+        # Lexicographic == chronological still holds for sub-hour windows
+        assert iso_cutoff(minutes=30) < iso_cutoff(minutes=1)
+        assert iso_cutoff(minutes=1) < iso_cutoff(minutes=0)
+
+    def test_no_args_equals_now_within_tolerance(self):
+        # iso_cutoff() with no args is equivalent to iso_cutoff(0)
+        before = utc_now_iso()
+        cutoff = iso_cutoff()
+        after = utc_now_iso()
+        assert before <= cutoff <= after

@@ -46,7 +46,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-from utils.helpers import utc_now_iso
+from utils.helpers import iso_cutoff, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
@@ -211,15 +211,16 @@ def _collect_terminal_executions(window_minutes: int = 30) -> Set[str]:
     from db.connection import get_db_connection
 
     placeholders = ",".join("?" * len(TERMINAL_EXECUTION_STATUSES))
+    cutoff = iso_cutoff(minutes=int(window_minutes))
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             f"""
             SELECT id FROM schedule_executions
             WHERE status IN ({placeholders})
-              AND completed_at > datetime('now', ?)
+              AND completed_at > ?
             """,
-            (*TERMINAL_EXECUTION_STATUSES, f"-{int(window_minutes)} minutes"),
+            (*TERMINAL_EXECUTION_STATUSES, cutoff),
         )
         return {row["id"] for row in cursor.fetchall()}
 
