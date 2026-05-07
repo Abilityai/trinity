@@ -4,7 +4,7 @@ Database migrations for Trinity platform.
 Each migration function handles a specific schema change.
 Migrations are idempotent - safe to run multiple times.
 
-Migration Order (as of 2026-02-28):
+Migration Order (as of 2026-05-07):
 1. agent_sharing - Email-based sharing (from user_id)
 2. schedule_executions_observability - Context/cost/tools columns
 3. mcp_api_keys_agent_scope - Agent collaboration support
@@ -34,11 +34,34 @@ Migration Order (as of 2026-02-28):
 27. agent_ownership_execution_timeout - TIMEOUT-001 per-agent execution timeout
 28. public_user_memory_table - MEM-001 per-user persistent memory for public link agents
 29. subscription_rate_limit_tracking - SUB-003 rate-limit event tracking for auto-switch
-30. execution_fan_out_id - FANOUT-001 fan-out operation linkage
-31. scheduler_retry_support - RETRY-001 scheduler retry mechanism
-32. validation_support - VALIDATE-001 post-execution business validation
-33. agent_git_config_pat - #347 per-agent GitHub PAT support
-34. canary_violations_table - CANARY-001 / Issue #411 invariant harness violations
+30. chat_messages_source_column - Chat message source tracking
+31. agent_ownership_voice_prompt - Per-agent voice system prompt
+32. slack_channel_agents - SLACK-002 channel-agent bindings
+33. execution_fan_out_id - FANOUT-001 fan-out operation linkage
+34. telegram_bindings - TELEGRAM-001 Telegram bot integration tables
+35. subscription_usage_tracking - SUB-002 usage tracking columns
+36. telegram_group_configs - TGRAM-GROUP Telegram group chat configs
+37. access_control - #311 unified channel access control (access_requests, verified_email)
+38. public_link_require_email_unified - #311 unified require_email flag on public links
+39. email_whitelist_default_role - #314 default role on email whitelist rows
+40. backlog_support - BACKLOG-001 persistent FIFO overflow store
+41. scheduler_retry_support - RETRY-001 scheduler retry mechanism
+42. validation_support - VALIDATE-001 post-execution business validation
+43. audit_log_table - SEC-001 / #20 platform audit log
+44. group_auth_mode - Telegram/Slack group auth mode
+45. agent_ownership_guardrails - GUARD-001 per-agent guardrails overrides
+46. agent_git_config_pat - #347 per-agent GitHub PAT support
+47. proactive_messaging - #321 proactive agent-to-user messaging
+48. agent_git_config_branch_ownership - Working-branch ownership tracking
+49. sync_health - #389 agent_sync_state for sync health observability
+50. whatsapp_bindings - WHATSAPP-001 Twilio WhatsApp integration
+51. agent_schedules_webhook - WEBHOOK-001 webhook tokens for schedules
+52. agent_shared_files - FILES-001 outbound file sharing
+53. agent_sessions_tables - SESSION_TAB --resume-default Session tab
+54. session_compact_events - Session compact event tracking
+55. public_links_type - SITE-001 type column on public links (chat | site)
+56. slack_bot_token_encryption - #453 encrypt Slack bot tokens at rest
+57. canary_violations_table - CANARY-001 / Issue #411 invariant harness violations
 """
 import logging
 import sqlite3
