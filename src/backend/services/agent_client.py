@@ -43,7 +43,11 @@ class CircuitState:
 
     def record_failure(self):
         self.failure_count += 1
-        self.last_failure_time = time.monotonic()
+        # Don't reset the cooldown clock once open — continuous probe failures
+        # would otherwise keep last_failure_time near zero, preventing the
+        # half-open transition (root cause of #687).
+        if self.state != "open":
+            self.last_failure_time = time.monotonic()
         if self.failure_count >= self.failure_threshold:
             if self.state != "open":
                 logger.warning(

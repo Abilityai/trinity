@@ -21,6 +21,7 @@ Ensure all open issues are on the board with correct rank, tier, Epic, and Theme
 | GitHub Issues | `abilityai/trinity` | Yes | No | All open issues |
 | GitHub Project #6 | `abilityai` org, project 6 | Yes | Yes | Trinity Roadmap board — Rank, Tier, Status, Epic, Theme fields |
 | Project Constants | This skill | Yes | No | Project ID, field IDs |
+| Target Architecture | `docs/planning/TARGET_ARCHITECTURE.md` | Yes | No | Optimal system design — informs ranking and tier decisions |
 
 ### Project Constants
 
@@ -154,6 +155,37 @@ EOF
 ```
 
 For each mismatch, propose moving the board column to match the label (auto-fix in Step 5).
+
+### Step 2c: Target Architecture Alignment Scan
+
+Read `docs/planning/TARGET_ARCHITECTURE.md` and identify which open Todo issues advance the target architecture.
+
+The target architecture has five primary change areas. Map open issues against them:
+
+| Component | What counts as "advancing it" |
+|-----------|-------------------------------|
+| **Data Layer** | PostgreSQL migration, PgBouncer, Alembic migrations, Redis-as-event-bus (not primary store) |
+| **Coordination Model** | Actor model / mailbox-first, async `chat_with_agent`, fan-out via event bus, circuit breakers, saga pattern, idempotency keys |
+| **Observability** | Prometheus metrics, Grafana dashboards, fleet-level signals (not just per-agent), semantic health score |
+| **Security** | GuardAgent output monitoring, workflow-scoped capability tokens, zero-trust agent-to-agent |
+| **Infrastructure** | Celery scheduler, K8s compatibility, streaming responses, richer agent health signal |
+
+Output a simple mapping before proceeding to Step 3:
+
+```
+## Target Architecture Alignment
+
+| Component | Aligned Issues |
+|-----------|----------------|
+| Data Layer | #NNN, #NNN |
+| Coordination Model | #NNN, #NNN |
+| Observability | #NNN |
+| Security | #NNN |
+| Infrastructure | #NNN |
+| No clear alignment | #NNN, #NNN, ... |
+```
+
+This mapping informs ranking in Step 4 — issues advancing the target architecture rank above same-type, same-tier issues that do not.
 
 ### Step 2: Detect Unranked Items
 
@@ -317,7 +349,8 @@ Based on the audit, propose specific changes:
 
 **Ranking strategy:**
 - Within each tier, prioritize: bugs > security > features > refactors
-- Within same type, order by issue number (older first, unless context says otherwise)
+- **Target architecture alignment**: within the same type, issues that advance a component in `docs/planning/TARGET_ARCHITECTURE.md` rank above issues that do not (use the Step 2c mapping)
+- Within same type and alignment status, order by issue number (older first, unless context says otherwise)
 - Use fractional ranks (e.g., 8.1, 8.2) to slot between existing ranked items without displacing them
 
 **Epic/Theme assignment strategy:**

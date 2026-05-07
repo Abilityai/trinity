@@ -47,6 +47,17 @@ Agents communicate with each other via Trinity's MCP server, enabling orchestrat
 - Use **shared folders** for file-based collaboration between agents.
 - Use **event subscriptions** for pub/sub patterns between agents.
 
+### Shared Folder Configuration
+
+![Agent Folders tab showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../images/agent-folders-tab.png)
+
+Agents can share files via Docker volumes:
+
+1. On the **source agent**, open the **Folders** tab and enable **Expose Shared Folder**. Files placed in `/home/developer/shared-out` are made available to permitted agents.
+2. Grant the consuming agent permission via the **Permissions** tab.
+3. On the **consuming agent**, enable **Mount Shared Folders**. Exposed folders appear at `/home/developer/shared-in/{agent-name}`.
+4. Restart both agents to apply the volume mounts.
+
 ## See Also
 
 - [Event Subscriptions](../features/event-subscriptions.md) -- Pub/sub for inter-agent pipelines

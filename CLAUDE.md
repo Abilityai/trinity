@@ -117,7 +117,7 @@ Follow methodology guides in `.claude/skills/`:
 | `code-review` | Verify feedback technically before implementing |
 
 ### 7. Architectural Invariants
-Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift.
+Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
 
 ---
 
@@ -126,7 +126,8 @@ Before adding endpoints, services, DB tables, or frontend views, review the Arch
 | File | Purpose |
 |------|---------|
 | `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** - All features |
-| @docs/memory/architecture.md | Current system design (~1000 lines max) |
+| @docs/memory/architecture.md | **Current system design** — describes what is built today (~1000 lines max) |
+| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design** — describes the optimal destination; use when evaluating tradeoffs and prioritizing work |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` | Active multi-sprint plan for execution/orchestration reliability. **Current focus: Tier 2.5 Simplification — #306 (push event bus) → #428/#429/#430.** Consult before touching `task_execution_service`, `slot_service`, `backlog_service`, `execution_queue`, or `cleanup_service`. |
 | GitHub Issues + Project Board | Prioritized task queue — **Trinity Roadmap** board (Todo/In Progress/Done), priority labels (P0-P3), Tier sub-priority (P1a/P1b/P1c) |

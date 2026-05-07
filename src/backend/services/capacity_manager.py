@@ -159,7 +159,8 @@ class CapacityManager:
         slot_service: Optional[SlotService] = None,
         backlog_service: Optional[BacklogService] = None,
     ):
-        url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379")
+        from config import REDIS_URL as _DEFAULT_REDIS_URL
+        url = redis_url or _DEFAULT_REDIS_URL
         self._redis = redis.from_url(url, decode_responses=True)
         self._slots = slot_service or SlotService(url)
         self._backlog = backlog_service or BacklogService()

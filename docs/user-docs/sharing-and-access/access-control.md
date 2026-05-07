@@ -12,6 +12,8 @@ Unified access control across all channels (web, Telegram, Slack). Verified emai
 
 ## How It Works
 
+![Agent Sharing tab showing Identity Proof (require verified email, open access) and Team Sharing allow-list controls](../images/agent-sharing-access.png)
+
 ### Enable Email Verification
 
 1. Go to Agent Detail → **Sharing** tab.

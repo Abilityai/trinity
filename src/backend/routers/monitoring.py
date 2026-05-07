@@ -10,7 +10,8 @@ Provides endpoints for agent health monitoring:
 """
 
 import json
-from typing import Optional, List
+import logging
+from typing import Any, Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 
 from database import db
@@ -36,9 +37,60 @@ from services.agent_service import get_accessible_agents
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 
+logger = logging.getLogger(__name__)
+
+# Sort key: lower number = higher severity, surfaces first.
+_STATUS_SORT_ORDER = {"critical": 0, "unhealthy": 1, "degraded": 2, "unknown": 3, "healthy": 4}
+
 # WebSocket manager for broadcasting health events
 _websocket_manager = None
 _filtered_websocket_manager = None
+
+
+# ============================================================================
+# Builders (extracted for unit-test coverage — see #669)
+# ============================================================================
+
+def _coerce_status(raw: Any) -> str:
+    """Map any persisted status value (incl. NULL / non-str) to a known label.
+
+    The DB column is nullable, and partial health-check rows can land with
+    `status = NULL`. Without coercion, building `AgentHealthSummary(status=...)`
+    fails Pydantic validation (status is a required str) and the whole
+    fleet-status endpoint returns 500. See #669.
+    """
+    if isinstance(raw, str) and raw:
+        return raw
+    return "unknown"
+
+
+def _build_agent_summary(name: str, check: Optional[Dict[str, Any]]) -> AgentHealthSummary:
+    """Build an `AgentHealthSummary` from a (possibly absent / partial) row.
+
+    Tolerates `check is None` (no row at all), missing keys, NULL `status`,
+    and NULL `error_message`. All defects in stored data degrade to
+    `status="unknown"` instead of bubbling as a 500.
+    """
+    if not check:
+        return AgentHealthSummary(name=name, status="unknown", issues=["No health check data"])
+
+    error_message = check.get("error_message") or ""
+    issues = error_message.split("; ") if error_message else []
+
+    return AgentHealthSummary(
+        name=name,
+        status=_coerce_status(check.get("status")),
+        docker_status=check.get("container_status"),
+        network_reachable=check.get("reachable"),
+        runtime_available=check.get("runtime_available"),
+        last_check_at=check.get("checked_at"),
+        issues=issues,
+    )
+
+
+def _status_sort_key(summary: AgentHealthSummary) -> int:
+    """Sort key for fleet status — most severe first, unknowns in the middle."""
+    return _STATUS_SORT_ORDER.get(summary.status, 3)
 
 
 def set_websocket_manager(manager):
@@ -101,7 +153,7 @@ async def get_fleet_status(
 
     # Filter to accessible agents (unless admin)
     if current_user.role != "admin":
-        accessible = get_accessible_agents(current_user.email, all_agent_names)
+        accessible = get_accessible_agents(current_user)
         accessible_names = {a["name"] for a in accessible}
         agent_names = [n for n in all_agent_names if n in accessible_names]
     else:
@@ -115,34 +167,25 @@ async def get_fleet_status(
             agents=[]
         )
 
-    # Get latest health checks from database
-    latest_checks = db.get_all_latest_health_checks(agent_names, "aggregate")
-    summary = db.get_health_summary(agent_names)
-
-    # Build agent summaries
-    agents = []
-    for name in agent_names:
-        check = latest_checks.get(name)
-        if check:
-            agents.append(AgentHealthSummary(
-                name=name,
-                status=check.get("status", "unknown"),
-                docker_status=check.get("container_status"),
-                network_reachable=check.get("reachable"),
-                runtime_available=check.get("runtime_available"),
-                last_check_at=check.get("checked_at"),
-                issues=check.get("error_message", "").split("; ") if check.get("error_message") else []
-            ))
-        else:
-            agents.append(AgentHealthSummary(
-                name=name,
-                status="unknown",
-                issues=["No health check data"]
-            ))
-
-    # Sort by status severity (critical first)
-    status_order = {"critical": 0, "unhealthy": 1, "degraded": 2, "unknown": 3, "healthy": 4}
-    agents.sort(key=lambda a: status_order.get(a.status, 3))
+    # #669: aggregator-side defects (NULL status, schema drift, partial rows)
+    # must not propagate as 500. Degrade to an "unknown" payload so MCP clients
+    # and the UI can render *something*.
+    try:
+        latest_checks = db.get_all_latest_health_checks(agent_names, "aggregate")
+        summary = db.get_health_summary(agent_names)
+        agents = [_build_agent_summary(name, latest_checks.get(name)) for name in agent_names]
+        agents.sort(key=_status_sort_key)
+    except Exception:
+        logger.exception("Fleet health aggregation failed for %d agents", len(agent_names))
+        return FleetHealthStatus(
+            enabled=get_monitoring_service().is_running,
+            last_check_at=None,
+            summary=FleetHealthSummary(total_agents=len(agent_names), unknown=len(agent_names)),
+            agents=[
+                AgentHealthSummary(name=n, status="unknown", issues=["Health aggregation failed"])
+                for n in agent_names
+            ],
+        )
 
     # Include circuit breaker states for admin users
     cb_data = None

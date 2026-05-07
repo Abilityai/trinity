@@ -42,6 +42,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 
 ### Tasks Tab (per-agent)
 
+![Agent Tasks tab showing execution history, success rate, total cost, and average duration](../images/agent-tasks-tab.png)
+
 1. Open agent detail and click the **Tasks** tab.
 2. Enter a task message. Optionally select a model.
 3. Click **Send** to start the execution.

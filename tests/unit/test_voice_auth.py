@@ -77,27 +77,28 @@ def _stub_voice_service():
             self.chat_session_id = "cs_test"
             self.transcript = []
             self._duration_seconds = 0.0
+            self.panel_state = {"type": "empty", "content": "", "title": None, "updated_at": None}
 
     class _FakeVoiceService:
         def __init__(self):
             self._sessions: dict = {}
             self.is_available = MagicMock(return_value=True)
-            self.create_session = MagicMock()
+            self.create_session = AsyncMock()
             self.connect_and_stream = AsyncMock()
             self.send_audio = AsyncMock()
-            self.remove_session = MagicMock(side_effect=lambda sid: self._sessions.pop(sid, None))
+            # get_session and remove_session are now async (fix for #704)
+            self.remove_session = AsyncMock(side_effect=lambda sid: self._sessions.pop(sid, None))
+            self.get_session = AsyncMock(side_effect=lambda sid: self._sessions.get(sid))
 
         def add(self, session):
             self._sessions[session.session_id] = session
-
-        def get_session(self, sid):
-            return self._sessions.get(sid)
 
         async def end_session(self, sid):
             return self._sessions.get(sid)
 
     mod.VoiceSession = _FakeVoiceSession
     mod.voice_service = _FakeVoiceService()
+    mod.WORKSPACE_PANEL_INSTRUCTIONS = ""
     sys.modules["services.gemini_voice"] = mod
     return mod.voice_service, _FakeVoiceSession
 
@@ -316,3 +317,105 @@ class TestVoiceStopAuth:
         monkeypatch.setattr(voice_router, "_save_transcript", lambda s: 0)
         result = _run(voice_router.voice_stop(req, name="alice-agent", current_user=_FakeUser(99, role="admin")))
         assert result.messages_saved == 0
+
+
+# ── GET /panel ownership tests ───────────────────────────────────────────────
+
+class TestVoicePanelAuth:
+    """Tests for GET /api/agents/{name}/voice/{session_id}/panel ownership gate."""
+
+    def test_missing_session_returns_empty_state(self, monkeypatch):
+        """Non-existent session_id returns empty state (200), not 404."""
+        result = _run(voice_router.get_voice_panel(
+            session_id="vs_does_not_exist",
+            name="alice-agent",
+            current_user=_FakeUser(1),
+        ))
+        assert result["type"] == "empty"
+        assert result["content"] == ""
+
+    def test_owner_gets_panel_state(self, alice_session, monkeypatch):
+        """Session owner gets the panel state back."""
+        # Inject some panel state on the fake session
+        alice_session.panel_state = {
+            "type": "markdown", "content": "# Hello", "title": None, "updated_at": "ts"
+        }
+        result = _run(voice_router.get_voice_panel(
+            session_id="vs_alice",
+            name="alice-agent",
+            current_user=_FakeUser(1),
+        ))
+        assert result["type"] == "markdown"
+        assert result["content"] == "# Hello"
+
+    def test_wrong_agent_name_403(self, alice_session, monkeypatch):
+        """Session belongs to alice-agent but path says bob-agent — reject."""
+        with pytest.raises(HTTPException) as exc:
+            _run(voice_router.get_voice_panel(
+                session_id="vs_alice",
+                name="bob-agent",
+                current_user=_FakeUser(1),
+            ))
+        assert exc.value.status_code == 403
+
+    def test_other_user_403(self, alice_session, monkeypatch):
+        """Bob cannot read Alice's panel state."""
+        with pytest.raises(HTTPException) as exc:
+            _run(voice_router.get_voice_panel(
+                session_id="vs_alice",
+                name="alice-agent",
+                current_user=_FakeUser(2),
+            ))
+        assert exc.value.status_code == 403
+
+    def test_admin_reads_any_panel(self, alice_session, monkeypatch):
+        """Admin can read any user's panel state."""
+        alice_session.panel_state = {
+            "type": "html", "content": "<b>data</b>", "title": "T", "updated_at": "ts"
+        }
+        result = _run(voice_router.get_voice_panel(
+            session_id="vs_alice",
+            name="alice-agent",
+            current_user=_FakeUser(99, role="admin"),
+        ))
+        assert result["type"] == "html"
+
+
+# ── Audit attribution tests (#705) ──────────────────────────────────────────
+
+class TestVoiceAuditAttribution:
+    """
+    Tests that on_tool_call uses actor_user= (SimpleNamespace) not the legacy
+    actor_type/actor_id/actor_email kwargs that caused TypeError (fix for #705).
+    """
+
+    def test_on_tool_call_audit_uses_actor_user_not_legacy_kwargs(self):
+        """
+        Fix #705: the on_tool_call closure inside voice_websocket must pass
+        actor_user= to audit.log(), not the legacy actor_type=/actor_id=/actor_email=
+        kwargs that caused a TypeError and silently suppressed audit records.
+
+        Tests the source directly — the regression was a kwargs mismatch; source
+        inspection is the most reliable check and avoids async scheduling complexity.
+        """
+        import inspect
+        source = inspect.getsource(voice_router.voice_websocket)
+
+        # Must NOT contain the legacy invalid kwargs
+        assert "actor_type=" not in source, (
+            "Legacy actor_type= kwarg found in voice_websocket — this causes TypeError (#705)"
+        )
+        assert "actor_id=" not in source, (
+            "Legacy actor_id= kwarg found in voice_websocket — this causes TypeError (#705)"
+        )
+        assert "actor_email=" not in source, (
+            "Legacy actor_email= kwarg found in voice_websocket — this causes TypeError (#705)"
+        )
+
+        # Must use the correct actor_user= kwarg
+        assert "actor_user=" in source, (
+            "actor_user= is missing from audit.log() call in voice_websocket"
+        )
+        assert "SimpleNamespace" in source, (
+            "SimpleNamespace wrapper is missing from actor_user= in voice_websocket"
+        )

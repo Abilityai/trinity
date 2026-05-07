@@ -142,6 +142,43 @@ class TestCircuitState:
         assert d["state"] == "open"
         assert d["cooldown_remaining"] > 0
 
+    def test_open_circuit_does_not_reset_cooldown_clock_on_subsequent_failures(self):
+        """Subsequent failures while open must not advance last_failure_time (#687).
+
+        Before the fix, every record_failure() call reset last_failure_time even
+        when the circuit was already open. This made the cooldown timer restart on
+        every probe failure, so the half-open state was unreachable under load.
+        """
+        circuit = CircuitState(
+            agent_name="test", failure_threshold=1, cooldown_seconds=30.0
+        )
+        circuit.record_failure()
+        assert circuit.state == "open"
+        clock_at_open = circuit.last_failure_time
+
+        time.sleep(0.01)
+        circuit.record_failure()
+        circuit.record_failure()
+
+        assert circuit.last_failure_time == clock_at_open
+
+    def test_continuous_failures_while_open_still_allow_half_open_recovery(self):
+        """Circuit must enter half-open after cooldown even with ongoing probe failures (#687)."""
+        circuit = CircuitState(
+            agent_name="test", failure_threshold=1, cooldown_seconds=0.05
+        )
+        circuit.record_failure()
+        assert circuit.state == "open"
+
+        # Simulate cleanup / scheduler probes failing while circuit is open
+        circuit.record_failure()
+        circuit.record_failure()
+        circuit.record_failure()
+
+        time.sleep(0.1)
+        assert circuit.allow_request() is True
+        assert circuit.state == "half-open"
+
 
 # ============================================================================
 # Circuit Registry Tests

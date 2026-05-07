@@ -1871,6 +1871,80 @@ def _migrate_public_links_type(cursor, conn):
     conn.commit()
 
 
+def _migrate_slack_bot_token_encryption(cursor, conn):
+    """Encrypt plaintext Slack bot tokens at rest (#453).
+
+    Walks `slack_link_connections.slack_bot_token` and `slack_workspaces.bot_token`
+    once. For each row whose value starts with `xoxb-` (real Slack bot tokens
+    always do), re-encrypt in place via `CredentialEncryptionService` (AES-256-GCM,
+    JSON envelope) — same primitive Telegram and WhatsApp bindings already use.
+
+    Idempotent at row level: rows that are already JSON envelopes are skipped.
+    Idempotent at migration level: the runner tracks applied migrations in
+    `schema_migrations` and won't re-run this on subsequent restarts.
+
+    Hard-fail on missing CREDENTIAL_ENCRYPTION_KEY: matches the pattern already
+    used by subscription_credentials, nevermined_agent_config, and the channel
+    encryption helpers in db/{telegram,whatsapp,slack}_channels.py. The key MUST
+    be set before this migration runs; otherwise the backend won't start.
+
+    Background context: `slack_workspaces.bot_token` was rolled out with lazy
+    encryption (encrypt-on-write + plaintext-fallback-on-read at
+    `slack_channels.py:47-49`). That left two sources of plaintext on disk:
+    rows written before the encryption rollout, and rows copied from the
+    legacy `slack_link_connections` table by `_migrate_slack_channel_agents`.
+    This one-shot pass closes both gaps. See project memory
+    `project_453_slack_encryption.md` for full background.
+    """
+    from services.credential_encryption import CredentialEncryptionService
+    encryption = CredentialEncryptionService()  # raises ValueError if key unset
+
+    def _encrypt_table(table_name: str, token_column: str) -> tuple[int, int]:
+        """Returns (encrypted_count, skipped_count). Skips rows that already
+        look like JSON envelopes (the xoxb-* prefix is the only signal we
+        trust for "this is plaintext that needs encrypting").
+        """
+        # Defensive: skip if the table doesn't exist on this DB
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        if not cursor.fetchone():
+            logger.info(f"#453 migration: table {table_name} not present, skipping")
+            return (0, 0)
+
+        cursor.execute(f"SELECT id, {token_column} FROM {table_name}")
+        rows = cursor.fetchall()
+        encrypted, skipped = 0, 0
+        for row_id, value in rows:
+            if not value or not value.startswith("xoxb-"):
+                # Already encrypted (JSON envelope) or NULL — leave alone
+                skipped += 1
+                continue
+            envelope = encryption.encrypt({"bot_token": value})
+            cursor.execute(
+                f"UPDATE {table_name} SET {token_column} = ? WHERE id = ?",
+                (envelope, row_id),
+            )
+            encrypted += 1
+        return (encrypted, skipped)
+
+    link_enc, link_skip = _encrypt_table("slack_link_connections", "slack_bot_token")
+    ws_enc, ws_skip = _encrypt_table("slack_workspaces", "bot_token")
+
+    if link_enc or ws_enc:
+        logger.info(
+            f"#453 migration: encrypted {link_enc} slack_link_connections rows + "
+            f"{ws_enc} slack_workspaces rows (skipped {link_skip + ws_skip} already-encrypted)"
+        )
+    else:
+        logger.info(
+            f"#453 migration: nothing to encrypt — all {link_skip + ws_skip} rows "
+            f"already encrypted (or empty tables)"
+        )
+    conn.commit()
+
+
 def _migrate_canary_violations_table(cursor, conn):
     """Create canary_violations table + indexes (CANARY-001 / Issue #411 — Phase 1).
 
@@ -1965,5 +2039,6 @@ MIGRATIONS = [
     ("agent_sessions_tables", _migrate_agent_sessions_tables),
     ("session_compact_events", _migrate_session_compact_events),
     ("public_links_type", _migrate_public_links_type),
+    ("slack_bot_token_encryption", _migrate_slack_bot_token_encryption),
     ("canary_violations_table", _migrate_canary_violations_table),
 ]

@@ -6,6 +6,8 @@ Unified operator command center with four tabs -- Queue, Notifications, Cost Ale
 
 ### Queue Tab
 
+![Operating Room showing 3 pending responses and 1 notification with escalated items from agents](../images/operating-room-queue.png)
+
 Shows items from agents' operator queues: questions, approval requests, and status updates.
 
 - Agents write to `~/.trinity/operator-queue.json` inside their container.

@@ -19,7 +19,7 @@ The main Dashboard at `/` provides a real-time agent network graph and timeline 
 
 ### Timeline View
 
-![Trinity Dashboard — Timeline view showing scheduled executions across all agents](../images/dashboard-timeline-view.png)
+![Trinity Dashboard — Timeline view showing live executions across oracle and market agents](../images/dashboard-timeline-live.png)
 
 1. Toggle between Graph and Timeline via the mode switch in the top-right.
 2. Timeline shows execution boxes per agent, arranged chronologically.

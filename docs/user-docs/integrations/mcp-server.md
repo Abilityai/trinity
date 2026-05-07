@@ -13,6 +13,8 @@ Trinity's MCP server exposes 62 tools for agent orchestration via the Model Cont
 
 ### Authentication
 
+![MCP API Keys page showing auto-generated agent keys with usage stats and connection snippet](../images/mcp-api-keys.png)
+
 1. Go to the **API Keys** page (`/api-keys`).
 2. Click **Create Key**. Optionally scope the key to a specific agent.
 3. Copy the generated key (prefixed `trinity_mcp_*`).

@@ -1,41 +1,37 @@
 <template>
-  <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
-    <NavBar />
+  <div>
+    <div class="flex justify-between items-start mb-6">
+      <div>
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white">MCP API Keys</h2>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          Manage API keys for accessing the Trinity MCP server
+        </p>
+      </div>
+      <button
+        @click="showCreateModal = true"
+        class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700"
+      >
+        <svg class="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+        </svg>
+        Create API Key
+      </button>
+    </div>
 
-    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-      <div class="px-4 py-6 sm:px-0">
-        <div class="flex justify-between items-center mb-8">
-          <div>
-            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">MCP API Keys</h1>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Manage API keys for accessing the Trinity MCP server
-            </p>
-          </div>
-          <button
-            @click="showCreateModal = true"
-            class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700"
-          >
-            <svg class="-ml-1 mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-            </svg>
-            Create API Key
-          </button>
+    <!-- MCP Connection Info -->
+    <div class="bg-status-info-50 dark:bg-status-info-900/30 border border-status-info-200 dark:border-status-info-800 rounded-lg p-4 mb-6">
+      <div class="flex">
+        <div class="flex-shrink-0">
+          <svg class="h-5 w-5 text-status-info-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+          </svg>
         </div>
-
-        <!-- MCP Connection Info -->
-        <div class="bg-status-info-50 dark:bg-status-info-900/30 border border-status-info-200 dark:border-status-info-800 rounded-lg p-4 mb-6">
-          <div class="flex">
-            <div class="flex-shrink-0">
-              <svg class="h-5 w-5 text-status-info-400" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
-              </svg>
-            </div>
-            <div class="ml-3 flex-1">
-              <h3 class="text-sm font-medium text-status-info-800 dark:text-status-info-300">Connect to MCP Server</h3>
-              <p class="text-sm text-status-info-700 dark:text-status-info-400 mt-1">
-                Add this to your <code class="bg-status-info-100 dark:bg-status-info-800 px-1 rounded">.mcp.json</code> configuration:
-              </p>
-              <pre class="mt-2 bg-status-info-100 dark:bg-status-info-800 rounded p-3 text-xs overflow-x-auto text-status-info-900 dark:text-status-info-100">{
+        <div class="ml-3 flex-1">
+          <h3 class="text-sm font-medium text-status-info-800 dark:text-status-info-300">Connect to MCP Server</h3>
+          <p class="text-sm text-status-info-700 dark:text-status-info-400 mt-1">
+            Add this to your <code class="bg-status-info-100 dark:bg-status-info-800 px-1 rounded">.mcp.json</code> configuration:
+          </p>
+          <pre class="mt-2 bg-status-info-100 dark:bg-status-info-800 rounded p-3 text-xs overflow-x-auto text-status-info-900 dark:text-status-info-100">{
   "mcpServers": {
     "trinity": {
       "type": "http",
@@ -46,95 +42,92 @@
     }
   }
 }</pre>
-            </div>
-          </div>
-        </div>
-
-        <!-- API Keys List -->
-        <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg overflow-hidden">
-          <div v-if="loading" class="p-8 text-center">
-            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
-            <p class="mt-4 text-gray-500 dark:text-gray-400">Loading API keys...</p>
-          </div>
-
-          <div v-else-if="displayedKeys.length === 0" class="text-center py-12">
-            <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-            </svg>
-            <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No API keys</h3>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Create an API key to start using the MCP server.</p>
-          </div>
-
-          <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
-            <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center flex-1">
-                  <div class="flex-shrink-0">
-                    <div class="h-10 w-10 rounded-full flex items-center justify-center"
-                         :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50' : 'bg-status-danger-100 dark:bg-status-danger-900/50'">
-                      <svg class="h-6 w-6" :class="key.is_active ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                      </svg>
-                    </div>
-                  </div>
-                  <div class="ml-4 flex-1">
-                    <div class="flex items-center">
-                      <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ key.name }}</h3>
-                      <span class="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
-                            :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-800 dark:text-status-danger-300'">
-                        {{ key.is_active ? 'Active' : 'Revoked' }}
-                      </span>
-                      <!-- Scope badge for admin visibility -->
-                      <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
-                        Agent
-                      </span>
-                      <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300">
-                        System
-                      </span>
-                    </div>
-                    <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
-                    <div class="mt-1 flex items-center text-xs text-gray-400 dark:text-gray-500 space-x-4">
-                      <span>
-                        <code class="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded font-mono">{{ key.key_prefix }}...</code>
-                      </span>
-                      <span v-if="key.user_email" class="flex items-center">
-                        <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                        </svg>
-                        {{ key.user_email }}
-                      </span>
-                      <span>Created {{ formatDate(key.created_at) }}</span>
-                      <span v-if="key.last_used_at">Last used {{ formatDate(key.last_used_at) }}</span>
-                      <span class="flex items-center">
-                        <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                        </svg>
-                        {{ key.usage_count }} requests
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div class="ml-4 flex items-center space-x-2">
-                  <button
-                    v-if="key.is_active"
-                    @click="revokeKey(key.id)"
-                    class="inline-flex items-center px-3 py-1.5 border border-status-warning-300 dark:border-status-warning-600 shadow-sm text-xs font-medium rounded text-status-warning-700 dark:text-status-warning-300 bg-white dark:bg-gray-700 hover:bg-status-warning-50 dark:hover:bg-status-warning-900/30"
-                  >
-                    Revoke
-                  </button>
-                  <button
-                    @click="deleteKey(key.id)"
-                    class="inline-flex items-center px-3 py-1.5 border border-status-danger-300 dark:border-status-danger-600 shadow-sm text-xs font-medium rounded text-status-danger-700 dark:text-status-danger-300 bg-white dark:bg-gray-700 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/30"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            </li>
-          </ul>
         </div>
       </div>
-    </main>
+    </div>
+
+    <!-- API Keys List -->
+    <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg overflow-hidden">
+      <div v-if="loading" class="p-8 text-center">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+        <p class="mt-4 text-gray-500 dark:text-gray-400">Loading API keys...</p>
+      </div>
+
+      <div v-else-if="displayedKeys.length === 0" class="text-center py-12">
+        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+        </svg>
+        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">No API keys</h3>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Create an API key to start using the MCP server.</p>
+      </div>
+
+      <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
+        <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center flex-1">
+              <div class="flex-shrink-0">
+                <div class="h-10 w-10 rounded-full flex items-center justify-center"
+                     :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50' : 'bg-status-danger-100 dark:bg-status-danger-900/50'">
+                  <svg class="h-6 w-6" :class="key.is_active ? 'text-status-success-600 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                </div>
+              </div>
+              <div class="ml-4 flex-1">
+                <div class="flex items-center">
+                  <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ key.name }}</h3>
+                  <span class="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                        :class="key.is_active ? 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-800 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-800 dark:text-status-danger-300'">
+                    {{ key.is_active ? 'Active' : 'Revoked' }}
+                  </span>
+                  <span v-if="key.scope === 'agent'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-accent-purple-100 dark:bg-accent-purple-900/50 text-accent-purple-800 dark:text-accent-purple-300">
+                    Agent
+                  </span>
+                  <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 dark:bg-orange-900/50 text-orange-800 dark:text-orange-300">
+                    System
+                  </span>
+                </div>
+                <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
+                <div class="mt-1 flex items-center text-xs text-gray-400 dark:text-gray-500 space-x-4">
+                  <span>
+                    <code class="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded font-mono">{{ key.key_prefix }}...</code>
+                  </span>
+                  <span v-if="key.user_email" class="flex items-center">
+                    <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    {{ key.user_email }}
+                  </span>
+                  <span>Created {{ formatDate(key.created_at) }}</span>
+                  <span v-if="key.last_used_at">Last used {{ formatDate(key.last_used_at) }}</span>
+                  <span class="flex items-center">
+                    <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                    {{ key.usage_count }} requests
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div class="ml-4 flex items-center space-x-2">
+              <button
+                v-if="key.is_active"
+                @click="revokeKey(key.id)"
+                class="inline-flex items-center px-3 py-1.5 border border-status-warning-300 dark:border-status-warning-600 shadow-sm text-xs font-medium rounded text-status-warning-700 dark:text-status-warning-300 bg-white dark:bg-gray-700 hover:bg-status-warning-50 dark:hover:bg-status-warning-900/30"
+              >
+                Revoke
+              </button>
+              <button
+                @click="deleteKey(key.id)"
+                class="inline-flex items-center px-3 py-1.5 border border-status-danger-300 dark:border-status-danger-600 shadow-sm text-xs font-medium rounded text-status-danger-700 dark:text-status-danger-300 bg-white dark:bg-gray-700 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/30"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </div>
 
     <!-- Create API Key Modal -->
     <div v-if="showCreateModal" class="fixed z-10 inset-0 overflow-y-auto">
@@ -217,7 +210,6 @@
             </div>
 
             <div class="space-y-4">
-              <!-- MCP Configuration (Primary - Copy this!) -->
               <div>
                 <div class="flex items-center justify-between mb-1">
                   <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -243,7 +235,6 @@
                 <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-green-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
               </div>
 
-              <!-- Raw API Key (Secondary) -->
               <div>
                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">API Key Only</label>
                 <div class="flex items-center space-x-2">
@@ -308,13 +299,19 @@
 </template>
 
 <script setup>
+// MCP Keys settings tab — extracted from views/ApiKeys.vue (#302).
+// Lives at /settings?tab=mcp-keys; the old /api-keys route now redirects
+// here. Visible to ALL authenticated users (non-admin too); other tabs
+// in Settings.vue are admin-only.
+
 import { ref, reactive, onMounted, computed } from 'vue'
 import axios from 'axios'
-import NavBar from '../components/NavBar.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { useAuthStore } from '../stores/auth'
+import ConfirmDialog from '../ConfirmDialog.vue'
+import { useAuthStore } from '../../stores/auth'
+import { useRole } from '../../composables/useRole'
 
 const authStore = useAuthStore()
+const { isAdmin } = useRole()
 
 const apiKeys = ref([])
 const loading = ref(true)
@@ -325,14 +322,12 @@ const createdApiKey = ref('')
 const showApiKey = ref(false)
 const copied = ref(false)
 const copiedConfig = ref(false)
-const isAdmin = ref(false)
 
 const newKey = ref({
   name: '',
   description: ''
 })
 
-// Confirm dialog state
 const confirmDialog = reactive({
   visible: false,
   title: '',
@@ -342,7 +337,7 @@ const confirmDialog = reactive({
   onConfirm: () => {}
 })
 
-// MCP server URL: use admin-configured URL if set, otherwise auto-detect from hostname
+// MCP server URL: use admin-configured URL if set, otherwise auto-detect
 const configuredMcpUrl = ref(null)
 
 const mcpServerUrl = computed(() => {
@@ -373,7 +368,6 @@ const displayedKeys = computed(() => {
   return apiKeys.value.filter(k => k.scope !== 'agent')
 })
 
-// Generate MCP config JSON with the given API key
 const getMcpConfig = (apiKey) => {
   return JSON.stringify({
     mcpServers: {
@@ -386,22 +380,6 @@ const getMcpConfig = (apiKey) => {
       }
     }
   }, null, 2)
-}
-
-const fetchUserRole = async () => {
-  try {
-    const response = await fetch('/api/users/me', {
-      headers: {
-        'Authorization': `Bearer ${authStore.token}`
-      }
-    })
-    if (response.ok) {
-      const userData = await response.json()
-      isAdmin.value = userData.role === 'admin'
-    }
-  } catch (error) {
-    console.error('Failed to fetch user role:', error)
-  }
 }
 
 const fetchApiKeys = async () => {
@@ -421,7 +399,6 @@ const fetchApiKeys = async () => {
   }
 }
 
-// Ensure user has a default MCP key on first visit
 const ensureDefaultKey = async () => {
   try {
     const response = await fetch('/api/mcp/keys/ensure-default', {
@@ -432,11 +409,10 @@ const ensureDefaultKey = async () => {
     })
     if (response.ok) {
       const data = await response.json()
-      // If a key was created, show it to the user
       if (data && data.api_key) {
         createdApiKey.value = data.api_key
         showKeyModal.value = true
-        await fetchApiKeys() // Refresh the list
+        await fetchApiKeys()
       }
     }
   } catch (error) {
@@ -446,7 +422,6 @@ const ensureDefaultKey = async () => {
 
 const createKey = async () => {
   creating.value = true
-
   try {
     const response = await fetch('/api/mcp/keys', {
       method: 'POST',
@@ -528,27 +503,27 @@ const deleteKey = (keyId) => {
 }
 
 const copyApiKey = async () => {
-  try {
-    await navigator.clipboard.writeText(createdApiKey.value)
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-  } catch (error) {
-    console.error('Failed to copy:', error)
+  const ok = await copyToClipboard(createdApiKey.value)
+  if (!ok) {
+    alert('Failed to copy API key. Please select the key text and copy it manually.')
+    return
   }
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 2000)
 }
 
 const copyMcpConfig = async () => {
-  try {
-    await navigator.clipboard.writeText(getMcpConfig(createdApiKey.value))
-    copiedConfig.value = true
-    setTimeout(() => {
-      copiedConfig.value = false
-    }, 2000)
-  } catch (error) {
-    console.error('Failed to copy config:', error)
+  const ok = await copyToClipboard(getMcpConfig(createdApiKey.value))
+  if (!ok) {
+    alert('Failed to copy config. Please select the config text and copy it manually.')
+    return
   }
+  copiedConfig.value = true
+  setTimeout(() => {
+    copiedConfig.value = false
+  }, 2000)
 }
 
 const closeKeyModal = () => {
@@ -566,8 +541,7 @@ const formatDate = (dateString) => {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchMcpUrl(), fetchUserRole(), fetchApiKeys()])
-  // After loading keys, ensure user has a default key (for first-time users)
+  await Promise.all([fetchMcpUrl(), fetchApiKeys()])
   await ensureDefaultKey()
 })
 </script>

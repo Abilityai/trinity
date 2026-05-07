@@ -799,7 +799,7 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - OAuth flow for workspace connection
   - Signature verification for Slack events
 - **Database Tables**:
-  - `slack_link_connections` - Connects workspace to public link
+  - `slack_link_connections` - Connects workspace to public link (bot_token AES-256-GCM encrypted, #453)
   - `slack_user_verifications` - Tracks verified Slack users
   - `slack_pending_verifications` - In-progress email verifications
 - **API Endpoints**:
@@ -1942,10 +1942,16 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Key Features**: Single `run_task` tool declaration sent to Gemini Live API; non-blocking `asyncio.create_task` dispatch with 30s timeout; prompt injection mitigation (`_TOOL_PROMPT_MAX = 2000` chars); `_pending_tool_tasks` dict with cancellation on session end; canvas orb in `VoiceOverlay.vue` with `isToolCalling` state (no CDN dependencies); platform audit log on every tool call
 - **Architecture**: Gemini → `tool_call` WS message → `_execute_and_respond()` → `POST /api/agents/{name}/chat` → Gemini `tool_response`
 
+### 29.8 Voice Workspace (VOICE-008)
+- **Status**: ✅ Implemented (#699)
+- **Description**: Full-page workspace at `/agents/:name/workspace` with split layout — orb + controls left, agent-controlled canvas panel right; gated behind `voice_available` feature flag
+- **Key Features**: 4 in-process panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+
 ### Phase Roadmap
 1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt ✅
 2. **Phase 2 (Polish)**: Real-time waveform, incremental transcript, auto-generate voice prompt from CLAUDE.md ✅
 3. **Phase 3 (Advanced)**: Tool calling (run_task), canvas orb ✅ — multi-language auto-detection, custom voice per agent (deferred)
+4. **Phase 4 (Workspace)**: Full-page workspace with canvas panel tools, feature-flag gated (BETA) ✅
 
 ---
 

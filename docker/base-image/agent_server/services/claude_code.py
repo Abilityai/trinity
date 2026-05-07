@@ -847,6 +847,12 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # Initialize tracking structures
         execution_log: List[ExecutionLogEntry] = []
         raw_messages: List[Dict] = []  # Capture ALL raw JSON messages for execution log viewer
+        # Issue #640: track stdout JSON parse failures so operators can see when
+        # the wire was corrupted (interleaved/truncated lines that json.loads
+        # silently dropped before #639's recovery path could capture them).
+        # Mutable single-element box so the reader thread and the main thread
+        # share the same state without locking.
+        parse_fail_state: Dict[str, object] = {"count": 0, "first_sample": None}
         metadata = ExecutionMetadata()
         tool_start_times: Dict[str, datetime] = {}
         response_parts: List[str] = []
@@ -901,6 +907,17 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                         try:
                             raw_msg = json.loads(line.strip())
                         except json.JSONDecodeError:
+                            # Issue #640: track parse failures so the
+                            # empty-result path can report them. Capture
+                            # only the first sample (sanitized + length-
+                            # capped) — flooding logs on a long corrupted
+                            # task would harm signal more than help.
+                            parse_fail_state["count"] = int(parse_fail_state["count"]) + 1  # type: ignore[arg-type]
+                            if parse_fail_state["first_sample"] is None:
+                                sample = sanitize_subprocess_line(line).rstrip("\n")
+                                if len(sample) > 300:
+                                    sample = sample[:299] + "…"
+                                parse_fail_state["first_sample"] = sample
                             raw_msg = None
 
                         if isinstance(raw_msg, dict):
@@ -950,16 +967,16 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     f"— killing process group"
                 )
                 _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid)
-                _drain_reader_threads(
+                asyncio.run(_drain_reader_threads(
                     process, stdout_thread, stderr_thread,
                     grace=3, pgid=process_pgid,
-                )
+                ))
                 raise
 
-            _drain_reader_threads(
+            asyncio.run(_drain_reader_threads(
                 process, stdout_thread, stderr_thread,
                 grace=5, pgid=process_pgid,
-            )
+            ))
 
             stderr = ''.join(stderr_lines)
             stderr = sanitize_text(stderr) if stderr else stderr
@@ -1043,7 +1060,20 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
 
             # Log metadata for debugging
             # NOTE: input_tokens already includes cached tokens - cache_creation and cache_read are billing subsets, NOT additional
-            logger.info(f"Claude response: cost=${metadata.cost_usd}, duration={metadata.duration_ms}ms, tools={metadata.tool_count}, context={metadata.input_tokens}/{metadata.context_window}, raw_messages={len(raw_messages)}, execution_id={execution_id}")
+            parse_fail_count = int(parse_fail_state["count"])  # type: ignore[arg-type]
+            logger.info(f"Claude response: cost=${metadata.cost_usd}, duration={metadata.duration_ms}ms, tools={metadata.tool_count}, context={metadata.input_tokens}/{metadata.context_window}, raw_messages={len(raw_messages)}, parse_failures={parse_fail_count}, execution_id={execution_id}")
+            # Issue #640: surface stream-json parse failures even when the
+            # response built successfully. They mean some lines were dropped —
+            # the response may be incomplete in subtle ways (e.g. a tool_result
+            # missing) and operators should know.
+            if parse_fail_count:
+                sample = parse_fail_state["first_sample"]
+                logger.warning(
+                    f"[Chat] {parse_fail_count} stdout line(s) failed JSON parse "
+                    f"(first sample: {sample!r}). Likely cause: stdio MCP child "
+                    f"interleaved with claude on the agent-server pipe. "
+                    f"execution_id={execution_id}"
+                )
 
             return response_text, execution_log, metadata, raw_messages
         finally:
@@ -1312,6 +1342,8 @@ def _classify_empty_result(
     metadata: Optional['ExecutionMetadata'] = None,
     raw_message_count: int = 0,
     raw_messages: Optional[List[Dict]] = None,
+    parse_failure_count: int = 0,
+    parse_failure_sample: Optional[str] = None,
 ) -> Optional[Tuple[int, str]]:
     """Classify a clean (return_code == 0) exit that produced no result message.
 
@@ -1344,6 +1376,14 @@ def _classify_empty_result(
     append and parse). When recovery succeeds, metadata is populated and
     the function falls through to the success path.
 
+    Issue #640: ``parse_failure_count`` / ``parse_failure_sample`` come from
+    the stdout reader's tally of lines that ``json.loads`` rejected. A
+    non-zero count is the strongest signal we have that the result was lost
+    to wire interleaving rather than to the reader thread leaking past
+    claude's exit. The detail string surfaces both the count and the first
+    failed line (sanitized + length-capped) so the next debug session has
+    a concrete trace instead of just a generic "child held stdout" guess.
+
     Returns ``(status_code, detail)`` for empty-result exits, or ``None``
     if metadata looks well-formed (caller proceeds with the normal
     response-building path).
@@ -1373,15 +1413,31 @@ def _classify_empty_result(
     else:
         num_turns = 0
 
+    # Issue #640: summarise what raw_messages we did capture — when the
+    # result is lost, the message-type histogram tells operators whether the
+    # reader caught most of the stream (e.g. assistant-heavy → likely lost
+    # only the trailing result line) or stopped near the start (e.g. corrupt
+    # init line → reader bailed early on a different failure).
+    if raw_messages:
+        from collections import Counter
+        type_counts = Counter(m.get("type", "?") for m in raw_messages)
+        type_summary = ",".join(f"{t}={c}" for t, c in type_counts.most_common(6))
+    else:
+        type_summary = "<none>"
+
     detail = (
         f"Execution completed without a result message after {tool_count} tool calls "
-        f"/ {num_turns} turns (raw_messages={raw_message_count}). "
+        f"/ {num_turns} turns (raw_messages={raw_message_count} types={type_summary}, "
+        f"parse_failures={parse_failure_count}). "
         f"Likely cause: a tool or child subprocess inherited stdout and prevented "
         f"the claude reader thread from capturing the final result block. "
-        f"Check agent-server logs for 'Reader thread(s) stuck after process exit' or "
-        f"'I/O operation on closed file' near this execution. "
+        f"Check agent-server logs for 'Reader thread(s) stuck after process exit', "
+        f"'Orphan pipe-writer SIGKILL' (#618), or 'I/O operation on closed file' "
+        f"near this execution. "
         f"This is a transient infrastructure failure; retry the task."
     )
+    if parse_failure_count and parse_failure_sample:
+        detail += f" First malformed stdout line: {parse_failure_sample!r}"
     return (502, detail)
 
 
@@ -1518,6 +1574,8 @@ async def execute_headless_task(
         execution_log: List[ExecutionLogEntry] = []
         raw_messages: List[Dict] = []  # Capture ALL raw JSON messages from Claude Code
         verbose_output_lines: List[str] = []  # Capture verbose text output (stderr)
+        # Issue #640: track stdout JSON parse failures (see chat-path comment).
+        parse_fail_state: Dict[str, object] = {"count": 0, "first_sample": None}
         metadata = ExecutionMetadata()
         tool_start_times: Dict[str, datetime] = {}
         response_parts: List[str] = []
@@ -1621,6 +1679,13 @@ async def execute_headless_task(
                         try:
                             raw_msg = json.loads(line.strip())
                         except json.JSONDecodeError:
+                            # Issue #640: track parse failures (see chat-path comment).
+                            parse_fail_state["count"] = int(parse_fail_state["count"]) + 1  # type: ignore[arg-type]
+                            if parse_fail_state["first_sample"] is None:
+                                sample = sanitize_subprocess_line(line).rstrip("\n")
+                                if len(sample) > 300:
+                                    sample = sample[:299] + "…"
+                                parse_fail_state["first_sample"] = sample
                             raw_msg = None
 
                         if isinstance(raw_msg, dict):
@@ -1743,19 +1808,19 @@ async def execute_headless_task(
                     f"— killing process group"
                 )
                 _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid)
-                _drain_reader_threads(
+                asyncio.run(_drain_reader_threads(
                     process, stdout_thread, stderr_thread,
                     grace=3, pgid=process_pgid,
-                )
+                ))
                 raise
 
             # Subprocess exited. Drain readers — if a hook grandchild still
             # holds a pipe, the helper will close the pipe FDs so the
             # reader threads can exit.
-            _drain_reader_threads(
+            asyncio.run(_drain_reader_threads(
                 process, stdout_thread, stderr_thread,
                 grace=5, pgid=process_pgid,
-            )
+            ))
 
             # Re-raise permission-mode failure captured by stdout thread
             if stdout_exc:
@@ -1911,7 +1976,19 @@ async def execute_headless_task(
             #
             # Hard failure path stays as-is for the truly empty case (no
             # assistant text accumulated → nothing to recover).
-            empty_result = _classify_empty_result(metadata, raw_message_count=len(raw_messages), raw_messages=raw_messages)
+            #
+            # Issue #640: pass parse_failure_count + sample from the stdout
+            # reader so the diagnostic detail can distinguish wire corruption
+            # from reader-leak when the soft-recovery doesn't fire.
+            parse_fail_count = int(parse_fail_state["count"])  # type: ignore[arg-type]
+            parse_fail_sample = parse_fail_state["first_sample"]
+            empty_result = _classify_empty_result(
+                metadata,
+                raw_message_count=len(raw_messages),
+                raw_messages=raw_messages,
+                parse_failure_count=parse_fail_count,
+                parse_failure_sample=parse_fail_sample if isinstance(parse_fail_sample, str) else None,
+            )
             if empty_result is not None:
                 if response_parts:
                     logger.warning(
@@ -1988,7 +2065,16 @@ async def execute_headless_task(
             if len(raw_messages) == 0:
                 logger.warning(f"[Headless Task] Task {final_session_id} completed but raw_messages is empty - execution transcript will be unavailable")
             else:
-                logger.info(f"[Headless Task] Task {final_session_id} completed: cost=${metadata.cost_usd}, duration={metadata.duration_ms}ms, tools={metadata.tool_count}, raw_messages={len(raw_messages)}")
+                logger.info(f"[Headless Task] Task {final_session_id} completed: cost=${metadata.cost_usd}, duration={metadata.duration_ms}ms, tools={metadata.tool_count}, raw_messages={len(raw_messages)}, parse_failures={parse_fail_count}")
+            # Issue #640: same as chat path — surface parse failures even on
+            # success because they may indicate silently dropped content.
+            if parse_fail_count:
+                logger.warning(
+                    f"[Headless Task] {parse_fail_count} stdout line(s) failed JSON parse "
+                    f"(first sample: {parse_fail_sample!r}). Likely cause: stdio MCP child "
+                    f"interleaved with claude on the agent-server pipe. "
+                    f"task_id={final_session_id}"
+                )
 
             # Return raw_messages as the execution log (full JSON transcript from Claude Code)
             # Contains: init, assistant (thinking/tool_use), user (tool_result), result

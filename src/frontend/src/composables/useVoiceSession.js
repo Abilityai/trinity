@@ -46,8 +46,9 @@ export function useVoiceSession(agentName) {
    * Start a voice session.
    * @param {string|null} sessionId - Existing chat session to continue
    * @param {string|null} voiceName - Gemini voice name override
+   * @param {boolean} workspaceMode - Enable canvas panel tools
    */
-  async function start(sessionId = null, voiceName = null) {
+  async function start(sessionId = null, voiceName = null, workspaceMode = false) {
     if (active.value) return
     error.value = null
     transcriptEntries.value = []
@@ -58,7 +59,7 @@ export function useVoiceSession(agentName) {
     try {
       const response = await axios.post(
         `/api/agents/${agentName}/voice/start`,
-        { session_id: sessionId, voice_name: voiceName },
+        { session_id: sessionId, voice_name: voiceName, workspace_mode: workspaceMode },
         { headers: authStore.authHeader }
       )
 

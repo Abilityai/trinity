@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import logging
+import types
 from typing import Optional
 
 import httpx
@@ -22,9 +23,9 @@ from models import User
 from dependencies import get_current_user, get_authorized_agent
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED
-from services.gemini_voice import voice_service
+from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
 from services.docker_service import get_agent_container
-from services.platform_audit_service import platform_audit_service, AuditEventType, AuditActorType
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ router = APIRouter(tags=["voice"])
 class VoiceStartRequest(BaseModel):
     session_id: Optional[str] = None  # Existing chat session to continue
     voice_name: Optional[str] = None  # Gemini voice name (e.g. "Kore", "Puck")
+    workspace_mode: bool = False       # Enable canvas panel tools
 
 
 class VoiceStartResponse(BaseModel):
@@ -94,16 +96,19 @@ async def voice_start(
     combined_prompt = voice_prompt
     if context_summary:
         combined_prompt += f"\n\n## Conversation so far:\n{context_summary}"
+    if request.workspace_mode:
+        combined_prompt += WORKSPACE_PANEL_INSTRUCTIONS
 
     voice_name = request.voice_name or _get_voice_name(name)
 
-    session = voice_service.create_session(
+    session = await voice_service.create_session(
         agent_name=name,
         chat_session_id=chat_session_id,
         user_id=current_user.id,
         user_email=current_user.email or current_user.username,
         system_prompt=combined_prompt,
         voice_name=voice_name,
+        workspace_mode=request.workspace_mode,
     )
 
     return VoiceStartResponse(
@@ -124,7 +129,7 @@ async def voice_stop(
     # the session before any mutation happens — otherwise any authenticated
     # user with access to ANY agent could end and persist a transcript onto
     # someone else's session by passing its 128-bit id in the body.
-    preview = voice_service.get_session(request.voice_session_id)
+    preview = await voice_service.get_session(request.voice_session_id)
     if not preview:
         raise HTTPException(status_code=404, detail="Voice session not found")
     if preview.agent_name != name:
@@ -140,7 +145,7 @@ async def voice_stop(
     messages_saved = _save_transcript(session)
 
     # Clean up
-    voice_service.remove_session(request.voice_session_id)
+    await voice_service.remove_session(request.voice_session_id)
 
     return VoiceStopResponse(
         transcript=[
@@ -163,6 +168,27 @@ async def voice_status(
         "available": voice_service.is_available(),
         "voice_prompt_set": bool(db.get_voice_system_prompt(name)),
     }
+
+
+@router.get("/api/agents/{name}/voice/{session_id}/panel")
+async def get_voice_panel(
+    session_id: str,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the current canvas panel state for a workspace voice session.
+
+    Returns empty state (not 404) when session has ended so the frontend
+    poll loop doesn't raise errors during the teardown window.
+    """
+    session = await voice_service.get_session(session_id)
+    if not session:
+        return {"type": "empty", "content": "", "title": None, "updated_at": None}
+    if session.agent_name != name:
+        raise HTTPException(status_code=403, detail="Session does not belong to this agent")
+    if session.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+    return session.panel_state
 
 
 @router.get("/api/agents/{name}/voice/prompt")
@@ -203,14 +229,14 @@ async def voice_websocket(
                   {"type": "transcript", "role": "user|assistant", "text": "..."}
                   {"type": "status", "state": "connecting|listening|speaking|ended"}
     """
-    session = voice_service.get_session(voice_session_id)
-    if not session:
-        await websocket.close(code=4004, reason="Voice session not found")
-        return
-
     # Authenticate via query param token (WebSocket can't use Authorization header)
     if not token:
         await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    session = await voice_service.get_session(voice_session_id)
+    if not session:
+        await websocket.close(code=4004, reason="Voice session not found")
         return
 
     from jose import jwt, JWTError
@@ -283,17 +309,15 @@ async def voice_websocket(
             })
         except Exception:
             pass
-        await platform_audit_service.log(
+        asyncio.create_task(platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="voice_tool_call",
-            actor_type=AuditActorType.USER,
-            actor_id=str(session.user_id),
-            actor_email=session.user_email,
+            source="api",
+            actor_user=types.SimpleNamespace(id=user["id"], email=user.get("email")),
             target_type="agent",
             target_id=session.agent_name,
             details={"tool": tool_name, "prompt_preview": str(args.get("prompt", ""))[:100]},
-            source="api",
-        )
+        ))
 
     async def on_tool_result(tool_name: str, result: str):
         try:
@@ -338,7 +362,7 @@ async def voice_websocket(
         session = await voice_service.end_session(voice_session_id)
         if session:
             _save_transcript(session)
-            voice_service.remove_session(voice_session_id)
+            await voice_service.remove_session(voice_session_id)
 
         # Cancel Gemini task
         if not gemini_task.done():

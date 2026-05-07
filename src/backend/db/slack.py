@@ -5,8 +5,13 @@ Handles:
 - Slack connection CRUD (workspace to public link)
 - User verification management
 - Pending verification state machine
+
+Bot tokens are encrypted at rest via `services.credential_encryption`
+(AES-256-GCM, JSON envelope) — same pattern as `db/slack_channels.py`,
+`db/telegram_channels.py`, and `db/whatsapp_channels.py`. See #453.
 """
 
+import logging
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -14,9 +19,47 @@ from typing import Optional, List
 from db.connection import get_db_connection
 from utils.helpers import utc_now_iso
 
+logger = logging.getLogger(__name__)
+
 
 class SlackOperations:
     """Operations for managing Slack integrations."""
+
+    # =========================================================================
+    # Encryption helpers (same pattern as SlackChannelOperations,
+    # TelegramChannelOperations, WhatsAppChannelOperations)
+    # =========================================================================
+
+    def _get_encryption_service(self):
+        """Lazy-load encryption service.
+
+        Raises ValueError on first call if CREDENTIAL_ENCRYPTION_KEY is unset.
+        Write paths fail loudly; read paths catch and return None.
+        """
+        from services.credential_encryption import CredentialEncryptionService
+        return CredentialEncryptionService()
+
+    def _encrypt_token(self, token: str) -> str:
+        svc = self._get_encryption_service()
+        return svc.encrypt({"bot_token": token})
+
+    def _decrypt_token(self, encrypted: str) -> Optional[str]:
+        try:
+            svc = self._get_encryption_service()
+            decrypted = svc.decrypt(encrypted)
+            return decrypted.get("bot_token")
+        except Exception as e:
+            logger.error(f"Failed to decrypt Slack bot token: {e}")
+            # Fallback: legacy plaintext rows (Slack bot tokens always start xoxb-).
+            # The one-shot migration in db/migrations.py re-encrypts these on the
+            # next backend restart; this fallback keeps runtime working in the
+            # interim and on developer machines that haven't run the migration.
+            if encrypted and encrypted.startswith("xoxb-"):
+                logger.warning(
+                    "Slack bot token stored in plaintext — will re-encrypt on next migration"
+                )
+                return encrypted
+            return None
 
     # =========================================================================
     # Slack Connection Operations
@@ -30,9 +73,13 @@ class SlackOperations:
         slack_bot_token: str,
         connected_by: str
     ) -> dict:
-        """Create a new Slack connection for a public link."""
+        """Create a new Slack connection for a public link.
+
+        Bot token is encrypted at rest (#453).
+        """
         connection_id = secrets.token_urlsafe(16)
         now = utc_now_iso()
+        encrypted_token = self._encrypt_token(slack_bot_token)
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -40,7 +87,7 @@ class SlackOperations:
                 INSERT INTO slack_link_connections
                 (id, link_id, slack_team_id, slack_team_name, slack_bot_token, connected_by, connected_at, enabled)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            """, (connection_id, link_id, slack_team_id, slack_team_name, slack_bot_token, connected_by, now))
+            """, (connection_id, link_id, slack_team_id, slack_team_name, encrypted_token, connected_by, now))
             conn.commit()
 
         return self.get_slack_connection(connection_id)
@@ -164,13 +211,18 @@ class SlackOperations:
             return cursor.rowcount > 0
 
     def _row_to_connection(self, row) -> dict:
-        """Convert a database row to a connection dict."""
+        """Convert a database row to a connection dict.
+
+        Bot token is decrypted before return (#453). Callers (`routers/slack.py`,
+        `adapters/slack_adapter.py`) receive plaintext tokens — same API
+        surface as before encryption was added.
+        """
         return {
             "id": row[0],
             "link_id": row[1],
             "slack_team_id": row[2],
             "slack_team_name": row[3],
-            "slack_bot_token": row[4],
+            "slack_bot_token": self._decrypt_token(row[4]),
             "connected_by": row[5],
             "connected_at": row[6],
             "enabled": bool(row[7])

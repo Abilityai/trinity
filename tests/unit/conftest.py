@@ -4,11 +4,21 @@ Unit test conftest — overrides the parent conftest's autouse fixtures.
 These tests run without a backend connection (no Docker, no API).
 """
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
 
 import pytest
+
+# Issue #589 + #645: backend/config.py raises at import if REDIS_URL lacks
+# credentials. Unit tests don't share the parent conftest (the unit/pytest.ini
+# sets `norecursedirs = ..`), so set a creds-bearing dummy here. Any test
+# that wants to assert the fail-fast behavior (e.g. test_config_fail_fast.py)
+# still uses monkeypatch to override.
+os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
+os.environ.setdefault("REDIS_PASSWORD", "test")
+os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
 
 # Ensure src/backend is importable before test modules are collected.
 #

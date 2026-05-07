@@ -251,6 +251,20 @@ claude  # launch the ops agent
 
 **Provisioning guides** (for new server setup): Hetzner, GCP, AWS, DigitalOcean, and localhost — all in `provision/`.
 
+## Detailed Deployment Guides
+
+Step-by-step guides for each deployment scenario:
+
+| Guide | What it covers |
+|---|---|
+| [Local Development](deploying/local-development.md) | Docker Desktop, dev compose, hot reload, auto-generated secrets |
+| [Single Server](deploying/single-server.md) | Linux VPS, prod compose, all required env vars, Redis dual-password setup |
+| [Public Access](deploying/public-access.md) | Cloudflare Tunnel, webhook surface, Slack/Telegram/WhatsApp integrations |
+| [Upgrading](deploying/upgrading.md) | Pre-flight → backup → rebuild → restart → verify → rollback |
+| [Backup and Restore](deploying/backup-and-restore.md) | SQLite backup pattern, daily cron, restore procedure |
+| [Monitoring](deploying/monitoring.md) | Six-probe health check, resource thresholds, recovery patterns |
+| [Ops Agent](deploying/ops-agent.md) | Automated day-to-day operations via trinity-ops-public |
+
 ## Next Steps
 
 - [Building Agents](building-agents.md) — Create and deploy with Claude Code + abilities

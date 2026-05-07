@@ -6,6 +6,9 @@ a real Slack connection, SDK, or backend dependencies.
 
 Module: src/backend/adapters/transports/slack_socket.py
 Issue: https://github.com/abilityai/trinity/issues/278
+
+Updated for #244: per-client watchdog (contexts[0] is the single-client
+backward-compat shape these tests exercise).
 """
 
 import asyncio
@@ -116,6 +119,7 @@ sys.modules["adapters.transports.slack_socket"] = _mod
 _spec.loader.exec_module(_mod)
 
 SlackSocketTransport = _mod.SlackSocketTransport
+_ClientCtx = _mod._ClientCtx
 WATCHDOG_INTERVAL_SECONDS = _mod.WATCHDOG_INTERVAL_SECONDS
 WATCHDOG_BACKOFF_INITIAL_SECONDS = _mod.WATCHDOG_BACKOFF_INITIAL_SECONDS
 WATCHDOG_BACKOFF_MAX_SECONDS = _mod.WATCHDOG_BACKOFF_MAX_SECONDS
@@ -177,16 +181,24 @@ class FakeClient:
 
 @pytest.fixture
 def transport():
-    """Create a SlackSocketTransport with a fake client."""
+    """Create a SlackSocketTransport with a single fake client at contexts[0]."""
     adapter = MagicMock()
     router = MagicMock()
     t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
-    t.client = FakeClient(
+    fake_client = FakeClient(
         session=FakeSession(closed=False),
         monitor=FakeMonitor(is_done=False),
     )
+    ctx = _ClientCtx(index=0, client=fake_client)
+    t.contexts = [ctx]
     t._running = True
     return t
+
+
+@pytest.fixture
+def ctx(transport):
+    """Convenience accessor for the single ClientCtx in the fixture."""
+    return transport.contexts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -196,24 +208,24 @@ def transport():
 class TestHealthCheck:
     """Test _check_health detects the three structural failure modes."""
 
-    def test_healthy(self, transport):
-        assert transport._check_health() is None
+    def test_healthy(self, transport, ctx):
+        assert transport._check_health(ctx) is None
 
-    def test_session_none(self, transport):
-        transport.client.current_session = None
-        assert "dead/closed" in transport._check_health()
+    def test_session_none(self, transport, ctx):
+        ctx.client.current_session = None
+        assert "dead/closed" in transport._check_health(ctx)
 
-    def test_session_closed(self, transport):
-        transport.client.current_session.closed = True
-        assert "dead/closed" in transport._check_health()
+    def test_session_closed(self, transport, ctx):
+        ctx.client.current_session.closed = True
+        assert "dead/closed" in transport._check_health(ctx)
 
-    def test_monitor_none(self, transport):
-        transport.client.current_session_monitor = None
-        assert "monitor is None" in transport._check_health()
+    def test_monitor_none(self, transport, ctx):
+        ctx.client.current_session_monitor = None
+        assert "monitor is None" in transport._check_health(ctx)
 
-    def test_monitor_exited(self, transport):
-        transport.client.current_session_monitor = FakeMonitor(is_done=True)
-        assert "monitor task exited" in transport._check_health()
+    def test_monitor_exited(self, transport, ctx):
+        ctx.client.current_session_monitor = FakeMonitor(is_done=True)
+        assert "monitor task exited" in transport._check_health(ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -223,33 +235,33 @@ class TestHealthCheck:
 class TestPingCheck:
     """Test _ping_check detects connection-level failures."""
 
-    def test_ping_success(self, transport):
-        result = _run(transport._ping_check())
+    def test_ping_success(self, transport, ctx):
+        result = _run(transport._ping_check(ctx))
         assert result is None
 
-    def test_ping_failure(self, transport):
-        transport.client.current_session._ping_should_fail = True
-        result = _run(transport._ping_check())
+    def test_ping_failure(self, transport, ctx):
+        ctx.client.current_session._ping_should_fail = True
+        result = _run(transport._ping_check(ctx))
         assert "ping failed" in result
 
-    def test_ping_timeout(self, transport):
+    def test_ping_timeout(self, transport, ctx):
         original = _mod.WATCHDOG_PING_TIMEOUT_SECONDS
         _mod.WATCHDOG_PING_TIMEOUT_SECONDS = 0.1
         try:
-            transport.client.current_session._ping_should_timeout = True
-            result = _run(transport._ping_check())
+            ctx.client.current_session._ping_should_timeout = True
+            result = _run(transport._ping_check(ctx))
             assert "ping timeout" in result
         finally:
             _mod.WATCHDOG_PING_TIMEOUT_SECONDS = original
 
-    def test_ping_session_gone(self, transport):
-        transport.client.current_session = None
-        result = _run(transport._ping_check())
+    def test_ping_session_gone(self, transport, ctx):
+        ctx.client.current_session = None
+        result = _run(transport._ping_check(ctx))
         assert "gone" in result
 
 
 # ---------------------------------------------------------------------------
-# is_connected tests
+# is_connected tests (now reflects "any client healthy" semantics)
 # ---------------------------------------------------------------------------
 
 class TestIsConnected:
@@ -262,16 +274,16 @@ class TestIsConnected:
         transport._running = False
         assert transport.is_connected is False
 
-    def test_no_client(self, transport):
-        transport.client = None
+    def test_no_clients(self, transport):
+        transport.contexts = []
         assert transport.is_connected is False
 
-    def test_session_closed(self, transport):
-        transport.client.current_session.closed = True
+    def test_session_closed(self, transport, ctx):
+        ctx.client.current_session.closed = True
         assert transport.is_connected is False
 
-    def test_session_none(self, transport):
-        transport.client.current_session = None
+    def test_session_none(self, transport, ctx):
+        ctx.client.current_session = None
         assert transport.is_connected is False
 
 
@@ -280,31 +292,31 @@ class TestIsConnected:
 # ---------------------------------------------------------------------------
 
 class TestBackoff:
-    """Test exponential backoff with cap."""
+    """Test exponential backoff with cap (per-client)."""
 
-    def test_no_failures(self, transport):
-        transport._consecutive_failures = 0
-        assert transport._get_backoff_interval() == WATCHDOG_INTERVAL_SECONDS
+    def test_no_failures(self, transport, ctx):
+        ctx.consecutive_failures = 0
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_INTERVAL_SECONDS
 
-    def test_first_failure(self, transport):
-        transport._consecutive_failures = 1
-        assert transport._get_backoff_interval() == WATCHDOG_BACKOFF_INITIAL_SECONDS
+    def test_first_failure(self, transport, ctx):
+        ctx.consecutive_failures = 1
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_BACKOFF_INITIAL_SECONDS
 
-    def test_second_failure(self, transport):
-        transport._consecutive_failures = 2
-        assert transport._get_backoff_interval() == WATCHDOG_BACKOFF_INITIAL_SECONDS * 2
+    def test_second_failure(self, transport, ctx):
+        ctx.consecutive_failures = 2
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_BACKOFF_INITIAL_SECONDS * 2
 
-    def test_third_failure(self, transport):
-        transport._consecutive_failures = 3
-        assert transport._get_backoff_interval() == WATCHDOG_BACKOFF_INITIAL_SECONDS * 4
+    def test_third_failure(self, transport, ctx):
+        ctx.consecutive_failures = 3
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_BACKOFF_INITIAL_SECONDS * 4
 
-    def test_capped(self, transport):
-        transport._consecutive_failures = 4
-        assert transport._get_backoff_interval() == WATCHDOG_BACKOFF_MAX_SECONDS
+    def test_capped(self, transport, ctx):
+        ctx.consecutive_failures = 4
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_BACKOFF_MAX_SECONDS
 
-    def test_stays_capped(self, transport):
-        transport._consecutive_failures = 10
-        assert transport._get_backoff_interval() == WATCHDOG_BACKOFF_MAX_SECONDS
+    def test_stays_capped(self, transport, ctx):
+        ctx.consecutive_failures = 10
+        assert transport._get_backoff_interval(ctx) == WATCHDOG_BACKOFF_MAX_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -314,19 +326,19 @@ class TestBackoff:
 class TestReconnect:
     """Test _attempt_reconnect behavior."""
 
-    def test_reconnect_success_resets_failures(self, transport):
-        transport._consecutive_failures = 3
-        _run(transport._attempt_reconnect("test reason"))
-        assert transport._consecutive_failures == 0
-        assert transport.client._reconnect_called is True
+    def test_reconnect_success_resets_failures(self, transport, ctx):
+        ctx.consecutive_failures = 3
+        _run(transport._attempt_reconnect(ctx, "test reason"))
+        assert ctx.consecutive_failures == 0
+        assert ctx.client._reconnect_called is True
 
-    def test_reconnect_failure_increments_count(self, transport):
-        transport.client.connect_to_new_endpoint = AsyncMock(
+    def test_reconnect_failure_increments_count(self, transport, ctx):
+        ctx.client.connect_to_new_endpoint = AsyncMock(
             side_effect=Exception("network error")
         )
-        transport._consecutive_failures = 2
-        _run(transport._attempt_reconnect("test reason"))
-        assert transport._consecutive_failures == 3
+        ctx.consecutive_failures = 2
+        _run(transport._attempt_reconnect(ctx, "test reason"))
+        assert ctx.consecutive_failures == 3
 
 
 # ---------------------------------------------------------------------------
@@ -336,10 +348,9 @@ class TestReconnect:
 class TestWatchdogLoop:
     """Test the _watchdog loop orchestrates checks correctly."""
 
-    def _run_one_cycle(self, transport):
+    def _run_one_cycle(self, transport, ctx):
         """Run the watchdog for one cycle then stop it."""
         async def _one_cycle():
-            # Patch sleep to run instantly and stop after first cycle
             cycle_count = 0
             _original_sleep = asyncio.sleep
 
@@ -347,51 +358,49 @@ class TestWatchdogLoop:
                 nonlocal cycle_count
                 cycle_count += 1
                 if cycle_count > 1:
-                    # Stop after first real cycle completes
                     transport._running = False
-                # Don't actually sleep
                 await _original_sleep(0)
 
             _mod.asyncio.sleep = _fast_sleep
             try:
-                await transport._watchdog()
+                await transport._watchdog(ctx)
             finally:
                 _mod.asyncio.sleep = _original_sleep
 
         _run(_one_cycle())
 
-    def test_healthy_session_no_reconnect(self, transport):
+    def test_healthy_session_no_reconnect(self, transport, ctx):
         """Healthy session + monitor → no reconnect triggered."""
-        transport.client._reconnect_called = False
-        self._run_one_cycle(transport)
-        assert transport.client._reconnect_called is False
-        assert transport._consecutive_failures == 0
+        ctx.client._reconnect_called = False
+        self._run_one_cycle(transport, ctx)
+        assert ctx.client._reconnect_called is False
+        assert ctx.consecutive_failures == 0
 
-    def test_dead_session_triggers_reconnect(self, transport):
+    def test_dead_session_triggers_reconnect(self, transport, ctx):
         """Dead session → reconnect without even trying ping."""
-        transport.client.current_session.closed = True
-        self._run_one_cycle(transport)
-        assert transport.client._reconnect_called is True
+        ctx.client.current_session.closed = True
+        self._run_one_cycle(transport, ctx)
+        assert ctx.client._reconnect_called is True
 
-    def test_dead_monitor_triggers_reconnect(self, transport):
+    def test_dead_monitor_triggers_reconnect(self, transport, ctx):
         """Monitor exited → reconnect."""
-        transport.client.current_session_monitor = FakeMonitor(is_done=True)
-        self._run_one_cycle(transport)
-        assert transport.client._reconnect_called is True
+        ctx.client.current_session_monitor = FakeMonitor(is_done=True)
+        self._run_one_cycle(transport, ctx)
+        assert ctx.client._reconnect_called is True
 
-    def test_ping_failure_triggers_reconnect(self, transport):
+    def test_ping_failure_triggers_reconnect(self, transport, ctx):
         """Session looks OK but ping fails → reconnect."""
-        transport.client.current_session._ping_should_fail = True
-        self._run_one_cycle(transport)
-        assert transport.client._reconnect_called is True
+        ctx.client.current_session._ping_should_fail = True
+        self._run_one_cycle(transport, ctx)
+        assert ctx.client._reconnect_called is True
 
-    def test_healthy_resets_consecutive_failures(self, transport):
+    def test_healthy_resets_consecutive_failures(self, transport, ctx):
         """After recovery, consecutive failures reset to 0."""
-        transport._consecutive_failures = 5
-        self._run_one_cycle(transport)
-        assert transport._consecutive_failures == 0
+        ctx.consecutive_failures = 5
+        self._run_one_cycle(transport, ctx)
+        assert ctx.consecutive_failures == 0
 
-    def test_survives_unexpected_exception(self, transport):
+    def test_survives_unexpected_exception(self, transport, ctx):
         """Watchdog must not die on unexpected errors — keeps backend alive."""
         async def _error_cycle():
             cycle_count = 0
@@ -410,17 +419,17 @@ class TestWatchdogLoop:
             call_count = 0
             original_check = transport._check_health
 
-            def _exploding_check():
+            def _exploding_check(ctx_arg):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
                     raise RuntimeError("unexpected SDK explosion")
-                return original_check()
+                return original_check(ctx_arg)
 
             transport._check_health = _exploding_check
 
             try:
-                await transport._watchdog()
+                await transport._watchdog(ctx)
             finally:
                 _mod.asyncio.sleep = _original_sleep
 

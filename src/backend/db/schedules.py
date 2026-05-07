@@ -101,7 +101,10 @@ class ScheduleOperations:
             # Validation configuration (VALIDATE-001)
             validation_enabled=bool(row["validation_enabled"]) if "validation_enabled" in row_keys and row["validation_enabled"] is not None else False,
             validation_prompt=row["validation_prompt"] if "validation_prompt" in row_keys else None,
-            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120
+            validation_timeout_seconds=row["validation_timeout_seconds"] if "validation_timeout_seconds" in row_keys and row["validation_timeout_seconds"] is not None else 120,
+            # Webhook trigger (WEBHOOK-001 / #647 follow-up)
+            webhook_enabled=bool(row["webhook_enabled"]) if "webhook_enabled" in row_keys and row["webhook_enabled"] is not None else False,
+            webhook_token=row["webhook_token"] if "webhook_token" in row_keys else None,
         )
 
     @staticmethod
@@ -1006,10 +1009,15 @@ class ScheduleOperations:
     ) -> bool:
         """Update execution status when completed.
 
-        CAS contract (RELIABILITY-005): SUCCESS writes are unconditional — the agent's
-        own completion result always wins. Non-success terminal writes (FAILED, CANCELLED)
-        are guarded so they cannot overwrite an already-terminal status, preventing
-        cleanup paths from silently clobbering a real completion.
+        CAS contract:
+        - SUCCESS writes win over RUNNING / QUEUED / PENDING_RETRY / SKIPPED and
+          over a phantom-stale FAILED (so a real completion lands even if a
+          cleanup path misfired first — see #378). SUCCESS is **blocked** when
+          the row is already CANCELLED: a user cancel is authoritative and the
+          late-arriving agent reply must not be reported as a deliverable (#671).
+        - Non-success terminal writes (FAILED, CANCELLED) are guarded against
+          overwriting any already-terminal status (RELIABILITY-005), preventing
+          cleanup paths from silently clobbering a real completion.
 
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
@@ -1038,17 +1046,22 @@ class ScheduleOperations:
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
             if status == TaskExecutionStatus.SUCCESS:
-                # Agent's own completion result always wins.
+                # Agent's own completion result wins over everything except a
+                # user-issued cancel (#671). A late "I'm done!" from Claude Code
+                # after the operator pulled the plug must not flip the row to
+                # success — that hides incomplete deliverables and silently
+                # advances the schedule's next_run_at.
                 cursor.execute("""
                     UPDATE schedule_executions
                     SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
                         context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
                         execution_log = ?, claude_session_id = ?, compact_metadata = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status != ?
                 """, (
                     status, to_utc_iso(completed_at), duration_ms, response, error,
                     context_used, context_max, cost, tool_calls, execution_log,
                     claude_session_id, compact_metadata, execution_id,
+                    TaskExecutionStatus.CANCELLED,
                 ))
             else:
                 # Non-success terminal write: block if already terminal so cleanup

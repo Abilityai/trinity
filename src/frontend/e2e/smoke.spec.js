@@ -12,7 +12,8 @@ import { test, expect } from '@playwright/test'
 test.describe('smoke', () => {
   test('@smoke dashboard renders for authenticated admin', async ({ page }) => {
     await page.goto('/')
-    // Top nav has Dashboard, Agents, Templates, Health, Ops, Keys, Settings.
+    // Top nav has Dashboard, Agents, Templates, Health, Ops, Settings.
+    // (Keys link removed in #302 — MCP keys now live in Settings → MCP Keys tab.)
     await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible({ timeout: 10000 })
     await expect(page.getByRole('link', { name: 'Agents', exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible()

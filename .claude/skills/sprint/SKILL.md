@@ -39,7 +39,8 @@ Automate the complete Trinity development workflow:
 | GitHub Project Board | `abilityai project #6` | ✅ | ✅ | Ranked issue pipeline |
 | GitHub Issues | `abilityai/trinity` | ✅ | ✅ | Issue details, labels |
 | Requirements | `docs/memory/requirements.md` | ✅ | ✅ | Feature requirements |
-| Architecture | `docs/memory/architecture.md` | ✅ | ✅ | System design |
+| Architecture | `docs/memory/architecture.md` | ✅ | ✅ | Current system design |
+| Target Architecture | `docs/planning/TARGET_ARCHITECTURE.md` | ✅ | ✗ | Destination design — check alignment when selecting issue |
 | Feature Flows | `docs/memory/feature-flows/` | ✅ | ✅ | Feature documentation |
 | Source Code | `src/`, `docker/base-image/` | ✅ | ✅ | Implementation |
 | Tests | `tests/` | ✅ | ✅ | Test files |
@@ -114,6 +115,19 @@ Which issue should I work on? (number or #issue)
 ```
 
 **Important**: Always sort by `rank` field, not by tier or issue number. The rank reflects the actual board priority order set by the user. Tier (P1a/P1b/P1c) comes from the project field, NOT from issue labels.
+
+**Target architecture alignment**: when presenting the backlog or confirming an issue selection, check `docs/planning/TARGET_ARCHITECTURE.md` and note if the chosen issue advances a target architecture component (Data Layer, Coordination Model, Observability, Security, Infrastructure). Surface this as a one-line note:
+
+```
+ℹ️  #NNN advances the Coordination Model component of the target architecture (actor model / async-first communication).
+```
+
+or if not aligned:
+```
+ℹ️  #NNN does not directly advance the target architecture — it is a standalone feature/fix.
+```
+
+This is informational only — it does not block issue selection. The rank on the board is authoritative.
 
 **If `$ARGUMENTS` is "recent" — show recently created open issues:**
 

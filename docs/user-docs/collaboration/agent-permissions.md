@@ -4,6 +4,8 @@ Explicit permission model controlling which agents can communicate with which. R
 
 ## How It Works
 
+![Agent Permissions tab showing the agent collaboration list with Allow All / Allow None controls](../images/agent-permissions-tab.png)
+
 1. Open the agent detail page and click the **Permissions** tab (located in the agent files/config area).
 2. You will see a list of all agents in the system.
 3. Toggle permissions to allow or deny each agent from calling the current agent.

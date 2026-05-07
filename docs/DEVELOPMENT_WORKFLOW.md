@@ -88,6 +88,7 @@ Run `/groom` periodically to keep the backlog healthy. It audits board coverage,
 - All open issues are on the project board
 - All Todo items have a Rank and Tier assigned
 - P1a items ranked highest, bugs above features within same tier
+- Issues advancing `docs/planning/TARGET_ARCHITECTURE.md` ranked above same-type issues that do not
 - Stale or resolved items flagged for closure
 
 ### Issue Types
@@ -465,24 +466,29 @@ docs/memory/
 ├── architecture.md      ← Current system design (~1000 lines max)
 ├── feature-flows.md     ← Index of all feature flow documents
 └── feature-flows/       ← Individual feature documentation
+
+docs/planning/
+└── TARGET_ARCHITECTURE.md  ← Target system design — optimal destination;
+                               consult when evaluating tradeoffs and prioritizing work
 ```
 
 ### How They Connect
 
 ```
-requirements.md  ──defines──►  What features exist
+requirements.md        ──defines──►  What features exist
        │
        ▼
-GitHub Issues    ──prioritizes──►  What to work on next
+GitHub Issues          ──prioritizes──►  What to work on next
+       │                                 (guided by TARGET_ARCHITECTURE.md)
+       ▼
+feature-flows/*        ──documents──►  How features work
        │
        ▼
-feature-flows/*  ──documents──►  How features work
+git log                ──records──►  What changed and when
        │
        ▼
-git log          ──records──►  What changed and when
-       │
-       ▼
-architecture.md  ──maintains──►  Current system state
+architecture.md        ──maintains──►  Current system state
+TARGET_ARCHITECTURE.md ──defines──►   Target system state (destination)
 ```
 
 ---

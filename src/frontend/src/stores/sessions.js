@@ -27,6 +27,7 @@ export const useSessionsStore = defineStore('sessions', {
     // Feature-flag cache (resolved once per page load)
     featureFlagsLoaded: false,
     sessionTabEnabled: false,
+    voiceAvailable: false,
   }),
 
   getters: {
@@ -50,8 +51,10 @@ export const useSessionsStore = defineStore('sessions', {
           headers: authStore.authHeader,
         })
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
+        this.voiceAvailable = !!r.data?.voice_available
       } catch {
         this.sessionTabEnabled = false
+        this.voiceAvailable = false
       } finally {
         this.featureFlagsLoaded = true
       }

@@ -63,7 +63,10 @@ class SlotService:
     - ZREMRANGEBYSCORE for cleanup
     """
 
-    def __init__(self, redis_url: str = "redis://redis:6379"):
+    def __init__(self, redis_url: Optional[str] = None):
+        if redis_url is None:
+            from config import REDIS_URL
+            redis_url = REDIS_URL
         self.redis = redis.from_url(redis_url, decode_responses=True)
         self.slots_prefix = "agent:slots:"
         self.metadata_prefix = "agent:slot:"
@@ -398,7 +401,5 @@ def get_slot_service() -> SlotService:
     """Get the global slot service instance."""
     global _slot_service
     if _slot_service is None:
-        import os
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        _slot_service = SlotService(redis_url)
+        _slot_service = SlotService()  # resolves REDIS_URL via config
     return _slot_service

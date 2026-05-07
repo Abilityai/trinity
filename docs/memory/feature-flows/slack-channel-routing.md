@@ -25,7 +25,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - **API**: `POST /api/settings/slack/connect` — start Socket Mode transport
 - **API**: `POST /api/settings/slack/install` — platform-level OAuth (workspace install)
 - **API**: `POST /api/agents/{name}/slack/channel` — create channel + bind agent
-- **Transport**: `src/backend/adapters/transports/slack_socket.py` — Socket Mode receives events
+- **Transport**: `src/backend/adapters/transports/slack_socket.py` — Socket Mode receives events. Runs **N concurrent WebSocket connections** (default 2, configurable via `SLACK_SOCKET_CONNECTION_COUNT` env var, clamped 1–10) per Slack's documented multi-connection guidance; one connection half-closing is absorbed by the others. Each client has an independent watchdog. An envelope-ID dedup ring (cap 1024, FIFO) protects against possible cross-connection duplicate delivery (#244)
 
 ## Frontend Layer
 

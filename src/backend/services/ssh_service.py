@@ -40,7 +40,10 @@ SSH_ACCESS_PREFIX = "ssh_access:"
 class SshService:
     """Service for managing ephemeral SSH access to agent containers."""
 
-    def __init__(self, redis_url: str = "redis://redis:6379"):
+    def __init__(self, redis_url: Optional[str] = None):
+        if redis_url is None:
+            from config import REDIS_URL
+            redis_url = REDIS_URL
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
 
     async def inject_ssh_key(self, agent_name: str, public_key: str) -> bool:
@@ -546,6 +549,5 @@ def get_ssh_service() -> SshService:
     """Get the SSH service singleton."""
     global _ssh_service
     if _ssh_service is None:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
-        _ssh_service = redis_url and SshService(redis_url)
+        _ssh_service = SshService()  # resolves REDIS_URL via config
     return _ssh_service

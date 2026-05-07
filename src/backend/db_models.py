@@ -153,6 +153,11 @@ class Schedule(BaseModel):
     validation_enabled: bool = False  # Enable post-execution validation
     validation_prompt: Optional[str] = None  # Custom auditor instructions (None = default prompt)
     validation_timeout_seconds: int = 120  # Timeout for validation task (30-600 range)
+    # Webhook trigger (WEBHOOK-001 / #647 follow-up): the DB column exists and
+    # is read by `webhooks.py:trigger_webhook`, but the pydantic model never
+    # carried these fields — every webhook trigger raised AttributeError.
+    webhook_enabled: bool = False
+    webhook_token: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):

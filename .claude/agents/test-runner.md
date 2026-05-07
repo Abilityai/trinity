@@ -172,6 +172,7 @@ The test suite covers:
 - **Local Deployment** (test_deploy_local.py) - Deploy local agents via MCP (Req 11.2)
 - **Public Links** (test_public_links.py) - Public agent sharing; email verification is driven by agent-level access policy (#311 follow-up, 2026-04-13) (Req 11.3)
 - **Public User Memory** (test_public_user_memory.py) - Per-user persistent memory for email-verified public sessions (MEM-001) [SMOKE]
+- **Site Proxy** (test_site_proxy.py) - Agent website proxy via /site/{token}/{path}; link_type field, URL format, token validation, 502 on no web server, redirect (SITE-001, #633)
 
 ### Operations & Observability
 - **Fleet Operations** (test_ops.py) - Fleet status/health, restart/stop, schedule list/pause/resume, emergency stop, alerts, costs [SLOW]
@@ -204,6 +205,8 @@ The test suite covers:
 - **Web Terminal** (test_web_terminal.py) - WebSocket terminal sessions
 - **Execution Streaming** (test_execution_streaming.py) - SSE streaming for execution logs
 - **Trinity Connect** (test_trinity_connect.py) - [NOT YET IMPLEMENTED] /ws/events endpoint, MCP key auth, filtered event broadcasts (Req SYNC-001)
+- **Voice Tool Execution** (unit/test_voice_tools.py) - `_execute_tool`, `_execute_and_respond`, tool declarations, panel tools (show_markdown/update_panel/append_to_panel/clear_panel), 512KB content cap, routing guard, session cancellation [UNIT] (19 tests)
+- **Voice Auth & Panel Ownership** (unit/test_voice_auth.py) - WS ownership gate (no-token/invalid-token/unknown-session/wrong-user/owner/admin), voice_stop auth, GET /panel ownership (missing-session/owner/wrong-agent/wrong-user/admin) [UNIT] (18 tests)
 
 ### Direct Agent Tests
 - **Agent Server Direct** (agent_server/) - Direct agent server tests [SKIPPED unless TEST_AGENT_NAME set]
@@ -233,10 +236,10 @@ The test suite covers:
 
 ## Test Suite Statistics
 
-**Total Tests**: ~2,262 tests across 124 test files
+**Total Tests**: ~2,283 tests across 125 test files
 **Smoke Tests**: ~578 tests (fast, no agent creation)
-**Unit Tests**: ~170 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67), subprocess pgroup (11), empty result classification (13))
-**Core Tests (not slow)**: ~2,112 tests
+**Unit Tests**: ~190 tests (no backend needed, rate limit detection, watchdog logic, context formula, OTel trace logging, file upload, voice transcription, voice tools+auth (45: 26 tools + 19 auth), inter-agent timeout, scheduler sync loop, team-share gate, WhatsApp adapter (67), subprocess pgroup (11), empty result classification (13))
+**Core Tests (not slow)**: ~2,124 tests
 **Slow Tests**: ~99 tests (chat execution, fleet ops, system agent ops, execution termination, WhatsApp live-backend integration)
 **WebSocket Tests**: ~10 tests (web terminal, execution streaming)
 
@@ -265,6 +268,38 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
 
+## Recent Test Additions (2026-05-07)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_voice_tools.py` | Voice Redis cross-worker fix (#704) — `TestRedisSessionFallback`: in-memory hit skips Redis, cross-worker Redis fallback reconstructs session, Redis miss returns None, Redis error degrades gracefully, remove_session deletes Redis key, create_session writes metadata with correct TTL, create_session Redis failure raises + clears memory; `REDIS_URL` added to config stub | +7 tests (file total 26) |
+| `unit/test_voice_auth.py` | Voice audit attribution fix (#705) — `TestVoiceAuditAttribution`: source-inspect regression guard verifying `actor_user=SimpleNamespace(...)` and absence of legacy `actor_type=`/`actor_id=`/`actor_email=` kwargs; `_FakeVoiceService` updated to use `AsyncMock` for `get_session`, `remove_session`, `create_session` (now async) | +1 test (file total 19) |
+| `unit/test_voice_tools.py` | Voice workspace (#699) — `TestExecutePanelTool`: all 4 panel tool handlers (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`), 512 KB content cap on `append_to_panel`, routing guard (panel tools must not reach `_execute_tool`); config stub extended with `SECRET_KEY`, `ALGORITHM`, `VOICE_ENABLED` for cross-session stability | +7 tests (file total 19) |
+| `unit/test_voice_auth.py` | Voice workspace (#699) — `TestVoicePanelAuth`: missing session → 200 empty state (no 404 during teardown), owner access, wrong-agent 403, wrong-user 403, admin bypass; `_FakeVoiceSession` extended with `panel_state`; stub extended with `WORKSPACE_PANEL_INSTRUCTIONS` | +5 tests (file total 18) |
+
+**Voice Workspace Panel Tests (#699)** — panel tool execution and endpoint auth:
+
+Panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`) are executed in-process via `_execute_panel_tool()` without touching the agent container. Key behaviors tested:
+- Each handler sets `panel_state["type"]` and `"content"` correctly
+- `append_to_panel` accumulates content and caps at `_PANEL_CONTENT_MAX = 524_288` (512 KB), keeping the tail
+- The `_execute_and_respond` routing guard verifies panel tools never reach `_execute_tool` (the agent container call)
+- `GET /panel` returns empty state (200, not 404) for a non-existent `session_id` — avoids poll errors during the teardown window when the session has just been removed
+- Ownership checks: `session.agent_name != name` → 403; `session.user_id != current_user.id` → 403; admin role bypasses ownership
+
+Run via: `pytest tests/unit/test_voice_tools.py tests/unit/test_voice_auth.py -v` (must run in this order — auth file depends on config stub from tools file).
+
+**Known cross-session collision (pre-existing, not introduced by #699)**: the 3 tests `TestToolDeclaration::test_run_task_declared`, `test_prompt_required`, `TestExecuteAndRespond::test_timeout_sends_error_response` fail when both files run together. Root cause: `test_voice_auth.py` replaces `sys.modules["services.gemini_voice"]` with a minimal stub during collection, dropping `_RUN_TASK_TOOL` and `asyncio` from the already-imported module. The 34 remaining tests all pass. New panel tests (7 + 5) all pass regardless.
+
+---
+
+## Recent Test Additions (2026-05-05)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_subprocess_pgroup.py` | #657 — `drain_reader_threads` async refactor: updated all 5 `drain_reader_threads(...)` call sites to `asyncio.run(drain_reader_threads(...))` following the function being converted to `async def`. All 12 existing tests pass. No new tests required — the existing `TestDrainOrphanKillerTimeout.test_drain_bounded_when_orphan_killer_blocks` was already the regression test for the deadlock scenario; after the fix it completes in ~14s instead of 100s. | 0 new, 12 updated call sites |
+
+---
+
 ## Recent Test Additions (2026-05-04)
 
 | Test File | Description | Tests Added |
@@ -274,6 +309,12 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 **Webhook facade-delegation fix (#647)** — `src/backend/database.py`:
 
 Root cause of all `POST/GET/DELETE /api/agents/{name}/schedules/{id}/webhook` and `POST /api/webhooks/{token}` returning 500 on a live stack since #291 (Nov 2025). WEBHOOK-001 added the four methods to `ScheduleOperations` but never added the matching pass-throughs on the `DatabaseManager` facade — and there's no `__getattr__` proxy. The integration test from PR #643 would have caught it but doesn't run in CI. New unit test runs in any Python (no live stack), would have caught the regression at PR-time.
+
+## Recent Test Additions (2026-05-03)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `test_site_proxy.py` | SITE-001 (#633) — agent website proxy: `test_create_chat_link_default_type`, `test_create_site_link` (URL uses `/site/`), `test_create_invalid_link_type_rejected`, `test_list_links_includes_type`, `test_invalid_token_returns_401`, `test_chat_token_rejected_at_site_endpoint`, `test_valid_site_token_502_when_agent_not_running`, `test_disabled_link_returns_401`, `test_root_path_without_trailing_slash_redirects` | 9 new tests |
 
 ---
 

@@ -207,18 +207,25 @@ def _check_webhook_rate_limit(token: str) -> None:
 
     key = f"webhook_calls:{token}"
     try:
-        count = r.get(key)
-        if count and int(count) >= WEBHOOK_RATE_LIMIT:
+        # INCR-then-compare avoids the read-then-incr TOCTOU race (#644):
+        # under concurrency, separate GET + INCR round-trips let N callers
+        # all observe `count < limit` and all increment, exceeding the limit
+        # by N. INCR is atomic in Redis, so we increment unconditionally and
+        # 429 the caller whose post-increment count crosses the threshold.
+        # Trade-off: blocked requests still tick the counter, slightly
+        # extending the cool-down for an already-over-limit token. Acceptable
+        # for a rate-limiter (we only stop accepting work, we don't unwind).
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, WEBHOOK_RATE_WINDOW)
+        new_count, _ = pipe.execute()
+        if int(new_count) > WEBHOOK_RATE_LIMIT:
             ttl = r.ttl(key)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Webhook rate limit exceeded. Try again in {ttl} seconds.",
                 headers={"Retry-After": str(max(ttl, 1))},
             )
-        pipe = r.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, WEBHOOK_RATE_WINDOW)
-        pipe.execute()
     except HTTPException:
         raise
     except Exception as e:
@@ -322,12 +329,15 @@ async def trigger_webhook(
             detail="Scheduler service unavailable — try again later",
         )
 
-    # Audit trail (SEC-001)
+    # Audit trail (SEC-001). Webhook callers are unauthenticated — the URL
+    # token IS the credential — so no actor_user / actor_agent_name. The
+    # service derives actor_type internally; passing it explicitly is a
+    # TypeError (#647 follow-up). Caller IP is the only attributable signal.
     await platform_audit_service.log(
         event_type=AuditEventType.EXECUTION,
         event_action="task_triggered",
         source="api",
-        actor_type="system",
+        actor_ip=caller_ip,
         target_type="agent",
         target_id=schedule.agent_name,
         endpoint=f"/api/webhooks/{webhook_token[:8]}…",

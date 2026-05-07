@@ -1,4 +1,6 @@
 <div align="center">
+  <a href="https://www.ability.ai/workshopsgt"><strong>🛠️ Free Weekly Workshops — Learn to build AI agents on Trinity →</strong></a>
+  <br/><br/>
   <img src="docs/assets/trinity-logo-white.svg#gh-dark-mode-only" alt="Trinity" width="120"/>
   <img src="docs/assets/trinity-logo.svg#gh-light-mode-only" alt="Trinity" width="120"/>
   <h1>Trinity</h1>

@@ -89,7 +89,9 @@ Agents can query monitoring data through these MCP tools:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/monitoring/fleet-health` | GET | Fleet health summary |
+| `/api/monitoring/status` | GET | Fleet health summary |
+| `/api/monitoring/agents/{name}` | GET | Single-agent health detail |
+| `/api/monitoring/agents/{name}/check` | POST | Force immediate health check |
 | `/api/monitoring/cleanup-status` | GET | Cleanup service status (admin) |
 | `/api/monitoring/cleanup-trigger` | POST | Force a cleanup run (admin) |
 

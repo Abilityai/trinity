@@ -265,6 +265,13 @@
       "added": "2026-05-04",
       "categories": ["backend", "unit", "database", "webhooks", "lint"],
       "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI — would have caught WEBHOOK-001 before #291 landed."
+    },
+    {
+      "file": "unit/test_slack_token_encryption.py",
+      "feature": "Issue #453",
+      "added": "2026-05-05",
+      "categories": ["backend", "unit", "slack", "security", "credentials", "encryption"],
+      "description": "Unit tests for SLACK-001 bot token encryption added to db/slack.py (#453): round-trip via SlackOperations, raw DB value is JSON envelope, plaintext fallback for legacy xoxb-* rows, decrypt-failure returns None, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, _migrate_slack_bot_token_encryption walks both slack_link_connections and slack_workspaces (idempotent, skips encrypted rows, hard-fails without key, no-op on empty/missing tables). 14 tests. Tests for slack_channels.py + telegram + whatsapp encryption are tracked separately in #664."
     }
   ]
 }

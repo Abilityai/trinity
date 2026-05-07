@@ -20,6 +20,7 @@ Module under test: docker/base-image/agent_server/utils/subprocess_pgroup.py
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -260,7 +261,7 @@ class TestDrainReaderThreads:
             # Now drain. Helper must kill the grandchild + close the pipe,
             # so the reader thread exits.
             start = time.monotonic()
-            drain_reader_threads(proc, stderr_thread, grace=2, pgid=pgid)
+            asyncio.run(drain_reader_threads(proc, stderr_thread, grace=2, pgid=pgid))
             elapsed = time.monotonic() - start
 
             assert elapsed < 6.0, f"drain took {elapsed:.2f}s — too slow"
@@ -300,7 +301,7 @@ class TestDrainReaderThreads:
 
             # Drain should be a cheap no-op.
             start = time.monotonic()
-            drain_reader_threads(proc, t, grace=2)
+            asyncio.run(drain_reader_threads(proc, t, grace=2))
             assert time.monotonic() - start < 1.0
             assert out_lines == ["hi\n"]
         finally:
@@ -373,12 +374,12 @@ sys.exit(0)
         try:
             # grace=0 forces the stuck-reader path immediately; post_kill_grace
             # gives the natural-drain window.
-            drain_reader_threads(
+            asyncio.run(drain_reader_threads(
                 proc, t,
                 grace=0,
                 post_kill_grace=5,
                 pgid=pgid,
-            )
+            ))
             assert not t.is_alive(), "reader thread should have exited after drain"
             assert "RESULT_LINE" in captured, (
                 f"sentinel lost — captured={captured!r}. "
@@ -537,7 +538,7 @@ class TestDrainOrphanKillerTimeout:
         try:
             start = time.monotonic()
             # grace=0 → immediately enters the stuck-reader path.
-            drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=pgid)
+            asyncio.run(drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=pgid))
             elapsed = time.monotonic() - start
 
             # Orphan killer must have been called.
@@ -717,7 +718,7 @@ sys.exit(0)
 
             # grace=0 → immediately triggers the stuck-reader path.
             start = time.monotonic()
-            drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=claude_pgid)
+            asyncio.run(drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=claude_pgid))
             elapsed = time.monotonic() - start
 
             assert elapsed < 7.0, f"drain took {elapsed:.2f}s — too slow"

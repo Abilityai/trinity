@@ -147,6 +147,23 @@
         </div>
         <!-- Right: Primary Actions -->
         <div class="flex items-center space-x-3">
+          <!-- Workspace button (voice + canvas, BETA) -->
+          <button
+            v-if="voiceAvailable"
+            @click="goToWorkspace"
+            :disabled="agent.status !== 'running'"
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors"
+            :class="agent.status === 'running'
+              ? 'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-700'
+              : 'text-gray-300 dark:text-gray-600 border border-gray-200 dark:border-gray-700 cursor-not-allowed'"
+            title="Open Workspace — voice + canvas (Beta)"
+          >
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4M12 15a3 3 0 003-3V5a3 3 0 00-6 0v7a3 3 0 003 3z" />
+            </svg>
+            Workspace
+            <span class="px-1 py-0.5 text-[10px] font-semibold rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 leading-none">BETA</span>
+          </button>
           <!-- Running State Toggle -->
           <RunningStateToggle
             :model-value="agent.status === 'running'"
@@ -416,6 +433,7 @@
 
 <script setup>
 import { ref, computed, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import SparklineChart from './SparklineChart.vue'
@@ -536,6 +554,10 @@ const props = defineProps({
   tokenStats: {
     type: Object,
     default: null
+  },
+  voiceAvailable: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -556,6 +578,12 @@ const emit = defineEmits([
   'cycle-emotion',
   'change-subscription'
 ])
+
+const router = useRouter()
+
+function goToWorkspace() {
+  router.push(`/agents/${props.agent.name}/workspace`)
+}
 
 // Name editing functions
 function startEditName() {

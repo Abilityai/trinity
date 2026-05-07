@@ -12,6 +12,8 @@ Cron-based automation for agents using APScheduler. Schedule recurring tasks wit
 
 ## How It Works
 
+![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../images/agent-schedules-tab.png)
+
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description.

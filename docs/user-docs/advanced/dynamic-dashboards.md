@@ -13,7 +13,7 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 
 ## How It Works
 
-![Agent Dashboard tab showing a knowledge base overview with live metrics and trend indicators](../images/dynamic-dashboard-example.png)
+![Agent Dashboard tab showing Cornelius autonomous learning agent with Moltbook social presence metrics](../images/agent-custom-dashboard.png)
 
 1. The agent writes a `dashboard.yaml` file to its workspace.
 2. The file defines widgets with `type`, `title`, `value`, and optional configuration fields.

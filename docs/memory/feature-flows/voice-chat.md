@@ -1,7 +1,7 @@
 # Voice Chat — Gemini 2.5 Flash Native Audio
 
-**Status**: ✅ Phase 1 + Tool Calling Complete
-**Date**: 2026-04-29
+**Status**: ✅ Phase 1 + Tool Calling + Workspace Mode (BETA) Complete
+**Date**: 2026-05-07
 **Priority**: P1
 
 ---
@@ -24,65 +24,62 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 
 ## Architecture
 
+### Standard Mode (Chat Tab overlay)
+
 ```
 ┌────────────────────────────────────────────────────────────┐
 │                     Browser (Agent Detail)                  │
 │                                                            │
 │  ┌──────────────┐    ┌──────────────────────────────────┐  │
 │  │  Chat Panel  │    │  VoiceOverlay.vue (canvas orb)   │  │
-│  │  (existing)  │    │                                  │  │
-│  │              │    │  Canvas orb — value noise + curl │  │
-│  │  ... msgs    │    │  noise particles (220, 3 layers)  │  │
-│  │              │    │  State hues: idle/connecting=0°   │  │
-│  │              │    │  listening=+90° (green)           │  │
-│  │              │    │  speaking=+210° (indigo)          │  │
-│  │              │    │  tool_calling=amber badge overlay │  │
+│  │  (existing)  │    │  Canvas orb — value noise + curl │  │
+│  │  ... msgs    │    │  State hues + tool_calling badge  │  │
 │  │              │    │  [Mute] [End Call]                │  │
 │  └──────────────┘    └──────────────┬───────────────────┘  │
-│                                     │                       │
-│                    useVoiceSession.js composable            │
-│                    (amplitude polling @ 30ms,               │
-│                     tool_call / tool_result WS handlers)    │
-│                                     │ WebSocket             │
 └─────────────────────────────────────┼───────────────────────┘
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │   Trinity Backend      │
-                          │                        │
-                          │  routers/voice.py      │
-                          │  POST voice/start      │
-                          │  WS /ws/voice/{id}     │
-                          │                        │
-                          │  services/gemini_voice │
-                          │  VoiceSession          │
-                          │  _execute_and_respond()│
-                          │  (30s timeout)         │
-                          │                        │
-                          │  on_tool_call →        │
-                          │    WS frame + audit log│
-                          │  on_tool_result →      │
-                          │    WS frame            │
-                          └────────────┬───────────┘
-                                       │
-                          ┌────────────┴───────────┐
-                          │                        │
-                          ▼                        ▼
-              ┌───────────────────┐   ┌────────────────────┐
-              │  Gemini Live API  │   │  Agent Container   │
-              │  (Vertex AI)      │   │  (Claude Code)     │
-              │                   │   │                    │
-              │  tools=[          │   │  agent_client      │
-              │   run_task fn     │   │  .task(prompt)     │
-              │  ]                │   │                    │
-              └───────────────────┘   └────────────────────┘
+                                      │ useVoiceSession.js (workspace_mode=false)
+                                      │ WebSocket
+                                      ▼ Trinity Backend
+```
+
+### Workspace Mode (Separate page `/agents/:name/workspace`, BETA)
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    /agents/:name/workspace                          │
+│                                                                    │
+│  ┌─────────────────────────┐  ┌───────────────────────────────┐   │
+│  │  Left Panel (40%)       │  │  Right Panel (60%)            │   │
+│  │  bg-black               │  │  bg-gray-900 (canvas)         │   │
+│  │                         │  │                               │   │
+│  │  <canvas> orb (same     │  │  Panel content rendered via   │   │
+│  │   particle system as    │  │  show_markdown → renderMarkdown│  │
+│  │   VoiceOverlay)         │  │  update_panel → DOMPurify +   │   │
+│  │                         │  │  _execScripts (Chart.js ok)   │   │
+│  │  Status label           │  │  Chart.js 4 pre-loaded        │   │
+│  │  Tool name badge        │  │                               │   │
+│  │  [Mute] [Start/End]     │  │  Polled 300ms; updated_at     │   │
+│  │  Voice selector         │  │  gate + in-flight guard       │   │
+│  └─────────────────────────┘  └───────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────┘
+         │
+         │ useVoiceSession.js (workspace_mode=true)
+         │ WebSocket (same as standard mode)
+         ▼
+   Trinity Backend (routers/voice.py)
+         │
+         ├─ Panel tools handled in-process (_execute_panel_tool)
+         │   show_markdown, update_panel, append_to_panel, clear_panel
+         │   → session.panel_state (in-memory, capped at 512 KB)
+         │
+         └─ run_task → Agent Container (Claude Code)
 ```
 
 ---
 
 ## User Flow
 
-### Starting a Voice Session
+### Starting a Voice Session (Standard Mode)
 
 1. User is on Agent Detail page, Chat tab (authenticated)
 2. User clicks **"Talk"** button (microphone icon) next to the chat input
@@ -108,6 +105,23 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 2. Backend closes Gemini session, cancels any pending `_pending_tool_tasks`
 3. Transcript saved as `ChatMessage` rows in existing `chat_messages` table
 4. Chat panel refreshes showing voice conversation inline with text messages
+
+### Starting a Voice Session (Workspace Mode)
+
+1. User is on Agent Detail page (agent must be running)
+2. **Workspace button** in AgentHeader (shown only when `voice_available=true` from feature flags)
+3. Router navigates to `/agents/:name/workspace` — `AgentWorkspace.vue`
+4. Same `POST /api/agents/{name}/voice/start` with `workspace_mode: true`
+5. Backend appends `WORKSPACE_PANEL_INSTRUCTIONS` to the system prompt (describes 4 panel tools)
+6. WebSocket established; panel poll starts at 300ms interval
+7. Agent may call panel tools during conversation — panel content updated in-memory
+8. Frontend polls `GET /api/agents/{name}/voice/{session_id}/panel` and re-renders canvas
+
+### Feature Flag: voice_available
+
+`GET /api/settings/feature-flags` returns `voice_available: VOICE_ENABLED && bool(GEMINI_API_KEY)`.
+Stored in `sessions.js` Pinia store as `voiceAvailable`. Passed as prop to `AgentHeader.vue`.
+Button hidden entirely when `voiceAvailable=false`.
 
 ---
 
@@ -185,6 +199,28 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 | Method | Truncation of last N messages injected into system prompt |
 | Fallback | Voice system prompt alone if no prior messages |
 
+### VOICE-009: Multi-Worker Session Reliability (#704)
+
+**Status**: ✅ Implemented (2026-05-07)
+
+Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/voice/stop`) and WebSocket connections round-robin across OS processes. Without a cross-worker session store, the WebSocket worker would have an empty `_sessions` dict and reject with 403.
+
+**Fix: Redis dual-write pattern**
+
+| Layer | Store | Purpose |
+|-------|-------|---------|
+| In-memory `_sessions` dict | Live state | Gemini connection, asyncio tasks, panel_state (unserializable) |
+| Redis key `voice_session:{id}` | Serializable metadata | Cross-worker auth lookup (agent_name, user_id, user_email, …) |
+
+- `create_session()` (now `async`) writes JSON metadata to Redis with TTL = `VOICE_MAX_DURATION + 60` (360s). If Redis write fails, in-memory state is rolled back and `RuntimeError` is raised — the client gets 500 at `/voice/start` rather than a session ID that will intermittently 403.
+- `get_session()` (now `async`) checks `_sessions` first; on cache miss, falls back to Redis, reconstructs a `VoiceSession` from the stored metadata, and registers it in the worker's `_sessions` for subsequent calls. Redis errors degrade gracefully to `None`.
+- `remove_session()` (now `async`) deletes the Redis key and pops from `_sessions`.
+- `_redis` client is lazy-initialized as `redis.asyncio` (async, non-blocking) reusing the existing platform Redis URL (`config.REDIS_URL`).
+
+**Key implementation:** `src/backend/services/gemini_voice.py` — `_get_redis()`, `_REDIS_SESSION_TTL`, async `create_session`/`get_session`/`remove_session`.
+
+---
+
 ### VOICE-007: Tool Calling (run_task)
 
 **Status**: ✅ Implemented (Phase 3 — shipped early)
@@ -198,7 +234,27 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 | Empty prompt | Falls back to "No prompt" |
 | Session tracking | `_pending_tool_tasks` dict on `VoiceSession`; all cancelled on `end_session()` |
 | WS events | `{type: "tool_call", tool_name: "run_task"}` and `{type: "tool_result", ...}` frames |
-| Audit | Platform audit log written on each tool call via `on_tool_call` callback |
+| Audit | Platform audit log written on each tool call via `on_tool_call` callback; `actor_user=types.SimpleNamespace(id=..., email=...)` pattern (#705 — legacy `actor_type=`/`actor_id=`/`actor_email=` kwargs caused silent TypeError) |
+
+### VOICE-008: Workspace Mode + Canvas Panel (BETA)
+
+**Status**: ✅ Implemented (2026-05-07, issue #699)
+
+| Requirement | Detail |
+|-------------|--------|
+| Entry point | "Workspace" button in `AgentHeader.vue` (hidden when `voice_available=false`) |
+| Route | `/agents/:name/workspace` → `AgentWorkspace.vue` |
+| Layout | Left 40% (orb + controls) + Right 60% (canvas panel) |
+| `workspace_mode` flag | Passed in `POST /voice/start` body; appends `WORKSPACE_PANEL_INSTRUCTIONS` to system prompt |
+| Panel tools | `show_markdown`, `update_panel`, `append_to_panel`, `clear_panel` — handled in-process via `_execute_panel_tool()`, never forwarded to agent container |
+| Panel state | `VoiceSession.panel_state` dict (in-memory); type ∈ {empty, markdown, html}; content capped at `_PANEL_CONTENT_MAX=524288` (512 KB) |
+| Panel endpoint | `GET /api/agents/{name}/voice/{session_id}/panel` — returns empty state for missing sessions (no 404 during teardown window); ownership-gated (user_id + agent_name check, admin bypass) |
+| Frontend poll | `setInterval(fetchPanel, 300)` — in-flight guard (`panelFetching` flag) prevents overlapping requests; skips state update when `updated_at` unchanged (prevents 3×/sec Vue re-renders and preserves content after session ends) |
+| Content preservation | Panel content preserved on session end (poll stops, state not reset); reset on new session **start** via `resetPanelState()` |
+| HTML rendering | `update_panel`/`append_to_panel` → `ref="htmlPanelEl"` + `renderHtmlPanel()`: `DOMPurify.sanitize(html, {ADD_TAGS:['script']})` then `_execScripts()` re-clones `<script>` nodes as live DOM elements so Chart.js `new Chart(...)` calls execute |
+| Chart.js | Chart.js 4.4.0 pre-loaded globally via `injectChartJs()` on mount (CDN `<script>` tag injected once into `document.head`, guarded by `#chartjs-cdn` id check) |
+| XSS protection | `show_markdown` → `renderMarkdown()` (DOMPurify-wrapped); `update_panel` HTML — DOMPurify strips event handlers and `javascript:` hrefs; `<script>` tags are re-executed (Chart.js init) — trade-off: accepted per issue #707 security review, same trust level as agent MCP calls |
+| BETA indicator | Amber "BETA" badge in header button and page header |
 
 ---
 
@@ -207,6 +263,7 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 **Client → Server:**
 ```json
 { "type": "audio", "data": "<base64 PCM audio>" }
+{ "type": "end" }
 ```
 
 **Server → Client:**
@@ -214,9 +271,11 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 { "type": "audio", "data": "<base64 PCM audio>" }
 { "type": "transcript", "role": "user|assistant", "text": "..." }
 { "type": "status", "state": "listening|speaking|processing" }
-{ "type": "tool_call", "tool_name": "run_task" }
+{ "type": "tool_call", "tool_name": "run_task|show_markdown|..." }
 { "type": "tool_result", "tool_name": "run_task", "result": "..." }
 ```
+
+Panel tool calls (`show_markdown`, `update_panel`, etc.) appear as `tool_call` WS frames but do NOT send `tool_result` frames to the browser — they're resolved in-process on the backend and Gemini is notified internally. The frontend polls the panel state separately via REST.
 
 ---
 
@@ -228,7 +287,8 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 ```json
 {
   "session_id": "optional - existing chat session to continue",
-  "voice_name": "optional - Gemini voice name"
+  "voice_name": "optional - Gemini voice name",
+  "workspace_mode": false
 }
 ```
 
@@ -236,7 +296,7 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 ```json
 {
   "voice_session_id": "vs_abc123",
-  "websocket_url": "wss://localhost:8000/ws/voice/vs_abc123",
+  "websocket_url": "/ws/voice/vs_abc123",
   "chat_session_id": "cs_xyz789"
 }
 ```
@@ -250,6 +310,20 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
   "messages_saved": 12,
   "duration_seconds": 45,
   "cost": 0.003
+}
+```
+
+### GET /api/agents/{name}/voice/{session_id}/panel
+
+Returns current canvas panel state. Returns empty state (not 404) for non-existent sessions to avoid poll errors during teardown. Auth: `get_authorized_agent` dep + `session.user_id == current_user.id` check (admin bypass).
+
+**Response:**
+```json
+{
+  "type": "empty|markdown|html",
+  "content": "...",
+  "title": "optional title or null",
+  "updated_at": "ISO-Z timestamp or null"
 }
 ```
 
@@ -280,12 +354,17 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler, `_get_voice_system_prompt()`, `on_tool_call`/`on_tool_result` callbacks |
-| **Backend** | `src/backend/services/gemini_voice.py` | `VoiceSession`, `_RUN_TASK_TOOL` declaration, `_execute_tool()`, `_execute_and_respond()`, `_pending_tool_tasks` |
-| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | Canvas orb (value noise + curl noise particles, state hues, amber tool badge) |
-| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | Session state (`toolName`, `amplitude`, `isToolCalling`), WS message handlers, amplitude polling |
+| **Backend** | `src/backend/routers/voice.py` | Voice endpoints + WebSocket handler, `/panel` endpoint, `_get_voice_system_prompt()`, `on_tool_call`/`on_tool_result` callbacks |
+| **Backend** | `src/backend/services/gemini_voice.py` | `VoiceSession` (+ `workspace_mode`, `panel_state`), `_RUN_TASK_TOOL`, `_PANEL_TOOLS`, `_execute_panel_tool()`, `WORKSPACE_PANEL_INSTRUCTIONS` |
+| **Backend** | `src/backend/routers/settings.py` | `voice_available` feature flag in `GET /api/settings/feature-flags` |
+| **Frontend** | `src/frontend/src/views/AgentWorkspace.vue` | Full workspace page (orb + canvas panel, particle system inlined, panel polling) |
+| **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | Standard mode orb overlay (unchanged) |
+| **Frontend** | `src/frontend/src/components/AgentHeader.vue` | Workspace button (`goToWorkspace()`, shown when `voiceAvailable=true`) |
+| **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | `start(sessionId, voiceName, workspaceMode)` — passes `workspace_mode` to backend |
+| **Frontend** | `src/frontend/src/stores/sessions.js` | `voiceAvailable` state from feature flags |
 | **Frontend** | `src/frontend/src/utils/audio.js` | AudioWorklet-first capture/playback, `getAmplitude()` via `AnalyserNode` |
-| **Tests** | `tests/unit/test_voice_tools.py` | 12 unit tests: `_execute_tool`, `_execute_and_respond`, tool declaration, session cancellation |
+| **Tests** | `tests/unit/test_voice_tools.py` | 26 unit tests: tool execution, panel tool handlers, content cap, routing guard, Redis session fallback (#704) |
+| **Tests** | `tests/unit/test_voice_auth.py` | 19 unit tests: WS auth, stop auth, panel ownership, audit attribution kwargs (#705) |
 
 ---
 
@@ -315,6 +394,20 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 - ✅ 30s timeout with error recovery
 - ⏳ Multi-language voice with auto-detection
 - ⏳ Voice cloning / custom voice per agent
+
+### Phase 4: Workspace Mode ✅ Complete (2026-05-07, issue #699/#707, BETA)
+
+- ✅ Separate full-page workspace at `/agents/:name/workspace`
+- ✅ Split layout: orb (left) + canvas panel (right)
+- ✅ 4 panel tools: `show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`
+- ✅ `voice_available` feature flag gates workspace button in AgentHeader
+- ✅ Panel ownership gate on REST endpoint
+- ✅ 512 KB content cap on accumulated `append_to_panel` content
+- ✅ Panel flicker fixed: `updated_at` change-detection gate + in-flight fetch guard (#707)
+- ✅ Panel content preserved on session end; reset on new session start (#707)
+- ✅ Chart.js 4 pre-loaded; `update_panel` HTML with `<script>` tags executes correctly (#707)
+- ⏳ Export panel content as PDF/markdown
+- ⏳ Multi-page / tabbed canvas
 
 ---
 

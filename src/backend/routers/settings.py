@@ -122,8 +122,10 @@ async def get_public_feature_flags(
     Auth required (any role) — these flags reveal nothing sensitive but we
     still keep them out of the unauthenticated surface.
     """
+    from config import GEMINI_API_KEY, VOICE_ENABLED
     return {
         "session_tab_enabled": settings_service.is_session_tab_enabled(),
+        "voice_available": VOICE_ENABLED and bool(GEMINI_API_KEY),
     }
 
 

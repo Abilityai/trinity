@@ -45,6 +45,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/agents/:name/workspace',
+    name: 'AgentWorkspace',
+    component: () => import('../views/AgentWorkspace.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/agents/:name/executions/:executionId',
     name: 'ExecutionDetail',
     component: () => import('../views/ExecutionDetail.vue'),
@@ -71,10 +77,10 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    // #302 — /api-keys absorbed into /settings as the "MCP Keys" tab.
+    // Permanent redirect preserves bookmarks and external doc links.
     path: '/api-keys',
-    name: 'ApiKeys',
-    component: () => import('../views/ApiKeys.vue'),
-    meta: { requiresAuth: true }
+    redirect: { path: '/settings', query: { tab: 'mcp-keys' } }
   },
   {
     path: '/settings',

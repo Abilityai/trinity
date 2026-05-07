@@ -25,6 +25,7 @@ Provides strategic views of the roadmap:
 | GitHub Issues | `abilityai/trinity` | Yes | No |
 | GitHub Project #6 | `abilityai` org | Yes | No |
 | Labels | priority-p0/p1/p2/p3, type-*, status-* | Yes | No |
+| Target Architecture | `docs/planning/TARGET_ARCHITECTURE.md` | Yes | No |
 
 ### Project Constants
 
@@ -49,6 +50,7 @@ THEME_FIELD_ID = PVTSSF_lADOB8r7us4BRY6-zhKSr-g
 | `/roadmap blocked` | Blocked items |
 | `/roadmap in-progress` | Work in progress |
 | `/roadmap orphans` | Issues without Epic assigned |
+| `/roadmap arch` | Issues mapped to target architecture components |
 | `/roadmap #N` or `/roadmap N` | Single issue with epic context |
 | `/roadmap create <title>` | Create new issue |
 
@@ -370,6 +372,58 @@ for num, title, epic in items:
 "
 ```
 
+#### Target Architecture View (`/roadmap arch`)
+
+Read `docs/planning/TARGET_ARCHITECTURE.md`, then map open issues to the five target architecture components. This shows how much of the current backlog is moving toward the destination vs. standing features/fixes.
+
+```python
+# Manually classify issues by reading their titles and descriptions against
+# the five target architecture components in TARGET_ARCHITECTURE.md
+
+ARCH_COMPONENTS = {
+    "Data Layer": [
+        "keywords: postgres, postgresql, sqlite migration, pgbouncer, alembic, database migration"
+    ],
+    "Coordination Model": [
+        "keywords: actor model, mailbox, async chat, fan-out, event-driven, circuit breaker, saga, idempotency, backlog, capacity"
+    ],
+    "Observability": [
+        "keywords: prometheus, grafana, metrics, fleet health, otel, tracing, monitoring dashboard"
+    ],
+    "Security": [
+        "keywords: guardagent, output monitor, capability token, zero-trust, audit"
+    ],
+    "Infrastructure": [
+        "keywords: celery, scheduler, kubernetes, k8s, streaming, health signal, pgbouncer"
+    ],
+}
+```
+
+For each open non-Done issue on the board, determine which component it most closely advances (if any), using the issue title, labels, and epic assignment. Output:
+
+```
+## Roadmap → Target Architecture Coverage
+
+Read from: docs/planning/TARGET_ARCHITECTURE.md
+
+| Component | Open Issues | Issues |
+|-----------|-------------|--------|
+| Data Layer | N | #NNN Title, #NNN Title |
+| Coordination Model | N | #NNN Title, ... |
+| Observability | N | #NNN Title |
+| Security | N | #NNN Title |
+| Infrastructure | N | #NNN Title |
+| Other (not arch-aligned) | N | — |
+
+**Arch-aligned: N/M open issues (X%)**
+
+### Gaps (target architecture components with no open issues)
+- [List components with 0 aligned issues]
+  → Consider: does the backlog need issues for these, or are they intentionally deferred?
+```
+
+This view is for strategic decisions: when grooming or prioritizing, prefer advancing under-represented architecture components.
+
 ### Step 3: Create Issue (if requested)
 
 If user runs `/roadmap create <title>`:
@@ -432,6 +486,7 @@ gh api graphql -f query='mutation {
 | `/roadmap epic #20` | Deep dive on Audit Trail epic |
 | `/roadmap themes` | Coverage by strategic theme |
 | `/roadmap orphans` | Issues needing epic/theme assignment |
+| `/roadmap arch` | Issues mapped to target architecture components |
 | `/roadmap #123` | Single issue with epic context |
 | `/roadmap all` | All open issues |
 | `/roadmap blocked` | Blocked items |

@@ -237,3 +237,109 @@ def test_none_metadata_returns_none():
     None and let the caller handle it via the existing empty-response 500
     path. The classifier should never crash on bad input."""
     assert _classify_empty_result(None, raw_message_count=0) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #640: parse-failure context surfaces in the 502 detail.
+# ---------------------------------------------------------------------------
+
+def test_parse_failure_count_surfaces_in_detail():
+    """When the stdout reader saw lines that ``json.loads`` rejected, the
+    detail must include the count so operators can distinguish "wire was
+    corrupted" (parse_failures > 0 — likely #640 interleaving) from "reader
+    leaked past claude exit" (parse_failures == 0, the original #520/#618
+    shape). Without this signal, both failure modes look identical in
+    production logs."""
+    metadata = ExecutionMetadata(tool_count=4, num_turns=8)
+
+    result = _classify_empty_result(
+        metadata,
+        raw_message_count=15,
+        parse_failure_count=3,
+    )
+
+    assert result is not None
+    _, detail = result
+    assert "parse_failures=3" in detail
+
+
+def test_parse_failure_sample_appended_when_present():
+    """The first malformed line (sanitized + length-capped by the reader) is
+    appended to the detail so operators can identify the truncation pattern
+    — e.g. ``{"type":"user", ... "tool_use_id":"toolu_…","`` is the canonical
+    #630 fingerprint and points at a specific failure shape."""
+    metadata = ExecutionMetadata(tool_count=4, num_turns=8)
+    sample = '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_abc","'
+
+    result = _classify_empty_result(
+        metadata,
+        raw_message_count=15,
+        parse_failure_count=1,
+        parse_failure_sample=sample,
+    )
+
+    assert result is not None
+    _, detail = result
+    assert "First malformed stdout line:" in detail
+    assert "tool_use_id" in detail
+
+
+def test_parse_failure_sample_omitted_when_count_is_zero():
+    """If the reader saw no parse failures, no sample fragment should appear
+    even if a stale sample is somehow passed in. parse_failures=0 in the
+    detail is itself useful — confirms the wire was clean and the result
+    line was lost downstream (reader leak)."""
+    metadata = ExecutionMetadata(tool_count=4, num_turns=8)
+
+    result = _classify_empty_result(
+        metadata,
+        raw_message_count=15,
+        parse_failure_count=0,
+        parse_failure_sample="should-not-appear",
+    )
+
+    assert result is not None
+    _, detail = result
+    assert "parse_failures=0" in detail
+    assert "should-not-appear" not in detail
+    assert "First malformed stdout line:" not in detail
+
+
+def test_raw_messages_type_summary_in_detail():
+    """The raw-message type histogram (capped to top 6 types) lets operators
+    see the shape of what was captured before the result line was lost.
+    Distinguishes "got most of the stream, lost only the trailing result"
+    from "stopped near the start" — different infrastructure failures."""
+    metadata = ExecutionMetadata(tool_count=2, num_turns=5)
+    raw = (
+        [{"type": "system"}]
+        + [{"type": "assistant"} for _ in range(5)]
+        + [{"type": "user"} for _ in range(2)]
+    )
+
+    result = _classify_empty_result(
+        metadata,
+        raw_message_count=len(raw),
+        raw_messages=raw,
+    )
+
+    assert result is not None
+    _, detail = result
+    assert "types=" in detail
+    assert "assistant=5" in detail
+    assert "user=2" in detail
+
+
+def test_default_parse_failure_args_preserve_legacy_callers():
+    """Old callers that pass only metadata + raw_message_count must keep
+    working unchanged: parse_failure_count defaults to 0, sample to None,
+    detail still renders. Backward compatibility for the chat path that
+    doesn't yet wire parse-failure tracking through the classifier."""
+    metadata = ExecutionMetadata(tool_count=7, num_turns=12)
+
+    result = _classify_empty_result(metadata, raw_message_count=22)
+
+    assert result is not None
+    status_code, detail = result
+    assert status_code == 502
+    assert "parse_failures=0" in detail
