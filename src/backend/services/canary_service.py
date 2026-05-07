@@ -7,7 +7,8 @@ Runs in the backend process. Every 5 minutes:
 2. `run_invariants(snapshot)` — apply S-01 / E-02 / L-03 (Phase 1 set).
 3. Persist any violations to `canary_violations`.
 4. Detect green→red transitions per invariant against the previously-stored
-   latest violation; emit one notification per transition (the bell).
+   latest violation; the alert sink hook is a stub in Phase 1 (Slack lands
+   in a follow-up PR).
 
 Modeled on `services/cleanup_service.py` — single asyncio task, idempotent
 start/stop, lock-guarded re-entrancy. Disabled by default; enable per
@@ -41,11 +42,11 @@ class CycleResult:
     `violations` is the per-invariant list of `ViolationReport`s the
     deterministic library produced (now persisted to `canary_violations`).
 
-    `transition_invariant_ids` is the subset that fired a notification
-    this cycle — i.e. invariants the service decided were a real
-    green→red flip, not a continuation of an already-known violation.
-    The router exposes this directly to operators so the on-demand
-    `/api/canary/run-cycle` response matches what the bell received.
+    `transition_invariant_ids` is the subset the service classified as
+    a fresh green→red flip this cycle, not a continuation of an
+    already-known violation. The router exposes this directly to
+    operators so the on-demand `/api/canary/run-cycle` response matches
+    what the alert sink (when wired) will see.
 
     `persisted_violation_ids` is index-aligned with `violations`: for
     each `ViolationReport` in `violations[inv_id][i]`, the row id
@@ -86,8 +87,9 @@ SEVERITY_TO_PRIORITY = {
 }
 
 # WebSocket manager (injected from main.py) — broadcasts notifications live
-# so the bell lights up without a poll. Mirrors cleanup_service / notifications
-# router pattern.
+# so the Operating Room notifications panel updates without a poll. Retained
+# (alongside `_broadcast`) so the follow-up Slack PR can re-wire whichever
+# sink it picks. Mirrors cleanup_service / notifications router pattern.
 _ws_manager = None
 _filtered_ws_manager = None
 
@@ -181,10 +183,10 @@ class CanaryService:
         or by the operator via `POST /api/canary/run-cycle`.
 
         Returns a `CycleResult` carrying the per-invariant violation
-        lists this cycle produced *and* the subset that fired a
-        notification (i.e. green→red transitions). Both pieces of
-        truth come from the same code path the background loop uses,
-        so the on-demand endpoint cannot disagree with the bell.
+        lists this cycle produced *and* the subset classified as
+        green→red transitions. Both pieces of truth come from the same
+        code path the background loop uses, so the on-demand endpoint
+        cannot disagree with the alert sink (when wired).
         """
         if self._lock.locked():
             logger.debug("canary: cycle already in progress, skipping")
@@ -334,12 +336,12 @@ class CanaryService:
     ) -> str:
         """Human-readable one-liner for the notification body.
 
-        Time is intentionally omitted — the panel renders a relative
-        "just now / 4m ago" badge from the row's `created_at` column,
-        and the precise ISO `snapshot_time` is preserved in
-        `metadata.snapshot_time` for forensic correlation back to the
+        Time is intentionally omitted — when the alert sink is wired the
+        UI/Slack render will surface a relative "just now / 4m ago"
+        badge, and the precise ISO `snapshot_time` is preserved in the
+        notification metadata for forensic correlation back to the
         `canary_violations` row. Embedding it in the message text would
-        be redundant and crowd the bell.
+        be redundant.
         """
         if invariant_id == "S-01":
             agents = sorted({v.observed_state.get("agent_name") for v in violations})
@@ -436,7 +438,7 @@ class CanaryService:
         Mirrors the routers/notifications._broadcast_notification flow but
         is in-process (the canary service has no HTTP entry point of its
         own). Failures are logged and swallowed — the row is already
-        persisted, so the bell will pick it up on next render.
+        persisted, so the panel will pick it up on next render.
         """
         if _ws_manager is None and _filtered_ws_manager is None:
             return  # WS not wired (e.g. in tests)

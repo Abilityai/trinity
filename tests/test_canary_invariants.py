@@ -876,7 +876,7 @@ class TestCanaryService:
         the structural classification — `transition_invariant_ids` and the
         cumulative counter — instead of a notification side-effect. We also
         pin `db.create_notification` to zero calls so a future regression
-        that re-adds the bell path trips this test.
+        that re-adds the dashboard alert path trips this test.
         """
         _add_agent(canary_db, "real")
         _add_orphan_sharing(canary_db, "ghost-1")  # triggers L-03
