@@ -295,41 +295,36 @@ class CanaryService:
         violations: List[ViolationReport],
         snapshot_time: str,
     ) -> None:
-        """Create + broadcast one notification for a green→red transition.
+        """Fire alerts for a green→red transition.
 
-        Severity is the max of the cycle's violations for this invariant —
-        operators should hear about the worst one, not the first found.
+        Phase 1 ships with no alert sink wired — dashboard notifications
+        were dropped per product call (vybe), and Slack is the planned
+        replacement in a follow-up PR. The transition is still detected
+        and counted so behavior stays stable; this hook is the single
+        seam the next PR plugs into.
+
+        The original notification helpers — `_render_message`, `_broadcast`,
+        and `_severity_rank` — were intentionally retained alongside the
+        ws-manager setters so the next PR is a one-file change.
         """
+        await self._notify_transition_stub(invariant_id, violations, snapshot_time)
+
+    async def _notify_transition_stub(
+        self,
+        invariant_id: str,
+        violations: List[ViolationReport],
+        snapshot_time: str,
+    ) -> None:
+        """Placeholder alert sink — replaced by Slack in the next PR."""
         worst = max(violations, key=lambda v: _severity_rank(v.severity))
-        priority = SEVERITY_TO_PRIORITY.get(worst.severity, "normal")
-
-        title = f"{invariant_id} violated"
-        if len(violations) > 1:
-            title += f" ({len(violations)}× this cycle)"
-
-        message = self._render_message(invariant_id, violations, snapshot_time)
-
-        data = NotificationCreate(
-            notification_type="alert",
-            title=title[:200],
-            message=message,
-            priority=priority,
-            category="canary",
-            metadata={
-                "invariant_id": invariant_id,
-                "tier": worst.tier,
-                "severity": worst.severity,
-                "snapshot_time": snapshot_time,
-                "violations_in_cycle": len(violations),
-                # Cap sample for the bell tooltip to keep the row small.
-                "sample_observed_state": [
-                    v.observed_state for v in violations[:3]
-                ],
-            },
+        logger.info(
+            "canary transition (alert sink not wired): %s severity=%s "
+            "violations_in_cycle=%d snapshot_time=%s",
+            invariant_id,
+            worst.severity,
+            len(violations),
+            snapshot_time,
         )
-
-        notification = db.create_notification(CANARY_NOTIFIER_NAME, data)
-        await self._broadcast(notification)
 
     @staticmethod
     def _render_message(

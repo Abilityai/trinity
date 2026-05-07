@@ -866,27 +866,36 @@ def _run(coro):
 class TestCanaryService:
     """End-to-end tests for `CanaryService.run_cycle()`."""
 
-    def test_first_cycle_violation_fires_one_notification(
+    def test_first_cycle_violation_classifies_as_transition(
         self, canary_db, canary_service
     ):
-        """First cycle that sees a violation emits exactly one notification."""
+        """First cycle that sees a violation classifies it as a green→red flip.
+
+        Phase 1 has no alert sink wired (dashboard notifications dropped per
+        product decision; Slack arrives in a follow-up PR), so we assert on
+        the structural classification — `transition_invariant_ids` and the
+        cumulative counter — instead of a notification side-effect. We also
+        pin `db.create_notification` to zero calls so a future regression
+        that re-adds the bell path trips this test.
+        """
         _add_agent(canary_db, "real")
         _add_orphan_sharing(canary_db, "ghost-1")  # triggers L-03
 
-        result = _run(canary_service["service"].run_cycle())
+        svc = canary_service["service"]
+        result = _run(svc.run_cycle())
 
-        assert "L-03" in result.transition_invariant_ids
-        assert len(canary_service["notification_calls"]) == 1
-        call = canary_service["notification_calls"][0]
-        assert call["agent_name"] == "canary-harness"
-        assert "L-03" in call["data"].title
+        assert result.transition_invariant_ids == ["L-03"]
+        assert svc.cumulative_transitions == 1
+        assert canary_service["notification_calls"] == [], (
+            "dashboard notification path must stay severed in Phase 1"
+        )
 
-    def test_continuing_red_does_not_re_fire(self, canary_db, canary_service):
-        """Same orphan, three cycles → 3 violations persisted, 1 notification.
+    def test_continuing_red_does_not_re_classify(self, canary_db, canary_service):
+        """Same orphan, three cycles → 3 violations persisted, 1 transition.
 
         Regression for e7c11b2e: transition detection was firing on every
         continuing-red cycle. The fix uses a Redis previous-cycle cursor
-        so a continuously-red invariant rings the bell exactly once.
+        so a continuously-red invariant is classified once, not every cycle.
         """
         _add_agent(canary_db, "real")
         _add_orphan_sharing(canary_db, "ghost-1")
@@ -897,15 +906,15 @@ class TestCanaryService:
         _run(svc.run_cycle())
 
         # All three cycles still persist the violation — the forensic
-        # record is intact even when the bell stays quiet.
+        # record is intact even when the transition counter stays flat.
         ops = canary_service["canary_ops"]
         assert ops.count_violations(invariant_id="L-03") == 3
-        assert len(canary_service["notification_calls"]) == 1, (
-            "continuing-red must not re-notify on every cycle"
+        assert svc.cumulative_transitions == 1, (
+            "continuing-red must not re-classify on every cycle"
         )
 
-    def test_red_green_red_fires_twice(self, canary_db, canary_service):
-        """red → green → red emits two notifications.
+    def test_red_green_red_classifies_twice(self, canary_db, canary_service):
+        """red → green → red registers two transitions.
 
         A clean cycle in the middle "re-arms" the invariant; the next
         violation is a fresh transition, not a continuation.
@@ -917,7 +926,7 @@ class TestCanaryService:
 
         # Cycle 1: red.
         _run(svc.run_cycle())
-        assert len(canary_service["notification_calls"]) == 1
+        assert svc.cumulative_transitions == 1
 
         # Cycle 2: clean it up → green.
         c = _conn(canary_db)
@@ -925,16 +934,14 @@ class TestCanaryService:
         c.commit()
         c.close()
         _run(svc.run_cycle())
-        assert len(canary_service["notification_calls"]) == 1, (
-            "green cycle must not emit"
-        )
+        assert svc.cumulative_transitions == 1, "green cycle must not classify"
 
         # Cycle 3: re-introduce → red again.
         _add_orphan_sharing(canary_db, "ghost-1")
         _run(svc.run_cycle())
 
-        assert len(canary_service["notification_calls"]) == 2, (
-            "red→green→red must fire on the second red transition"
+        assert svc.cumulative_transitions == 2, (
+            "red→green→red must register a fresh transition on the second red"
         )
 
     def test_terminal_status_set_seeds_e02_side_table(
