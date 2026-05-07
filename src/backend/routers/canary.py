@@ -202,7 +202,8 @@ async def run_canary_cycle(
       - integration tests that need deterministic cycle timing
 
     The response surfaces exactly the transitions the service emitted —
-    no recomputation here — so the endpoint and the bell cannot disagree.
+    no recomputation here — so the endpoint and the Slack webhook cannot
+    disagree.
     """
     body = body or RunCycleRequest()
     requested_ids = body.invariants or list(INVARIANTS.keys())

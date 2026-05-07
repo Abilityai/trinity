@@ -2,8 +2,9 @@
 Canary invariant violations database operations (CANARY-001 / Issue #411).
 
 Append-mostly access to the `canary_violations` table populated by the
-continuous orchestration-invariant harness. The canary skill writes one row
-per fired check; the read API surfaces them to admins for triage.
+continuous orchestration-invariant harness. `services/canary_service.py`
+writes one row per fired check each cycle; the read API surfaces them to
+admins for triage.
 
 `observed_state` is stored as a JSON string per invariant; the helpers
 parse it on the way out so callers see a dict.
@@ -170,10 +171,10 @@ class CanaryOperations:
     def get_latest_per_invariant(self) -> Dict[str, Dict[str, Any]]:
         """Return the most recent violation per invariant_id.
 
-        Used by the canary skill for green→red transition detection: if the
+        Used by `CanaryService` for green→red transition detection: if the
         latest stored violation for an invariant predates the current
-        snapshot, this cycle is a fresh transition that warrants a push
-        notification.
+        snapshot, this cycle is a fresh transition that warrants a Slack
+        webhook post.
         """
         with get_db_connection() as conn:
             cursor = conn.cursor()

@@ -13,8 +13,9 @@ Public API:
   snapshot and return a list of `ViolationReport`.
 - `INVARIANTS` — registry of invariant id → check function.
 
-The agent template at config/agent-templates/canary-invariant invokes
-these via POST /api/canary/run-cycle on a 5-minute schedule.
+`services/canary_service.py` drives these on a 5-minute background loop
+in the backend process; `POST /api/canary/run-cycle` exposes the same
+entrypoint for on-demand smoke tests.
 """
 
 from .snapshot import (

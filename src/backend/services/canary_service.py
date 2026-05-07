@@ -591,14 +591,13 @@ class CanaryService:
         violations: List[ViolationReport],
         snapshot_time: str,
     ) -> str:
-        """Human-readable one-liner for the notification body.
+        """Human-readable one-liner for the Slack message body.
 
-        Time is intentionally omitted — when the alert sink is wired the
-        UI/Slack render will surface a relative "just now / 4m ago"
-        badge, and the precise ISO `snapshot_time` is preserved in the
-        notification metadata for forensic correlation back to the
-        `canary_violations` row. Embedding it in the message text would
-        be redundant.
+        Time is intentionally omitted — the Slack Block Kit payload
+        carries a relative "just now / 4m ago" context badge, and the
+        precise ISO `snapshot_time` is preserved in the `canary_violations`
+        row for forensic correlation. Embedding it in the message text
+        would be redundant.
         """
         if invariant_id == "S-01":
             agents = sorted({v.observed_state.get("agent_name") for v in violations})

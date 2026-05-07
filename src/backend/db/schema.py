@@ -821,10 +821,11 @@ TABLES = {
     # Canary Invariant Harness (CANARY-001 / Issue #411 — Phase 1)
     # -------------------------------------------------------------------------
     # Continuous orchestration-invariant violations recorded by the canary
-    # agent. Each row is one fired check; the row stores the invariant id,
-    # tier, severity, snapshot timestamp, and a JSON `observed_state` payload
-    # specific to the invariant. The canary skill writes here every cycle and
-    # emits notifications on green→red transitions.
+    # watcher service (`services/canary_service.py`). Each row is one fired
+    # check; the row stores the invariant id, tier, severity, snapshot
+    # timestamp, and a JSON `observed_state` payload specific to the
+    # invariant. The service writes here every cycle and posts to a Slack
+    # webhook (`CANARY_SLACK_WEBHOOK_URL`) on green→red transitions.
     "canary_violations": """
         CREATE TABLE IF NOT EXISTS canary_violations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
