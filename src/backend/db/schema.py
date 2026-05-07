@@ -48,6 +48,22 @@ TABLES = {
         )
     """,
 
+    # SUB-001: Subscription credentials. Declared before agent_ownership so the
+    # subscription_id foreign key target exists if FKs are ever turned on.
+    "subscription_credentials": """
+        CREATE TABLE IF NOT EXISTS subscription_credentials (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            encrypted_credentials TEXT NOT NULL,
+            subscription_type TEXT,
+            rate_limit_tier TEXT,
+            owner_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (owner_id) REFERENCES users(id)
+        )
+    """,
+
     "agent_ownership": """
         CREATE TABLE IF NOT EXISTS agent_ownership (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +75,7 @@ TABLES = {
             autonomy_enabled INTEGER DEFAULT 0,
             memory_limit TEXT,
             cpu_limit TEXT,
+            full_capabilities INTEGER DEFAULT 0,
             read_only_mode INTEGER DEFAULT 0,
             read_only_config TEXT,
             subscription_id TEXT,
@@ -69,7 +86,9 @@ TABLES = {
             is_default_avatar INTEGER DEFAULT 0,
             require_email INTEGER DEFAULT 0,
             open_access INTEGER DEFAULT 0,
+            max_backlog_depth INTEGER DEFAULT 50,
             group_auth_mode TEXT DEFAULT 'none',
+            voice_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (owner_id) REFERENCES users(id),
@@ -161,6 +180,8 @@ TABLES = {
             validation_enabled INTEGER DEFAULT 0,
             validation_prompt TEXT,
             validation_timeout_seconds INTEGER DEFAULT 120,
+            webhook_token TEXT,
+            webhook_enabled INTEGER DEFAULT 0,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )
     """,
@@ -193,6 +214,15 @@ TABLES = {
             validation_execution_id TEXT,
             validates_execution_id TEXT,
             compact_metadata TEXT,
+            source_user_id INTEGER,
+            source_user_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            source_mcp_key_name TEXT,
+            claude_session_id TEXT,
+            queued_at TEXT,
+            backlog_metadata TEXT,
+            fan_out_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -318,6 +348,26 @@ TABLES = {
             FOREIGN KEY (parent_activity_id) REFERENCES agent_activities(id),
             FOREIGN KEY (related_chat_message_id) REFERENCES chat_messages(id),
             FOREIGN KEY (related_execution_id) REFERENCES schedule_executions(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Notifications (NOTIF-001)
+    # -------------------------------------------------------------------------
+    "agent_notifications": """
+        CREATE TABLE IF NOT EXISTS agent_notifications (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            notification_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT,
+            priority TEXT DEFAULT 'normal',
+            category TEXT,
+            metadata TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            acknowledged_at TEXT,
+            acknowledged_by TEXT
         )
     """,
 
@@ -681,6 +731,154 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Multi-Agent Slack Tables (SLACK-002)
+    # -------------------------------------------------------------------------
+    "slack_workspaces": """
+        CREATE TABLE IF NOT EXISTS slack_workspaces (
+            id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL UNIQUE,
+            team_name TEXT,
+            bot_token TEXT NOT NULL,
+            connected_by TEXT,
+            connected_at TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1
+        )
+    """,
+
+    "slack_channel_agents": """
+        CREATE TABLE IF NOT EXISTS slack_channel_agents (
+            id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            slack_channel_id TEXT NOT NULL,
+            slack_channel_name TEXT,
+            agent_name TEXT NOT NULL,
+            is_dm_default INTEGER DEFAULT 0,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(team_id, slack_channel_id),
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE
+        )
+    """,
+
+    "slack_active_threads": """
+        CREATE TABLE IF NOT EXISTS slack_active_threads (
+            team_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            thread_ts TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (team_id, channel_id, thread_ts)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Telegram Integration Tables (TELEGRAM-001 / TGRAM-GROUP)
+    # -------------------------------------------------------------------------
+    "telegram_bindings": """
+        CREATE TABLE IF NOT EXISTS telegram_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL UNIQUE,
+            bot_token_encrypted TEXT NOT NULL,
+            bot_username TEXT,
+            bot_id TEXT UNIQUE,
+            webhook_secret TEXT NOT NULL,
+            webhook_url TEXT,
+            telegram_secret_token TEXT,
+            last_update_id INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """,
+
+    # verified_email/verified_at columns rolled in from _migrate_access_control (#311)
+    "telegram_chat_links": """
+        CREATE TABLE IF NOT EXISTS telegram_chat_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            binding_id INTEGER NOT NULL REFERENCES telegram_bindings(id),
+            telegram_user_id TEXT NOT NULL,
+            telegram_username TEXT,
+            session_id TEXT,
+            message_count INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_active TEXT,
+            verified_email TEXT,
+            verified_at TEXT,
+            UNIQUE(binding_id, telegram_user_id)
+        )
+    """,
+
+    # verified_by_email/verified_at columns rolled in from _migrate_group_auth_mode
+    "telegram_group_configs": """
+        CREATE TABLE IF NOT EXISTS telegram_group_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            binding_id INTEGER NOT NULL REFERENCES telegram_bindings(id),
+            chat_id TEXT NOT NULL,
+            chat_title TEXT,
+            chat_type TEXT DEFAULT 'group',
+            trigger_mode TEXT DEFAULT 'mention',
+            welcome_enabled INTEGER DEFAULT 0,
+            welcome_text TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            verified_by_email TEXT,
+            verified_at TEXT
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # WhatsApp Integration Tables (WHATSAPP-001 — Twilio)
+    # -------------------------------------------------------------------------
+    "whatsapp_bindings": """
+        CREATE TABLE IF NOT EXISTS whatsapp_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL UNIQUE,
+            account_sid TEXT NOT NULL,
+            auth_token_encrypted TEXT NOT NULL,
+            from_number TEXT NOT NULL,
+            messaging_service_sid TEXT,
+            display_name TEXT,
+            is_sandbox INTEGER DEFAULT 0,
+            webhook_secret TEXT NOT NULL UNIQUE,
+            webhook_url TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """,
+
+    "whatsapp_chat_links": """
+        CREATE TABLE IF NOT EXISTS whatsapp_chat_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            binding_id INTEGER NOT NULL REFERENCES whatsapp_bindings(id),
+            wa_user_phone TEXT NOT NULL,
+            wa_user_name TEXT,
+            session_id TEXT,
+            verified_email TEXT,
+            verified_at TEXT,
+            message_count INTEGER DEFAULT 0,
+            last_active TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(binding_id, wa_user_phone)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Subscription Rate Limit Tracking (SUB-003)
+    # -------------------------------------------------------------------------
+    "subscription_rate_limit_events": """
+        CREATE TABLE IF NOT EXISTS subscription_rate_limit_events (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            subscription_id TEXT NOT NULL,
+            error_message TEXT,
+            occurred_at TEXT NOT NULL,
+            FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id) ON DELETE CASCADE
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Operator Queue Tables (OPS-001)
     # -------------------------------------------------------------------------
     "operator_queue": """
@@ -991,6 +1189,57 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_mcp_key ON audit_log(mcp_key_id, timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_audit_log_request ON audit_log(request_id)",
+
+    # Subscription credentials indexes (SUB-001)
+    "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",
+    "CREATE INDEX IF NOT EXISTS idx_subscriptions_owner ON subscription_credentials(owner_id)",
+
+    # Notifications indexes (NOTIF-001)
+    "CREATE INDEX IF NOT EXISTS idx_notifications_agent ON agent_notifications(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_status ON agent_notifications(status)",
+    "CREATE INDEX IF NOT EXISTS idx_notifications_priority ON agent_notifications(priority)",
+
+    # Subscription rate-limit indexes (SUB-003)
+    "CREATE INDEX IF NOT EXISTS idx_rate_limit_agent_sub "
+    "ON subscription_rate_limit_events(agent_name, subscription_id, occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_rate_limit_sub "
+    "ON subscription_rate_limit_events(subscription_id, occurred_at DESC)",
+
+    # Multi-agent Slack indexes (SLACK-002)
+    "CREATE INDEX IF NOT EXISTS idx_slack_channel_agents_team ON slack_channel_agents(team_id)",
+    "CREATE INDEX IF NOT EXISTS idx_slack_channel_agents_agent ON slack_channel_agents(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_slack_active_threads_lookup ON slack_active_threads(team_id, channel_id, thread_ts)",
+
+    # Telegram integration indexes (TELEGRAM-001 / TGRAM-GROUP)
+    "CREATE INDEX IF NOT EXISTS idx_telegram_bindings_agent ON telegram_bindings(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_telegram_bindings_bot_id ON telegram_bindings(bot_id)",
+    "CREATE INDEX IF NOT EXISTS idx_telegram_bindings_webhook ON telegram_bindings(webhook_secret)",
+    "CREATE INDEX IF NOT EXISTS idx_telegram_chat_links_binding ON telegram_chat_links(binding_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_group_binding_chat ON telegram_group_configs(binding_id, chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tg_group_chat_id ON telegram_group_configs(chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tg_group_active ON telegram_group_configs(is_active)",
+
+    # WhatsApp integration indexes (WHATSAPP-001)
+    "CREATE INDEX IF NOT EXISTS idx_whatsapp_bindings_agent ON whatsapp_bindings(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_whatsapp_bindings_webhook ON whatsapp_bindings(webhook_secret)",
+    "CREATE INDEX IF NOT EXISTS idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id)",
+
+    # Execution fan-out / backlog / retry partial indexes
+    "CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)",
+    "CREATE INDEX IF NOT EXISTS idx_executions_queued "
+    "ON schedule_executions(agent_name, queued_at) "
+    "WHERE status = 'queued'",
+    "CREATE INDEX IF NOT EXISTS idx_executions_pending_retry "
+    "ON schedule_executions(retry_scheduled_at) "
+    "WHERE retry_scheduled_at IS NOT NULL AND status = 'pending_retry'",
+
+    # Schedule webhook token (WEBHOOK-001 / #291)
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_webhook_token "
+    "ON agent_schedules(webhook_token) WHERE webhook_token IS NOT NULL",
+
+    # Proactive messaging share lookup (#321)
+    "CREATE INDEX IF NOT EXISTS idx_agent_sharing_proactive "
+    "ON agent_sharing(agent_name, shared_with_email) WHERE allow_proactive = 1",
 ]
 
 
