@@ -25,32 +25,37 @@ agents:
   # Constant slot churn — fires every minute (cron's minimum). Exercises
   # S-01 (slot–row bijection) and E-02 (no phantom reversal) by producing
   # a steady stream of acquire / release cycles.
+  #
+  # `test-echo` is Trinity's minimal stock template (no MCP servers, no
+  # credentials, deterministic short reply) — exactly what slot-churn
+  # invariants need.
   burst:
-    template: local:default
+    template: local:test-echo
     resources:
       cpu: "1"
       memory: "512m"
     schedules:
       - name: heartbeat
         cron: "* * * * *"  # every minute
-        message: "Reply only with the literal string: ok"
+        message: "ok"
         timezone: UTC
         description: Constant load to exercise slot–row bijection (S-01) and reversal (E-02)
 
-  # Long-running task with a non-default execution timeout, so S-03
-  # (slot TTL ≥ timeout + 300) has anything to check, and E-01
-  # (no overdue running rows) has long-lived rows to scrutinize.
+  # Slower cadence so multiple slots overlap across cycles. Phase 2
+  # invariants (S-03 / E-01 / E-06) want a longer-lived slot to scrutinize;
+  # Phase 1 only needs the slower cron to broaden snapshot coverage, so
+  # reusing `test-echo` is fine here too.
   long:
-    template: local:default
+    template: local:test-echo
     resources:
       cpu: "1"
       memory: "1g"
     schedules:
       - name: long-task
         cron: "*/5 * * * *"  # every 5 min
-        message: "Run a small sleep then echo done. Use the bash tool."
+        message: "long-task ping"
         timezone: UTC
-        description: Longer-lived slot for S-03/E-01/E-06 exercise (Phase 2)
+        description: Slower cadence to overlap slots across canary cycles (Phase 2 will swap in a real long task)
 
 # No cross-agent permissions — the canary fleet observes the orchestration
 # layer, not each other.
