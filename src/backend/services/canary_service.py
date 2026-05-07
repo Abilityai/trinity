@@ -63,6 +63,7 @@ class CycleResult:
     # `None` if this is the first-ever violation for that invariant.
     previous_violation_at: Dict[str, Optional[str]] = field(default_factory=dict)
     snapshot_time: str = ""
+    sources_unavailable: List[str] = field(default_factory=list)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,7 @@ class CanaryService:
             transition_invariant_ids=transition_ids,
             previous_violation_at=previous_violation_at,
             snapshot_time=snapshot.snapshot_time,
+            sources_unavailable=list(snapshot.sources_unavailable),
         )
 
     # ------------------------------------------------------------------

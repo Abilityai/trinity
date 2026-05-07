@@ -2,10 +2,10 @@
 Canary Invariant Harness API (CANARY-001 / Issue #411).
 
 Admin-only query interface over the `canary_violations` table populated by
-the continuous canary harness. Phase 1 deploys this read endpoint plus the
-canary agent fleet that calls `mcp__trinity__send_notification` on green→red
-transitions; the table itself is the source of truth for forensic replay
-and 24-hour trend tiles on the canary agent's dashboard.
+the continuous canary harness. Phase 1 ships this read endpoint plus the
+`CanaryService` 5-minute background loop that posts to a Slack webhook
+(`CANARY_SLACK_WEBHOOK_URL`) on green→red transitions; the table itself is
+the source of truth for forensic replay and 24-hour trend tiles.
 
 Mounted at `/api/canary` to keep the canary surface area distinct from the
 platform audit log.
@@ -96,8 +96,9 @@ class CycleViolation(BaseModel):
 class CycleTransition(BaseModel):
     """A green→red transition detected this cycle.
 
-    Agents iterate this list and send exactly one push notification per
-    entry, mapping severity to the notification priority.
+    `CanaryService` posts exactly one Slack webhook message per entry,
+    mapping severity to the message styling. Surfaced here so the run-cycle
+    response mirrors what the service actually emitted.
     """
 
     invariant_id: str
@@ -267,7 +268,7 @@ async def run_canary_cycle(
         cycle_duration_ms=duration_ms,
         checks_run=[i for i in valid_ids if i in cycle.violations],
         checks_skipped=checks_skipped,
-        sources_unavailable=[],  # Service logs but doesn't surface; future: expose
+        sources_unavailable=cycle.sources_unavailable,
         violations=persisted,
         transitions=transitions_out,
     )
