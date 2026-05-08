@@ -15,14 +15,24 @@ container — non-trivial and orthogonal to the check itself.
 Phase 1 instead uses a **state-comparison** detector: each cycle, the set
 of recently-terminal execution_ids (last 30 min, per the snapshot
 collector) is compared against the previous cycle's set, persisted in a
-Redis hash `canary:e02:terminal_seen`. Any execution_id that was in the
-previous set, is *not* terminal in this snapshot's running/queued tables,
-**and** still exists in the DB → reversal violation.
+Redis sorted set `canary:e02:terminal_seen` with `score = unix ts last
+seen terminal`. Any execution_id that was in the previous set, is *not*
+terminal in this snapshot's running/queued tables, **and** still exists
+in the DB → reversal violation.
 
 This is strictly more sensitive than log diffing for this bug class:
 even a reversal that happens silently (no log line, e.g. via direct DB
 write) is caught. The trade-off is a small Redis side-table; fine in
 exchange for a cleaner Phase 1.
+
+The side-table is bounded by **age**, not by a hard count. Each cycle
+calls `ZREMRANGEBYSCORE` to drop entries older than
+`PREV_TERMINAL_RETENTION_SECONDS`. Earlier versions of this code
+DEL'd the entire key once it crossed a 5000-row hard cap and re-added
+only the current cycle's terminals, which left a one-cycle E-02 blind
+spot every time the cap was crossed on busy installs. Score-based
+trimming bounds memory by `activity_rate × retention_window` and never
+loses an in-window terminal id to a hard reset.
 
 When Phase 2 wires up Vector log access, we may add a complementary
 log-based detector — but the state-comparison check stands on its own.
@@ -32,7 +42,8 @@ class of bug this harness exists to catch.
 """
 
 import logging
-from typing import List, Set
+import time
+from typing import Dict, List, Set
 
 from ..snapshot import Snapshot, ViolationReport, TERMINAL_EXECUTION_STATUSES
 
@@ -44,13 +55,26 @@ INVARIANT_ID = "E-02"
 TIER = "A"
 SEVERITY = "critical"
 
-# Redis hash storing the previous cycle's terminal set.
-# Members are execution_ids; values are the terminal status at last sight.
+# Redis sorted set storing the previous-cycle terminal ids.
+# Members are execution_ids; scores are the unix ts the id was last
+# observed in a snapshot's terminal set.
 REDIS_KEY_PREV_TERMINAL = "canary:e02:terminal_seen"
 
-# Cap on stored set size to bound the side-table; older entries are
-# trimmed by snapshot_collector's window (30 min) anyway.
-PREV_TERMINAL_MAX = 5000
+# Parallel hash carrying the actual terminal status (success / failed /
+# cancelled / skipped) for each id in the ZSET. Read on reversal so the
+# violation report (and the Slack forensic line) can render the real
+# prior status — earlier code stored the placeholder string "terminal"
+# which made on-call alerts read "terminal → running" instead of e.g.
+# "success → running".
+REDIS_KEY_PREV_TERMINAL_STATUS = "canary:e02:terminal_status"
+
+# Trim ids older than this many seconds. Comfortably larger than the
+# snapshot collector's 30-min terminal window so an id does not age out
+# between the cycle that records it and the cycle that detects a
+# reversal of it. Age-based trimming replaced an earlier hard count cap
+# (5000) that DEL'd the entire key on overflow, creating one-cycle blind
+# spots on busy installs.
+PREV_TERMINAL_RETENTION_SECONDS = 60 * 60  # 1 hour
 
 
 def _redis():
@@ -70,10 +94,23 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
     ):
         return violations
 
+    now_ts = time.time()
+    cutoff_ts = now_ts - PREV_TERMINAL_RETENTION_SECONDS
+
     try:
         redis_client = _redis()
+        # Snapshot the about-to-expire ids before trimming so we can
+        # garbage-collect their entries from the parallel status hash in
+        # the same cycle. Done via ZRANGEBYSCORE before ZREMRANGEBYSCORE
+        # because the latter does not return the dropped members.
+        expired_ids: List[str] = list(
+            redis_client.zrangebyscore(REDIS_KEY_PREV_TERMINAL, "-inf", cutoff_ts) or []
+        )
+        redis_client.zremrangebyscore(REDIS_KEY_PREV_TERMINAL, "-inf", cutoff_ts)
+        if expired_ids:
+            redis_client.hdel(REDIS_KEY_PREV_TERMINAL_STATUS, *expired_ids)
         previous: Set[str] = set(
-            redis_client.hkeys(REDIS_KEY_PREV_TERMINAL) or []
+            redis_client.zrange(REDIS_KEY_PREV_TERMINAL, 0, -1) or []
         )
     except Exception:
         # Redis unreachable — record once via the snapshot mechanism on
@@ -81,7 +118,7 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         logger.exception("E-02: previous terminal set unreadable; skipping")
         return violations
 
-    current_terminal = snapshot.terminal_exec_ids
+    current_terminal: Dict[str, str] = snapshot.terminal_exec_statuses
 
     # Reversal candidates: ids that were terminal previously but are now
     # in the running/queued sets. Cross-reference against per-agent
@@ -93,9 +130,21 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         queued_now |= agent.queued_exec_ids
 
     reversed_ids = previous & (running_now | queued_now)
+    if reversed_ids:
+        try:
+            prev_status_values = redis_client.hmget(
+                REDIS_KEY_PREV_TERMINAL_STATUS, *sorted(reversed_ids)
+            )
+        except Exception:
+            logger.exception("E-02: status lookup failed; reporting status as unknown")
+            prev_status_values = [None] * len(reversed_ids)
+        prev_status_by_eid = dict(zip(sorted(reversed_ids), prev_status_values))
+    else:
+        prev_status_by_eid = {}
+
     for eid in sorted(reversed_ids):
-        previous_status = redis_client.hget(REDIS_KEY_PREV_TERMINAL, eid)
         current_status = "running" if eid in running_now else "queued"
+        previous_status = prev_status_by_eid.get(eid) or "unknown"
         violations.append(
             ViolationReport(
                 invariant_id=INVARIANT_ID,
@@ -109,34 +158,29 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                     "terminal_statuses_tracked": list(TERMINAL_EXECUTION_STATUSES),
                 },
                 signal_query=(
-                    f"execution_id {eid} was terminal in previous cycle "
-                    f"({previous_status}); now {current_status}"
+                    f"execution_id {eid} was {previous_status} in previous "
+                    f"cycle; now {current_status}"
                 ),
             )
         )
 
     # Update the side-table with this cycle's terminal set so the next
-    # cycle has something to compare against. Done after the check so a
-    # crash mid-write doesn't poison the next cycle.
+    # cycle has something to compare against. ZADD updates the score on
+    # existing members, so a still-terminal id has its retention clock
+    # refreshed and will not age out while it's still being observed.
+    # The parallel hash carries the row's actual terminal status; HSET
+    # overwrites on transitions between terminal statuses (rare in
+    # practice but cheap to honour).
     try:
-        # Mapping eid -> status for richer reports; we store a placeholder
-        # since current snapshot doesn't carry the per-row status (the
-        # collector only fetches ids). Acceptable trade-off — the row's
-        # actual status at violation time is what we report.
         if current_terminal:
-            redis_client.hset(
+            redis_client.zadd(
                 REDIS_KEY_PREV_TERMINAL,
-                mapping={eid: "terminal" for eid in current_terminal},
+                {eid: now_ts for eid in current_terminal},
             )
-        # Trim if oversized — pop the oldest by HLEN heuristic. SQL
-        # window already bounds growth, so this is belt-and-suspenders.
-        if redis_client.hlen(REDIS_KEY_PREV_TERMINAL) > PREV_TERMINAL_MAX:
-            redis_client.delete(REDIS_KEY_PREV_TERMINAL)
-            if current_terminal:
-                redis_client.hset(
-                    REDIS_KEY_PREV_TERMINAL,
-                    mapping={eid: "terminal" for eid in current_terminal},
-                )
+            redis_client.hset(
+                REDIS_KEY_PREV_TERMINAL_STATUS,
+                mapping=current_terminal,
+            )
     except Exception:
         logger.exception("E-02: failed to persist terminal set; next cycle will skip")
 

@@ -149,10 +149,12 @@ class Snapshot:
     orphan_refs: List[OrphanRef] = field(default_factory=list)
     # Redis slot keys observed for agents NOT in known_agents (also L-03).
     orphan_redis_slots: Dict[str, int] = field(default_factory=dict)
-    # E-02 inputs: terminal-state set per execution_id in the most recent
+    # E-02 inputs: terminal-state map per execution_id in the most recent
     # snapshot. The check compares this against a stored "previously
-    # terminal" set fetched from Redis to detect reversals.
-    terminal_exec_ids: Set[str] = field(default_factory=set)
+    # terminal" set fetched from Redis to detect reversals. The status
+    # value (success/failed/cancelled/skipped) is preserved so reversal
+    # alerts can render the real prior status, not a placeholder.
+    terminal_exec_statuses: Dict[str, str] = field(default_factory=dict)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
 
@@ -200,13 +202,18 @@ def _collect_executions(agent_name: str) -> Dict[str, Set[str]]:
         return out
 
 
-def _collect_terminal_executions(window_minutes: int = 30) -> Set[str]:
-    """Recent terminal execution_ids (for E-02 reversal detection).
+def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
+    """Recent terminal execution_ids → status (for E-02 reversal detection).
 
     Bounding the window keeps the comparison set small. Reversals are
     expected within minutes of the original transition; older terminal
     rows reverting would also indicate corruption but at vanishingly low
     base rate, and would be caught by E-01 (terminal-state closure) too.
+
+    Returns a dict so E-02 can persist the *real* prior status (success
+    / failed / cancelled / skipped) into its Redis side-table — the
+    reversal alert prints that back to the operator, and a placeholder
+    string ("terminal") would erase the forensic value of the alert.
     """
     from db.connection import get_db_connection
 
@@ -216,13 +223,13 @@ def _collect_terminal_executions(window_minutes: int = 30) -> Set[str]:
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT id FROM schedule_executions
+            SELECT id, status FROM schedule_executions
             WHERE status IN ({placeholders})
               AND completed_at > ?
             """,
             (*TERMINAL_EXECUTION_STATUSES, cutoff),
         )
-        return {row["id"] for row in cursor.fetchall()}
+        return {row["id"]: row["status"] for row in cursor.fetchall()}
 
 
 def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
@@ -404,9 +411,9 @@ def collect_snapshot() -> Snapshot:
         logger.exception("canary snapshot: orphan ref scan failed")
         snap.sources_unavailable.append(f"sqlite.orphan_refs: {exc}")
 
-    # SQLite: terminal execution ids for E-02 detector.
+    # SQLite: terminal execution ids → status for E-02 detector.
     try:
-        snap.terminal_exec_ids = _collect_terminal_executions()
+        snap.terminal_exec_statuses = _collect_terminal_executions()
     except Exception as exc:
         logger.exception("canary snapshot: terminal executions read failed")
         snap.sources_unavailable.append(f"sqlite.terminal_executions: {exc}")

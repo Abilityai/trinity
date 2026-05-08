@@ -98,6 +98,37 @@ class FakeRedis:
             return 1
         return 0
 
+    def zremrangebyscore(self, key: str, min_score, max_score) -> int:
+        # Accepts numerics or the strings "-inf" / "+inf" — same as redis-py.
+        def _coerce(v):
+            if isinstance(v, str):
+                if v in ("-inf", "inf", "+inf"):
+                    return float(v)
+            return float(v)
+
+        lo = _coerce(min_score)
+        hi = _coerce(max_score)
+        if key not in self._zsets:
+            return 0
+        to_remove = [m for m, s in self._zsets[key].items() if lo <= s <= hi]
+        for m in to_remove:
+            del self._zsets[key][m]
+        return len(to_remove)
+
+    def zrangebyscore(self, key: str, min_score, max_score) -> List[str]:
+        def _coerce(v):
+            if isinstance(v, str) and v in ("-inf", "inf", "+inf"):
+                return float(v)
+            return float(v)
+
+        lo = _coerce(min_score)
+        hi = _coerce(max_score)
+        items = sorted(
+            (kv for kv in self._zsets.get(key, {}).items() if lo <= kv[1] <= hi),
+            key=lambda kv: kv[1],
+        )
+        return [m for m, _ in items]
+
     # HASH ------------------------------------------------------------------
 
     def hset(self, key: str, field: str = None, value: str = None, mapping: Dict[str, str] = None) -> int:
@@ -115,6 +146,21 @@ class FakeRedis:
 
     def hget(self, key: str, field: str):
         return self._hashes.get(key, {}).get(field)
+
+    def hmget(self, key: str, *fields: str) -> List:
+        bucket = self._hashes.get(key, {})
+        return [bucket.get(f) for f in fields]
+
+    def hdel(self, key: str, *fields: str) -> int:
+        bucket = self._hashes.get(key)
+        if not bucket:
+            return 0
+        removed = 0
+        for f in fields:
+            if f in bucket:
+                del bucket[f]
+                removed += 1
+        return removed
 
     def hkeys(self, key: str) -> List[str]:
         return list(self._hashes.get(key, {}).keys())
@@ -522,8 +568,9 @@ class TestSnapshotCollector:
             completed_at="2025-01-01T00:00:00",
         )
         snap = reload_canary["canary"].collect_snapshot()
-        assert "e-recent" in snap.terminal_exec_ids
-        assert "e-old" not in snap.terminal_exec_ids
+        assert "e-recent" in snap.terminal_exec_statuses
+        assert snap.terminal_exec_statuses["e-recent"] == "success"
+        assert "e-old" not in snap.terminal_exec_statuses
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +698,104 @@ class TestInvariantE02:
         assert v.invariant_id == "E-02"
         assert v.observed_state["execution_id"] == "e-done"
         assert v.observed_state["current_status"] == "running"
+        # Forensic value of the alert: the reversal report must carry the
+        # actual prior status (success / failed / cancelled / skipped),
+        # not the placeholder string "terminal" the early Phase 1 cut
+        # used to write into the side-table. The Slack renderer prints
+        # this verbatim — "terminal → running" is useless to on-call.
+        assert v.observed_state["previous_status"] == "success"
+        assert v.signal_query and "success" in v.signal_query
+
+    def test_reversal_renders_real_prior_status_for_each_terminal_kind(
+        self, canary_db, reload_canary
+    ):
+        """The four terminal statuses round-trip through the side-table.
+
+        Regression for the placeholder-string bug: the previous-cycle
+        side-table only carried the literal "terminal" string, so a
+        reversal of e.g. a `cancelled` row reported "terminal → running"
+        instead of "cancelled → running". Run all four through the
+        seed/reverse cycle and assert each comes back labelled correctly.
+        """
+        from canary.invariants import e02_no_phantom_reversal as e02
+
+        # Seed cycle: one row per terminal status.
+        _add_agent(canary_db, "a1")
+        for eid, status in (
+            ("e-success", "success"),
+            ("e-failed", "failed"),
+            ("e-cancelled", "cancelled"),
+            ("e-skipped", "skipped"),
+        ):
+            _add_execution(
+                canary_db, eid, "a1", status,
+                completed_at=datetime.utcnow().isoformat(),
+            )
+        snap1 = reload_canary["canary"].collect_snapshot()
+        e02.check(snap1)
+
+        # Reversal: flip them all to running.
+        c = _conn(canary_db)
+        c.execute(
+            "UPDATE schedule_executions SET status='running', completed_at=NULL"
+        )
+        c.commit()
+        c.close()
+
+        snap2 = reload_canary["canary"].collect_snapshot()
+        violations = e02.check(snap2)
+        prev_by_eid = {
+            v.observed_state["execution_id"]: v.observed_state["previous_status"]
+            for v in violations
+        }
+        assert prev_by_eid == {
+            "e-success": "success",
+            "e-failed": "failed",
+            "e-cancelled": "cancelled",
+            "e-skipped": "skipped",
+        }
+
+    def test_side_table_trims_by_age_not_by_hard_reset(
+        self, canary_db, reload_canary, fake_redis
+    ):
+        """Aged-out ids are dropped; in-window ids survive.
+
+        Regression for the pre-fix hard-reset trim: when the side-table
+        crossed a 5000-entry hash cap the entire key was DEL'd, leaving
+        a one-cycle E-02 blind spot. The fix uses a sorted set scored
+        by unix ts and trims via `ZREMRANGEBYSCORE`, so only entries
+        older than the retention window age out — never an in-window
+        terminal id. Verifies that property directly.
+        """
+        from canary.invariants import e02_no_phantom_reversal as e02
+
+        # Seed: one stale entry (well past retention) and one fresh.
+        # Use scores < cutoff and > cutoff to test the boundary.
+        retention = e02.PREV_TERMINAL_RETENTION_SECONDS
+        import time as _time
+        now = _time.time()
+        fake_redis.zadd(
+            e02.REDIS_KEY_PREV_TERMINAL,
+            {
+                "stale-eid": now - retention - 60,    # past cutoff
+                "fresh-eid": now - 30,                # well inside window
+            },
+        )
+
+        # Run one check; both pre-existing ids are non-running, so no
+        # violation, but the trim path should drop "stale-eid" and keep
+        # "fresh-eid".
+        _add_agent(canary_db, "a1")
+        snap = reload_canary["canary"].collect_snapshot()
+        e02.check(snap)
+
+        survivors = set(
+            fake_redis.zrange(e02.REDIS_KEY_PREV_TERMINAL, 0, -1)
+        )
+        assert "stale-eid" not in survivors, "aged-out id must be trimmed"
+        assert "fresh-eid" in survivors, (
+            "in-window id must NOT be lost to a hard reset"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -931,9 +1076,17 @@ class TestCanaryService:
 
         _run(canary_service["service"].run_cycle())
 
-        terminal_seen = fake_redis.hkeys("canary:e02:terminal_seen")
+        terminal_seen = fake_redis.zrange("canary:e02:terminal_seen", 0, -1)
         assert "e-real-success" in terminal_seen, (
             "'success' must be in TERMINAL_EXECUTION_STATUSES"
+        )
+        # Parallel hash must carry the row's real terminal status so a
+        # later reversal renders "success → running", not the
+        # placeholder "terminal → running" that an earlier Phase 1 cut
+        # was emitting into Slack alerts.
+        assert (
+            fake_redis.hget("canary:e02:terminal_status", "e-real-success")
+            == "success"
         )
 
 

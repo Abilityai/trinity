@@ -529,7 +529,7 @@ class CanaryService:
             for v in violations[:5]:
                 obs = v.observed_state or {}
                 eid = obs.get("execution_id", "?")
-                prev = obs.get("previous_status", "?")
+                prev = obs.get("previous_status") or "unknown"
                 curr = obs.get("current_status", "?")
                 lines.append(f"  • `{eid}`: *{prev}* → *{curr}*")
             if len(violations) > 5:
