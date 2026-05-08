@@ -215,10 +215,8 @@ async def run_canary_cycle(
             detail=f"Unknown invariant id(s): {invalid_ids}. "
                    f"Available: {sorted(INVARIANTS.keys())}",
         )
-    valid_ids = [i for i in requested_ids if i in INVARIANTS]
-
     started = time.monotonic()
-    cycle = await canary_service.run_cycle(invariant_ids=valid_ids)
+    cycle = await canary_service.run_cycle(invariant_ids=requested_ids)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     # Row ids come straight from the service via `persisted_violation_ids`
