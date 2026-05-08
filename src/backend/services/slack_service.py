@@ -275,7 +275,7 @@ class SlackService:
     ) -> Tuple[bool, Optional[str]]:
         """Post to a Slack incoming webhook URL.
 
-        Used by the canary alert sink (CANARY-001 Phase 2). Distinct from
+        Used by the canary alert sink (CANARY-001 Phase 1). Distinct from
         `send_message` which uses an OAuth bot token: webhooks are
         URL-as-credential, single-channel, fire-and-forget. Slack's
         response is HTTP 200 with body "ok", or non-200 with an error
