@@ -679,7 +679,7 @@ class CanaryService:
             return True
         if prev_cycle_at is None:
             return True
-        # `>=` so a same-snapshot replay from an immediate manual rerun
+        # `<` so a same-snapshot replay from an immediate manual rerun
         # is treated as a continuation rather than re-firing.
         return prev["snapshot_time"] < prev_cycle_at
 
