@@ -52,6 +52,11 @@ class CycleResult:
     returned by `insert_canary_violation` is at
     `persisted_violation_ids[inv_id][i]` — or `None` if the insert
     failed. Lets the router surface row ids without re-querying.
+
+    `skipped` is True when the lock was already held (concurrent cycle
+    in progress) and this call returned without running. The router
+    maps this to HTTP 409 so an empty response can never be confused
+    with a real green cycle.
     """
 
     violations: Dict[str, List[ViolationReport]] = field(default_factory=dict)
@@ -65,6 +70,7 @@ class CycleResult:
     previous_violation_at: Dict[str, Optional[str]] = field(default_factory=dict)
     snapshot_time: str = ""
     sources_unavailable: List[str] = field(default_factory=list)
+    skipped: bool = False
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +171,7 @@ class CanaryService:
         """
         if self._lock.locked():
             logger.debug("canary: cycle already in progress, skipping")
-            return CycleResult()
+            return CycleResult(skipped=True)
         async with self._lock:
             return await self._run_cycle_inner(invariant_ids)
 

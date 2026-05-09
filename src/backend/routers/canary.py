@@ -224,6 +224,13 @@ async def run_canary_cycle(
     cycle = await canary_service.run_cycle(invariant_ids=requested_ids)
     duration_ms = int((time.monotonic() - started) * 1000)
 
+    # 409 is the operator-friendly signal for "another cycle was mid-run, this
+    # call did nothing." Without it the response is structurally identical to
+    # a real green cycle (empty violations, empty transitions) and the caller
+    # has no way to tell their request was skipped — see /review I2.
+    if cycle.skipped:
+        raise HTTPException(status_code=409, detail="cycle in progress")
+
     # Row ids come straight from the service via `persisted_violation_ids`
     # (index-aligned with `cycle.violations`); no re-query needed. A `None`
     # slot means the insert failed — we drop those from the response rather

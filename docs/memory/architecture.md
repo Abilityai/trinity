@@ -692,7 +692,7 @@ export, enable/disable toggle. Issue #20 can be closed.
 | GET | `/api/canary/violations` | Admin | List violations (filters: invariant_id, severity, tier, start_time, end_time, limit, offset) |
 | GET | `/api/canary/violations/stats` | Admin | Aggregate counts by invariant_id and severity |
 | GET | `/api/canary/violations/{id}` | Admin | Single violation by row id |
-| POST | `/api/canary/run-cycle` | Admin | Run one cycle on demand (delegates to the same `CanaryService.run_cycle()` invoked by the 5-min background loop). Optional body filters which invariants to run. Returns `{snapshot_time, cycle_duration_ms, checks_run, checks_skipped, violations[], transitions[]}`. |
+| POST | `/api/canary/run-cycle` | Admin | Run one cycle on demand (delegates to the same `CanaryService.run_cycle()` invoked by the 5-min background loop). Optional body filters which invariants to run. Returns `{snapshot_time, cycle_duration_ms, checks_run, sources_unavailable, violations[], transitions[]}`. Returns 409 with `detail="cycle in progress"` when a background or sibling on-demand cycle is mid-run — empty payload is never silently returned. |
 
 **Storage**: `canary_violations` table in main SQLite DB. JSON-encoded
 `observed_state` column carries invariant-specific payload.

@@ -46,18 +46,25 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+from models import TaskExecutionStatus
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
 logger = logging.getLogger(__name__)
 
 
-# Statuses considered "terminal" for execution rows. Sourced from the
-# `TaskExecutionStatus` enum in models.py (SUCCESS / FAILED / CANCELLED
-# / SKIPPED) — the same set PR #524's CAS state machine treats as
-# write-once. Used by E-02 (phantom reversal detection) and the L-03
-# orphan scan filter.
-TERMINAL_EXECUTION_STATUSES = ("success", "failed", "cancelled", "skipped")
+# Statuses considered "terminal" for execution rows. Derived directly
+# from `TaskExecutionStatus` (models.py) — the same set PR #524's CAS
+# state machine treats as write-once. Used by E-02 (phantom reversal
+# detection) and the L-03 orphan scan filter. Sourcing from the enum
+# means a new terminal status added there flows here automatically;
+# the previous hand-maintained tuple silently drifted (see /review I3).
+TERMINAL_EXECUTION_STATUSES = (
+    TaskExecutionStatus.SUCCESS.value,
+    TaskExecutionStatus.FAILED.value,
+    TaskExecutionStatus.CANCELLED.value,
+    TaskExecutionStatus.SKIPPED.value,
+)
 _TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in TERMINAL_EXECUTION_STATUSES)
 
 

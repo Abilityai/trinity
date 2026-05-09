@@ -58,6 +58,30 @@ if "croniter" not in sys.modules:
     sys.modules["croniter"] = _croniter_mod
 
 
+# Stub `models.TaskExecutionStatus` so canary/snapshot.py can derive its
+# terminal-status tuple from the canonical enum without dragging the
+# real `models` module (and its pydantic / db_models dependencies) into
+# unit-test imports. Mirrors the four terminal values from
+# src/backend/models.py:TaskExecutionStatus.
+if "models" not in sys.modules:
+    from enum import Enum as _Enum
+
+    class _StubTaskExecutionStatus(str, _Enum):
+        SUCCESS = "success"
+        FAILED = "failed"
+        CANCELLED = "cancelled"
+        SKIPPED = "skipped"
+        # Non-terminal values still listed so tests that touch them
+        # match the real enum's surface area.
+        QUEUED = "queued"
+        RUNNING = "running"
+        PENDING_RETRY = "pending_retry"
+
+    _models_mod = types.ModuleType("models")
+    _models_mod.TaskExecutionStatus = _StubTaskExecutionStatus
+    sys.modules["models"] = _models_mod
+
+
 # ---------------------------------------------------------------------------
 # Tiny in-memory Redis substitute — covers only the surface canary uses.
 # ---------------------------------------------------------------------------
