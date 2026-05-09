@@ -1147,40 +1147,40 @@ class TestCanarySlackPayload:
     """
 
     def test_format_last_red_first_red_when_none(self, canary_service):
-        from services.canary_service import CanaryService
+        from services.canary_alerts import CanaryAlerts
         assert (
-            CanaryService._format_last_red(None, "2026-05-04T12:00:00Z")
+            CanaryAlerts._format_last_red(None, "2026-05-04T12:00:00Z")
             == "first red for this invariant"
         )
 
     def test_format_last_red_seconds(self, canary_service):
-        from services.canary_service import CanaryService
-        out = CanaryService._format_last_red(
+        from services.canary_alerts import CanaryAlerts
+        out = CanaryAlerts._format_last_red(
             "2026-05-04T11:59:30Z", "2026-05-04T12:00:00Z"
         )
         assert out == "last red 30s ago"
 
     def test_format_last_red_minutes(self, canary_service):
-        from services.canary_service import CanaryService
-        out = CanaryService._format_last_red(
+        from services.canary_alerts import CanaryAlerts
+        out = CanaryAlerts._format_last_red(
             "2026-05-04T11:55:00Z", "2026-05-04T12:00:00Z"
         )
         assert out == "last red 5m ago"
 
     def test_format_last_red_hours(self, canary_service):
-        from services.canary_service import CanaryService
-        out = CanaryService._format_last_red(
+        from services.canary_alerts import CanaryAlerts
+        out = CanaryAlerts._format_last_red(
             "2026-05-04T10:00:00Z", "2026-05-04T12:30:00Z"
         )
         assert out == "last red 2h ago"
 
     def test_format_last_red_falls_back_on_garbage(self, canary_service):
-        from services.canary_service import CanaryService
-        out = CanaryService._format_last_red("not-a-timestamp", "2026-05-04T12:00:00Z")
+        from services.canary_alerts import CanaryAlerts
+        out = CanaryAlerts._format_last_red("not-a-timestamp", "2026-05-04T12:00:00Z")
         assert out == "first red for this invariant"
 
     def test_build_payload_severity_emoji(self, canary_service):
-        from services.canary_service import CanaryService
+        from services.canary_alerts import CanaryAlerts
         from canary.snapshot import ViolationReport
 
         v = ViolationReport(
@@ -1189,7 +1189,7 @@ class TestCanarySlackPayload:
             severity="critical",
             observed_state={"agent_name": "alpha"},
         )
-        text, blocks = CanaryService._build_slack_payload(
+        text, blocks = CanaryAlerts._build_slack_payload(
             "S-01", [v], "2026-05-04T12:00:00Z", None, "critical", [42],
         )
         assert text.startswith("🚨")
@@ -1201,7 +1201,7 @@ class TestCanarySlackPayload:
         assert "Slot–row bijection" in header["text"]["text"]
 
     def test_build_payload_includes_last_red_badge(self, canary_service):
-        from services.canary_service import CanaryService
+        from services.canary_alerts import CanaryAlerts
         from canary.snapshot import ViolationReport
 
         v = ViolationReport(
@@ -1210,7 +1210,7 @@ class TestCanarySlackPayload:
             severity="major",
             observed_state={"ghost_agent_name": "ghost-1"},
         )
-        _, blocks = CanaryService._build_slack_payload(
+        _, blocks = CanaryAlerts._build_slack_payload(
             "L-03",
             [v],
             "2026-05-04T12:00:00Z",
@@ -1225,7 +1225,7 @@ class TestCanarySlackPayload:
         assert "violation #21" in ctx["elements"][0]["text"]
 
     def test_build_payload_l03_forensic_block(self, canary_service):
-        from services.canary_service import CanaryService
+        from services.canary_alerts import CanaryAlerts
         from canary.snapshot import ViolationReport
 
         v = ViolationReport(
@@ -1241,7 +1241,7 @@ class TestCanarySlackPayload:
                 ],
             },
         )
-        _, blocks = CanaryService._build_slack_payload(
+        _, blocks = CanaryAlerts._build_slack_payload(
             "L-03", [v], "2026-05-04T12:00:00Z", None, "major", [21],
         )
         sections = [b for b in blocks if b["type"] == "section"]
@@ -1252,7 +1252,7 @@ class TestCanarySlackPayload:
         assert "row `9`" in forensic_text
 
     def test_build_payload_includes_runbook_hint(self, canary_service):
-        from services.canary_service import CanaryService
+        from services.canary_alerts import CanaryAlerts
         from canary.snapshot import ViolationReport
 
         v = ViolationReport(
@@ -1261,7 +1261,7 @@ class TestCanarySlackPayload:
             severity="major",
             observed_state={"ghost_agent_name": "ghost-1"},
         )
-        _, blocks = CanaryService._build_slack_payload(
+        _, blocks = CanaryAlerts._build_slack_payload(
             "L-03", [v], "2026-05-04T12:00:00Z", None, "major", [21],
         )
         all_text = " ".join(
@@ -1270,20 +1270,20 @@ class TestCanarySlackPayload:
         assert "deleted" in all_text  # runbook hint mentions delete handler
 
     def test_format_row_refs_variants(self, canary_service):
-        from services.canary_service import CanaryService
-        assert CanaryService._format_row_refs([]) is None
-        assert CanaryService._format_row_refs([None]) is None
-        assert CanaryService._format_row_refs([21]) == "violation #21"
+        from services.canary_alerts import CanaryAlerts
+        assert CanaryAlerts._format_row_refs([]) is None
+        assert CanaryAlerts._format_row_refs([None]) is None
+        assert CanaryAlerts._format_row_refs([21]) == "violation #21"
         assert (
-            CanaryService._format_row_refs([21, 22, 23])
+            CanaryAlerts._format_row_refs([21, 22, 23])
             == "violations #21, #22, #23"
         )
         assert (
-            CanaryService._format_row_refs([21, 22, 23, 24, 25])
+            CanaryAlerts._format_row_refs([21, 22, 23, 24, 25])
             == "violations #21–#25 (5 total)"
         )
         # Drops Nones (insert failures) before counting.
-        assert CanaryService._format_row_refs([21, None, 23]) == "violations #21, #23"
+        assert CanaryAlerts._format_row_refs([21, None, 23]) == "violations #21, #23"
 
 
 @pytest.fixture

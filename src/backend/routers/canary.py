@@ -260,12 +260,12 @@ async def run_canary_cycle(
                 previous_violation_at=cycle.previous_violation_at.get(invariant_id),
             ))
 
-    checks_skipped = [i for i in valid_ids if i not in cycle.violations]
+    checks_skipped = [i for i in requested_ids if i not in cycle.violations]
 
     return RunCycleResponse(
         snapshot_time=snapshot_time,
         cycle_duration_ms=duration_ms,
-        checks_run=[i for i in valid_ids if i in cycle.violations],
+        checks_run=[i for i in requested_ids if i in cycle.violations],
         checks_skipped=checks_skipped,
         sources_unavailable=cycle.sources_unavailable,
         violations=persisted,
