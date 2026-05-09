@@ -26,7 +26,7 @@ import tempfile
 import types
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -89,16 +89,65 @@ pytestmark = pytest.mark.unit
 # ── Importlib-load routers/monitoring.py without dragging in routers/__init__ ─
 
 def _load_monitoring_router():
-    """Load routers/monitoring.py directly.
+    """Load routers/monitoring.py directly with scoped dependency stubs.
 
     Going through `from routers import monitoring` would import 50+
     unrelated routers via routers/__init__.py.
+
+    Several test files collected alphabetically before this one permanently
+    install minimal stubs in sys.modules at collection time:
+
+    * test_inter_agent_timeout_unit.py: fake `dependencies` without require_admin.
+    * test_start_agent_skip_inject.py: bare services.agent_service without get_accessible_agents.
+    * test_inject_assigned_credentials.py: fastapi Mock, so @router.get() returns
+      a Mock instead of the original function.
+
+    We use patch.dict to install correct stubs for the duration of exec_module
+    and recover real fastapi by briefly evicting the polluted entry.
+
+    Type notes:
+    - AuthorizedAgentByName is Annotated[str, Depends(func)] → use `str` so
+      FastAPI treats it as a plain path parameter, not an unresolvable Pydantic type.
+    - require_admin is a Depends callable → use a plain lambda.
     """
+    _deps = types.ModuleType("dependencies")
+    _deps.get_current_user = lambda: None
+    _deps.require_admin = lambda: None
+    _deps.AuthorizedAgentByName = str
+    _deps.OwnedAgentByName = str
+    _deps.get_authorized_agent = lambda: None
+
+    _agent_svc = types.ModuleType("services.agent_service")
+    _agent_svc.get_accessible_agents = MagicMock()
+
+    _mon_svc = types.ModuleType("services.monitoring_service")
+    _mon_svc.perform_health_check = MagicMock()
+    _mon_svc.perform_fleet_health_check = MagicMock()
+    _mon_svc.get_monitoring_service = MagicMock()
+    _mon_svc.start_monitoring_service = MagicMock()
+    _mon_svc.stop_monitoring_service = MagicMock()
+    _mon_svc.DEFAULT_CONFIG = {}
+
+    # test_inject_assigned_credentials.py permanently overwrites sys.modules['fastapi']
+    # with a Mock at collection time (sys.modules.update), causing @router.get() to
+    # return a Mock instead of the original function.  Evict the polluted entry briefly
+    # so `import fastapi` reloads from disk; then restore the Mock for other tests.
+    _saved_fastapi = sys.modules.pop("fastapi", None)
+    import fastapi as _real_fastapi  # noqa: PLC0415
+    if _saved_fastapi is not None:
+        sys.modules["fastapi"] = _saved_fastapi
+
     path = _BACKEND / "routers" / "monitoring.py"
     spec = importlib.util.spec_from_file_location("routers.monitoring", str(path))
     mod = importlib.util.module_from_spec(spec)
     sys.modules["routers.monitoring"] = mod
-    spec.loader.exec_module(mod)
+    with patch.dict(sys.modules, {
+        "dependencies": _deps,
+        "services.agent_service": _agent_svc,
+        "services.monitoring_service": _mon_svc,
+        "fastapi": _real_fastapi,
+    }):
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -143,8 +192,37 @@ class TestGetAccessibleAgentsSignature:
     """
 
     def test_helper_takes_single_user_param(self):
-        from services.agent_service.helpers import get_accessible_agents
+        # Load helpers.py DIRECTLY via importlib, bypassing services/agent_service/
+        # __init__.py.  test_start_agent_skip_inject.py permanently registers
+        # sys.modules['services.agent_service'] as a bare stub, so a normal
+        # `from services.agent_service.helpers import …` picks up the stub's
+        # MagicMock attribute rather than the real function.
+        helpers_path = str(_BACKEND / "services" / "agent_service" / "helpers.py")
+        _spec = importlib.util.spec_from_file_location(
+            "agent_service_helpers_sigcheck", helpers_path
+        )
+        _hmod = importlib.util.module_from_spec(_spec)
+        _docker_stub = types.SimpleNamespace(
+            docker_client=MagicMock(),
+            list_all_agents=MagicMock(),
+            list_all_agents_fast=MagicMock(),
+            get_agent_container=MagicMock(),
+        )
+        _settings_stub = types.SimpleNamespace(
+            get_anthropic_api_key=lambda: "sk-test",
+            get_github_pat=lambda: None,
+            get_agent_full_capabilities=lambda: False,
+            settings_service=MagicMock(),
+        )
+        with patch.dict(sys.modules, {
+            "services.docker_service": _docker_stub,
+            "services.docker_utils": types.SimpleNamespace(volume_get=MagicMock()),
+            "services.settings_service": _settings_stub,
+            "database": types.SimpleNamespace(db=MagicMock()),
+        }):
+            _spec.loader.exec_module(_hmod)
 
+        get_accessible_agents = _hmod.get_accessible_agents
         sig = inspect.signature(get_accessible_agents)
         params = list(sig.parameters.values())
         assert len(params) == 1, (

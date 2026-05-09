@@ -44,8 +44,10 @@ AGENT_SSH_PORT_START="2222"
 # Authentication
 # ===========================================
 
-# Admin password for dev mode (change this!)
-ADMIN_PASSWORD="changeme"
+# Admin password — REQUIRED, no default
+# gcp-deploy.sh refuses to deploy if this is unset or equal to "changeme" (issue #692).
+# Generate with: openssl rand -hex 24  (or pick a strong value of your own)
+ADMIN_PASSWORD=""
 
 # Secret key for JWT tokens (generate with: openssl rand -hex 32)
 SECRET_KEY=""

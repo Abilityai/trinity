@@ -36,6 +36,50 @@ from ..utils.subprocess_pgroup import (
 
 logger = logging.getLogger(__name__)
 
+# Hard budget for drain_reader_threads when called from an executor thread.
+# Python's buffered I/O holds an internal lock during readline(); if that
+# thread is stuck waiting for pipe data, a concurrent pipe.close() will
+# deadlock on the same lock and block asyncio.run() indefinitely (Issue #728).
+# Wrapping every asyncio.run(_drain_reader_threads(...)) call in a daemon
+# thread with this budget prevents the executor thread from wedging for the
+# full task timeout (up to 7200 s). Leaked reader threads are daemon threads
+# and die with the container.
+_DRAIN_BUDGET_SECONDS = 90
+
+
+def _drain_bounded(
+    process: subprocess.Popen,
+    *threads: Optional[threading.Thread],
+    grace: int = 5,
+    pgid: Optional[int] = None,
+) -> None:
+    """Run drain_reader_threads with a hard _DRAIN_BUDGET_SECONDS time cap.
+
+    Prevents a TextIOWrapper lock deadlock in safe_close_pipes (Issue #728)
+    from wedging the executor thread for the full task timeout.
+    Uses the same asyncio.run() pattern required by drain_reader_threads'
+    async-to-sync callers (established in #657); adds a daemon-thread wrapper
+    so the budget is enforced at the threading level, not the asyncio level.
+    """
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            asyncio.run(_drain_reader_threads(process, *threads, grace=grace, pgid=pgid))
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    threading.Thread(target=_target, daemon=True).start()
+    if not done.wait(timeout=_DRAIN_BUDGET_SECONDS):
+        logger.warning(
+            "[Subprocess] Drain budget (%ds) exceeded — safe_close_pipes may have "
+            "deadlocked with reader thread's TextIOWrapper lock; reader threads are "
+            "leaked daemon threads (pid=%s). Issue #728.",
+            _DRAIN_BUDGET_SECONDS, process.pid,
+        )
+
 
 # ---------------------------------------------------------------------------
 # JSONL fallback recovery (stdout pipe race — final safety net)
@@ -967,16 +1011,12 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     f"— killing process group"
                 )
                 _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid)
-                asyncio.run(_drain_reader_threads(
-                    process, stdout_thread, stderr_thread,
-                    grace=3, pgid=process_pgid,
-                ))
+                _drain_bounded(process, stdout_thread, stderr_thread,
+                               grace=3, pgid=process_pgid)
                 raise
 
-            asyncio.run(_drain_reader_threads(
-                process, stdout_thread, stderr_thread,
-                grace=5, pgid=process_pgid,
-            ))
+            _drain_bounded(process, stdout_thread, stderr_thread,
+                           grace=5, pgid=process_pgid)
 
             stderr = ''.join(stderr_lines)
             stderr = sanitize_text(stderr) if stderr else stderr
@@ -1808,19 +1848,15 @@ async def execute_headless_task(
                     f"— killing process group"
                 )
                 _terminate_process_group(process, graceful_timeout=5, pgid=process_pgid)
-                asyncio.run(_drain_reader_threads(
-                    process, stdout_thread, stderr_thread,
-                    grace=3, pgid=process_pgid,
-                ))
+                _drain_bounded(process, stdout_thread, stderr_thread,
+                               grace=3, pgid=process_pgid)
                 raise
 
             # Subprocess exited. Drain readers — if a hook grandchild still
             # holds a pipe, the helper will close the pipe FDs so the
             # reader threads can exit.
-            asyncio.run(_drain_reader_threads(
-                process, stdout_thread, stderr_thread,
-                grace=5, pgid=process_pgid,
-            ))
+            _drain_bounded(process, stdout_thread, stderr_thread,
+                           grace=5, pgid=process_pgid)
 
             # Re-raise permission-mode failure captured by stdout thread
             if stdout_exc:

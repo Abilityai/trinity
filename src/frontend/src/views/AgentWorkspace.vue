@@ -203,6 +203,7 @@ import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
 import DOMPurify from 'dompurify'
 import AgentAvatar from '../components/AgentAvatar.vue'
+import Chart from 'chart.js/auto'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -309,10 +310,10 @@ async function fetchPanel() {
       `/api/agents/${agentName}/voice/${sid}/panel`,
       { headers: authStore.authHeader }
     )
-    // Only update state when content has actually changed — prevents 3x/sec
-    // Vue re-renders and avoids overwriting preserved content with empty state
-    // when the session ends and the backend returns the default empty response.
-    if (r.data.updated_at !== panelState.value.updated_at) {
+    // Only update when the agent has actually called a panel tool (updated_at
+    // is non-null) AND the timestamp changed. A null updated_at means "session
+    // not found or no tool ever called" — never overwrite real content with it.
+    if (r.data.updated_at !== null && r.data.updated_at !== panelState.value.updated_at) {
       panelState.value = r.data
     }
   } catch (_) {
@@ -556,16 +557,9 @@ function resizeCanvas() {
 
 watch(() => voice.status.value, (s) => { targetHueShift = STATE_HUE[s] ?? 0 })
 
-function injectChartJs() {
-  if (document.getElementById('chartjs-cdn')) return
-  const s = document.createElement('script')
-  s.id = 'chartjs-cdn'
-  s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'
-  document.head.appendChild(s)
-}
-
 onMounted(async () => {
-  injectChartJs()
+  // Expose Chart globally so agent update_panel HTML snippets can call new Chart(...)
+  if (!window.Chart) window.Chart = Chart
   await fetchAgent()
   currentSprites = buildSprites(0)
   initParticles()

@@ -1,0 +1,130 @@
+name: backend-unit-test
+
+# Per-PR unit-suite regression gate (issue #715).
+#
+# Runs the backend unit suite under three pytest-randomly seeds against both
+# `base` (the PR's target branch tip) and `head` (the PR's merge commit), then
+# diffs the union of failing test IDs. Fails the check if `head` introduces
+# any new failing test ID that was not failing in `base` under any seed, or
+# if any pytest run produced no JUnit XML (fail-closed on infra failure).
+#
+# Trigger manually via the Actions tab (workflow_dispatch) for backfill.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: backend-unit-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.side }}, seed ${{ matrix.seed }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [base, head]
+        seed: [12345, 67890, 99999]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `pull_request` checks out the synthetic merge commit by default.
+          # We capture the diff script before any branch switch so it
+          # survives the base-side checkout below (where scripts/ci/ may
+          # not yet exist on the target branch).
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stash diff script (survives branch switch)
+        run: |
+          mkdir -p "$HOME/.ci-tools"
+          cp scripts/ci/diff-pytest-failures.py "$HOME/.ci-tools/diff-pytest-failures.py"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: tests/requirements-test.txt
+
+      - name: Install test dependencies
+        # pytest-randomly is installed in-workflow only — adding it to
+        # tests/requirements-test.txt would silently randomize
+        # tests/run-core.sh and any local contributor pytest invocation,
+        # because pytest auto-discovers installed plugins.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-test.txt 'pytest-randomly>=3.15.0'
+
+      - name: Diff-script self-test
+        run: python "$HOME/.ci-tools/diff-pytest-failures.py" --self-test
+
+      - name: Switch to base branch tip (when side=base)
+        if: matrix.side == 'base'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref || 'dev' }}"
+          git switch --detach FETCH_HEAD
+
+      - name: Run unit suite
+        # || true: the existing 34 failures + 17 errors documented in #660
+        # produce a non-zero pytest exit. The diff job (`diff` below) is
+        # what fails this workflow on regression.
+        run: |
+          cd tests
+          python -m pytest unit/ -m "not slow" \
+            -p randomly --randomly-seed=${{ matrix.seed }} \
+            --junit-xml="$GITHUB_WORKSPACE/junit-${{ matrix.side }}-${{ matrix.seed }}.xml" \
+            --tb=no -q || true
+
+      - name: Upload JUnit XML
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.side }}-${{ matrix.seed }}
+          path: junit-${{ matrix.side }}-${{ matrix.seed }}.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  diff:
+    name: regression diff
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all JUnit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: junit-*
+          merge-multiple: true
+
+      - name: Diff base vs head
+        run: |
+          python scripts/ci/diff-pytest-failures.py \
+            --base junit-base-12345.xml \
+                   junit-base-67890.xml \
+                   junit-base-99999.xml \
+            --head junit-head-12345.xml \
+                   junit-head-67890.xml \
+                   junit-head-99999.xml \
+            --out "$GITHUB_STEP_SUMMARY"

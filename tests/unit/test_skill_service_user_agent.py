@@ -52,12 +52,21 @@ for mod_name, attrs in [
             "get_skills_library_url": lambda: "https://github.com/owner/repo",
             "get_skills_library_branch": lambda: "main",
             "get_github_pat": lambda: None,
+            # Additional attrs needed by services.agent_service.helpers/lifecycle
+            # when those modules are transitively imported in the same pytest run.
+            "get_anthropic_api_key": lambda: "sk-test",
+            "get_agent_full_capabilities": lambda: False,
+            "get_agent_default_resources": lambda: {"cpu": "2", "memory": "4g"},
+            "settings_service": MagicMock(),
         },
     ),
     (
         "services.agent_client",
         {"get_agent_client": MagicMock(), "AgentClientError": Exception},
     ),
+    # sys.modules["utils"] points to tests/utils/ (needed for api_client/cleanup),
+    # not src/backend/utils/, so url_validation.py isn't found automatically.
+    ("utils.url_validation", {"validate_skills_library_url": lambda url: url}),
 ]:
     if mod_name not in sys.modules:
         m = _types.ModuleType(mod_name)

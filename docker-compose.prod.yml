@@ -21,7 +21,7 @@ services:
       - "8000:8000"
     environment:
       - SECRET_KEY=${SECRET_KEY}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env (admin login + MCP auth)}"
       # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -284,7 +284,9 @@ services:
       - MCP_PORT=8080
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
-      - TRINITY_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      # MCP server uses ADMIN_PASSWORD for legacy non-API-key auth path.
+      # Fail-loud at compose render rather than silently use a well-known fallback (issue #692).
+      - "TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"
       - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
       # No REDIS_URL: src/mcp-server/ (TypeScript) has zero Redis imports.
       # Don't hand a credential to a process that has no use for it.

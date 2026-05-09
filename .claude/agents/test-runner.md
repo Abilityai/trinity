@@ -170,6 +170,7 @@ The test suite covers:
 - **System Manifest** (test_systems.py) - Multi-agent deployment from YAML, permissions, folders, schedules, tags (Req 10.7, ORG-001)
 - **System Views** (test_system_views.py) - [TESTS NEEDED] System view CRUD, agent_count, auto-creation from manifest (ORG-001)
 - **Local Deployment** (test_deploy_local.py) - Deploy local agents via MCP (Req 11.2)
+- **Schema Parity** (unit/test_schema_parity.py) - Diff `init_schema()` vs full `init_database()` lifecycle on in-memory SQLite. Catches drift in tables/columns (with type comparison)/indexes/triggers (#713) [UNIT]
 - **Public Links** (test_public_links.py) - Public agent sharing; email verification is driven by agent-level access policy (#311 follow-up, 2026-04-13) (Req 11.3)
 - **Public User Memory** (test_public_user_memory.py) - Per-user persistent memory for email-verified public sessions (MEM-001) [SMOKE]
 - **Site Proxy** (test_site_proxy.py) - Agent website proxy via /site/{token}/{path}; link_type field, URL format, token validation, 502 on no web server, redirect (SITE-001, #633)
@@ -267,6 +268,16 @@ Use these thresholds to assess test health (based on **executed** tests, not inc
 - **Healthy**: >90% pass rate, 0 critical failures
 - **Warning**: 75-90% pass rate, <5 failures
 - **Critical**: <75% pass rate or >5 failures
+
+## Recent Test Additions (2026-05-09)
+
+| Test File | Description | Tests Added |
+|-----------|-------------|-------------|
+| `unit/test_schema_parity.py` | Schema drift CI gate (#713) — `TestSchemaParity` builds two in-memory SQLite snapshots: `schema_snapshot` (`init_schema()` only) and `production_snapshot` (full `init_database()` lifecycle: `run_all_migrations` → `init_schema` → `run_all_migrations`). Diffs tables/columns (with type drift)/indexes/triggers. Module-scoped fixtures so each DB is built once. The full lifecycle (vs `init_schema` → migrations) is required so short-circuit migrations like `_migrate_audit_log_table` (`migrations.py:1356-1364`) can't hide schema.py omissions of indexes/triggers. Triggers `schema_migrations` table is the only allow-listed difference. Out of scope: NOT NULL/DEFAULT/FK/CHECK constraint drift, trigger BODY drift, reverse-direction drift (schema.py edited without a migration). Wired into CI via `.github/workflows/schema-parity.yml` (path-filtered to `src/backend/db/**`, `src/backend/utils/helpers.py`, `tests/requirements-test.txt`). | 4 tests (file total 4) |
+
+Local: `pytest tests/unit/test_schema_parity.py -v` → expected 4 passed in ~0.2s. Synthetic-failure smoke (verified): commenting out `idx_audit_log_timestamp` from `schema.py` causes only `test_no_missing_indexes` to fail with a clear `schema.py drift detected` message naming the missing index.
+
+---
 
 ## Recent Test Additions (2026-05-07)
 

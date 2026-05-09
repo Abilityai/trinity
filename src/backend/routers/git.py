@@ -318,12 +318,11 @@ async def initialize_github_sync(
     6. Stores configuration in the database
 
     Requires:
-    - GitHub PAT configured in system settings
+    - GitHub PAT configured (per-agent or platform-level) in system settings
     - Agent must be running
     - User must be agent owner
     """
     from services.docker_service import get_agent_container
-    from services.settings_service import get_github_pat
     from services.github_service import GitHubService, GitHubError
 
     # Check if agent exists and is running
@@ -349,12 +348,12 @@ async def initialize_github_sync(
             print(f"Warning: Found orphaned git config for {agent_name}. Cleaning up and allowing re-initialization.")
             db.delete_git_config(agent_name)
 
-    # Get GitHub PAT from settings
-    github_pat = get_github_pat()
+    # Get GitHub PAT: per-agent PAT first, then platform PAT (DB then env var)
+    github_pat = get_github_pat_for_agent(agent_name)
     if not github_pat:
         raise HTTPException(
             status_code=400,
-            detail="GitHub Personal Access Token not configured. Please add it in Settings."
+            detail="GitHub Personal Access Token not configured. Set a per-agent PAT or configure the platform PAT in Settings."
         )
 
     repo_full_name = f"{body.repo_owner}/{body.repo_name}"

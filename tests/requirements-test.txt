@@ -12,6 +12,27 @@ pydantic>=2.10.0
 fastapi>=0.115.0
 pyyaml>=6.0.0
 python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.20
 # OpenTelemetry for trace logging tests
 opentelemetry-api>=1.29.0
 opentelemetry-sdk>=1.29.0
+# Backend deps reachable via unit-test transitive imports (#660). The
+# contributor command `uv pip install -r tests/requirements-test.txt` must
+# pull these so `tests/unit/` runs green out-of-the-box. Versions match the
+# floors set in docker/backend/Dockerfile.
+pytz>=2024.1
+redis>=5.2.0
+croniter>=5.0.0
+psutil>=6.1.0
+aiofiles>=24.1.0
+python-magic>=0.4.27
+slack_sdk[socket-mode]>=3.41.0
+slackify-markdown>=0.2.0
+twilio>=9.10.0
+Pillow>=11.1.0
+tenacity>=9.0.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.2.0
+pydantic-settings>=2.0.0
+google-genai>=1.0.0
+payments-py>=1.0.0

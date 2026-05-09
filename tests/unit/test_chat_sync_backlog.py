@@ -298,10 +298,20 @@ def test_terminal_statuses_match_enum(waiter_module):
     """
     from models import TaskExecutionStatus
 
-    non_terminal = {TaskExecutionStatus.QUEUED, TaskExecutionStatus.RUNNING}
+    # PENDING_RETRY is transient by design (#271 state machine, models.py:198-199):
+    # RUNNING → PENDING_RETRY → RUNNING. Excluding it from the terminal set is
+    # load-bearing — sync waiters must keep polling on a retry-pending row instead
+    # of resolving early with no result. Enumerate non-terminals explicitly so a
+    # new enum value forces a deliberate placement choice.
+    non_terminal = {
+        TaskExecutionStatus.QUEUED,
+        TaskExecutionStatus.RUNNING,
+        TaskExecutionStatus.PENDING_RETRY,
+    }
     expected_terminal = set(TaskExecutionStatus) - non_terminal
     assert waiter_module.TERMINAL_TASK_STATUSES == frozenset(expected_terminal), (
-        "TaskExecutionStatus enum gained a new value; update "
-        "TERMINAL_TASK_STATUSES in services/sync_waiter.py to decide whether "
-        "sync waiters should wake on it."
+        "TaskExecutionStatus enum gained a new value; update either the "
+        "non_terminal set above (if transient) or TERMINAL_TASK_STATUSES in "
+        "services/sync_waiter.py (if terminal) to decide whether sync waiters "
+        "should wake on it."
     )

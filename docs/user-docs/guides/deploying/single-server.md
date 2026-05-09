@@ -30,7 +30,7 @@ Edit `.env` and set the variables below. Every variable in this table is forward
 | Variable | How to generate | Notes |
 |---|---|---|
 | `SECRET_KEY` | `openssl rand -hex 32` | JWT signing key. Never reuse across instances. |
-| `ADMIN_PASSWORD` | Choose a strong password | Minimum 12 characters. This is the `admin` login password. |
+| `ADMIN_PASSWORD` | Choose a strong password | Minimum 12 characters. Drives both `admin` login and the MCP server's legacy auth path. **Required** — `docker-compose.prod.yml` refuses to render if unset (issue #692). |
 | `CREDENTIAL_ENCRYPTION_KEY` | `openssl rand -hex 32` | Encrypts OAuth tokens, channel bot tokens, and subscription credentials. **If lost, all encrypted credentials become unrecoverable.** |
 | `INTERNAL_API_SECRET` | `openssl rand -hex 32` | Authenticates scheduler-to-backend calls (C-003). |
 | `REDIS_PASSWORD` | `openssl rand -hex 24` | Admin/`default` ACL user. Used for recovery and ad-hoc ops. |

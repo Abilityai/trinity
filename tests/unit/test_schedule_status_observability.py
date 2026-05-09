@@ -76,7 +76,8 @@ def tmp_db(tmp_path, monkeypatch):
             cost REAL,
             tool_calls TEXT,
             execution_log TEXT,
-            claude_session_id TEXT
+            claude_session_id TEXT,
+            compact_metadata TEXT
         )
         """
     )
@@ -135,6 +136,14 @@ class TestResidualRaceObservabilityLog:
 
     pytestmark = pytest.mark.unit
 
+    @pytest.mark.skip(
+        reason="The #378 residual-race observability WARNING was removed "
+        "deliberately by PR #524 (RELIABILITY-005) when SUCCESS writes were "
+        "made unconditional via CAS guards. The negative-assertion siblings "
+        "in this class still hold value (they assert no misfire on legitimate "
+        "FAILED→SUCCESS transitions); only this affirmative-emission test is "
+        "obsolete. Remove with the next observability cleanup pass."
+    )
     def test_logs_when_success_overwrites_phantom_stale_failed(
         self, tmp_db, schedule_ops, caplog
     ):

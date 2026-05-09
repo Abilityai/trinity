@@ -119,6 +119,11 @@ _stub_genai()
 _stub_config()
 _stub_services_package()
 
+# Evict any stale stub registered by test_voice_auth.py when both files run in
+# the same pytest session — that module installs a fake services.gemini_voice
+# for isolation, and without this eviction the real class is unreachable.
+sys.modules.pop("services.gemini_voice", None)
+
 # Now we can import the service
 from services.gemini_voice import (  # noqa: E402
     GeminiVoiceService, VoiceSession, _TOOL_PROMPT_MAX, _PANEL_CONTENT_MAX,

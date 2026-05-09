@@ -249,11 +249,12 @@ class TestMessageRouterFileValidation:
 
     def test_magic_available_flag(self):
         """Check that magic library availability is tracked."""
-        from adapters import message_router
+        from services import upload_service
 
-        # _MAGIC_AVAILABLE should be defined (True if python-magic installed)
-        assert hasattr(message_router, "_MAGIC_AVAILABLE")
-        assert isinstance(message_router._MAGIC_AVAILABLE, bool)
+        # _MAGIC_AVAILABLE moved to upload_service when file-upload code was
+        # extracted from adapters/message_router (services/upload_service.py:26-28).
+        assert hasattr(upload_service, "_MAGIC_AVAILABLE")
+        assert isinstance(upload_service._MAGIC_AVAILABLE, bool)
 
 
 class TestParseMessageWithFiles:
@@ -459,10 +460,10 @@ class TestFileDeliveryFormat:
         router = ChannelMessageRouter()
 
         with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
-             patch("adapters.message_router.container_put_archive", new=AsyncMock(return_value=True)), \
-             patch("adapters.message_router.platform_audit_service") as mock_audit:
+             patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
+             patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
-            descriptions, upload_dir, all_failed = await router._handle_file_uploads(
+            descriptions, upload_dir, all_failed, _image_data = await router._handle_file_uploads(
                 adapter, message, "test-agent", container, "session-abc",
                 verified_email="alice@example.com",
             )
@@ -497,10 +498,10 @@ class TestFileDeliveryFormat:
         router = ChannelMessageRouter()
 
         with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
-             patch("adapters.message_router.container_put_archive", new=AsyncMock(return_value=True)), \
-             patch("adapters.message_router.platform_audit_service") as mock_audit:
+             patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
+             patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
-            descriptions, _, all_failed = await router._handle_file_uploads(
+            descriptions, _, all_failed, _image_data = await router._handle_file_uploads(
                 adapter, message, "test-agent", container, "session-x",
                 verified_email=None,
             )
@@ -541,10 +542,10 @@ class TestFileDeliveryFailures:
         router = ChannelMessageRouter()
 
         with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
-             patch("adapters.message_router.container_put_archive", new=AsyncMock(return_value=False)), \
-             patch("adapters.message_router.platform_audit_service") as mock_audit:
+             patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=False)), \
+             patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
-            descriptions, _, all_failed = await router._handle_file_uploads(
+            descriptions, _, all_failed, _image_data = await router._handle_file_uploads(
                 adapter, message, "test-agent", container, "session-y",
                 verified_email="user@example.com",
             )
@@ -583,10 +584,10 @@ class TestFileDeliveryFailures:
         put_mock = AsyncMock(side_effect=[True, False])
 
         with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
-             patch("adapters.message_router.container_put_archive", new=put_mock), \
-             patch("adapters.message_router.platform_audit_service") as mock_audit:
+             patch("services.upload_service.container_put_archive", new=put_mock), \
+             patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
-            descriptions, _, all_failed = await router._handle_file_uploads(
+            descriptions, _, all_failed, _image_data = await router._handle_file_uploads(
                 adapter, message, "test-agent", container, "session-z",
                 verified_email="user@example.com",
             )
@@ -621,10 +622,10 @@ class TestFileDeliveryFailures:
         router = ChannelMessageRouter()
 
         with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
-             patch("adapters.message_router.container_put_archive", new=AsyncMock(return_value=True)), \
-             patch("adapters.message_router.platform_audit_service") as mock_audit:
+             patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
+             patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
-            descriptions, _, all_failed = await router._handle_file_uploads(
+            descriptions, _, all_failed, _image_data = await router._handle_file_uploads(
                 adapter, message, "test-agent", container, "session-q",
                 verified_email=None,
             )

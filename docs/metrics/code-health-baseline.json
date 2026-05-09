@@ -1,0 +1,60 @@
+{
+  "last_run": "2026-05-08",
+  "commit_sha": "1eb7b5e",
+  "hotspot_top3": [
+    {
+      "file": "src/backend/routers/chat.py",
+      "complexity": 165,
+      "churn": 37,
+      "score": 6105
+    },
+    {
+      "file": "src/backend/db/schedules.py",
+      "complexity": 107,
+      "churn": 34,
+      "score": 3638
+    },
+    {
+      "file": "src/backend/services/task_execution_service.py",
+      "complexity": 151,
+      "churn": 21,
+      "score": 3171
+    }
+  ],
+  "hotspot_scores": {
+    "src/backend/routers/chat.py": 6105,
+    "src/backend/db/schedules.py": 3638,
+    "src/backend/services/task_execution_service.py": 3171,
+    "src/backend/main.py": 2184,
+    "src/backend/services/agent_service/crud.py": 2052,
+    "src/backend/routers/agents.py": 1769,
+    "src/backend/adapters/message_router.py": 1445,
+    "src/backend/services/cleanup_service.py": 1311,
+    "src/backend/database.py": 1168,
+    "src/backend/services/agent_service/lifecycle.py": 742,
+    "src/backend/routers/settings.py": 735,
+    "src/backend/adapters/telegram_adapter.py": 610,
+    "src/backend/routers/public.py": 544,
+    "src/backend/services/git_service.py": 473,
+    "src/backend/services/agent_service/helpers.py": 304,
+    "src/backend/adapters/slack_adapter.py": 200,
+    "src/backend/routers/git.py": 176,
+    "src/backend/routers/credentials.py": 96,
+    "src/backend/db/migrations.py": 42,
+    "src/backend/db_models.py": 35,
+    "src/backend/db/schema.py": 31,
+    "src/backend/models.py": 18,
+    "src/backend/routers/internal.py": 14,
+    "src/backend/routers/schedules.py": 13,
+    "src/backend/db/agents.py": 12,
+    "src/backend/routers/subscriptions.py": 10,
+    "src/backend/config.py": 9,
+    "src/backend/services/slack_service.py": 9,
+    "src/backend/db/subscriptions.py": 8,
+    "src/backend/services/slot_service.py": 7
+  },
+  "size_violations_count": 14,
+  "stale_todo_count": 6,
+  "high_coupling_count": 4,
+  "circular_import_count": 0
+}

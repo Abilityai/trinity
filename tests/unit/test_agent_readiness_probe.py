@@ -66,6 +66,7 @@ def wait_for_agent_ready(monkeypatch):
         "services.settings_service": types.SimpleNamespace(
             get_anthropic_api_key=None, get_github_pat=None,
             get_agent_full_capabilities=None,
+            get_agent_default_resources=None,  # added to lifecycle.py import (#725)
         ),
         "services.skill_service": types.SimpleNamespace(skill_service=None),
     }

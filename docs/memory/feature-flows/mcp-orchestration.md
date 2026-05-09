@@ -280,7 +280,7 @@ const authContext = context?.session;  // Each request has own context
 
 ## MCP Server Layer
 
-### Server Configuration (`src/mcp-server/src/server.ts:64-74`)
+### Server Configuration (`src/mcp-server/src/server.ts:78-113`)
 ```typescript
 export async function createServer(config: ServerConfig = {}) {
   const {
@@ -289,12 +289,14 @@ export async function createServer(config: ServerConfig = {}) {
     trinityApiUrl = process.env.TRINITY_API_URL || "http://localhost:8000",
     trinityApiToken = process.env.TRINITY_API_TOKEN,
     trinityUsername = process.env.TRINITY_USERNAME || "admin",
-    trinityPassword = process.env.TRINITY_PASSWORD || "changeme",
+    trinityPassword = process.env.TRINITY_PASSWORD,  // #692: no default; throws below when unset and not in API-key mode
     port = parseInt(process.env.MCP_PORT || "8080", 10),
     requireApiKey = process.env.MCP_REQUIRE_API_KEY === "true",
   } = config;
 }
 ```
+
+**Note**: As of issue #692, the prior `|| "changeme"` fallback on `trinityPassword` has been removed. If `MCP_REQUIRE_API_KEY=false`, `TRINITY_API_TOKEN` is unset, AND `TRINITY_PASSWORD` is unset, the server now throws on startup rather than silently authenticating with a well-known password.
 
 **Note**: When `MCP_REQUIRE_API_KEY=true` (production), NO admin credentials are needed. All backend API calls use the user's MCP API key directly. This eliminates the complexity and recurring issues with admin password authentication.
 

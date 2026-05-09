@@ -397,9 +397,10 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         env_vars.pop('ANTHROPIC_API_KEY', None)
         env_vars.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
 
-    # Update GITHUB_PAT if the container has one and a current system PAT exists
+    # Update GITHUB_PAT using per-agent PAT first, then platform PAT
     if env_vars.get('GITHUB_PAT'):
-        current_pat = get_github_pat()
+        from routers.git import get_github_pat_for_agent
+        current_pat = get_github_pat_for_agent(agent_name)
         if current_pat:
             env_vars['GITHUB_PAT'] = current_pat
 

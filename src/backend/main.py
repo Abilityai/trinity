@@ -491,8 +491,13 @@ async def lifespan(app: FastAPI):
                 if _slack_transport.is_connected:
                     print("Slack transport started (Socket Mode)")
                 else:
-                    print("Slack Socket Mode: connection failed (check logs). Backend continues without Slack.")
-                    _slack_transport = None
+                    # #708: keep the transport reference — its startup recovery
+                    # supervisor (slack_socket.py:_startup_supervisor) is now
+                    # retrying in the background and will populate contexts
+                    # when the network recovers. Setting _slack_transport=None
+                    # here would orphan the supervisor and leave Slack offline
+                    # until the next manual restart.
+                    print("Slack Socket Mode: initial connection failed; recovery supervisor retrying in background.")
             else:
                 print("Slack Socket Mode: no app token configured (set slack_app_token in Settings)")
         else:

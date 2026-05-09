@@ -105,7 +105,7 @@ Guidelines:
 - Clear when the topic changes significantly.
 
 Chart.js rule (for `update_panel` HTML):
-- Chart.js 4 is PRE-LOADED globally in the workspace. NEVER add a CDN `<script src>` tag for it — doing so causes a race condition and produces a blank chart.
+- Chart.js 4 is available as `window.Chart` in the workspace (bundled, no CDN needed). NEVER add a `<script src>` tag for it.
 - Use `new Chart(...)` directly. Always give the canvas a fixed height: `<canvas id="c" style="max-height:380px"></canvas>`.
 """
 

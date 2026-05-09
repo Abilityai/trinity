@@ -207,6 +207,12 @@ gh pr diff $PR_NUMBER --name-only | grep -iE '(credentials\.json|service.?accoun
 ```
 - [ ] No credential files committed
 
+#### 4.7 Infrastructure Changes
+```bash
+gh pr diff $PR_NUMBER --name-only | grep -iE '(docker-compose.*\.yml|Dockerfile|\.dockerignore|nginx\.conf)'
+```
+- [ ] docker-compose.yml / Dockerfile changes have clear justification in PR description
+
 ### Step 5: Code Quality Assessment
 
 #### 5.1 Minimal Necessary Changes
@@ -256,6 +262,7 @@ Create the report in this format:
 | Feature Flows | ✅/❌/⚠️ | [details] |
 | Feature Flow Format | ✅/❌/➖ | [details or N/A] |
 | Security Check | ✅/❌ | [details] |
+| Infrastructure | ✅/❌/➖ | [details or N/A] |
 | Code Quality | ✅/⚠️ | [details] |
 | Requirements Trace | ✅/⚠️ | [details] |
 
@@ -276,6 +283,7 @@ Create the report in this format:
 - [x/] No .env files
 - [x/] No hardcoded secrets
 - [x/] No credential files
+- [x/] Infrastructure changes (docker-compose/Dockerfile) justified
 
 ### Issues Found
 

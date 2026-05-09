@@ -306,7 +306,12 @@ export function createScheduleTools(
         message: z.string().optional().describe("New task message"),
         timezone: z.string().optional().describe("New timezone"),
         description: z.string().optional().describe("New description"),
-        enabled: z.boolean().optional().describe("Enable/disable schedule"),
+        enabled: z.boolean().optional().describe(
+          "Enable or disable the schedule. WARNING: only include this field if you explicitly intend to " +
+          "change the enabled state. Omitting it leaves the current state unchanged. " +
+          "Prefer toggle_agent_schedule for toggling; setting enabled=true here will re-enable a " +
+          "previously disabled schedule."
+        ),
         timeout_seconds: z
           .number()
           .int()

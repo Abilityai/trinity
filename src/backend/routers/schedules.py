@@ -85,6 +85,9 @@ class ScheduleUpdateRequest(BaseModel):
     timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None
     model: Optional[str] = None  # Model override (MODEL-001)
+    # Retry configuration (RETRY-001)
+    max_retries: Optional[int] = None
+    retry_delay_seconds: Optional[int] = None
     # Validation configuration (VALIDATE-001)
     validation_enabled: Optional[bool] = None
     validation_prompt: Optional[str] = None
@@ -514,14 +517,18 @@ async def generate_webhook(
 
 @router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
 async def get_webhook_status(
-    name: AuthorizedAgent,
+    name: str,
     schedule_id: str,
     request: Request,
+    current_user: User = Depends(get_current_user)
 ):
     """Get webhook configuration for a schedule."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+
+    if not db.can_user_access_agent(current_user.username, name):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     status_data = db.get_webhook_status(schedule_id)
     if status_data is None:

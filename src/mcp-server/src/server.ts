@@ -82,7 +82,7 @@ export async function createServer(config: ServerConfig = {}) {
     trinityApiUrl = process.env.TRINITY_API_URL || "http://localhost:8000",
     trinityApiToken = process.env.TRINITY_API_TOKEN,
     trinityUsername = process.env.TRINITY_USERNAME || "admin",
-    trinityPassword = process.env.TRINITY_PASSWORD || "changeme",
+    trinityPassword = process.env.TRINITY_PASSWORD,
     port = parseInt(process.env.MCP_PORT || "8080", 10),
     requireApiKey = process.env.MCP_REQUIRE_API_KEY === "true",
   } = config;
@@ -101,6 +101,15 @@ export async function createServer(config: ServerConfig = {}) {
       console.log("Using provided API token for authentication");
       client.setToken(trinityApiToken);
     } else {
+      // Issue #692: refuse to start with no usable backend credential rather
+      // than silently fall back to the well-known "changeme" password.
+      if (!trinityPassword) {
+        throw new Error(
+          "MCP server has no usable backend credential: MCP_REQUIRE_API_KEY=false, " +
+          "TRINITY_API_TOKEN unset, and TRINITY_PASSWORD unset. " +
+          "Either enable API-key mode (MCP_REQUIRE_API_KEY=true) or set ADMIN_PASSWORD/TRINITY_PASSWORD in .env."
+        );
+      }
       console.log(`Authenticating with Trinity API as '${trinityUsername}'...`);
       try {
         await client.authenticate(trinityUsername, trinityPassword);

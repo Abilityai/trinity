@@ -41,8 +41,62 @@ def _load(rel: str, name: str):
 _schema = _load("db/schema.py", "_schema_fa")
 _migrations = _load("db/migrations.py", "_migrations_fa")
 
+# Also import the canonical `db.schema` / `db.migrations` so we can patch the
+# objects that `database.DatabaseManager.__init__` will reach for. Without
+# this, our patches below land on the file-loaded copies above and the real
+# imports inside `database.py` see the unpatched originals.
+import db.schema as _real_schema  # noqa: E402
+import db.migrations as _real_migrations  # noqa: E402
+
 
 pytestmark = pytest.mark.unit
+
+
+def _evict_db_modules() -> None:
+    """Evict cached db.* modules so the next import re-binds to TRINITY_DB_PATH.
+
+    `db/connection.py` captures DB_PATH at import time, so without an explicit
+    eviction the previous test's path lingers across runs.
+    """
+    for modname in list(sys.modules):
+        if modname == "database" or modname.startswith("db.") \
+                or modname == "services.sync_health_service" \
+                or modname == "services.fleet_audit_service":
+            sys.modules.pop(modname, None)
+
+
+def _patch_s7_index_out():
+    """Re-apply the S7 index/migration patches after a module-cache eviction.
+
+    Eviction wipes our module-level patches on `db.schema.INDEXES` and the
+    branch-ownership migration. We re-import + re-patch so the next call to
+    `database.DatabaseManager.__init__` sees the patched module.
+    """
+    import db.schema as _s
+    import db.migrations as _m
+    _s.INDEXES = [s for s in _s.INDEXES if _S7_INDEX_NEEDLE not in s]
+    if hasattr(_m, "_migrate_agent_git_config_branch_ownership"):
+        _m._migrate_agent_git_config_branch_ownership = lambda cursor, conn: None
+
+
+# S7 Layer 2: idx_git_config_repo_branch_unique is a partial UNIQUE index that
+# prevents the duplicate (github_repo, working_branch) state in production.
+# The runtime detector at db/schedules.py::find_duplicate_bindings exists for
+# repos that pre-date the index. To exercise the detector we need to seed the
+# impossible-in-prod state, so we patch BOTH:
+#   1. `INDEXES` — so init_schema (called twice via DatabaseManager.__init__)
+#      doesn't recreate the index after duplicate rows exist.
+#   2. The S7 migration — so run_all_migrations (also called twice) doesn't
+#      raise the duplicate-detection error before the test even runs.
+# Production schema/migrations are untouched (verified by the partner test
+# tests/git-sync/test_s7_reserve_instance_id.py which exercises the index
+# directly).
+_S7_INDEX_NEEDLE = "idx_git_config_repo_branch_unique"
+for _mod in (_schema, _real_schema):
+    _mod.INDEXES = [s for s in _mod.INDEXES if _S7_INDEX_NEEDLE not in s]
+for _mod in (_migrations, _real_migrations):
+    if hasattr(_mod, "_migrate_agent_git_config_branch_ownership"):
+        _mod._migrate_agent_git_config_branch_ownership = lambda cursor, conn: None
 
 
 @pytest.fixture
@@ -54,15 +108,20 @@ def tmp_db(tmp_path, monkeypatch):
     cur = conn.cursor()
     _schema.init_schema(cur, conn)
     _migrations.run_all_migrations(cur, conn)
+    # The S7 partial UNIQUE index is also created by the migration path; drop
+    # it here so the duplicate-row seed succeeds in this in-memory DB.
+    cur.execute(f"DROP INDEX IF EXISTS {_S7_INDEX_NEEDLE}")
     conn.commit()
     conn.close()
 
-    for modname in list(sys.modules):
-        if modname == "database" or modname.startswith("db.") \
-                or modname == "services.sync_health_service" \
-                or modname == "services.fleet_audit_service":
-            sys.modules.pop(modname, None)
-    yield db_path
+    _evict_db_modules()
+    _patch_s7_index_out()  # re-apply after eviction wipes the patch
+    try:
+        yield db_path
+    finally:
+        # Re-evict on teardown so the next test file sees a clean module
+        # cache (db/connection.py:DB_PATH is captured at import time).
+        _evict_db_modules()
 
 
 @pytest.fixture

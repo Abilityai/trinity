@@ -18,6 +18,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
+      - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override (default: gemini-2.5-flash-native-audio-preview-12-2025)
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # OpenTelemetry Configuration (Optional)
@@ -216,7 +217,10 @@ services:
       - MCP_PORT=8080
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
-      - TRINITY_PASSWORD=${TRINITY_PASSWORD:-}  # Match ADMIN_PASSWORD in .env
+      # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
+      # Read directly from ADMIN_PASSWORD so devs do not have to set the same
+      # secret twice (issue #692).
+      - TRINITY_PASSWORD=${ADMIN_PASSWORD:-}
       - MCP_REQUIRE_API_KEY=true
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:

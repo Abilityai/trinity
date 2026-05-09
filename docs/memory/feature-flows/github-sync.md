@@ -496,24 +496,31 @@ The dependency automatically:
 
 ### Settings Service Integration
 
-GitHub PAT is retrieved via the centralized settings service:
+GitHub PAT resolution follows a per-agent → platform fallback chain (#735):
 
 ```python
-# src/backend/routers/git.py:274
-from services.settings_service import get_github_pat
-
-# Used in initialize_github_sync endpoint (line 301)
-github_pat = get_github_pat()
+# src/backend/routers/git.py — initialize_github_sync endpoint
+# Uses get_github_pat_for_agent so per-agent PAT is tried first
+github_pat = get_github_pat_for_agent(agent_name)
 ```
 
-**Settings Service** (`src/backend/services/settings_service.py:71-76` and `113-115`):
+**Helper Function** (`src/backend/routers/git.py`):
+```python
+def get_github_pat_for_agent(agent_name: str) -> str:
+    """Per-agent PAT first, then platform PAT (DB then env var)."""
+    agent_pat = db.get_agent_github_pat(agent_name)
+    if agent_pat:
+        return agent_pat
+    return get_github_pat()  # platform fallback: DB then GITHUB_PAT env var
+```
+
+**Platform PAT** (`src/backend/services/settings_service.py`):
 ```python
 def get_github_pat(self) -> str:
-    """Get GitHub PAT from settings, fallback to env var."""
-    key = self.get_setting('github_pat')
+    key = self.get_setting('github_pat')   # DB-stored via PUT /api/settings/api-keys/github
     if key:
         return key
-    return os.getenv('GITHUB_PAT', '')
+    return os.getenv('GITHUB_PAT', '')     # env var fallback
 ```
 
 ### Per-Agent GitHub PAT (#347)

@@ -1,0 +1,64 @@
+name: Schema Parity Gate
+
+# Issue #713: fail PRs that add a migration to src/backend/db/migrations.py
+# without updating src/backend/db/schema.py to match. Runs the
+# tests/unit/test_schema_parity.py pytest suite, which builds two in-memory
+# SQLite snapshots (schema-only vs full init_database lifecycle) and diffs
+# tables/columns/indexes/triggers.
+#
+# MAINTAINER NOTE: do NOT add this job to required-status-checks in branch
+# protection until it has been green for ~1 week of normal PR traffic.
+# Otherwise any path-filter false-negative (e.g. a future module move that
+# bypasses the filter) would brick PRs that don't touch DB files. The
+# workflow self-skips on unrelated PRs (no path match -> no run -> no
+# required check needed) so leaving it optional is safe.
+
+on:
+  pull_request:
+    paths:
+      - 'src/backend/db/**'
+      - 'src/backend/database.py'
+      - 'src/backend/utils/helpers.py'
+      - 'tests/unit/test_schema_parity.py'
+      - 'tests/requirements-test.txt'
+      - '.github/workflows/schema-parity.yml'
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/backend/db/**'
+      - 'src/backend/database.py'
+      - 'src/backend/utils/helpers.py'
+      - 'tests/unit/test_schema_parity.py'
+      - 'tests/requirements-test.txt'
+      - '.github/workflows/schema-parity.yml'
+
+jobs:
+  schema-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'tests/requirements-test.txt'
+
+      - name: Install test deps
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Run schema parity check
+        env:
+          # Migration _migrate_slack_bot_token_encryption (migrations.py:1898)
+          # imports services.credential_encryption. The key is only accessed
+          # if the migration encrypts a row — which never happens on an empty
+          # in-memory DB. Use a valid-hex placeholder (64 chars of zeros) so
+          # any future code path that DOES call encrypt() produces a real
+          # test failure instead of a "key format" crypto error.
+          CREDENTIAL_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          # Backend config.py raises at import if REDIS_URL lacks credentials
+          # (#589/#645). Set creds-bearing dummies; same pattern tests/unit/conftest.py uses.
+          REDIS_URL: "redis://test:test@redis:6379"
+          REDIS_PASSWORD: "test"
+          REDIS_BACKEND_PASSWORD: "test"
+        run: pytest tests/unit/test_schema_parity.py -v --tb=short

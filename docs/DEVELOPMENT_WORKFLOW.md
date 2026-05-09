@@ -450,6 +450,7 @@ Agents are invoked automatically by Claude Code when appropriate. The `/test-run
 | `/validate-architecture` | Validate codebase against 16 architectural invariants | Weekly / Review |
 | `/validate-schema` | Check schema.py vs migrations.py vs architecture.md for drift | Weekly |
 | `/validate-config` | Check env vars across docker-compose, .env.example, and code | Weekly |
+| `/code-health` | Hotspot scores, size violations, coupling, stale smells; updates baseline + GitHub issue | Weekly |
 | `/groom` | Backlog grooming — audit board, rank issues, review priorities | Todo |
 | `/sprint [issue-number]` | Full dev cycle (orchestrates all above) | All |
 | `/release [version-tag]` | Cut a release — pre-release checklist, version bump, notes, `dev` → `main` merge, tag push | Release (§4b) |
@@ -538,6 +539,7 @@ Skills in `.claude/skills/` define HOW to approach specific tasks:
 - [ ] `/validate-schema` — check schema.py vs migrations.py vs architecture.md for drift
 - [ ] `/validate-config` — check env vars across docker-compose, .env.example, and code
 - [ ] `/generate-user-docs` — regenerate user documentation from code
+- [ ] `/code-health` — hotspot scores, size violations, coupling, stale smells; updates baseline and files GitHub issue
 - [ ] `/groom` — audit backlog, rank issues, review priorities (manual, requires human review)
 
-> **Automated schedules**: The validation tasks and `/generate-user-docs` run automatically on the `trinity` dev agent (Mon-Thu 9:00 UTC). `/groom` remains manual as it requires human judgment for prioritization decisions.
+> **Automated schedules**: The validation tasks, `/generate-user-docs`, and `/code-health` run automatically on the `trinity` dev agent (Mon-Thu 9:00 UTC; `/code-health` runs Mondays). `/groom` remains manual as it requires human judgment for prioritization decisions.

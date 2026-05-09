@@ -107,6 +107,12 @@ class SlackSocketTransport(ChannelTransport):
         self._envelope_seen: OrderedDict[str, float] = OrderedDict()
         self._dedup_lock = asyncio.Lock()
         self._dedup_hits = 0  # for tests / introspection
+        # Startup recovery supervisor (#708): when all initial connect attempts
+        # fail, this task retries with exponential backoff until at least one
+        # client connects, then graduates to the per-client watchdog model.
+        # Without this, a 10s startup blip leaves Slack permanently offline.
+        self._supervisor_task: Optional[asyncio.Task] = None
+        self._supervisor_attempts: int = 0
 
     @property
     def is_connected(self) -> bool:
@@ -164,14 +170,26 @@ class SlackSocketTransport(ChannelTransport):
                 # _start_one_client logged the reason internally
                 logger.warning(f"Slack Socket Mode [c={i}]: did not connect")
 
+        # _running is set BEFORE the supervisor branch so the supervisor's
+        # `while self._running` guard cannot race with start() returning.
+        # is_connected still requires at least one healthy session, so callers
+        # that check it (main.py, /api/settings/slack/connect, /slack/status)
+        # see False until the supervisor actually recovers a client (#708).
+        self._running = True
+
         if not self.contexts:
+            # All initial attempts failed — spawn the recovery supervisor.
+            # Returns immediately; the supervisor retries in the background
+            # with the same exponential backoff the per-client watchdog uses.
             logger.error(
-                "Slack Socket Mode: all connection attempts failed. "
-                "Backend continues without Slack."
+                "Slack Socket Mode: all initial connection attempts failed. "
+                "Starting recovery supervisor — will retry in background "
+                f"(first retry in {WATCHDOG_BACKOFF_INITIAL_SECONDS}s)."
+            )
+            self._supervisor_task = asyncio.create_task(
+                self._startup_supervisor(target_count=n)
             )
             return
-
-        self._running = True
 
         # Spawn one independent watchdog task per connected client.
         for ctx in self.contexts:
@@ -229,9 +247,120 @@ class SlackSocketTransport(ChannelTransport):
         client.auto_reconnect_enabled = True
         return _ClientCtx(index=index, client=client)
 
+    async def _startup_supervisor(self, target_count: int) -> None:
+        """Recovery supervisor — runs only when ALL initial connect attempts fail.
+
+        The per-client watchdog model assumes at least one connection has
+        been established. When the network is hiccuping during backend
+        startup and every initial attempt times out (#708), nothing in
+        the watchdog model fires. This task fills that gap.
+
+        Behavior:
+        - Sleeps `_supervisor_backoff_interval()` (60 → 120 → 240 → 300s cap),
+          then retries `_start_one_client(i)` for every slot 0..target_count-1.
+        - As soon as ANY client connects, appends it to self.contexts, spawns
+          per-client watchdogs for the recovered clients, and exits — handing
+          recovery back to the watchdog model.
+        - Logs ERROR after 3 consecutive failures so operators get a paging
+          signal rather than just the single startup log line.
+        - Cancelled by stop(); CancelledError is re-raised so awaiters of the
+          task see clean cancellation.
+        """
+        logger.info(
+            f"Socket Mode startup supervisor: started "
+            f"(target={target_count} connection(s))"
+        )
+        try:
+            while self._running:
+                interval = self._supervisor_backoff_interval()
+                logger.info(
+                    f"Socket Mode startup supervisor: next attempt in {interval}s "
+                    f"(attempt #{self._supervisor_attempts + 1})"
+                )
+                await asyncio.sleep(interval)
+
+                if not self._running:
+                    break
+
+                self._supervisor_attempts += 1
+
+                results = await asyncio.gather(
+                    *(self._start_one_client(i) for i in range(target_count)),
+                    return_exceptions=True,
+                )
+                recovered: list[_ClientCtx] = []
+                for i, result in enumerate(results):
+                    if isinstance(result, _ClientCtx):
+                        recovered.append(result)
+                    else:
+                        logger.warning(
+                            f"Socket Mode startup supervisor [c={i}]: still failing"
+                        )
+
+                if recovered:
+                    self.contexts.extend(recovered)
+                    for ctx in recovered:
+                        ctx.watchdog_task = asyncio.create_task(self._watchdog(ctx))
+                    logger.info(
+                        f"Socket Mode startup supervisor: recovered "
+                        f"{len(recovered)}/{target_count} connection(s) after "
+                        f"{self._supervisor_attempts} attempt(s); "
+                        f"watchdog(s) started, supervisor exiting."
+                    )
+                    self._supervisor_attempts = 0
+                    return
+
+                if self._supervisor_attempts >= 3:
+                    next_interval = self._supervisor_backoff_interval()
+                    logger.error(
+                        f"SLACK SOCKET MODE STARTUP UNREACHABLE — "
+                        f"{self._supervisor_attempts} consecutive recovery attempts failed. "
+                        f"Next retry in {next_interval}s. "
+                        f"Check Slack app token and network connectivity."
+                    )
+        except asyncio.CancelledError:
+            logger.info("Socket Mode startup supervisor: cancelled")
+            raise
+        except Exception as e:
+            logger.error(
+                f"Socket Mode startup supervisor: unexpected error: {e}",
+                exc_info=True,
+            )
+        finally:
+            logger.info("Socket Mode startup supervisor: stopped")
+
+    def _supervisor_backoff_interval(self) -> int:
+        """Exponential backoff for the startup supervisor.
+
+        Mirrors the per-client watchdog cadence so operators see a single
+        consistent retry rhythm (60 → 120 → 240 → 300s cap).
+        """
+        if self._supervisor_attempts == 0:
+            return WATCHDOG_BACKOFF_INITIAL_SECONDS
+        backoff = WATCHDOG_BACKOFF_INITIAL_SECONDS * (2 ** (self._supervisor_attempts - 1))
+        return min(backoff, WATCHDOG_BACKOFF_MAX_SECONDS)
+
     async def stop(self) -> None:
-        """Stop all watchdog tasks and disconnect all clients."""
+        """Stop the supervisor (if any), all watchdog tasks, and disconnect all clients.
+
+        Order matters: flip _running first so any loops observing it exit on
+        their next iteration; then cancel the supervisor (it may be mid-sleep
+        or mid-`_start_one_client`); then per-client watchdogs; then disconnect
+        live clients. This keeps shutdown bounded even if a supervisor retry
+        is in flight when stop() is called (#708 admin-disconnect path).
+        """
         self._running = False
+        if self._supervisor_task is not None:
+            self._supervisor_task.cancel()
+            try:
+                await self._supervisor_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(
+                    f"Socket Mode startup supervisor: error during cancel: {e}"
+                )
+            self._supervisor_task = None
         for ctx in self.contexts:
             if ctx.watchdog_task is not None:
                 ctx.watchdog_task.cancel()

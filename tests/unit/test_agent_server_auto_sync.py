@@ -22,10 +22,32 @@ from unittest.mock import patch
 import pytest
 
 
+import importlib.util
+
 _BASE_IMAGE = Path(__file__).resolve().parent.parent.parent / "docker" / "base-image"
 _BASE_IMAGE_STR = str(_BASE_IMAGE)
 if _BASE_IMAGE_STR not in sys.path:
     sys.path.insert(0, _BASE_IMAGE_STR)
+
+# Evict any previously cached `agent_server` (shadow or real) so the
+# explicit file-based loader below wins regardless of sys.path order.
+for _mod in list(sys.modules):
+    if _mod == "agent_server" or _mod.startswith("agent_server."):
+        sys.modules.pop(_mod, None)
+
+# Force-load the real agent_server package from docker/base-image. Without
+# this, pytest's rootdir machinery (`tests/unit/pytest.ini` makes `tests/` a
+# search root) lets `tests/agent_server/__init__.py` shadow the real package
+# and `import agent_server.auto_sync` raises ModuleNotFoundError. Same pattern
+# as conftest.py:38 for the `utils` shadow.
+_AS_INIT = _BASE_IMAGE / "agent_server" / "__init__.py"
+_as_spec = importlib.util.spec_from_file_location(
+    "agent_server", str(_AS_INIT),
+    submodule_search_locations=[str(_BASE_IMAGE / "agent_server")],
+)
+_as_mod = importlib.util.module_from_spec(_as_spec)
+sys.modules["agent_server"] = _as_mod
+_as_spec.loader.exec_module(_as_mod)
 
 from agent_server.routers.git import (  # noqa: E402
     _read_sync_state_file,

@@ -268,6 +268,76 @@ Priority in `SlackAdapter.get_agent_name()`:
 **Verify**:
 - [ ] `POST /api/agents/{name}/slack/channel` returns 400
 
+#### 14. Startup Recovery Supervisor — Network Blip (#708)
+
+The Socket Mode transport's `start()` runs once at backend boot. Pre-#708, if every initial connect attempt timed out (10s ceiling, e.g. transient DNS slowness or Slack edge throttle), the transport gave up silently — backend stayed up but Slack was permanently offline until manual restart. With #708, when all initial attempts fail `start()` spawns a **recovery supervisor** task that retries with the same backoff cadence as the per-client watchdog (60→120→240→300s cap). When at least one client connects, the supervisor appends contexts, spawns per-client watchdogs, and exits — graduating recovery to the watchdog model.
+
+**Manual reproduction (recovery on transient network failure):**
+
+1. With Slack Socket Mode connected, write `extra_hosts` poisoning Slack DNS into a docker-compose override:
+   ```yaml
+   # docker-compose.smoke.override.yml
+   services:
+     backend:
+       extra_hosts:
+         - "slack.com:127.0.0.1"
+         - "wss-primary.slack.com:127.0.0.1"
+         - "wss-backup.slack.com:127.0.0.1"
+         - "wss-mobile.slack.com:127.0.0.1"
+   ```
+2. Recreate backend with the override applied:
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.smoke.override.yml up -d --no-deps --force-recreate backend
+   ```
+3. **Expected backend logs (within ≤30s)**:
+   - `Slack Socket Mode: all initial connection attempts failed. Starting recovery supervisor — will retry in background (first retry in 60s).`
+   - `Socket Mode startup supervisor: started (target=N connection(s))`
+4. After ~70s the supervisor logs its first retry result:
+   - `Socket Mode startup supervisor [c=0]: still failing`
+5. Unblock at runtime by stripping the poisoned lines from the running container's `/etc/hosts` (no restart — supervisor task is alive in the same process):
+   ```bash
+   docker exec trinity-backend python3 -c '
+   keep = [l for l in open("/etc/hosts") if not ("127.0.0.1" in l and "slack.com" in l)]
+   open("/etc/hosts","w").write("".join(keep))'
+   ```
+6. **Expected on the supervisor's next retry (≤120s after unblock)**:
+   - `Socket Mode startup supervisor: recovered N/N connection(s) after K attempt(s); watchdog(s) started, supervisor exiting.`
+   - `Socket Mode watchdog [c=0]: started` (one per recovered client)
+7. **Cleanup**: remove the override file and recreate backend to a clean state:
+   ```bash
+   rm docker-compose.smoke.override.yml
+   docker compose up -d --no-deps backend
+   ```
+
+**Manual reproduction (no zombie under bad credentials):**
+
+The supervisor will keep retrying forever if the token is permanently invalid (typo, expired, revoked). Verify the backend itself stays healthy throughout:
+
+1. Snapshot the existing `slack_app_token` in `system_settings` (SQLite at `/data/trinity.db` inside the backend container).
+2. Replace it with a well-formed but fake token (e.g. `xapp-1-A0000000000-0000000000000-` + 64 hex chars). **Don't forget `updated_at` — the column is `NOT NULL`.**
+3. `docker restart trinity-backend`.
+4. **Expected**: `start()` passes the format check, `_start_one_client` raises `invalid_auth` from Slack, supervisor spawns and retries.
+5. **Probe backend HTTP throughout** — `/health` and `/api/auth/mode` must return 200 during the supervisor's sleep AND across multiple retries. If either degrades, that's the zombie regression. Background-task supervisor must never block FastAPI.
+6. **Expected after 3 consecutive failures**: ERROR log `SLACK SOCKET MODE STARTUP UNREACHABLE — N consecutive recovery attempts failed.` — operator-paging signal.
+7. **Cleanup**: restore the original token in DB (with `updated_at` set), restart backend.
+
+**Permanent-error early-exit path:**
+
+A token that doesn't start with `xapp-` (operator pasted a `xoxb-` bot token by mistake, or random text) is rejected at the format check at the top of `start()` — no supervisor spawned, no retry loop, no resource use. Backend continues normally. Verified by unit test `TestStartupRecoverySupervisor.test_supervisor_not_spawned_for_invalid_token`.
+
+**Behavior matrix:**
+
+| Scenario | `_running` | Contexts | Supervisor | Backend health |
+|---|---|---|---|---|
+| All initial connects succeed | True | N | None | Healthy |
+| Partial initial succeeds (1 of N) | True | <N | None (degraded mode) | Healthy |
+| All initial fail, transient cause | True | 0 → N | Spawned → exits on recovery | Healthy throughout |
+| All initial fail, permanent bad creds | True | 0 (forever) | Spawned, retries with backoff | Healthy throughout, ERROR log every 3 failures |
+| Token format invalid (no `xapp-` prefix) | False | 0 | None (early return) | Healthy |
+| `stop()` called mid-supervisor | False | 0 | Cancelled | Healthy |
+
+**Unit-test coverage:** `tests/unit/test_slack_multi_connection.py::TestStartupRecoverySupervisor` — 9 cases covering happy path, recovery, backoff progression, cancellation by `stop()`, and operator-paging log.
+
 ### Edge Cases
 - [ ] Bot invited to #general (non-agent channel) → only responds to @mentions
 - [ ] Thread started by another user (not via @mention) → bot ignores replies
@@ -276,9 +346,9 @@ Priority in `SlackAdapter.get_agent_name()`:
 - [ ] Non-owner views Sharing tab → SlackChannelPanel shows "Only the agent owner can manage Slack channel bindings"
 - [ ] `CREDENTIAL_ENCRYPTION_KEY` mismatch → bot token decryption fails → Slack API calls fail (logged, no crash)
 
-**Last Tested**: 2026-03-26
-**Tested By**: claude + human (manual + 15 integration tests)
-**Status**: ✅ Core flow + transport management + per-agent channel binding working
+**Last Tested**: 2026-05-08 (#708 startup-recovery + bad-creds zombie smoke verified end-to-end against running backend)
+**Tested By**: claude + human (manual + 15 integration tests + 65 unit tests)
+**Status**: ✅ Core flow + transport management + per-agent channel binding + startup recovery supervisor (#708) working
 **Issues**: MCP tools bypass `--allowedTools` restriction (documented in security findings)
 
 ## Related Flows

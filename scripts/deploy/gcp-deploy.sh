@@ -129,10 +129,17 @@ sync_files() {
 create_remote_env() {
     echo "Creating .env file on remote..."
 
+    # Issue #692: refuse to bake the well-known "changeme" password into a prod
+    # .env. Set ADMIN_PASSWORD in deploy.config (or in the shell) before running.
+    if [ -z "${ADMIN_PASSWORD:-}" ] || [ "${ADMIN_PASSWORD}" = "changeme" ]; then
+        echo "ERROR: ADMIN_PASSWORD must be set to a strong value in deploy.config (current: '${ADMIN_PASSWORD:-<unset>}'). Refusing to deploy with a well-known default." >&2
+        return 1
+    fi
+
     # Build env file content
     ENV_CONTENT="# Trinity Production Environment
 SECRET_KEY=${SECRET_KEY:-$(openssl rand -hex 32)}
-ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+ADMIN_PASSWORD=${ADMIN_PASSWORD}
 BACKEND_URL=${BACKEND_URL:-https://${DOMAIN}/api}
 VITE_API_URL=${BACKEND_URL:-https://${DOMAIN}/api}
 

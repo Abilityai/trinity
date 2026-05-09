@@ -641,6 +641,73 @@ sys.exit(0)
             except Exception:
                 pass
 
+    def test_kills_orphan_even_when_stat_raises_dstate_simulation(self, monkeypatch):
+        """Regression for Issue #728: orphan must be killed even when os.stat()
+        raises OSError, simulating a D-state process where stat() blocks indefinitely.
+
+        The old implementation used os.stat() to follow /proc/pid/fd/N symlinks
+        and read the pipe inode — a syscall that blocks on D-state processes.
+        The new implementation uses os.readlink() which reads the symlink text
+        "pipe:[inode]" from proc metadata without acquiring any inode lock.
+
+        This test patches os.stat to always raise, then verifies the orphan is
+        still identified and killed via the readlink path.
+        """
+        import subprocess_pgroup as spg
+
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", self._NPX_SIM_SCRIPT],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        claude_pgid = capture_pgid(proc)
+        assert claude_pgid is not None
+
+        try:
+            proc.wait(timeout=5)  # parent exits; orphan (new session) still alive
+
+            reader_unblocked = threading.Event()
+
+            def read_stdout():
+                assert proc.stdout is not None
+                try:
+                    for line in iter(proc.stdout.readline, ""):
+                        if not line:
+                            break
+                except (ValueError, OSError):
+                    pass
+                reader_unblocked.set()
+
+            t = threading.Thread(target=read_stdout, daemon=True)
+            t.start()
+            time.sleep(0.15)
+            assert t.is_alive(), "Reader should be blocked — orphan holds pipe open"
+
+            # Simulate D-state: os.stat always raises OSError.  The old stat-based
+            # implementation would have silently skipped every FD and killed nothing.
+            # The new readlink-based implementation must still find and kill the orphan.
+            def _stat_raises(*args, **kwargs):
+                raise OSError(5, "D-state simulation")
+
+            monkeypatch.setattr(os, "stat", _stat_raises)
+
+            assert proc.stdout is not None
+            killed = spg._kill_orphan_pipe_writers(proc.stdout.fileno(), claude_pgid)
+            assert killed >= 1, (
+                f"Expected ≥1 orphan killed even with os.stat broken, got {killed}. "
+                "The readlink-based scan must not depend on os.stat (Issue #728)."
+            )
+
+            reader_unblocked.wait(timeout=3)
+            assert not t.is_alive(), "Reader still alive after orphan killed"
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=claude_pgid)
+            except Exception:
+                pass
+
     def test_does_not_kill_own_reader(self):
         """Our own process holds the read end — must NOT be killed."""
         proc = subprocess.Popen(

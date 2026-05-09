@@ -97,7 +97,7 @@ sequenceDiagram
     Backend->>Backend: Verify agent is running
     Backend->>GitService: check_git_initialized() - detect orphaned config
     Backend->>Backend: Clean up orphaned records if necessary
-    Backend->>SettingsService: get_github_pat()
+    Backend->>SettingsService: get_github_pat_for_agent(agent_name)  # per-agent PAT first (#735)
     Backend->>GitHubService: check_repo_exists(owner, name)
     GitHubService->>GitHub: GET /repos/{owner}/{name}
     alt Repository doesn't exist
@@ -591,10 +591,10 @@ async def initialize_github_sync(
             # Clean up orphaned record
             db.execute_query("DELETE FROM agent_git_config WHERE agent_name = ?", (agent_name,))
 
-    # Get GitHub PAT from settings_service (lines 300-306)
-    github_pat = get_github_pat()
+    # Get GitHub PAT: per-agent PAT first, then platform PAT (#735)
+    github_pat = get_github_pat_for_agent(agent_name)
     if not github_pat:
-        raise HTTPException(status_code=400, detail="GitHub Personal Access Token not configured...")
+        raise HTTPException(status_code=400, detail="GitHub Personal Access Token not configured. Set a per-agent PAT or configure the platform PAT in Settings.")
 
     repo_full_name = f"{body.repo_owner}/{body.repo_name}"
 

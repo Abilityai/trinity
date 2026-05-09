@@ -432,9 +432,12 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
 
 def check_github_pat_env_matches(container, agent_name: str) -> bool:
     """
-    Check if container's GITHUB_PAT env var matches the current system setting.
+    Check if container's GITHUB_PAT env var matches the effective PAT for this agent.
     Returns True if env matches (or agent has no PAT), False if recreation needed.
+    Checks per-agent PAT first, then falls back to platform PAT.
     """
+    from routers.git import get_github_pat_for_agent
+
     env_list = container.attrs.get("Config", {}).get("Env", [])
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
 
@@ -443,9 +446,9 @@ def check_github_pat_env_matches(container, agent_name: str) -> bool:
         # Agent doesn't use GITHUB_PAT — no update needed
         return True
 
-    current_pat = get_github_pat()
+    current_pat = get_github_pat_for_agent(agent_name)
     if not current_pat:
-        # No system PAT configured — can't update, leave as-is
+        # No PAT configured anywhere — can't update, leave as-is
         return True
 
     return container_pat == current_pat

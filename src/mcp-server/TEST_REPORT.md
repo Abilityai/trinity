@@ -5,6 +5,12 @@
 **Server Version:** 1.0.0
 **Test Method:** MCP Inspector CLI (`npx @modelcontextprotocol/inspector`)
 
+> **HISTORICAL** — captured 2025-11-26. The "changeme" default password
+> referenced in the credential and env-var tables below was removed by
+> issue #692 (2026-05). The MCP server now throws on startup if
+> `MCP_REQUIRE_API_KEY=false` and no `TRINITY_API_TOKEN`/`TRINITY_PASSWORD`
+> is set. See `src/mcp-server/src/server.ts` for current behavior.
+
 ## Summary
 
 All **10 MCP tools** have been tested and verified working correctly.

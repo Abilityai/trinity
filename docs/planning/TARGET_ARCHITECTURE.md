@@ -24,6 +24,7 @@ These rules take precedence over all other considerations. When in doubt, measur
 4. **Proven primitives.** Use PostgreSQL for relational state, Redis for ephemeral/event state, Docker for isolation. Resist building custom solutions for problems these tools already solve.
 5. **Actor model as the coordination shape.** Each agent is an independent actor with a mailbox, a processor, and a journal. The platform delivers messages and projects journals — it does not own workflow state.
 6. **Sovereign infrastructure.** Trinity runs on hardware the operator controls. Design decisions must work on a single commodity server, not require cloud dependencies or managed services.
+7. **Data exchange over conversation chains.** Agents composing via structured files, queues, and typed outputs is more reliable and testable than chaining conversations. Async data handoffs — shared folders, repo commits, scheduled queue tasks — are the default composition pattern. Direct agent-to-agent conversation is an edge adapter for cases where no data-exchange pattern fits.
 
 ---
 

@@ -27,6 +27,11 @@ import pytest
 # imports — otherwise database.py tries to mkdir /data on import.
 _TMP_DB = Path(tempfile.gettempdir()) / "trinity_test_voice_auth.db"
 os.environ.setdefault("TRINITY_DB_PATH", str(_TMP_DB))
+# Fix cross-module SECRET_KEY mismatch: test_voice_tools.py's _stub_config()
+# replaces sys.modules["config"] with a stub that hardcodes this same value.
+# Setting it here ensures the real config (loaded during collection) and the
+# stub (activated during tests) both sign/verify JWTs with the same key.
+os.environ.setdefault("SECRET_KEY", "test-secret-key-for-unit-tests")
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -105,8 +110,25 @@ def _stub_voice_service():
 
 def _stub_docker_service():
     mod = types.ModuleType("services.docker_service")
+    mod.docker_client = None
     mod.get_agent_container = MagicMock(return_value=None)
+    # services/__init__.py re-exports docker_client + several helpers; if the
+    # stub omits any of them, `from services import ...` chains downstream
+    # of database migrations explode with ImportError.
+    mod.get_agent_status_from_container = MagicMock(return_value=None)
+    mod.list_all_agents = MagicMock(return_value=[])
+    mod.get_agent_by_name = MagicMock(return_value=None)
+    mod.get_next_available_port = MagicMock(return_value=2222)
     sys.modules["services.docker_service"] = mod
+
+
+def _stub_template_service():
+    mod = types.ModuleType("services.template_service")
+    mod.get_github_template = MagicMock()
+    mod.clone_github_repo = MagicMock()
+    mod.extract_agent_credentials = MagicMock()
+    mod.generate_credential_files = MagicMock()
+    sys.modules["services.template_service"] = mod
 
 
 def _stub_platform_audit():
@@ -128,6 +150,7 @@ def _stub_platform_audit():
 
 _voice_service, _FakeVoiceSession = _stub_voice_service()
 _stub_docker_service()
+_stub_template_service()
 _stub_platform_audit()
 
 

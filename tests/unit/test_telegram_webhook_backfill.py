@@ -31,6 +31,7 @@ _STUBBED_MODULE_NAMES = [
     "dependencies",
     "services",
     "services.settings_service",
+    "services.platform_audit_service",
     "adapters",
     "adapters.transports",
     "adapters.transports.telegram_webhook",
@@ -84,7 +85,11 @@ def _load_settings_module():
     class _SystemSettingUpdate(BaseModel):
         value: str = ""
 
-    _stub("models", User=_User)
+    class _AgentDefaultResourcesUpdate(BaseModel):
+        max_parallel_tasks: int | None = None
+        execution_timeout_seconds: int | None = None
+
+    _stub("models", User=_User, AgentDefaultResourcesUpdate=_AgentDefaultResourcesUpdate)
 
     db_stub = MagicMock()
     db_stub.set_setting = MagicMock(return_value=_SystemSetting(key="public_chat_url"))
@@ -99,6 +104,12 @@ def _load_settings_module():
     _stub("dependencies", get_current_user=MagicMock())
 
     _stub(
+        "services.platform_audit_service",
+        platform_audit_service=AsyncMock(),
+        AuditEventType=MagicMock(),
+    )
+
+    _stub(
         "services.settings_service",
         get_anthropic_api_key=MagicMock(),
         get_github_pat=MagicMock(),
@@ -109,6 +120,10 @@ def _load_settings_module():
         OPS_SETTINGS_DESCRIPTIONS={},
         AGENT_QUOTA_DEFAULTS={},
         AGENT_QUOTA_DESCRIPTIONS={},
+        AGENT_DEFAULT_CPU_KEY="agent_default_cpu",
+        AGENT_DEFAULT_MEMORY_KEY="agent_default_memory",
+        AGENT_DEFAULT_CPU="1.0",
+        AGENT_DEFAULT_MEMORY="1g",
     )
     _stub("services", __path__=[])
 

@@ -190,15 +190,23 @@ def _kill_orphan_pipe_writers(pipe_read_fd: int, our_pgid: Optional[int]) -> int
     keep the pipe write FD open indefinitely so the kernel never delivers EOF
     to our reader thread.
 
-    We identify the target pipe by its inode (shared by both ends of the pipe)
-    and confirm write access via ``/proc/{pid}/fdinfo/{fd}`` flags.
+    We identify the target pipe by its inode using ``os.readlink()`` on
+    ``/proc/{pid}/fd/{N}``.  On Linux the kernel stores the symlink target as
+    the string ``"pipe:[inode]"`` in the proc pseudo-filesystem's symlink
+    metadata — reading it with ``readlink()`` does NOT follow the symlink and
+    does NOT require any inode lock, making it safe to call even when a
+    process is in uninterruptible sleep (D-state).  The previously-used
+    ``os.stat()`` followed the symlink and acquired the pipe inode lock, which
+    blocked indefinitely on D-state processes (Issue #728).
+
+    We skip our own PID (we hold the read end) and any process already in
+    ``our_pgid`` (already killed by the caller).  All remaining holders of the
+    target pipe inode are orphan writers; we SIGKILL them.
 
     Diagnostic logging (#640): captures cmdline / ppid / pgid for each orphan
     *before* SIGKILL and emits one INFO line per pid (capped at
     ``_ORPHAN_LOG_DETAIL_CAP`` lines, then a count-only summary) so operators
-    can identify the leaking package next time this fires in production. The
-    write-end inode confirmation already happened above; the failures of
-    /proc reads here are tolerated silently — diagnostics are best-effort.
+    can identify the leaking package next time this fires in production.
 
     Only meaningful on Linux (requires ``/proc`` filesystem).
 
@@ -209,7 +217,10 @@ def _kill_orphan_pipe_writers(pipe_read_fd: int, our_pgid: Optional[int]) -> int
     except OSError:
         return 0
 
+    our_pid = os.getpid()
     killed = 0
+    target_link = f"pipe:[{target_ino}]"
+
     try:
         proc_entries = os.listdir("/proc")
     except OSError:
@@ -219,6 +230,10 @@ def _kill_orphan_pipe_writers(pipe_read_fd: int, our_pgid: Optional[int]) -> int
         if not pid_str.isdigit():
             continue
         pid = int(pid_str)
+
+        # Skip ourselves — we hold the read end.
+        if pid == our_pid:
+            continue
 
         # Skip processes already inside the killed process group.
         if our_pgid is not None:
@@ -235,37 +250,33 @@ def _kill_orphan_pipe_writers(pipe_read_fd: int, our_pgid: Optional[int]) -> int
             continue
 
         for fd_name in fd_names:
+            # readlink() reads the symlink text "pipe:[inode]" from the proc
+            # pseudo-filesystem WITHOUT following the symlink — no inode lock
+            # is acquired, so this is safe on D-state processes (Issue #728).
             try:
-                st = os.stat(f"{fd_dir}/{fd_name}")
+                link = os.readlink(f"{fd_dir}/{fd_name}")
             except OSError:
                 continue
-            if not _stat.S_ISFIFO(st.st_mode) or st.st_ino != target_ino:
+            if link != target_link:
                 continue
-            # Matching pipe inode — confirm it's the write end via fdinfo flags.
-            try:
-                with open(f"/proc/{pid}/fdinfo/{fd_name}") as finfo:
-                    fdinfo = finfo.read()
-                if "flags:" not in fdinfo:
-                    continue
-                flags = int(fdinfo.split("flags:")[1].split()[0], 8)
-                if flags & os.O_ACCMODE:  # O_WRONLY=1 or O_RDWR=2, not O_RDONLY=0
-                    if killed < _ORPHAN_LOG_DETAIL_CAP:
-                        cmdline = _read_proc_cmdline(pid)
-                        ppid = _read_proc_field(pid, "PPid") or "?"
-                        try:
-                            pgid_str = str(os.getpgid(pid))
-                        except OSError:
-                            pgid_str = "?"
-                        logger.info(
-                            "[Subprocess] Orphan pipe-writer SIGKILL: "
-                            "pid=%s ppid=%s pgid=%s cmd=%s",
-                            pid, ppid, pgid_str, cmdline,
-                        )
-                    os.kill(pid, signal.SIGKILL)
-                    killed += 1
-                    break  # no need to inspect other FDs of this pid
-            except OSError:
-                continue
+            # Matching pipe inode — any non-self, non-pgid holder is an
+            # orphan writer (we hold only the read end; the pgid holders were
+            # already killed by the caller).
+            if killed < _ORPHAN_LOG_DETAIL_CAP:
+                cmdline = _read_proc_cmdline(pid)
+                ppid = _read_proc_field(pid, "PPid") or "?"
+                try:
+                    pgid_str = str(os.getpgid(pid))
+                except OSError:
+                    pgid_str = "?"
+                logger.info(
+                    "[Subprocess] Orphan pipe-writer SIGKILL: "
+                    "pid=%s ppid=%s pgid=%s cmd=%s",
+                    pid, ppid, pgid_str, cmdline,
+                )
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+            break  # no need to inspect other FDs of this pid
 
     if killed > _ORPHAN_LOG_DETAIL_CAP:
         logger.info(

@@ -1078,6 +1078,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-05-09 | **MCP update_agent_schedule fixes (aaad4f6, #741/#742)**: (1) `src/mcp-server/src/tools/schedules.ts` — added explicit warning to `enabled` field description in `update_agent_schedule` so AI models do not inadvertently re-enable a disabled schedule when updating unrelated fields (e.g. cron expression). (2) `src/backend/routers/schedules.py` — added `max_retries` and `retry_delay_seconds` to `ScheduleUpdateRequest`; both were missing, so `exclude_unset=True` silently dropped them before they reached `db.update_schedule()`, making retry config uneditable via MCP. |
 | 2026-04-23 | **Retry Default Flipped (#476)**: `max_retries` default `1 → 0`. Both new and existing schedules are opt-in now. Scheduled agents typically catch up on next tick; retries amplified load during multi-hour outages. |
 | 2026-04-14 | **Automatic Retry (RETRY-001)**: Added Flow 10 documenting configurable retry mechanism for failed executions. New fields: max_retries, retry_delay_seconds, attempt_number, retry_of_execution_id, retry_scheduled_at. New status: pending_retry. |
 | 2026-03-26 | **Line number refresh + Process Schedules documentation**: Updated all line numbers to match current code. Added Flow 3 (Process Schedule Execution), process schedule sync documentation, process schedule database operations, and full service method reference table. |

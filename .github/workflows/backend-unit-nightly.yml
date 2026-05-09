@@ -1,0 +1,318 @@
+name: backend-unit-nightly
+
+# Nightly fleet sweep over open PRs targeting `dev` (issue #715).
+#
+# For each open PR, attempts the merge into a scratch commit and runs the
+# 3-seed unit-suite diff. If the PR introduces new failures (or hits a merge
+# conflict), posts a sticky comment on the PR.
+#
+# Architecture (Codex finding 5 — untrusted PR code must never share a job
+# with a write-capable token):
+#
+#   discover (RO, lists open PRs)
+#       └─> test (RO, no creds, runs untrusted PR code)
+#               └─> comment (write, no checkout of PR code)
+#
+# Artifacts (diff Markdown + status JSON) are how `test` hands work to
+# `comment` without ever sharing a write token with the PR code.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC = 07:00 London
+  workflow_dispatch:
+
+# No top-level permissions — each job declares its own narrow scope.
+permissions: {}
+
+concurrency:
+  group: backend-unit-nightly
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: discover open PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      has_prs: ${{ steps.list.outputs.has_prs }}
+    steps:
+      - id: list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          prs=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --base dev \
+            --state open \
+            --limit 50 \
+            --json number,headRefName,headRefOid)
+          count=$(echo "$prs" | jq 'length')
+          if [ "$count" = "0" ]; then
+            echo "has_prs=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          matrix=$(echo "$prs" | jq -c '{include: [.[] | {
+            pr_number: .number,
+            head_ref: .headRefName,
+            head_sha: .headRefOid
+          }]}')
+          {
+            echo "has_prs=true"
+            echo "matrix<<MATRIX_EOF"
+            echo "$matrix"
+            echo "MATRIX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    name: pytest (PR #${{ matrix.pr_number }})
+    needs: discover
+    if: needs.discover.outputs.has_prs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout origin/dev (no PR creds)
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stash trusted diff script (pre-merge)
+        # Workspace is unmodified origin/dev at this point. Copy the
+        # diff utility to a stable path BEFORE the merge so that a
+        # malicious PR modifying scripts/ci/diff-pytest-failures.py
+        # can't make the gate silently green by always-exit-0.
+        # CSO finding (defense-in-depth): nightly comments are the
+        # cross-PR signal reviewers consume, so the diff script must
+        # be tamper-evident relative to the PR being tested.
+        run: |
+          mkdir -p "$HOME/.ci-tools"
+          cp scripts/ci/diff-pytest-failures.py "$HOME/.ci-tools/diff-pytest-failures.py"
+
+      - name: Fetch PR head via fork-safe ref
+        # `pull/N/head` is GitHub's internal ref that works for both
+        # same-repo and fork PRs. `origin/<headRefName>` would only work
+        # for same-repo branches and could collide with base-repo branch
+        # names. (Codex finding 5 / 11.)
+        run: |
+          git fetch --depth=1 origin pull/${{ matrix.pr_number }}/head:pr-head
+
+      - name: Attempt merge into dev
+        id: merge
+        run: |
+          git config user.email "ci@trinity.local"
+          git config user.name  "trinity-ci"
+          if ! git merge --no-edit --no-ff pr-head; then
+            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          else
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: tests/requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-test.txt 'pytest-randomly>=3.15.0'
+
+      - name: Diff-script self-test (trusted copy)
+        run: python "$HOME/.ci-tools/diff-pytest-failures.py" --self-test
+
+      - name: Run unit suite (base = origin/dev, head = merge commit)
+        if: steps.merge.outputs.merge_conflict == 'false'
+        run: |
+          set -euo pipefail
+          # Snapshot the merge commit so we can come back to it.
+          MERGE_SHA=$(git rev-parse HEAD)
+
+          # Base run = origin/dev tip, before merge.
+          git switch --detach origin/dev
+          for seed in 12345 67890 99999; do
+            ( cd tests && python -m pytest unit/ -m "not slow" \
+                -p randomly --randomly-seed=$seed \
+                --junit-xml="$GITHUB_WORKSPACE/junit-base-pr${{ matrix.pr_number }}-$seed.xml" \
+                --tb=no -q || true )
+          done
+
+          # Head run = merge commit.
+          git switch --detach "$MERGE_SHA"
+          for seed in 12345 67890 99999; do
+            ( cd tests && python -m pytest unit/ -m "not slow" \
+                -p randomly --randomly-seed=$seed \
+                --junit-xml="$GITHUB_WORKSPACE/junit-head-pr${{ matrix.pr_number }}-$seed.xml" \
+                --tb=no -q || true )
+          done
+
+      - name: Run regression diff (trusted copy)
+        if: steps.merge.outputs.merge_conflict == 'false'
+        id: diff
+        run: |
+          set +e
+          python "$HOME/.ci-tools/diff-pytest-failures.py" \
+            --base junit-base-pr${{ matrix.pr_number }}-*.xml \
+            --head junit-head-pr${{ matrix.pr_number }}-*.xml \
+            --out "diff-pr${{ matrix.pr_number }}.md"
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            echo "regression=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "regression=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write status JSON
+        if: always()
+        run: |
+          merge_conflict='${{ steps.merge.outputs.merge_conflict }}'
+          regression='${{ steps.diff.outputs.regression }}'
+          # Default regression to "false" when merge conflicted (no diff ran).
+          if [ -z "$regression" ]; then regression="false"; fi
+          jq -n \
+            --arg pr "${{ matrix.pr_number }}" \
+            --arg head_sha "${{ matrix.head_sha }}" \
+            --arg merge_conflict "$merge_conflict" \
+            --arg regression "$regression" \
+            '{pr_number: ($pr|tonumber), head_sha: $head_sha,
+              merge_conflict: ($merge_conflict == "true"),
+              regression: ($regression == "true")}' \
+            > "status-pr${{ matrix.pr_number }}.json"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-pr-${{ matrix.pr_number }}
+          path: |
+            diff-pr${{ matrix.pr_number }}.md
+            status-pr${{ matrix.pr_number }}.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  comment:
+    name: post sticky comments
+    needs: [discover, test]
+    if: always() && needs.discover.outputs.has_prs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write           # PR conversation comments are issue comments
+      pull-requests: write
+    steps:
+      - name: Download all nightly artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-pr-*
+          merge-multiple: true
+
+      - name: List artifacts
+        id: list
+        run: |
+          set -euo pipefail
+          ls -la
+          # Enumerate status JSONs so the next step can iterate.
+          paths=$(ls status-pr*.json 2>/dev/null || true)
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$paths" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Post or update sticky comment per PR
+        uses: actions/github-script@v7
+        env:
+          PATHS: ${{ steps.list.outputs.paths }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const marker = '<!-- nightly-unit-suite -->';
+
+            const paths = (process.env.PATHS || '').split('\n').map(s => s.trim()).filter(Boolean);
+            if (paths.length === 0) {
+              core.info('No status JSONs found — nothing to comment on.');
+              return;
+            }
+
+            for (const p of paths) {
+              try {
+                const status = JSON.parse(fs.readFileSync(p, 'utf8'));
+                const pr = status.pr_number;
+                const diffPath = `diff-pr${pr}.md`;
+
+                let body;
+                if (status.merge_conflict) {
+                  body = `${marker}\n⚠️ **Nightly unit-suite check skipped — merge conflict against \`dev\`.**\n\nResolve by running \`git merge dev\` locally and pushing the result. The next nightly run will re-test once the conflict is gone.`;
+                } else if (status.regression) {
+                  let diffMd = '_diff artifact missing_';
+                  if (fs.existsSync(diffPath)) {
+                    diffMd = fs.readFileSync(diffPath, 'utf8');
+                  }
+                  body = `${marker}\n⚠️ **Nightly unit-suite found regressions when this PR is merged into \`dev\`.**\n\n<details>\n<summary>Regression details (head_sha: \`${status.head_sha}\`)</summary>\n\n${diffMd}\n\n</details>\n\n_Reproduce locally:_ \`git merge dev && tests/run-core.sh\``;
+                } else {
+                  body = `${marker}\n✅ **Nightly unit-suite clean** when this PR is merged into \`dev\` (head_sha: \`${status.head_sha}\`).`;
+                }
+
+                // Find existing sticky comment by marker (paginated).
+                // Bot-author filter is required — without it, a user comment
+                // that quotes the marker would match, and the subsequent
+                // updateComment call would 403 (bots can only edit their
+                // own comments) and we'd never create a fresh sticky.
+                const existing = await github.paginate(
+                  github.rest.issues.listComments,
+                  {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr,
+                    per_page: 100,
+                  }
+                );
+                const sticky = existing.find(c =>
+                  (c.body || '').includes(marker)
+                  && c.user
+                  && (c.user.type === 'Bot' || c.user.login === 'github-actions[bot]')
+                );
+
+                if (sticky) {
+                  // Skip if body is unchanged — avoids no-op churn.
+                  if (sticky.body === body) {
+                    core.info(`PR #${pr}: comment unchanged, skipping.`);
+                    continue;
+                  }
+                  await github.rest.issues.updateComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: sticky.id,
+                    body,
+                  });
+                  core.info(`PR #${pr}: updated sticky comment ${sticky.id}.`);
+                } else if (status.regression || status.merge_conflict) {
+                  // Only create on bad news. Don't spam every PR with a
+                  // green sticky comment on its first night.
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr,
+                    body,
+                  });
+                  core.info(`PR #${pr}: created sticky comment.`);
+                } else {
+                  core.info(`PR #${pr}: clean and no prior comment — nothing to post.`);
+                }
+              } catch (err) {
+                // Per-PR failure must not take out the rest of the matrix.
+                core.warning(`Failed to process ${p}: ${err.message}`);
+              }
+            }

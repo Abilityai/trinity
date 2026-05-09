@@ -483,9 +483,20 @@ class TestPartialStartup:
         assert t.is_connected is True
         assert t.connected_count == 1
 
-    def test_start_aborts_when_all_clients_fail(self, monkeypatch):
-        """0/N clients succeed → _running stays False, no watchdogs spawned."""
+    def test_start_spawns_supervisor_when_all_clients_fail(self, monkeypatch):
+        """0/N clients succeed → supervisor task spawned, _running=True, contexts=[].
+
+        Pre-#708: start() returned silently with _running=False, leaving Slack
+        permanently offline. Now the recovery supervisor takes over in the
+        background; is_connected stays False until the supervisor recovers
+        a client, but the transport is no longer dead.
+        """
         monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+        # Make the supervisor's first sleep instant so the spawned task
+        # begins executing without holding the test for 60s. We immediately
+        # cancel it below — we're only asserting it was spawned, not that
+        # it succeeds. (Recovery is covered in TestStartupRecoverySupervisor.)
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 60)
 
         adapter = MagicMock()
         router = MagicMock()
@@ -498,13 +509,26 @@ class TestPartialStartup:
 
         async def _go():
             await t.start()
+            # Cancel the supervisor immediately so the test exits without
+            # waiting 60s for its first real attempt.
+            if t._supervisor_task is not None:
+                t._supervisor_task.cancel()
+                try:
+                    await t._supervisor_task
+                except asyncio.CancelledError:
+                    pass
 
         _run(_go())
 
-        assert t._running is False
+        # _running is now True so the supervisor's loop guard is satisfied.
+        assert t._running is True
         assert t.contexts == []
+        # is_connected requires a healthy session, which we don't have yet.
         assert t.is_connected is False
         assert t.connected_count == 0
+        # The supervisor task was spawned (and we cancelled it just above).
+        assert t._supervisor_task is not None
+        assert t._supervisor_task.cancelled() or t._supervisor_task.done()
 
     def test_start_rejects_invalid_token_format(self):
         """Non-xapp- token returns immediately, no connection attempts."""
@@ -518,6 +542,302 @@ class TestPartialStartup:
         _run(_go())
         assert t._running is False
         assert t.contexts == []
+
+
+# ---------------------------------------------------------------------------
+# Startup recovery supervisor (#708)
+# ---------------------------------------------------------------------------
+
+class TestStartupRecoverySupervisor:
+    """Test the supervisor that retries connection when ALL initial attempts fail.
+
+    Pre-#708, a single 10s startup timeout left Slack permanently offline.
+    These tests pin the new behavior: supervisor spawns, retries with the
+    watchdog backoff cadence, recovers cleanly when the network heals,
+    and shuts down cleanly when stop() is called.
+    """
+
+    def test_supervisor_not_spawned_when_initial_fully_succeeds(self, monkeypatch):
+        """Happy path: all N clients connect on first try → no supervisor."""
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        async def fake_start_one(index):
+            return _ClientCtx(index=index, client=FakeClient())
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            for ctx in t.contexts:
+                if ctx.watchdog_task is not None:
+                    ctx.watchdog_task.cancel()
+
+        _run(_go())
+
+        assert t._supervisor_task is None
+        assert len(t.contexts) == 2
+        assert t.is_connected is True
+
+    def test_supervisor_not_spawned_when_partial_initial_succeeds(self, monkeypatch):
+        """1 of N succeeds → no supervisor (degraded mode handled by watchdog)."""
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        async def fake_start_one(index):
+            if index == 0:
+                return _ClientCtx(index=0, client=FakeClient())
+            return None
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            for ctx in t.contexts:
+                if ctx.watchdog_task is not None:
+                    ctx.watchdog_task.cancel()
+
+        _run(_go())
+
+        assert t._supervisor_task is None
+        assert len(t.contexts) == 1
+        assert t.is_connected is True
+
+    def test_supervisor_not_spawned_for_invalid_token(self, monkeypatch):
+        """Bad token format is permanent — supervisor would just spin."""
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="not-an-app-token", adapter=adapter, router=router)
+
+        _run(t.start())
+
+        assert t._supervisor_task is None
+        assert t._running is False
+
+    def test_supervisor_recovers_on_subsequent_attempt(self, monkeypatch):
+        """Supervisor retries after sleep and exits once any client succeeds.
+
+        Patches the backoff constants to 0 so the supervisor loop runs at
+        full speed; first call to _start_one_client returns None for both
+        clients (initial gather), then succeeds on the supervisor's first
+        retry. End state: contexts populated, watchdogs spawned, supervisor
+        task done (it returned cleanly).
+        """
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 0)
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_MAX_SECONDS", 0)
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        # Track call rounds: first 2 calls (initial gather, both clients) fail,
+        # next 2 calls (supervisor's first retry) succeed.
+        state = {"calls": 0}
+
+        async def fake_start_one(index):
+            state["calls"] += 1
+            if state["calls"] <= 2:
+                return None
+            return _ClientCtx(index=index, client=FakeClient())
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            # Wait for the supervisor to finish its work (recovery).
+            if t._supervisor_task is not None:
+                await asyncio.wait_for(t._supervisor_task, timeout=2)
+            # Cancel any spawned watchdogs before exiting the test.
+            for ctx in t.contexts:
+                if ctx.watchdog_task is not None:
+                    ctx.watchdog_task.cancel()
+
+        _run(_go())
+
+        assert state["calls"] == 4  # 2 initial + 2 supervisor retry
+        assert len(t.contexts) == 2
+        assert t.is_connected is True
+        assert t._supervisor_attempts == 0  # reset on success
+        assert t._supervisor_task is not None
+        assert t._supervisor_task.done()
+
+    def test_supervisor_keeps_retrying_until_success(self, monkeypatch):
+        """Multiple failed retries before recovery — backoff increments correctly."""
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "1")
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 0)
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_MAX_SECONDS", 0)
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        # Fail 4 times (1 initial + 3 supervisor retries), succeed on the 5th.
+        state = {"calls": 0}
+
+        async def fake_start_one(index):
+            state["calls"] += 1
+            if state["calls"] <= 4:
+                return None
+            return _ClientCtx(index=index, client=FakeClient())
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            if t._supervisor_task is not None:
+                await asyncio.wait_for(t._supervisor_task, timeout=2)
+            for ctx in t.contexts:
+                if ctx.watchdog_task is not None:
+                    ctx.watchdog_task.cancel()
+
+        _run(_go())
+
+        assert state["calls"] == 5
+        assert len(t.contexts) == 1
+        assert t.is_connected is True
+
+    def test_supervisor_cancelled_by_stop(self, monkeypatch):
+        """stop() while supervisor is sleeping cancels it cleanly, no leak."""
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+        # Use a long sleep so the supervisor parks on its first asyncio.sleep
+        # and stop() catches it mid-sleep — exercising the cancel path.
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 60)
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        async def fake_start_one(index):
+            return None
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            assert t._supervisor_task is not None
+            assert not t._supervisor_task.done()
+            # Capture the task reference BEFORE stop() clears it.
+            captured = t._supervisor_task
+            # Yield to let the supervisor enter its asyncio.sleep.
+            await asyncio.sleep(0)
+            await t.stop()
+            return captured
+
+        captured_task = _run(_go())
+
+        # After stop(): _running flipped, supervisor reference cleared,
+        # the captured task should be done (cancelled by stop()).
+        assert t._running is False
+        assert t._supervisor_task is None
+        assert captured_task.done()
+
+    def test_supervisor_backoff_interval_progression(self):
+        """Pin the cadence: 60 → 60 → 120 → 240 → 300 → 300 (cap)."""
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        # attempts=0 → initial value (60s)
+        t._supervisor_attempts = 0
+        assert t._supervisor_backoff_interval() == 60
+        # attempts=1 → 60 * 2^0 = 60
+        t._supervisor_attempts = 1
+        assert t._supervisor_backoff_interval() == 60
+        # attempts=2 → 60 * 2^1 = 120
+        t._supervisor_attempts = 2
+        assert t._supervisor_backoff_interval() == 120
+        # attempts=3 → 60 * 2^2 = 240
+        t._supervisor_attempts = 3
+        assert t._supervisor_backoff_interval() == 240
+        # attempts=4 → 60 * 2^3 = 480 → capped to 300
+        t._supervisor_attempts = 4
+        assert t._supervisor_backoff_interval() == 300
+        # attempts=10 → still capped at 300
+        t._supervisor_attempts = 10
+        assert t._supervisor_backoff_interval() == 300
+
+    def test_admin_connect_path_can_fail_loud_and_cancel_supervisor(self, monkeypatch):
+        """Models routers/settings.py:756 behavior — admin connect raises 400.
+
+        Admin-triggered /api/settings/slack/connect wants synchronous fail-loud
+        semantics: if start() returns and is_connected is False, the router
+        raises 400 and stops the transport. This must cancel the supervisor
+        cleanly so we don't leak a zombie task.
+        """
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "2")
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 60)
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        async def fake_start_one(index):
+            return None
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            await t.start()
+            # Mimic routers/settings.py:756 — synchronous fail-loud check.
+            assert t.is_connected is False, "admin would raise 400 here"
+            # Then admin path stops the transport before raising.
+            await t.stop()
+
+        _run(_go())
+
+        assert t._running is False
+        assert t._supervisor_task is None
+        assert t.contexts == []
+
+    def test_supervisor_logs_after_three_consecutive_failures(self, monkeypatch, caplog):
+        """Operator-visible signal: supervisor escalates to ERROR after 3 fails."""
+        import logging as _logging
+        monkeypatch.setenv("SLACK_SOCKET_CONNECTION_COUNT", "1")
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_INITIAL_SECONDS", 0)
+        monkeypatch.setattr(_mod, "WATCHDOG_BACKOFF_MAX_SECONDS", 0)
+
+        adapter = MagicMock()
+        router = MagicMock()
+        t = SlackSocketTransport(app_token="xapp-test", adapter=adapter, router=router)
+
+        # Fail 3 supervisor attempts then succeed on the 4th so the test exits.
+        state = {"calls": 0}
+
+        async def fake_start_one(index):
+            state["calls"] += 1
+            # 1 initial + 3 retries = 4 fails, succeed on 5th
+            if state["calls"] <= 4:
+                return None
+            return _ClientCtx(index=index, client=FakeClient())
+
+        t._start_one_client = fake_start_one  # type: ignore
+
+        async def _go():
+            with caplog.at_level(_logging.ERROR, logger="adapters.transports.slack_socket"):
+                await t.start()
+                if t._supervisor_task is not None:
+                    await asyncio.wait_for(t._supervisor_task, timeout=2)
+            for ctx in t.contexts:
+                if ctx.watchdog_task is not None:
+                    ctx.watchdog_task.cancel()
+
+        _run(_go())
+
+        unreachable_logs = [
+            r for r in caplog.records
+            if "STARTUP UNREACHABLE" in r.getMessage()
+        ]
+        assert len(unreachable_logs) >= 1, (
+            f"expected at least one STARTUP UNREACHABLE error log, "
+            f"got messages: {[r.getMessage() for r in caplog.records]}"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -4,132 +4,225 @@
       "file": "test_agent_rename.py",
       "feature": "RENAME-001",
       "added": "2026-03-01",
-      "categories": ["backend", "api", "agents"]
+      "categories": [
+        "backend",
+        "api",
+        "agents"
+      ]
     },
     {
       "file": "scheduler_tests/test_skipped_executions.py",
       "feature": "Issue #46",
       "added": "2026-03-01",
-      "categories": ["scheduler", "database", "executions"],
+      "categories": [
+        "scheduler",
+        "database",
+        "executions"
+      ],
       "description": "Tests for recording skipped scheduled executions when max_instances=1 reached"
     },
     {
       "file": "test_dynamic_thinking_status.py",
       "feature": "THINK-001",
       "added": "2026-03-03",
-      "categories": ["backend", "api", "frontend", "streaming"],
+      "categories": [
+        "backend",
+        "api",
+        "frontend",
+        "streaming"
+      ],
       "description": "Tests for dynamic thinking status labels: status mapping logic, async mode, SSE streaming, session persistence"
     },
     {
       "file": "test_nevermined_permissions.py",
       "feature": "Issue #72",
       "added": "2026-03-05",
-      "categories": ["backend", "api", "permissions", "nevermined"],
+      "categories": [
+        "backend",
+        "api",
+        "permissions",
+        "nevermined"
+      ],
       "description": "Tests for Nevermined config read/write permission split: owner CRUD, unauthenticated rejection, nonexistent agent handling"
     },
     {
       "file": "test_operator_queue.py",
       "feature": "OPS-001",
       "added": "2026-03-07",
-      "categories": ["backend", "api", "operator-queue", "operating-room"],
+      "categories": [
+        "backend",
+        "api",
+        "operator-queue",
+        "operating-room"
+      ],
       "description": "Tests for Operator Queue API: list/get/respond/cancel items, stats, auth requirements, agent-specific queries, input validation"
     },
     {
       "file": "scheduler_tests/test_async_dispatch.py",
       "feature": "SCHED-ASYNC-001",
       "added": "2026-03-11",
-      "categories": ["scheduler", "backend", "async", "polling"],
+      "categories": [
+        "scheduler",
+        "backend",
+        "async",
+        "polling"
+      ],
       "description": "Tests for scheduler async fire-and-forget dispatch with DB polling: async dispatch, polling, status overwrite guard, backward compatibility, timeout handling"
     },
     {
       "file": "test_cleanup_service.py",
       "feature": "Issue #106",
       "added": "2026-03-13",
-      "categories": ["backend", "api", "cleanup", "executions"],
+      "categories": [
+        "backend",
+        "api",
+        "cleanup",
+        "executions"
+      ],
       "description": "Tests for cleanup service Issue #106 fixes: no-session execution fast-fail, orphaned skipped execution finalization, cleanup report structure"
     },
     {
       "file": "test_public_user_memory.py",
       "feature": "Issue #147",
       "added": "2026-03-19",
-      "categories": ["backend", "api", "public-links", "memory"],
+      "categories": [
+        "backend",
+        "api",
+        "public-links",
+        "memory"
+      ],
       "description": "Tests for per-user persistent memory for public link agents: DB operations (get_or_create, increment, update), system prompt formatting, anonymous session isolation"
     },
     {
       "file": "unit/test_base_image_allowlist.py",
       "feature": "Issue #172",
       "added": "2026-03-26",
-      "categories": ["backend", "security", "agents", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "agents",
+        "unit"
+      ],
       "description": "Tests for base image allowlist validation: default allowlist, custom settings, malformed settings fallback, error messages (19 tests)"
     },
     {
       "file": "unit/test_otp_rate_limiting.py",
       "feature": "Issue #176",
       "added": "2026-03-26",
-      "categories": ["backend", "security", "auth", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "auth",
+        "unit"
+      ],
       "description": "Tests for OTP verification rate limiting: per-email attempt counter, IP rate limit, brute-force lockout after 5 failures, counter reset on success"
     },
     {
       "file": "test_access_control.py",
       "feature": "Issue #174",
       "added": "2026-03-26",
-      "categories": ["backend", "security", "api", "access-control"],
+      "categories": [
+        "backend",
+        "security",
+        "api",
+        "access-control"
+      ],
       "description": "Tests for broken access control fix: admin-only endpoints (ops, observability, system-agent, alerts), owner-only agent endpoints (credentials, chat history, queue, skills), agent access checks (stats, queue, skills, detail, logs)"
     },
     {
       "file": "unit/test_credential_inject_allowlist.py",
       "feature": "Issue #183",
       "added": "2026-03-27",
-      "categories": ["backend", "security", "credentials", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "credentials",
+        "unit"
+      ],
       "description": "Tests for credential injection file path allowlist: allowed paths (.env, .mcp.json, etc.), blocked paths (arbitrary HTML, path traversal, CLAUDE.md overwrite), mixed paths, edge cases (20 tests)"
     },
     {
       "file": "unit/test_websocket_auth.py",
       "feature": "Issue #178",
       "added": "2026-03-27",
-      "categories": ["backend", "security", "websocket", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "websocket",
+        "unit"
+      ],
       "description": "Tests for WebSocket authentication enforcement: reject before accept() for missing/invalid/expired tokens, valid token authentication, first-message auth removal (15 tests)"
     },
     {
       "file": "test_websocket_auth.py",
       "feature": "Issue #178",
       "added": "2026-03-27",
-      "categories": ["backend", "security", "websocket", "integration"],
+      "categories": [
+        "backend",
+        "security",
+        "websocket",
+        "integration"
+      ],
       "description": "Integration tests for WebSocket authentication: HTTP-level rejection for missing/invalid tokens, valid token acceptance"
     },
     {
       "file": "unit/test_ssrf_skills_library.py",
       "feature": "Issue #179",
       "added": "2026-03-27",
-      "categories": ["backend", "security", "ssrf", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "ssrf",
+        "unit"
+      ],
       "description": "Tests for SSRF prevention in skills library URL: github.com hostname enforcement, internal IP rejection, scheme validation, bypass attempts (28 tests)"
     },
     {
       "file": "test_ip_rate_limit_fix.py",
       "feature": "Issue #181",
       "added": "2026-03-27",
-      "categories": ["backend", "security", "rate-limiting", "unit"],
+      "categories": [
+        "backend",
+        "security",
+        "rate-limiting",
+        "unit"
+      ],
       "description": "Tests for X-Forwarded-For rate limit bypass fix: trusted-proxy validation, spoofed header rejection, per-token secondary rate limit, pentest 3.2.4 PoC scenario"
     },
     {
       "file": "test_subscription_usage.py",
       "feature": "SUB-004",
       "added": "2026-04-01",
-      "categories": ["backend", "api", "subscriptions", "usage-tracking"],
+      "categories": [
+        "backend",
+        "api",
+        "subscriptions",
+        "usage-tracking"
+      ],
       "description": "Tests for per-subscription usage tracking: GET /api/subscriptions/{id}/usage returns correct structure, zeros for fresh subscriptions, 404 for unknown, auth enforcement, name-based lookup"
     },
     {
       "file": "test_role_model.py",
       "feature": "Issue #143",
       "added": "2026-03-20",
-      "categories": ["backend", "api", "auth", "roles"],
+      "categories": [
+        "backend",
+        "api",
+        "auth",
+        "roles"
+      ],
       "description": "Tests for 4-tier role model: list users, update roles, admin-only access, role validation"
     },
     {
       "file": "test_channel_access_control.py",
       "feature": "Issue #311",
       "added": "2026-04-13",
-      "categories": ["backend", "api", "sharing", "channels"],
+      "categories": [
+        "backend",
+        "api",
+        "sharing",
+        "channels"
+      ],
       "description": "Tests for unified channel access control: access-policy GET/PUT, access-requests GET/decide, approve-inserts-share side-effect, deny-without-share side-effect"
     },
     {
@@ -137,141 +230,262 @@
       "feature": "BACKLOG-001",
       "added": "2026-04-13",
       "updated": "2026-04-25",
-      "categories": ["backend", "unit", "backlog", "async", "executions"],
+      "categories": [
+        "backend",
+        "unit",
+        "backlog",
+        "async",
+        "executions"
+      ],
       "description": "Unit tests for persistent async task backlog (#260): TaskExecutionStatus.QUEUED enum, migration (queued_at/backlog_metadata/max_backlog_depth/partial index), ScheduleOperations claim FIFO atomicity, cancel paths, stale expiry, BacklogService enqueue depth-cap, drain slot-first acquire + corrupt metadata failure, SlotService release callback fan-out. #496: AST-based regression guards for the lazy-import target in services/backlog_service.py (catches the test-drift class that masked the broken drain), self-task field capture and round-trip through queueing for SELF-EXEC-001 (#264)."
     },
     {
       "file": "test_validation.py",
       "feature": "VALIDATE-001",
       "added": "2026-04-14",
-      "categories": ["backend", "api", "scheduler", "validation"],
+      "categories": [
+        "backend",
+        "api",
+        "scheduler",
+        "validation"
+      ],
       "description": "Tests for business task validation (#294): prompt building (placeholders, truncation, custom prompts), response parsing (JSON, markdown blocks, text fallback, failure indicators), business status mapping, schedule/execution model validation fields, API integration tests"
     },
     {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",
-      "categories": ["backend", "api", "git", "credentials"],
+      "categories": [
+        "backend",
+        "api",
+        "git",
+        "credentials"
+      ],
       "description": "Tests for per-agent GitHub PAT (#347): GET/PUT/DELETE endpoints, status checking, PAT validation, encryption roundtrip, auth requirements"
     },
     {
       "file": "test_proactive_messaging.py",
       "feature": "Issue #321",
       "added": "2026-04-16",
-      "categories": ["backend", "api", "messaging", "channels"],
+      "categories": [
+        "backend",
+        "api",
+        "messaging",
+        "channels"
+      ],
       "description": "Tests for proactive agent messaging (#321): send_message endpoint validation, allow_proactive flag management, proactive shares listing, channel selection, owner authorization, rate limiting info"
     },
     {
       "file": "unit/test_telegram_voice.py",
       "feature": "Issue #318",
       "added": "2026-04-18",
-      "categories": ["backend", "unit", "telegram", "voice", "transcription"],
+      "categories": [
+        "backend",
+        "unit",
+        "telegram",
+        "voice",
+        "transcription"
+      ],
       "description": "Unit tests for Telegram voice transcription (#318): voice validation (duration/size limits), transcription formatting, placeholder constants, combined validation (22 tests)"
     },
     {
       "file": "test_telegram_login_gate.py",
       "feature": "Issue #311",
       "added": "2026-04-19",
-      "categories": ["backend", "unit", "telegram", "access-control"],
+      "categories": [
+        "backend",
+        "unit",
+        "telegram",
+        "access-control"
+      ],
       "description": "Unit tests for Telegram /login access gate: verified+shared returns ready, open_access returns ready, verified+restricted upserts access_request and returns 'pending approval', upsert failures don't break the reply, invalid code short-circuits gate"
     },
     {
       "file": "test_event_bus.py",
       "feature": "RELIABILITY-003 / #306",
       "added": "2026-04-21",
-      "categories": ["backend", "unit", "websocket", "redis-streams"],
+      "categories": [
+        "backend",
+        "unit",
+        "websocket",
+        "redis-streams"
+      ],
       "description": "Unit tests for Redis Streams event bus (#306): last-event-id validation + id comparison, scope visibility (SCOPE_ALL vs SCOPE_SCOPED with accessible_agents), EventBus XADD envelope (dict + legacy JSON string + inferred agent_name), Redis-unavailable fallback buffer, StreamDispatcher 3-failure client eviction, slow-consumer queue overflow triggers resync marker, update_accessible_agents mutation, invalid last-event-id queues resync_required"
     },
     {
       "file": "unit/test_agent_shared_files_migration.py",
       "feature": "FILES-001 / amazing-file-outbound Step 1",
       "added": "2026-04-23",
-      "categories": ["backend", "unit", "schema", "migrations", "file-sharing"],
+      "categories": [
+        "backend",
+        "unit",
+        "schema",
+        "migrations",
+        "file-sharing"
+      ],
       "description": "Schema + migration tests for agent_shared_files: table creation on legacy DB, expected columns, file_sharing_enabled added to agent_ownership (default 0), FK carries both ON DELETE CASCADE and ON UPDATE CASCADE, 3 indexes including the partial 'WHERE revoked_at IS NULL', migration idempotent on legacy and fresh DBs, ON UPDATE CASCADE propagates rename, ON DELETE CASCADE removes children, download_token UNIQUE constraint enforced (12 tests)"
     },
     {
       "file": "unit/test_file_sharing_mixin.py",
       "feature": "FILES-001 / amazing-file-outbound Step 2",
       "added": "2026-04-23",
-      "categories": ["backend", "unit", "db", "file-sharing"],
+      "categories": [
+        "backend",
+        "unit",
+        "db",
+        "file-sharing"
+      ],
       "description": "FileSharingMixin DB operations: get_file_sharing_enabled default False (missing row, NULL column, 0 column), set/get round-trip (True, False, idempotent repeat), set returns False on unknown agent (rowcount=0), per-agent isolation, static volume-name convention ('agent-{name}-public'), static mount-path constant '/home/developer/public' (12 tests)"
     },
     {
       "file": "unit/test_public_folder_mount_match.py",
       "feature": "FILES-001 / amazing-file-outbound Step 2",
       "added": "2026-04-23",
-      "categories": ["backend", "unit", "lifecycle", "file-sharing"],
-      "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
+      "categories": [
+        "backend",
+        "unit",
+        "lifecycle",
+        "file-sharing"
+      ],
+      "description": "check_public_folder_mount_matches truth table: enabled+mounted \u2192 True, enabled+unmounted \u2192 False (needs recreation to attach), disabled+mounted \u2192 False (needs recreation to detach), disabled+unmounted \u2192 True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
     },
     {
       "file": "unit/test_slack_dm_default.py",
       "feature": "Slack DM-default agent setter (#584)",
       "added": "2026-04-29",
-      "categories": ["backend", "unit", "db", "slack"],
-      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote — router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
+      "categories": [
+        "backend",
+        "unit",
+        "db",
+        "slack"
+      ],
+      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote \u2014 router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
     },
     {
       "file": "test_public_chat_history.py",
       "feature": "Issue #587",
       "added": "2026-04-29",
-      "categories": ["backend", "api", "public", "chat"],
-      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} — auth requirements, 404 on invalid tokens, response shape, limit param"
+      "categories": [
+        "backend",
+        "api",
+        "public",
+        "chat"
+      ],
+      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} \u2014 auth requirements, 404 on invalid tokens, response shape, limit param"
     },
     {
       "file": "unit/test_voice_tools.py",
       "feature": "VOICE-001 / Issue #581",
       "added": "2026-04-29",
-      "categories": ["backend", "unit", "voice", "gemini", "tools"],
-      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
+      "categories": [
+        "backend",
+        "unit",
+        "voice",
+        "gemini",
+        "tools"
+      ],
+      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout \u2192 error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
     },
     {
       "file": "test_files_guardrail_bypass.py",
       "feature": "Issue #590 / AISEC-C2",
       "added": "2026-04-30",
-      "categories": ["backend", "api", "security", "files", "credentials"],
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "files",
+        "credentials"
+      ],
       "description": "Integration tests for the .mcp.json RCE-by-config bypass closure: AISEC-C2 exact reproduction (PUT /files?path=.mcp.json + credentials/inject vectors), full path_deny coverage (15 protected paths), path traversal variants (8), credentials inject allowlist (rejected paths + .env/.credentials.enc regression), defense-in-depth verification (block at backend layer for stopped agents), file-state proof (content unchanged after blocked write). Pairs with tests/unit/test_files_protected_paths.py (32 unit tests)."
     },
     {
       "file": "test_mcp_validator_endpoint.py",
       "feature": "Issue #598 / AISEC-C2 Layer 2",
       "added": "2026-04-30",
-      "categories": ["backend", "api", "security", "credentials", "mcp"],
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "credentials",
+        "mcp"
+      ],
       "description": "Integration tests for .mcp.json content validation at the inject endpoint: AISEC-C2 still blocked (now via content validator), legit configs accepted (npx, uvx, Bearer ${TOKEN} headers, empty mcpServers), 11 parametrized bypass attempts (path-disguised commands, inline-exec flags, shell metachars, command substitution, reserved env refs, SSRF localhost/IMDS, http-not-https, userinfo URLs, reserved trinity name, unknown fields), .mcp.json.template still blocked at path layer, mixed-batch atomicity (.env + evil .mcp.json rejects whole batch). Pairs with tests/unit/test_mcp_validator.py (88 unit tests)."
     },
     {
       "file": "unit/test_web_file_upload.py",
       "feature": "Issue #364",
       "added": "2026-04-29",
-      "categories": ["backend", "unit", "upload", "files", "chat"],
-      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) — 14 tests"
+      "categories": [
+        "backend",
+        "unit",
+        "upload",
+        "files",
+        "chat"
+      ],
+      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) \u2014 14 tests"
     },
     {
       "file": "unit/test_slack_mrkdwn.py",
       "feature": "Issue #293",
       "added": "2026-05-01",
-      "categories": ["backend", "unit", "slack", "channels", "formatting"],
+      "categories": [
+        "backend",
+        "unit",
+        "slack",
+        "channels",
+        "formatting"
+      ],
       "description": "Unit tests for the Slack mrkdwn renderer that replaces slackify-markdown 0.2.2 (#293): nested-list indentation preserved (2-3 levels, mixed bullet/ordered), blank line before headings (H1-H6), blockquote `>` prefix on every line (multi-line + softbreak continuation), table conversion to fenced code-block with column alignment, horizontal rule emits visible separator. Plus inline formatting regression coverage (bold, italic, strikethrough, links with/without label, image-as-link, code blocks with language fence stripping), real agent response patterns (status report, code review, blockquoted attribution), edge cases (empty/None/non-string input, HTML-as-literal-text). Pairs with tests/unit/test_slack_rich_text.py (13 tests, retargeted to new renderer)."
     },
     {
       "file": "test_site_proxy.py",
       "feature": "SITE-001",
       "added": "2026-05-03",
-      "categories": ["backend", "api", "public-links", "proxy"],
+      "categories": [
+        "backend",
+        "api",
+        "public-links",
+        "proxy"
+      ],
       "description": "Tests for agent website proxy (#633): site link creation, link_type field, URL format, token validation (invalid/wrong-type/disabled), 502 when web server not running, redirect on missing trailing slash."
     },
     {
       "file": "unit/test_database_facade_delegation.py",
       "feature": "Issue #647 / WEBHOOK-001 facade gap",
       "added": "2026-05-04",
-      "categories": ["backend", "unit", "database", "webhooks", "lint"],
-      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI — would have caught WEBHOOK-001 before #291 landed."
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "webhooks",
+        "lint"
+      ],
+      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI \u2014 would have caught WEBHOOK-001 before #291 landed."
     },
     {
       "file": "unit/test_slack_token_encryption.py",
       "feature": "Issue #453",
       "added": "2026-05-05",
-      "categories": ["backend", "unit", "slack", "security", "credentials", "encryption"],
+      "categories": [
+        "backend",
+        "unit",
+        "slack",
+        "security",
+        "credentials",
+        "encryption"
+      ],
       "description": "Unit tests for SLACK-001 bot token encryption added to db/slack.py (#453): round-trip via SlackOperations, raw DB value is JSON envelope, plaintext fallback for legacy xoxb-* rows, decrypt-failure returns None, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, _migrate_slack_bot_token_encryption walks both slack_link_connections and slack_workspaces (idempotent, skips encrypted rows, hard-fails without key, no-op on empty/missing tables). 14 tests. Tests for slack_channels.py + telegram + whatsapp encryption are tracked separately in #664."
+    },
+    {
+      "file": "unit/test_github_pat_fallback.py",
+      "feature": "#735",
+      "added": "2026-05-08",
+      "categories": [
+        "unit",
+        "backend",
+        "git"
+      ]
     }
   ]
 }
