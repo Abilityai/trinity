@@ -89,7 +89,7 @@ class CanaryAlerts:
         if not webhook_url:
             # Emit a structured debug line so operators can confirm the
             # transition was *detected* even when alerts are silent.
-            worst = max(violations, key=lambda v: _severity_rank(v.severity))
+            worst = max(violations, key=lambda v: severity_rank(v.severity))
             logger.debug(
                 "canary transition (slack disabled — set CANARY_SLACK_WEBHOOK_URL): "
                 "%s severity=%s violations_in_cycle=%d snapshot_time=%s",
@@ -100,7 +100,7 @@ class CanaryAlerts:
             )
             return
 
-        worst = max(violations, key=lambda v: _severity_rank(v.severity))
+        worst = max(violations, key=lambda v: severity_rank(v.severity))
         text, blocks = cls._build_slack_payload(
             invariant_id,
             violations,
@@ -365,6 +365,6 @@ class CanaryAlerts:
         return f"{invariant_id} fired {len(violations)} violation(s)."
 
 
-def _severity_rank(severity: str) -> int:
+def severity_rank(severity: str) -> int:
     """Higher = worse. Used to pick the loudest violation for a transition."""
     return {"minor": 1, "major": 2, "critical": 3}.get(severity, 0)

@@ -307,8 +307,12 @@ class SlackService:
         except httpx.TimeoutException:
             return False, f"timeout after {timeout_seconds}s"
         except Exception as e:
-            logger.error(f"Slack webhook post error: {e}")
-            return False, str(e)
+            # Don't echo `str(e)` — httpx exceptions typically embed the
+            # request URL in their message, and for canary alerts that URL
+            # IS the credential. Log + return only the exception class.
+            err = type(e).__name__
+            logger.error("Slack webhook post error: %s", err)
+            return False, f"{err}: webhook unreachable"
 
     async def get_user_email(
         self,

@@ -22,6 +22,7 @@ from canary import INVARIANTS
 from database import db
 from dependencies import require_admin
 from models import User
+from services.canary_alerts import severity_rank
 from services.canary_service import canary_service
 
 logger = logging.getLogger(__name__)
@@ -118,8 +119,12 @@ class RunCycleResponse(BaseModel):
 
     snapshot_time: str
     cycle_duration_ms: int
+    # Invariants this cycle attempted (= the request's `invariants` filter,
+    # or all registered ids if unfiltered). Whether each one *fired* is
+    # surfaced via `violations` and `transitions`. Sources that were down
+    # this cycle are listed in `sources_unavailable` — invariants that
+    # depend on them returned no violations regardless of state.
     checks_run: List[str]
-    checks_skipped: List[str]
     sources_unavailable: List[str]
     violations: List[CycleViolation]
     transitions: List[CycleTransition]
@@ -226,7 +231,6 @@ async def run_canary_cycle(
     snapshot_time = cycle.snapshot_time
     persisted: List[CycleViolation] = []
     transitions_out: List[CycleTransition] = []
-    sev_rank = {"critical": 3, "major": 2, "minor": 1}
     transition_set = set(cycle.transition_invariant_ids)
 
     for invariant_id, vlist in cycle.violations.items():
@@ -248,7 +252,7 @@ async def run_canary_cycle(
         # decided fired a notification this cycle. Continuing-red invariants
         # have rows in `persisted` but are absent from `transition_set`.
         if invariant_id in transition_set and vlist:
-            worst = max(vlist, key=lambda v: sev_rank.get(v.severity, 0))
+            worst = max(vlist, key=lambda v: severity_rank(v.severity))
             transitions_out.append(CycleTransition(
                 invariant_id=invariant_id,
                 severity=worst.severity,
@@ -260,13 +264,10 @@ async def run_canary_cycle(
                 previous_violation_at=cycle.previous_violation_at.get(invariant_id),
             ))
 
-    checks_skipped = [i for i in requested_ids if i not in cycle.violations]
-
     return RunCycleResponse(
         snapshot_time=snapshot_time,
         cycle_duration_ms=duration_ms,
-        checks_run=[i for i in requested_ids if i in cycle.violations],
-        checks_skipped=checks_skipped,
+        checks_run=list(requested_ids),
         sources_unavailable=cycle.sources_unavailable,
         violations=persisted,
         transitions=transitions_out,
