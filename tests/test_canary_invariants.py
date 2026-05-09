@@ -81,13 +81,10 @@ class FakeRedis:
             self._zsets[key][member] = score
         return added
 
-    def zrange(self, key: str, start: int, end: int) -> List[str]:
+    def zrange(self, key: str, start: int, end: int, withscores: bool = False):
         items = sorted(self._zsets.get(key, {}).items(), key=lambda kv: kv[1])
-        if end == -1:
-            sliced = items[start:]
-        else:
-            sliced = items[start : end + 1]
-        return [m for m, _ in sliced]
+        sliced = items[start:] if end == -1 else items[start : end + 1]
+        return list(sliced) if withscores else [m for m, _ in sliced]
 
     def zcard(self, key: str) -> int:
         return len(self._zsets.get(key, {}))
@@ -651,6 +648,44 @@ class TestInvariantS01:
 
         # Even with mismatch, must not fire if Redis was unreachable.
         assert s01.check(snap) == []
+
+    def test_grace_suppresses_fresh_sql_orphan(self, canary_db, reload_canary):
+        """Start-path race: SQL row freshly written, ZADD not landed yet."""
+        import time
+        _add_agent(canary_db, "a1")
+        fresh = datetime.utcfromtimestamp(time.time()).isoformat() + "Z"
+        _add_execution(canary_db, "e-fresh", "a1", "running", started_at=fresh)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        assert s01.check(snap) == []
+
+    def test_grace_suppresses_fresh_redis_phantom(self, canary_db, reload_canary):
+        """Stop-path race: ZSET score within grace, SQL already terminal."""
+        import time
+        _add_agent(canary_db, "a1")
+        reload_canary["redis"].zadd("agent:slots:a1", {"e-fresh": time.time()})
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        assert s01.check(snap) == []
+
+    def test_grace_does_not_suppress_durable_mismatch(self, canary_db, reload_canary):
+        """Old `started_at` + old ZSET score → real leak, must fire."""
+        _add_agent(canary_db, "a1")
+        _add_execution(canary_db, "e-stale-sql", "a1", "running")  # default 2026-04-30
+        reload_canary["redis"].zadd("agent:slots:a1", {"e-stale-redis": 1.0})  # 1970
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        violations = s01.check(snap)
+        assert len(violations) == 1
+        obs = violations[0].observed_state
+        assert obs["in_sql_only"] == ["e-stale-sql"]
+        assert obs["in_redis_only"] == ["e-stale-redis"]
 
 
 # ---------------------------------------------------------------------------

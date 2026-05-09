@@ -132,8 +132,12 @@ class AgentSnapshot:
     # bijection check; we keep the raw set here so other invariants can see
     # them if needed.
     slot_ids: Set[str] = field(default_factory=set)
+    # ZSET score per slot (Unix epoch seconds at acquire); used by S-01 grace.
+    slot_scores: Dict[str, float] = field(default_factory=dict)
     # SQLite execution_id sets, partitioned by status.
     running_exec_ids: Set[str] = field(default_factory=set)
+    # `started_at` per running id (ISO); used by S-01 grace.
+    running_started_at: Dict[str, str] = field(default_factory=dict)
     queued_exec_ids: Set[str] = field(default_factory=set)
 
 
@@ -189,14 +193,16 @@ def _collect_executions(agent_name: str) -> Dict[str, Set[str]]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, status FROM schedule_executions "
+            "SELECT id, status, started_at FROM schedule_executions "
             "WHERE agent_name = ? AND status IN ('running', 'queued')",
             (agent_name,),
         )
-        out = {"running": set(), "queued": set()}
+        out: Dict[str, Any] = {"running": set(), "queued": set(), "started_at": {}}
         for row in cursor.fetchall():
             if row["status"] == "running":
                 out["running"].add(row["id"])
+                if row["started_at"]:
+                    out["started_at"][row["id"]] = row["started_at"]
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
         return out
@@ -324,12 +330,14 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
     prefix = slot_service.slots_prefix
 
     by_agent: Dict[str, Set[str]] = {}
+    scores: Dict[str, Dict[str, float]] = {}
     orphan_slots: Dict[str, int] = {}
 
-    # Per-agent ZRANGE for known agents.
+    # Per-agent ZRANGE for known agents (with scores for S-01 grace).
     for name in known_agents:
-        members = redis_client.zrange(f"{prefix}{name}", 0, -1)
-        by_agent[name] = set(members)
+        with_scores = redis_client.zrange(f"{prefix}{name}", 0, -1, withscores=True)
+        by_agent[name] = {m for m, _ in with_scores}
+        scores[name] = {m: float(s) for m, s in with_scores}
 
     # SCAN for orphan keys (agent name in the key but not in known set).
     cursor = 0
@@ -345,7 +353,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         if cursor == 0:
             break
 
-    return {"by_agent": by_agent, "orphan_slots": orphan_slots}
+    return {"by_agent": by_agent, "scores": scores, "orphan_slots": orphan_slots}
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +382,7 @@ def collect_snapshot() -> Snapshot:
     snap.known_agents = {row["agent_name"] for row in agent_rows}
 
     # Redis slot state (scan once for both per-agent and orphan keys).
-    redis_state: Dict[str, Any] = {"by_agent": {}, "orphan_slots": {}}
+    redis_state: Dict[str, Any] = {"by_agent": {}, "scores": {}, "orphan_slots": {}}
     try:
         redis_state = _collect_redis_slot_state(snap.known_agents)
         snap.orphan_redis_slots = redis_state["orphan_slots"]
@@ -399,7 +407,9 @@ def collect_snapshot() -> Snapshot:
                 max_parallel=int(row["max_parallel_tasks"]),
                 execution_timeout_seconds=int(row["execution_timeout_seconds"]),
                 slot_ids=redis_state["by_agent"].get(name, set()),
+                slot_scores=redis_state["scores"].get(name, {}),
                 running_exec_ids=execs["running"],
+                running_started_at=execs.get("started_at", {}),
                 queued_exec_ids=execs["queued"],
             )
         )
