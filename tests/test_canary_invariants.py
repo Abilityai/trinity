@@ -1130,11 +1130,12 @@ class TestCanaryService:
 # ---------------------------------------------------------------------------
 #
 # These tests exercise the env-gated Slack webhook emit path. The pure
-# message-building helpers (_build_slack_payload, _format_last_red) are
-# tested without any fixtures — they're static/classmethods. The
-# `_emit_transition` integration path piggybacks on the existing
-# `canary_service` fixture and stubs the slack_service module so we can
-# observe the outbound call without touching httpx.
+# message-building helpers (CanaryAlerts._build_slack_payload,
+# CanaryAlerts._format_last_red) are tested without any fixtures — they're
+# static/classmethods. The `CanaryAlerts.emit_transition` integration path
+# piggybacks on the existing `canary_service` fixture and stubs the
+# slack_service module so we can observe the outbound call without
+# touching httpx.
 
 
 class TestCanarySlackPayload:
@@ -1291,9 +1292,9 @@ def slack_capture(monkeypatch):
     """Replace services.slack_service.slack_service with a recorder.
 
     The lazy `from services.slack_service import slack_service` inside
-    `_emit_transition` resolves through `sys.modules`, so seeding the
-    module entry up-front captures every call without a live httpx
-    client.
+    `CanaryAlerts.emit_transition` resolves through `sys.modules`, so
+    seeding the module entry up-front captures every call without a
+    live httpx client.
     """
     calls: List[Dict[str, Any]] = []
     return_value: Dict[str, Any] = {"value": (True, None)}
@@ -1316,7 +1317,7 @@ def slack_capture(monkeypatch):
 
 
 class TestCanarySlackEmit:
-    """Integration tests for `_emit_transition` against a recorded sink."""
+    """Integration tests for `CanaryAlerts.emit_transition` against a recorded sink."""
 
     def test_no_webhook_url_skips_silently(
         self, canary_db, canary_service, slack_capture, monkeypatch
@@ -1389,7 +1390,7 @@ class TestCanarySlackEmit:
     ):
         """A failing webhook must not break cycle accounting.
 
-        The row is already persisted before `_emit_transition` runs;
+        The row is already persisted before `CanaryAlerts.emit_transition` runs;
         a hung Slack endpoint can't roll that back. We assert the
         transition is still counted and the violation is still in the
         DB even when the recorder returns a failure tuple.
