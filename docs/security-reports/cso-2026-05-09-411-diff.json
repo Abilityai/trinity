@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "date": "2026-05-09",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/411-canary-migration",
+  "base": "dev",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "public_endpoints": 0,
+    "authenticated_endpoints": 0,
+    "admin_endpoints": 4,
+    "file_upload_points": 0,
+    "websocket_channels": 0,
+    "external_integrations": 1,
+    "background_jobs": 1,
+    "new_env_vars": 2
+  },
+  "findings": [],
+  "supply_chain_summary": {
+    "new_python_deps": 0,
+    "new_node_deps": 0,
+    "new_lockfile_changes": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 5,
+    "dropped_below_gate": 5,
+    "hard_exclusions_applied": ["#1 DoS/resource", "#3 memory leak"]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_report": "cso-2026-05-04-589-diff.md",
+    "carryover": 0,
+    "note": "Prior diff report covered a different change set (#589 network split). No findings carry over."
+  },
+  "summary": "Phase 1 of #411 (canary invariant harness). Admin-only API surface, outbound-only Slack integration with explicit URL-leak mitigation, SQL composition via constants and enum-derived values, env-gated activation. Zero findings at the 8/10 daily-mode gate."
+}
