@@ -57,7 +57,7 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         in_sql_only = sorted(
             eid for eid in running_ids - slot_ids
             if (ts := agent.running_started_at.get(eid)) is None
-            or datetime.fromisoformat(ts.rstrip("Z")).timestamp() < cutoff
+            or datetime.fromisoformat(ts).timestamp() < cutoff
         )
         if not in_redis_only and not in_sql_only:
             continue
