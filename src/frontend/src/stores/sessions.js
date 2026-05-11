@@ -174,13 +174,19 @@ export const useSessionsStore = defineStore('sessions', {
      * so it survives KeepAlive deactivation and doesn't bleed across
      * agents (one SessionPanel instance services all `/agents/*` routes).
      *
-     * No optimistic insert: the backend persists the user message at the
-     * start of the turn (routers/sessions.py step 2) and `loadSession`
-     * after a successful response surfaces both rows. Trades ~100-300 ms
-     * perceived latency for correctness across navigation — under the
-     * old optimistic-rollback approach, a turn that failed while the
-     * user was on another page would silently delete their message from
-     * view even though it was persisted server-side.
+     * Optimistic insert without rollback: the user's message is appended
+     * to `messagesBySession` synchronously so the UI doesn't sit on a
+     * blank spinner for the full turn duration (long Bash/sleep prompts
+     * can run for minutes). The backend persists this exact row at turn
+     * start (routers/sessions.py step 2), so on success `loadSession`
+     * replaces our optimistic row with the canonical row — same content,
+     * no flicker. On error the optimistic row is intentionally kept:
+     * server-side failures occur after the user row is persisted, and
+     * for the rare network failure where the POST never reaches the
+     * server, keeping the row in view is still better than the message
+     * silently disappearing. (The original PR #782 dropped optimistic
+     * insert entirely on the assumption that turns are fast — for 30s+
+     * turns that left the user staring at a bare spinner.)
      */
     async sendMessage(agentName, sessionId, text, { model, timeoutSeconds, files } = {}) {
       const authStore = useAuthStore()
@@ -188,6 +194,17 @@ export const useSessionsStore = defineStore('sessions', {
       this.inFlightBySession[sessionId] = true
       this.errorBySession[sessionId] = null
       this.fallbackNoticeBySession[sessionId] = false
+
+      const existing = this.messagesBySession[sessionId] || []
+      this.messagesBySession[sessionId] = [
+        ...existing,
+        {
+          id: `optimistic-${Date.now()}`,
+          role: 'user',
+          content: text,
+          timestamp: new Date().toISOString(),
+        },
+      ]
 
       try {
         const body = { message: text }

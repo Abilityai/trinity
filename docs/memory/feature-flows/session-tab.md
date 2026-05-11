@@ -48,7 +48,7 @@ As a Trinity user running long, multi-turn reasoning tasks against an agent, I w
 | `createSession(agent)` | `POST /api/agents/{name}/session` |
 | `loadSession(agent, id)` | `GET /api/agents/{name}/sessions/{id}` |
 | `selectSession(agent, id)` | local-only (active-session pointer) |
-| `sendMessage(agent, id, text, opts)` | `POST /api/agents/{name}/sessions/{id}/message` (with optimistic user-message insert + rollback on failure) |
+| `sendMessage(agent, id, text, opts)` | `POST /api/agents/{name}/sessions/{id}/message` (optimistic user-message insert, **no rollback on failure** — the backend persists the user row at turn start so the optimistic row is canonical; #789) |
 | `resetSession(agent, id)` | `POST /api/agents/{name}/sessions/{id}/reset` |
 | `deleteSession(agent, id)` | `DELETE /api/agents/{name}/sessions/{id}` |
 

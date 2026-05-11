@@ -513,12 +513,19 @@ watch(
 // catches up. Backend persists user + assistant rows itself; we just need
 // to re-fetch them.
 onActivated(async () => {
+  // Capture props.agentName and the active session id BEFORE the await.
+  // AgentDetail's route watch fires loadAgent() async on agent-name route
+  // changes; `agent.value` (and therefore SessionPanel's `props.agentName`)
+  // can update mid-await. Without capture, the post-await read would pair
+  // the previous agent's session id with the new agent's name and 404 the
+  // polling closure indefinitely (#759 follow-up).
+  const agentName = props.agentName
   const sid = currentSessionId.value
   if (!sid || props.agentStatus !== 'running') return
   try {
-    const data = await sessionsStore.loadSession(props.agentName, sid)
+    const data = await sessionsStore.loadSession(agentName, sid)
     if (data?.session?.turn_in_progress) {
-      sessionsStore.startPolling(props.agentName, sid)
+      sessionsStore.startPolling(agentName, sid)
     }
   } catch {
     // Re-sync failure is non-fatal — the next user action will retry.
