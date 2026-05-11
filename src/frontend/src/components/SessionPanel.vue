@@ -133,7 +133,7 @@
           </span>
         </div>
         <button
-          @click="fallbackNotice = false"
+          @click="dismissFallbackNotice"
           class="text-amber-500 hover:text-amber-700 dark:hover:text-amber-300"
           title="Dismiss"
         >
@@ -223,7 +223,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, onActivated, onDeactivated, watch } from 'vue'
 import { ChatMessages, ChatInput } from './chat'
 import ModelSelector from './ModelSelector.vue'
 import { useSessionsStore } from '../stores/sessions'
@@ -241,22 +241,28 @@ const props = defineProps({
 
 const sessionsStore = useSessionsStore()
 
-// Local UI state
+// -- Local UI state ----------------------------------------------------------
+// AgentDetail is wrapped in <KeepAlive>, so this SessionPanel instance is
+// reused across all `/agents/*` routes. Local refs survive deactivation
+// and would otherwise bleed across agents. Turn-specific state (loading,
+// error, fallback notice, in-flight tracking) lives in the Pinia store
+// keyed by sessionId. The local refs below are intentionally UI-only:
+// either ephemera that's safe to reset on agent change, or user prefs
+// (selectedModel) that should persist.
 const message = ref('')
-const loading = ref(false)
+const localLoading = ref(false)        // non-turn loading: select/create/reset
 const loadingText = ref('Thinking...')
-const error = ref(null)
+const localError = ref(null)           // non-turn errors: load/create/reset
 const sessionsLoading = ref(false)
 const showSessionDropdown = ref(false)
 const showResetModal = ref(false)
-const fallbackNotice = ref(false)
 const creatingSession = ref(false)
 const dropdownRef = ref(null)
 const messagesRef = ref(null)
 const chatInputRef = ref(null)
 const selectedModel = ref(localStorage.getItem('trinity_session_model') || '')
 
-// Derive from store
+// -- Derived from store -----------------------------------------------------
 const sessions = computed(() => sessionsStore.sessionsFor(props.agentName))
 const currentSessionId = computed(() => sessionsStore.activeSessionId(props.agentName))
 const messages = computed(() => {
@@ -268,6 +274,28 @@ const messages = computed(() => {
     source: 'text',
   }))
 })
+
+// -- Turn state from store, scoped by current sessionId ---------------------
+// These computed wrappers read store state keyed by `currentSessionId`.
+// Switching agents/sessions automatically follows the active session id,
+// so the template never sees stale state from another session.
+const turnInFlight = computed(() =>
+  currentSessionId.value ? sessionsStore.isInFlight(currentSessionId.value) : false,
+)
+const turnError = computed(() =>
+  currentSessionId.value ? sessionsStore.errorForSession(currentSessionId.value) : null,
+)
+const fallbackNotice = computed(() =>
+  currentSessionId.value ? sessionsStore.fallbackNoticeForSession(currentSessionId.value) : false,
+)
+
+// Unified `loading` for the template: turn in flight OR any UI loading.
+const loading = computed(
+  () => turnInFlight.value || localLoading.value || creatingSession.value || sessionsLoading.value,
+)
+// Unified `error` for the template: turn error takes precedence (it's
+// what the user just acted on); fall back to non-turn errors.
+const error = computed(() => turnError.value || localError.value)
 
 const currentSessionLabel = computed(() => {
   if (!currentSessionId.value) return 'No session'
@@ -334,7 +362,7 @@ async function loadSessions(autoSelect = true) {
       await selectSession(sessions.value[0], false)
     }
   } catch (e) {
-    error.value = 'Failed to load sessions'
+    localError.value = 'Failed to load sessions'
   } finally {
     sessionsLoading.value = false
   }
@@ -344,15 +372,14 @@ async function selectSession(session, closeDropdown = true) {
   if (closeDropdown) showSessionDropdown.value = false
   if (currentSessionId.value === session.id) return
   sessionsStore.selectSession(props.agentName, session.id)
-  loading.value = true
-  error.value = null
-  fallbackNotice.value = false
+  localLoading.value = true
+  localError.value = null
   try {
     await sessionsStore.loadSession(props.agentName, session.id)
   } catch {
-    error.value = 'Failed to load session messages'
+    localError.value = 'Failed to load session messages'
   } finally {
-    loading.value = false
+    localLoading.value = false
     focusInput()
   }
 }
@@ -361,16 +388,23 @@ async function startNewSession() {
   if (creatingSession.value) return
   creatingSession.value = true
   showSessionDropdown.value = false
-  error.value = null
-  fallbackNotice.value = false
+  localError.value = null
   try {
     await sessionsStore.createSession(props.agentName)
     focusInput()
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to create session'
+    localError.value = e.response?.data?.detail || 'Failed to create session'
   } finally {
     creatingSession.value = false
   }
+}
+
+function dismissFallbackNotice() {
+  const sid = currentSessionId.value
+  if (!sid) return
+  // Store owns fallback notice state per session; clear just that flag
+  // without touching in-flight/error state.
+  sessionsStore.fallbackNoticeBySession[sid] = false
 }
 
 // ----- reset / delete --------------------------------------------------------
@@ -386,9 +420,11 @@ async function performReset() {
   if (!sid) return
   try {
     await sessionsStore.resetSession(props.agentName, sid)
-    fallbackNotice.value = false
+    // Clear any stale turn state (error, fallback notice, polling) on
+    // the now-reset session. Store-side cleanup is idempotent.
+    sessionsStore.clearSessionTurnState(sid)
   } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to reset memory'
+    localError.value = e.response?.data?.detail || 'Failed to reset memory'
   }
 }
 
@@ -396,45 +432,34 @@ async function performReset() {
 
 async function onSubmit(text, files = []) {
   if ((!text && (!files || files.length === 0)) || loading.value || props.agentStatus !== 'running') return
-  error.value = null
 
   // Lazy session creation — first turn from the empty state creates a row.
   if (!currentSessionId.value) {
     try {
       await sessionsStore.createSession(props.agentName)
     } catch (e) {
-      error.value = e.response?.data?.detail || 'Failed to create session'
+      localError.value = e.response?.data?.detail || 'Failed to create session'
       return
     }
   }
 
   message.value = ''
-  loading.value = true
   loadingText.value = 'Thinking...'
-  fallbackNotice.value = false
   const sid = currentSessionId.value
 
   try {
-    const result = await sessionsStore.sendMessage(props.agentName, sid, text, {
+    // sendMessage manages inFlight + error + fallbackNotice on the store,
+    // keyed by sessionId. The template's computed `loading`/`error`/
+    // `fallbackNotice` follow automatically.
+    await sessionsStore.sendMessage(props.agentName, sid, text, {
       model: selectedModel.value || undefined,
       files: files && files.length > 0 ? files : undefined,
     })
-    if (result?.fallback_fired) {
-      fallbackNotice.value = true
-    }
     // Refresh the session list so the dropdown reflects new turn count + last_message_at.
     await sessionsStore.listSessions(props.agentName)
-  } catch (e) {
-    const detail = e.response?.data?.detail
-    if (typeof detail === 'string') {
-      error.value = detail
-    } else if (detail?.error) {
-      error.value = detail.error
-    } else {
-      error.value = 'Failed to send message'
-    }
+  } catch {
+    // Store has already populated errorBySession[sid] with a friendly message.
   } finally {
-    loading.value = false
     loadingText.value = 'Thinking...'
   }
 }
@@ -458,12 +483,55 @@ watch(selectedModel, (val) => {
 
 watch(
   () => [props.agentName, props.agentStatus],
-  ([, status]) => {
+  ([newName, status], oldVals) => {
     if (status === 'running') {
       loadSessions()
     }
+    const oldName = Array.isArray(oldVals) ? oldVals[0] : null
+    if (newName !== oldName) {
+      // SessionPanel instance is shared across agents via <KeepAlive>.
+      // Reset local UI ephemera so it doesn't bleed across agents (#759).
+      // Per-session turn state lives in the Pinia store keyed by sessionId
+      // and naturally scopes — but local refs survive deactivation.
+      message.value = ''
+      showSessionDropdown.value = false
+      showResetModal.value = false
+      localError.value = null
+      localLoading.value = false
+      creatingSession.value = false
+      sessionsLoading.value = false
+    }
   },
 )
+
+// ----- KeepAlive lifecycle (Issue #759) -------------------------------------
+
+// onActivated fires when SessionPanel is reactivated after a KeepAlive
+// deactivation — i.e., the user navigated to another route and came back.
+// If a turn is still running on the backend (visible via `turn_in_progress`
+// on the latest loadSession response), start polling so the UI eventually
+// catches up. Backend persists user + assistant rows itself; we just need
+// to re-fetch them.
+onActivated(async () => {
+  const sid = currentSessionId.value
+  if (!sid || props.agentStatus !== 'running') return
+  try {
+    const data = await sessionsStore.loadSession(props.agentName, sid)
+    if (data?.session?.turn_in_progress) {
+      sessionsStore.startPolling(props.agentName, sid)
+    }
+  } catch {
+    // Re-sync failure is non-fatal — the next user action will retry.
+  }
+})
+
+// Stop polling while the panel isn't visible. We're using ref-counted
+// start/stop so this won't kill a concurrent watcher (today there's only
+// ever one instance — but the contract is honoured).
+onDeactivated(() => {
+  const sid = currentSessionId.value
+  if (sid) sessionsStore.stopPolling(sid)
+})
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
@@ -472,5 +540,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  // Best-effort cleanup if the panel ever fully unmounts (KeepAlive cache
+  // eviction or a future refactor). Stops the timer for the current sid.
+  const sid = currentSessionId.value
+  if (sid) sessionsStore.stopPolling(sid)
 })
 </script>

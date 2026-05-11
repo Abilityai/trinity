@@ -95,8 +95,16 @@ def _session_or_404(session_id: str, user: User, agent_name: str):
     return session
 
 
-def _serialize_session(session) -> dict:
-    """Convert AgentSession dataclass to JSON-friendly dict."""
+def _serialize_session(session, turn_in_progress: bool = False) -> dict:
+    """Convert AgentSession dataclass to JSON-friendly dict.
+
+    The optional ``turn_in_progress`` flag is derived at the endpoint
+    layer from the ``session_inflight:{session_id}`` Redis sentinel; it
+    drives the UI's onActivated re-sync for #759. Callers that don't pass
+    it (list endpoint, write-path responses) get a safe ``False`` — the
+    real-time signal only matters on the per-session GET that the polling
+    UI loop reads.
+    """
     return {
         "id": session.id,
         "agent_name": session.agent_name,
@@ -118,6 +126,7 @@ def _serialize_session(session) -> dict:
         ),
         "consecutive_resume_failures": session.consecutive_resume_failures,
         "compact_count": session.compact_count,
+        "turn_in_progress": turn_in_progress,
     }
 
 
@@ -142,18 +151,29 @@ def _serialize_message(msg) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Per-(agent, claude_uuid) Redis lock — Phase 2.3 / Anthropic #20992
+# Redis primitives — resume lock (#20992) + in-flight sentinel (#759)
 # ---------------------------------------------------------------------------
 
-# JSONL writes by concurrent `claude --resume <same-uuid>` calls corrupt the
-# file (Anthropic #20992). We serialise resume turns per (agent, uuid) with a
-# Redis SET NX EX lock, polled with asyncio.sleep so we don't block the event
-# loop. Cold turns (no cached UUID yet) skip the lock — there's no JSONL to
-# corrupt. Lock value is a unique token so we only release locks we own
-# (token-check + DEL via Lua to avoid TOCTOU).
+# Two distinct Redis primitives gate session turns:
+#
+# 1. `session_lock:{agent}:{uuid}` — per-(agent, claude_uuid) lock that
+#    serialises concurrent `claude --resume <same-uuid>` calls (Anthropic
+#    #20992: concurrent resume calls corrupt the JSONL). Cold turns (no
+#    cached UUID yet) skip this lock — there's no JSONL to corrupt.
+#
+# 2. `session_inflight:{session_id}` — per-session sentinel SET for the
+#    duration of any turn (cold or warm). Drives the `turn_in_progress`
+#    field on GET sessions/{id} so the UI can reattach on activation
+#    (Issue #759). Distinct from the resume lock because the lock skips
+#    cold turns, whereas the in-flight signal must cover them.
+#
+# TTL for both is dynamic: at acquire time we look up the per-agent
+# `execution_timeout_seconds` (default 900) and add a 30s buffer, capped
+# at 7230s. Stale-lock cleanup after a backend crash is bounded by this
+# TTL (worst case ≈ 2h); admins can manually `DEL` if needed.
 
-_LOCK_TTL_SECONDS = 300            # 5-min ceiling — covers longest single turn
-_LOCK_WAIT_TOTAL_SECONDS = 30.0    # Hard ceiling for chat UX
+_LOCK_TTL_FALLBACK = 7230          # cap + default on lookup failure (≈ 2h)
+_LOCK_WAIT_TOTAL_SECONDS = 30.0    # hard ceiling for chat UX
 _LOCK_POLL_INTERVAL_SECONDS = 0.25
 
 _LOCK_RELEASE_LUA = """
@@ -165,6 +185,116 @@ end
 """
 
 
+def _session_lock_key(agent_name: str, claude_session_id: str) -> str:
+    """Canonical key for the per-(agent, uuid) resume lock.
+
+    Extracted as a helper so the producer (``_ResumeLock``) and any
+    future consumer that probes lock state share one source of truth. A
+    typo here would be a silent split-brain — locks claimed against one
+    key, probed against another.
+    """
+    return f"session_lock:{agent_name}:{claude_session_id}"
+
+
+def _session_inflight_key(session_id: str) -> str:
+    """Sentinel key set for the duration of any session turn.
+
+    Distinct from the resume lock — that one serialises JSONL writes;
+    this one signals "a turn is in flight on this session id" to the
+    UI's onActivated re-sync (Issue #759). Covers cold turns, which the
+    lock skips by design.
+    """
+    return f"session_inflight:{session_id}"
+
+
+def _resolve_lock_ttl(agent_name: str) -> int:
+    """Resolve a turn's TTL from the agent's per-agent execution timeout.
+
+    Uses ``db.get_execution_timeout(agent_name)`` (default 900s) plus a
+    30s buffer, capped at ``_LOCK_TTL_FALLBACK``. Falls back to the cap
+    on any lookup failure — safer to over-TTL than under-TTL since both
+    keys are auto-expiring strings, not state we care to keep precise.
+    """
+    try:
+        timeout = db.get_execution_timeout(agent_name)
+        return min(timeout + 30, _LOCK_TTL_FALLBACK)
+    except Exception as e:
+        logger.warning(
+            "[Session] get_execution_timeout failed for %s (%s) — using fallback %ds",
+            agent_name,
+            e,
+            _LOCK_TTL_FALLBACK,
+        )
+        return _LOCK_TTL_FALLBACK
+
+
+def _get_async_redis():
+    """Lazy async-Redis client. Returns None if unavailable."""
+    try:
+        import redis.asyncio as aioredis  # noqa: WPS433
+        from config import REDIS_URL  # noqa: WPS433
+    except Exception as e:
+        logger.warning("[Session] Cannot import async Redis client: %s", e)
+        return None
+    try:
+        return aioredis.from_url(REDIS_URL, decode_responses=True)
+    except Exception as e:
+        logger.warning("[Session] Cannot construct async Redis client: %s", e)
+        return None
+
+
+async def _set_session_inflight(session_id: str, ttl: int) -> None:
+    """SET the in-flight sentinel for a session. Degrades silently."""
+    redis = _get_async_redis()
+    if redis is None:
+        return
+    try:
+        await redis.set(_session_inflight_key(session_id), "1", ex=ttl)
+    except Exception as e:
+        logger.warning(
+            "[Session] inflight SET failed for %s (%s) — degraded mode",
+            session_id,
+            e,
+        )
+
+
+async def _clear_session_inflight(session_id: str) -> None:
+    """DEL the in-flight sentinel. Best-effort; TTL is the backstop."""
+    redis = _get_async_redis()
+    if redis is None:
+        return
+    try:
+        await redis.delete(_session_inflight_key(session_id))
+    except Exception as e:
+        logger.warning(
+            "[Session] inflight DEL failed for %s (%s) — TTL will expire",
+            session_id,
+            e,
+        )
+
+
+async def _is_turn_in_flight(session_id: str) -> bool:
+    """Whether a turn is currently in flight on this session.
+
+    Reads the sentinel set at the start of ``send_session_message``.
+    Covers cold + warm turns. Returns False if Redis is unavailable
+    (degraded mode — frontend should fall back to message_count delta to
+    detect completion).
+    """
+    redis = _get_async_redis()
+    if redis is None:
+        return False
+    try:
+        return bool(await redis.exists(_session_inflight_key(session_id)))
+    except Exception as e:
+        logger.warning(
+            "[Session] inflight EXISTS failed for %s (%s) — degraded",
+            session_id,
+            e,
+        )
+        return False
+
+
 class _ResumeLock:
     """Async context manager for the per-(agent, uuid) lock.
 
@@ -173,12 +303,18 @@ class _ResumeLock:
     is an optimisation, not a correctness gate at the platform layer).
     """
 
-    def __init__(self, agent_name: str, claude_session_id: Optional[str]):
+    def __init__(
+        self,
+        agent_name: str,
+        claude_session_id: Optional[str],
+        ttl_seconds: int = _LOCK_TTL_FALLBACK,
+    ):
         self._key = (
-            f"session_lock:{agent_name}:{claude_session_id}"
+            _session_lock_key(agent_name, claude_session_id)
             if claude_session_id
             else None
         )
+        self._ttl = ttl_seconds
         self._token = secrets.token_urlsafe(16)
         self._redis = None
         self._held = False
@@ -186,7 +322,7 @@ class _ResumeLock:
     async def __aenter__(self) -> "_ResumeLock":
         if self._key is None:
             return self
-        self._redis = self._get_redis()
+        self._redis = _get_async_redis()
         if self._redis is None:
             logger.warning(
                 "[Session] Redis unavailable for resume lock %s — proceeding unlocked",
@@ -201,7 +337,7 @@ class _ResumeLock:
                     self._key,
                     self._token,
                     nx=True,
-                    ex=_LOCK_TTL_SECONDS,
+                    ex=self._ttl,
                 )
             except Exception as e:
                 logger.warning(
@@ -238,20 +374,27 @@ class _ResumeLock:
                 e,
             )
 
-    @staticmethod
-    def _get_redis():
-        """Lazy async-Redis client. Returns None if unavailable."""
-        try:
-            import redis.asyncio as aioredis  # noqa: WPS433
-            from config import REDIS_URL  # noqa: WPS433
-        except Exception as e:
-            logger.warning("[Session] Cannot import async Redis client: %s", e)
-            return None
-        try:
-            return aioredis.from_url(REDIS_URL, decode_responses=True)
-        except Exception as e:
-            logger.warning("[Session] Cannot construct async Redis client: %s", e)
-            return None
+
+class _InflightSentinel:
+    """Async context manager that brackets a session turn with the sentinel.
+
+    SET on enter, DEL on exit (success or exception). The DEL is
+    guaranteed-best-effort: if Redis is down or the call fails, the TTL
+    is the backstop. Used by the turn handler so the UI's onActivated
+    re-sync (#759) sees an accurate ``turn_in_progress`` flag — including
+    on cold turns that the resume lock skips by design.
+    """
+
+    def __init__(self, session_id: str, ttl_seconds: int):
+        self._session_id = session_id
+        self._ttl = ttl_seconds
+
+    async def __aenter__(self) -> "_InflightSentinel":
+        await _set_session_inflight(self._session_id, self._ttl)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await _clear_session_inflight(self._session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -334,12 +477,22 @@ async def get_session_with_messages(
     current_user: User = Depends(get_current_user),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    """Return a single session row plus its most-recent ``limit`` messages."""
+    """Return a single session row plus its most-recent ``limit`` messages.
+
+    The session row carries ``turn_in_progress`` derived from the Redis
+    in-flight sentinel so the UI's onActivated re-sync (Issue #759) can
+    detect a still-running turn after a navigation away. Pair with
+    ``message_count`` to detect the in-progress → done transition: the
+    DEL of the sentinel races the INSERT of the assistant message, so
+    clients should treat ``(turn_in_progress=true ∧ message_count >
+    last_seen)`` as "completed, lock draining" and stop polling.
+    """
     _enabled_or_404()
     session = _session_or_404(session_id, current_user, name)
     messages = db.get_session_messages(session_id, limit=limit)
+    turn_in_progress = await _is_turn_in_flight(session_id)
     return {
-        "session": _serialize_session(session),
+        "session": _serialize_session(session, turn_in_progress=turn_in_progress),
         "messages": [_serialize_message(m) for m in messages],
     }
 
@@ -443,54 +596,20 @@ async def send_session_message(
         content=body.message,
     )
 
-    cached_uuid = db.get_cached_claude_session_id(session.id)
+    # In-flight sentinel brackets the turn so GET sessions/{id} can report
+    # `turn_in_progress=true` to the UI's onActivated re-sync (Issue #759).
+    # TTL = per-agent execution timeout + 30s buffer (capped at 7230s) so
+    # very long turns don't drop the sentinel before completing.
+    lock_ttl = _resolve_lock_ttl(name)
+    async with _InflightSentinel(session.id, lock_ttl):
+        cached_uuid = db.get_cached_claude_session_id(session.id)
 
-    service = get_task_execution_service()
-    fallback_fired = False
-    fallback_reason: Optional[str] = None
+        service = get_task_execution_service()
+        fallback_fired = False
+        fallback_reason: Optional[str] = None
 
-    async with _ResumeLock(name, cached_uuid):
-        # Step 4: cold or resume turn.
-        result = await service.execute_task(
-            agent_name=name,
-            message=effective_message,
-            triggered_by="session",
-            source_user_id=current_user.id,
-            source_user_email=user_email,
-            model=body.model,
-            timeout_seconds=body.timeout_seconds,
-            resume_session_id=cached_uuid,
-            persist_session=True,
-            subscription_id=session.subscription_id,
-            images=image_data or None,
-        )
-
-        # Step 5: resume-failure fallback. Only triggers when we *had* a
-        # cached UUID and execute_task came back failed with the marker.
-        if (
-            cached_uuid
-            and result.status != "success"
-            and _is_resume_not_found(result.error)
-        ):
-            fallback_fired = True
-            fallback_reason = "resume_jsonl_not_found"
-            db.clear_cached_claude_session_id(session.id)
-            failure_count = db.mark_resume_failure(session.id)
-            logger.warning(
-                "[Session] event=session_resume_fallback agent=%s session=%s "
-                "stale_uuid=%s consecutive_failures=%d reason=%s",
-                name,
-                session.id,
-                cached_uuid,
-                failure_count,
-                fallback_reason,
-            )
-            # Retry once cold. Lock is no longer relevant — the stale UUID
-            # is gone, and the new cold turn will write a fresh JSONL with
-            # a new UUID (no contention with anyone else by definition).
-            # Use effective_message + image_data so any uploaded files
-            # (already written to the workspace before the first attempt)
-            # are still referenced in the prompt + sent as vision blocks.
+        async with _ResumeLock(name, cached_uuid, ttl_seconds=lock_ttl):
+            # Step 4: cold or resume turn.
             result = await service.execute_task(
                 agent_name=name,
                 message=effective_message,
@@ -499,83 +618,123 @@ async def send_session_message(
                 source_user_email=user_email,
                 model=body.model,
                 timeout_seconds=body.timeout_seconds,
-                resume_session_id=None,
+                resume_session_id=cached_uuid,
                 persist_session=True,
                 subscription_id=session.subscription_id,
                 images=image_data or None,
             )
 
-    if result.status != "success":
-        # Bubble execute_task's classified error up. The user message is
-        # already persisted; we don't insert an empty assistant row.
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": result.error or "Agent execution failed",
-                "execution_id": result.execution_id,
-                "fallback_fired": fallback_fired,
-                "fallback_reason": fallback_reason,
-            },
+            # Step 5: resume-failure fallback. Only triggers when we *had* a
+            # cached UUID and execute_task came back failed with the marker.
+            if (
+                cached_uuid
+                and result.status != "success"
+                and _is_resume_not_found(result.error)
+            ):
+                fallback_fired = True
+                fallback_reason = "resume_jsonl_not_found"
+                db.clear_cached_claude_session_id(session.id)
+                failure_count = db.mark_resume_failure(session.id)
+                logger.warning(
+                    "[Session] event=session_resume_fallback agent=%s session=%s "
+                    "stale_uuid=%s consecutive_failures=%d reason=%s",
+                    name,
+                    session.id,
+                    cached_uuid,
+                    failure_count,
+                    fallback_reason,
+                )
+                # Retry once cold. Lock is no longer relevant — the stale UUID
+                # is gone, and the new cold turn will write a fresh JSONL with
+                # a new UUID (no contention with anyone else by definition).
+                # Use effective_message + image_data so any uploaded files
+                # (already written to the workspace before the first attempt)
+                # are still referenced in the prompt + sent as vision blocks.
+                result = await service.execute_task(
+                    agent_name=name,
+                    message=effective_message,
+                    triggered_by="session",
+                    source_user_id=current_user.id,
+                    source_user_email=user_email,
+                    model=body.model,
+                    timeout_seconds=body.timeout_seconds,
+                    resume_session_id=None,
+                    persist_session=True,
+                    subscription_id=session.subscription_id,
+                    images=image_data or None,
+                )
+
+        if result.status != "success":
+            # Bubble execute_task's classified error up. The user message is
+            # already persisted; we don't insert an empty assistant row.
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": result.error or "Agent execution failed",
+                    "execution_id": result.execution_id,
+                    "fallback_fired": fallback_fired,
+                    "fallback_reason": fallback_reason,
+                },
+            )
+
+        # Step 6: cache the real Claude UUID. Phase 1.3 fixed the parser so
+        # result.session_id is now trustworthy — no execution_log scan.
+        real_uuid = result.session_id
+        if real_uuid and real_uuid != cached_uuid:
+            db.update_cached_claude_session_id(session.id, real_uuid)
+        if real_uuid:
+            db.mark_resume_success(session.id)
+
+        # Step 7: persist the assistant message. cache_read_tokens is captured
+        # from the agent metadata when present (Phase 4.1 wires the column to
+        # the dashboard; storage starts now so we have backfill).
+        metadata = result.raw_response.get("metadata", {}) if result.raw_response else {}
+        cache_read_tokens = metadata.get("cache_read_input_tokens") or metadata.get(
+            "cache_read_tokens"
         )
 
-    # Step 6: cache the real Claude UUID. Phase 1.3 fixed the parser so
-    # result.session_id is now trustworthy — no execution_log scan.
-    real_uuid = result.session_id
-    if real_uuid and real_uuid != cached_uuid:
-        db.update_cached_claude_session_id(session.id, real_uuid)
-    if real_uuid:
-        db.mark_resume_success(session.id)
+        # Auto-compact events captured by the agent server's stream parser
+        # (Bundle B). Mirrors the JSON the task_execution_service writes to
+        # schedule_executions; lands on agent_session_messages.compact_metadata
+        # plus increments agent_sessions.compact_count for the inline reset hint.
+        compact_events = metadata.get("compact_events") or []
+        compact_metadata_json = json.dumps(compact_events) if compact_events else None
 
-    # Step 7: persist the assistant message. cache_read_tokens is captured
-    # from the agent metadata when present (Phase 4.1 wires the column to
-    # the dashboard; storage starts now so we have backfill).
-    metadata = result.raw_response.get("metadata", {}) if result.raw_response else {}
-    cache_read_tokens = metadata.get("cache_read_input_tokens") or metadata.get(
-        "cache_read_tokens"
-    )
+        assistant_msg = db.add_session_message(
+            session_id=session.id,
+            agent_name=name,
+            user_id=current_user.id,
+            user_email=user_email,
+            role="assistant",
+            content=result.response or "",
+            cost=result.cost,
+            context_used=result.context_used,
+            context_max=result.context_max,
+            cache_read_tokens=cache_read_tokens,
+            tool_calls=result.execution_log,
+            execution_time_ms=None,
+            claude_session_id=real_uuid,
+            compact_metadata=compact_metadata_json,
+            compact_event_count=len(compact_events),
+        )
 
-    # Auto-compact events captured by the agent server's stream parser
-    # (Bundle B). Mirrors the JSON the task_execution_service writes to
-    # schedule_executions; lands on agent_session_messages.compact_metadata
-    # plus increments agent_sessions.compact_count for the inline reset hint.
-    compact_events = metadata.get("compact_events") or []
-    compact_metadata_json = json.dumps(compact_events) if compact_events else None
+        # Refresh the session row so the response reflects the post-turn stats.
+        refreshed = db.get_session(session.id)
 
-    assistant_msg = db.add_session_message(
-        session_id=session.id,
-        agent_name=name,
-        user_id=current_user.id,
-        user_email=user_email,
-        role="assistant",
-        content=result.response or "",
-        cost=result.cost,
-        context_used=result.context_used,
-        context_max=result.context_max,
-        cache_read_tokens=cache_read_tokens,
-        tool_calls=result.execution_log,
-        execution_time_ms=None,
-        claude_session_id=real_uuid,
-        compact_metadata=compact_metadata_json,
-        compact_event_count=len(compact_events),
-    )
-
-    # Refresh the session row so the response reflects the post-turn stats.
-    refreshed = db.get_session(session.id)
-
-    return {
-        "session": _serialize_session(refreshed) if refreshed else _serialize_session(session),
-        "message": _serialize_message(assistant_msg),
-        "response": result.response or "",
-        "claude_session_id": real_uuid,
-        "execution_id": result.execution_id,
-        "fallback_fired": fallback_fired,
-        "fallback_reason": fallback_reason,
-        "cost": result.cost,
-        "context_used": result.context_used,
-        "context_max": result.context_max,
-        "cache_read_tokens": cache_read_tokens,
-        "compact_events": compact_events,
-    }
+        return {
+            "session": _serialize_session(refreshed) if refreshed else _serialize_session(session),
+            "message": _serialize_message(assistant_msg),
+            "response": result.response or "",
+            "claude_session_id": real_uuid,
+            "execution_id": result.execution_id,
+            "fallback_fired": fallback_fired,
+            "fallback_reason": fallback_reason,
+            "cost": result.cost,
+            "context_used": result.context_used,
+            "context_max": result.context_max,
+            "cache_read_tokens": cache_read_tokens,
+            "compact_events": compact_events,
+        }
 
 
 # ---------------------------------------------------------------------------

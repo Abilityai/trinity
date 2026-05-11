@@ -84,13 +84,15 @@ Voice mic and SSE dynamic status labels are **deferred** (each requires a backen
 1. Resolve session row, enforce per-user ownership (404 on mismatch — not 403, to avoid leaking session-id existence).
 2. Persist the user message immediately so it appears even on failure.
 3. Read `cached_claude_session_id`.
-4. Acquire `_ResumeLock(agent, cached_uuid)` — a Redis SET NX EX 300s with async wait-and-retry (250ms tick, 30s ceiling). Cold turns skip the lock.
-5. Call `task_execution_service.execute_task(..., resume_session_id=cached, persist_session=True)`. The persist flag is unconditional — even cold turns must write the JSONL so turn 2's resume succeeds.
-6. **Resume-failure fallback** (Phase 2.2): if execute_task returned failed with `"no conversation found"` AND we had a cached UUID, clear the cache, `mark_resume_failure`, retry **once** with `resume_session_id=None`. Log structured warning `event=session_resume_fallback`. Anthropic #39667 (cleanupPeriodDays) and #53417 (CLI upgrade) both produce this signal.
-7. On success, trust `result.session_id` directly (Phase 1.3 fixed the agent-server stream parser to recognise `{"type":"system","subtype":"init"}` — no execution_log scan needed). Update `cached_claude_session_id` if changed, `mark_resume_success` to reset the failure counter.
-8. Persist the assistant message with `cost`, `context_used/max`, `cache_read_tokens` (from agent metadata), `tool_calls`, and the per-message `claude_session_id` audit field.
-9. Release Redis lock (Lua script — only releases tokens we own).
-10. Return `{session, message, response, claude_session_id, fallback_fired, fallback_reason, cost, context_used, context_max, cache_read_tokens}`.
+4. Resolve dynamic lock TTL via `_resolve_lock_ttl(agent_name)` = `db.get_execution_timeout(agent) + 30s`, capped at 7230s. The static 300s constant was removed in #759 because turns running longer than 5 min would silently drop the lock and allow concurrent JSONL writes.
+5. SET in-flight sentinel `session_inflight:{session_id}` with the same TTL (#759). Bracketed via `_InflightSentinel` async context manager so DEL fires on success **and** exception. Distinct from the resume lock — the sentinel covers cold turns too, which the lock skips by design. Drives the `turn_in_progress` field on the GET endpoint.
+6. Acquire `_ResumeLock(agent, cached_uuid, ttl_seconds=lock_ttl)` — Redis SET NX EX with async wait-and-retry (250 ms tick, 30 s ceiling). Cold turns skip the lock. Lock key constructed via `_session_lock_key(agent, uuid)` helper (shared by producer + any future probe — regression guard against split-brain typos).
+7. Call `task_execution_service.execute_task(..., resume_session_id=cached, persist_session=True)`. The persist flag is unconditional — even cold turns must write the JSONL so turn 2's resume succeeds.
+8. **Resume-failure fallback** (Phase 2.2): if execute_task returned failed with `"no conversation found"` AND we had a cached UUID, clear the cache, `mark_resume_failure`, retry **once** with `resume_session_id=None`. Log structured warning `event=session_resume_fallback`. Anthropic #39667 (cleanupPeriodDays) and #53417 (CLI upgrade) both produce this signal.
+9. On success, trust `result.session_id` directly (Phase 1.3 fixed the agent-server stream parser to recognise `{"type":"system","subtype":"init"}` — no execution_log scan needed). Update `cached_claude_session_id` if changed, `mark_resume_success` to reset the failure counter.
+10. Persist the assistant message with `cost`, `context_used/max`, `cache_read_tokens` (from agent metadata), `tool_calls`, and the per-message `claude_session_id` audit field.
+11. Release resume lock (Lua script — only releases tokens we own). DEL in-flight sentinel via `_InflightSentinel.__aexit__`.
+12. Return `{session, message, response, claude_session_id, fallback_fired, fallback_reason, cost, context_used, context_max, cache_read_tokens}` — the `session` payload now carries `turn_in_progress: false` since the sentinel is already DELed before the response leaves.
 
 ### Spike-pitfall defenses
 

@@ -22,8 +22,20 @@ export const useSessionsStore = defineStore('sessions', {
     messagesBySession: {},
     // Map of sessionId -> "loading" | "ready"
     sessionStatus: {},
-    // Last error per agent (string or null)
+    // Last error per agent for list-load failures (string or null)
     errorByAgent: {},
+
+    // -- Per-session turn state (Issue #759) --------------------------------
+    // SessionPanel lives inside an AgentDetail view that is wrapped in
+    // <KeepAlive>, so the same component instance services all `/agents/*`
+    // routes. Local refs would survive navigation and bleed across agents.
+    // Keying turn state by sessionId scopes it to the actual conversation.
+    inFlightBySession: {},       // sessionId -> bool (a turn is running)
+    errorBySession: {},          // sessionId -> string|null (last turn error)
+    fallbackNoticeBySession: {}, // sessionId -> bool (resume fallback fired)
+    pollTimerBySession: {},      // sessionId -> setTimeout handle (private)
+    pollWatchersBySession: {},   // sessionId -> int (ref-count, private)
+
     // Feature-flag cache (resolved once per page load)
     featureFlagsLoaded: false,
     sessionTabEnabled: false,
@@ -39,6 +51,9 @@ export const useSessionsStore = defineStore('sessions', {
       return (state.sessionsByAgent[agentName] || []).find((s) => s.id === id) || null
     },
     messagesFor: (state) => (sessionId) => state.messagesBySession[sessionId] || [],
+    isInFlight: (state) => (sessionId) => !!state.inFlightBySession[sessionId],
+    errorForSession: (state) => (sessionId) => state.errorBySession[sessionId] || null,
+    fallbackNoticeForSession: (state) => (sessionId) => !!state.fallbackNoticeBySession[sessionId],
   },
 
   actions: {
@@ -130,6 +145,10 @@ export const useSessionsStore = defineStore('sessions', {
       if (this.activeSessionByAgent[agentName] === sessionId) {
         this.activeSessionByAgent[agentName] = null
       }
+      // Drop any in-flight turn state (#759). If a poll was running it
+      // will exit on its next tick once `pollWatchersBySession[sid]` is
+      // gone; the timer is also cleared eagerly.
+      this.clearSessionTurnState(sessionId)
     },
 
     async resetSession(agentName, sessionId) {
@@ -150,22 +169,25 @@ export const useSessionsStore = defineStore('sessions', {
     /**
      * Send a message in a session.
      *
-     * Optimistic UX: append a synthetic user message immediately so the
-     * caller can render it before the (sometimes long) HTTP round-trip.
-     * On failure, that synthetic message is rolled back so the input area
-     * can re-populate without confusing the conversation log.
+     * Issue #759 — in-flight state lives in the store keyed by sessionId
+     * (`inFlightBySession`, `errorBySession`, `fallbackNoticeBySession`)
+     * so it survives KeepAlive deactivation and doesn't bleed across
+     * agents (one SessionPanel instance services all `/agents/*` routes).
+     *
+     * No optimistic insert: the backend persists the user message at the
+     * start of the turn (routers/sessions.py step 2) and `loadSession`
+     * after a successful response surfaces both rows. Trades ~100-300 ms
+     * perceived latency for correctness across navigation — under the
+     * old optimistic-rollback approach, a turn that failed while the
+     * user was on another page would silently delete their message from
+     * view even though it was persisted server-side.
      */
     async sendMessage(agentName, sessionId, text, { model, timeoutSeconds, files } = {}) {
       const authStore = useAuthStore()
 
-      const optimistic = {
-        id: `optimistic-${Date.now()}`,
-        role: 'user',
-        content: text,
-        timestamp: new Date().toISOString(),
-      }
-      const before = this.messagesBySession[sessionId] || []
-      this.messagesBySession[sessionId] = [...before, optimistic]
+      this.inFlightBySession[sessionId] = true
+      this.errorBySession[sessionId] = null
+      this.fallbackNoticeBySession[sessionId] = false
 
       try {
         const body = { message: text }
@@ -192,10 +214,9 @@ export const useSessionsStore = defineStore('sessions', {
           },
         )
 
-        // Backend returns the persisted assistant message + the refreshed
-        // session row. Reload the canonical message list so the optimistic
-        // row gets its real id/timestamp from the server (and any cleanup
-        // from a fallback path is reflected).
+        // Reload canonical messages: the backend persisted both the user
+        // and assistant rows; `loadSession` replaces `messagesBySession`
+        // with the server's authoritative ordering.
         await this.loadSession(agentName, sessionId)
 
         // Update session row in the list (turn endpoint already returned it).
@@ -205,12 +226,123 @@ export const useSessionsStore = defineStore('sessions', {
           if (idx >= 0) list[idx] = r.data.session
         }
 
+        if (r.data?.fallback_fired) {
+          this.fallbackNoticeBySession[sessionId] = true
+        }
+
         return r.data
       } catch (e) {
-        // Roll back the optimistic insert.
-        this.messagesBySession[sessionId] = before
+        const detail = e.response?.data?.detail
+        let msg
+        if (typeof detail === 'string') {
+          msg = detail
+        } else if (detail?.error) {
+          msg = detail.error
+        } else {
+          msg = 'Failed to send message'
+        }
+        this.errorBySession[sessionId] = msg
         throw e
+      } finally {
+        this.inFlightBySession[sessionId] = false
       }
+    },
+
+    // ----- polling (reattach to in-flight turn on KeepAlive activation) --
+    // The flow: on `onActivated` in SessionPanel, call loadSession; if the
+    // returned session row has `turn_in_progress=true` AND no assistant
+    // reply has landed since the last user message, call startPolling.
+    // Ref-counted so two activations on the same session don't double-fire.
+
+    async startPolling(agentName, sessionId) {
+      this.pollWatchersBySession[sessionId] =
+        (this.pollWatchersBySession[sessionId] || 0) + 1
+      if (this.pollTimerBySession[sessionId]) return // already polling
+
+      const initialMsgCount = (this.messagesBySession[sessionId] || []).length
+      let attempts = 0
+      const BACKOFF_MS = [2000, 2000, 2000, 5000, 5000, 5000, 15000, 15000, 15000]
+      const MAX_ATTEMPTS = 60 // ~22 min total: 3×2 + 3×5 + 54×15
+
+      const tick = async () => {
+        if (!this.pollWatchersBySession[sessionId]) return // stopped externally
+
+        try {
+          this.inFlightBySession[sessionId] = true
+          const data = await this.loadSession(agentName, sessionId)
+          const session = data?.session
+          const messages = data?.messages || []
+          const inProgress = !!session?.turn_in_progress
+          const newMessages = messages.length > initialMsgCount
+          const lastIsAssistant =
+            messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
+
+          // Stop conditions:
+          //   1. Sentinel cleared (turn finished, lock released)
+          //   2. Assistant message landed (covers slow lock release —
+          //      backend INSERT races the DEL of the in-flight sentinel,
+          //      so a newly-arrived assistant reply is a terminal signal
+          //      even while sentinel still reads true).
+          if (!inProgress || (newMessages && lastIsAssistant)) {
+            this._stopPollingTimer(sessionId)
+            this.inFlightBySession[sessionId] = false
+            // Watcher count cleared too; clear so a future activation can
+            // restart polling cleanly.
+            delete this.pollWatchersBySession[sessionId]
+            return
+          }
+        } catch (e) {
+          // Transient — keep polling unless we've hit MAX_ATTEMPTS.
+          // eslint-disable-next-line no-console
+          console.warn('[sessions] poll tick failed:', e)
+        }
+
+        attempts++
+        if (attempts >= MAX_ATTEMPTS) {
+          this._stopPollingTimer(sessionId)
+          this.inFlightBySession[sessionId] = false
+          this.errorBySession[sessionId] =
+            'Turn took longer than expected — refresh to check status.'
+          delete this.pollWatchersBySession[sessionId]
+          return
+        }
+
+        const delay = BACKOFF_MS[Math.min(attempts, BACKOFF_MS.length - 1)]
+        this.pollTimerBySession[sessionId] = setTimeout(tick, delay)
+      }
+
+      this.pollTimerBySession[sessionId] = setTimeout(tick, BACKOFF_MS[0])
+    },
+
+    stopPolling(sessionId) {
+      if (!this.pollWatchersBySession[sessionId]) return
+      this.pollWatchersBySession[sessionId]--
+      if (this.pollWatchersBySession[sessionId] <= 0) {
+        this._stopPollingTimer(sessionId)
+        delete this.pollWatchersBySession[sessionId]
+      }
+    },
+
+    // Private: clears the setTimeout handle without touching the watcher
+    // count. Used both by `stopPolling` (when refcount → 0) and by `tick`
+    // itself (when it hits a terminal condition).
+    _stopPollingTimer(sessionId) {
+      const t = this.pollTimerBySession[sessionId]
+      if (t) {
+        clearTimeout(t)
+        delete this.pollTimerBySession[sessionId]
+      }
+    },
+
+    // Clear all per-session turn state. Called when a session is deleted
+    // or when the agent changes (to defuse the cross-agent bleed risk
+    // before it materialises).
+    clearSessionTurnState(sessionId) {
+      this._stopPollingTimer(sessionId)
+      delete this.pollWatchersBySession[sessionId]
+      delete this.inFlightBySession[sessionId]
+      delete this.errorBySession[sessionId]
+      delete this.fallbackNoticeBySession[sessionId]
     },
   },
 })
