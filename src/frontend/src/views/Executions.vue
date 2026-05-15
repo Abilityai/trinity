@@ -64,62 +64,86 @@
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg mb-4">
         <div class="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
           <!-- Agent filter -->
-          <select
-            :value="store.filters.agent"
-            @change="store.setFilter('agent', $event.target.value)"
-            class="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500"
-          >
-            <option value="">All agents</option>
-            <option v-for="name in agentNames" :key="name" :value="name">{{ name }}</option>
-          </select>
+          <div class="relative">
+            <select
+              :value="store.filters.agent"
+              @change="store.setFilter('agent', $event.target.value)"
+              class="appearance-none text-sm rounded-lg pl-3 pr-8 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500 cursor-pointer transition-colors"
+              :class="store.filters.agent
+                ? 'border-2 border-action-primary-500 font-medium'
+                : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
+            >
+              <option value="">All agents</option>
+              <option v-for="name in agentNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+            <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+          </div>
 
           <!-- Status filter -->
-          <select
-            :value="store.filters.status"
-            @change="store.setFilter('status', $event.target.value)"
-            class="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500"
-          >
-            <option value="">All statuses</option>
-            <option value="running">running</option>
-            <option value="queued">queued</option>
-            <option value="success">success</option>
-            <option value="failed">failed</option>
-            <option value="error">error</option>
-            <option value="cancelled">cancelled</option>
-            <option value="skipped">skipped</option>
-          </select>
+          <div class="relative">
+            <select
+              :value="store.filters.status"
+              @change="store.setFilter('status', $event.target.value)"
+              class="appearance-none text-sm rounded-lg pl-3 pr-8 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500 cursor-pointer transition-colors"
+              :class="store.filters.status
+                ? 'border-2 border-action-primary-500 font-medium'
+                : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
+            >
+              <option value="">All statuses</option>
+              <option value="running">running</option>
+              <option value="queued">queued</option>
+              <option value="success">success</option>
+              <option value="failed">failed</option>
+              <option value="error">error</option>
+              <option value="cancelled">cancelled</option>
+              <option value="skipped">skipped</option>
+            </select>
+            <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+          </div>
 
           <!-- Trigger filter -->
-          <select
-            :value="store.filters.triggered_by"
-            @change="store.setFilter('triggered_by', $event.target.value)"
-            class="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500"
-          >
-            <option value="">All triggers</option>
-            <option value="schedule">schedule</option>
-            <option value="manual">manual</option>
-            <option value="chat">chat</option>
-            <option value="session">session</option>
-            <option value="agent">agent</option>
-            <option value="mcp">mcp</option>
-            <option value="public">public</option>
-            <option value="webhook">webhook</option>
-            <option value="fan_out">fan_out</option>
-          </select>
+          <div class="relative">
+            <select
+              :value="store.filters.triggered_by"
+              @change="store.setFilter('triggered_by', $event.target.value)"
+              class="appearance-none text-sm rounded-lg pl-3 pr-8 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500 cursor-pointer transition-colors"
+              :class="store.filters.triggered_by
+                ? 'border-2 border-action-primary-500 font-medium'
+                : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
+            >
+              <option value="">All triggers</option>
+              <option value="schedule">schedule</option>
+              <option value="manual">manual</option>
+              <option value="chat">chat</option>
+              <option value="session">session</option>
+              <option value="agent">agent</option>
+              <option value="mcp">mcp</option>
+              <option value="public">public</option>
+              <option value="webhook">webhook</option>
+              <option value="fan_out">fan_out</option>
+            </select>
+            <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+          </div>
 
           <!-- Time range filter -->
-          <select
-            :value="store.filters.hours"
-            @change="store.setFilter('hours', Number($event.target.value))"
-            class="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500"
-          >
-            <option :value="1">Last 1h</option>
-            <option :value="6">Last 6h</option>
-            <option :value="24">Last 24h</option>
-            <option :value="168">Last 7d</option>
-            <option :value="720">Last 30d</option>
-            <option :value="0">All time</option>
-          </select>
+          <div class="relative">
+            <select
+              :value="store.filters.hours"
+              @change="store.setFilter('hours', Number($event.target.value))"
+              class="appearance-none text-sm rounded-lg pl-3 pr-8 py-1.5 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-action-primary-500 cursor-pointer transition-colors"
+              :class="store.filters.hours !== 24
+                ? 'border-2 border-action-primary-500 font-medium'
+                : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
+            >
+              <option :value="1">Last 1h</option>
+              <option :value="6">Last 6h</option>
+              <option :value="24">Last 24h</option>
+              <option :value="168">Last 7d</option>
+              <option :value="720">Last 30d</option>
+              <option :value="0">All time</option>
+            </select>
+            <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+          </div>
 
           <!-- Search -->
           <input
@@ -189,7 +213,7 @@
           <div
             v-for="row in store.rows"
             :key="row.id"
-            class="p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+            class="p-4 cursor-pointer group transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/40 hover:shadow-[inset_3px_0_0_0] hover:shadow-action-primary-400"
             :class="rowTintClass(row.status)"
             @click="goToDetail(row)"
           >
@@ -239,7 +263,7 @@
                 >
                   Stop
                 </button>
-                <svg class="w-4 h-4 text-gray-400 dark:text-gray-500 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg class="w-4 h-4 text-gray-300 dark:text-gray-600 hidden sm:block transition-transform group-hover:translate-x-0.5 group-hover:text-action-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                 </svg>
               </div>
