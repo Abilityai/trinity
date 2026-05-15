@@ -460,6 +460,20 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Operator queue notification on validation failure
 - **Flow**: `docs/memory/feature-flows/business-validation.md`
 
+### 10.10 Unified Executions Dashboard (EXEC-022)
+- **Status**: ✅ Implemented (2026-05-15)
+- **Requirement ID**: EXEC-022
+- **GitHub Issue**: #18
+- **Description**: Fleet-level execution history dashboard giving operators a single view across all agent task runs, with filtering, live stat cards, and real-time updates.
+- **Key Features**:
+  - `GET /api/executions` — paginated execution list (status/trigger/hours/agent/search filters, offset pagination, LIMIT 50)
+  - `GET /api/executions/stats` — single-pass conditional aggregation: total, success_count, failed_count, total_cost (windowed by `hours`), running_count and queued_count (always live)
+  - Access control: admins see all agents, non-admins see only accessible agents via shared `accessible_agent_names()` helper
+  - Frontend `/executions` page: 4 stat cards, running-now strip, filter bar, load-more list with per-row status tints and stop/navigate actions
+  - NavBar running-count badge (yellow when >0)
+  - Pinia store with 30s polling + `agent_activity` WebSocket refresh guard
+- **Flow**: `docs/memory/feature-flows/executions-dashboard.md`
+
 ---
 
 ## 11. GitHub Integration

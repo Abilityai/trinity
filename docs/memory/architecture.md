@@ -646,6 +646,17 @@ The `duplicate_binding` field flags agents whose
 agent — detects the §P5 silent-clobber setup at fleet level.
 
 
+### Executions (EXEC-022, NEW: 2026-05-15)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/executions/stats` | Aggregate stats for the fleet stat cards. `total`, `success_count`, `failed_count`, `total_cost` are windowed by `hours` (0 = all-time); `running_count` and `queued_count` are always live. Optional `agent` filter narrows to one agent. |
+| GET | `/api/executions` | Paginated fleet execution list. Filters: `status`, `triggered_by`, `hours`, `agent`, `search`. `limit` (max 200, default 50), `offset`. Returns `FleetExecutionSummary` rows ordered by `started_at DESC`. |
+
+**Access control:** Admin users see all agents. Non-admins see only agents they own or have been shared. Both endpoints share the `accessible_agent_names()` helper from `services/agent_service/helpers.py`.
+
+**Implementation:** `routers/executions.py` → `db/schedules.py:ScheduleOperations.get_fleet_executions` / `get_fleet_execution_stats`. Stats use single-pass conditional aggregation (`CASE WHEN time_cond THEN ...`) so windowed and live counts come from one SQL query. Router registers `/stats` before `""` to prevent FastAPI routing the literal string `"stats"` as an execution ID.
+
 ### Operator Queue (OPS-001)
 
 | Method | Path | Description |
