@@ -13,7 +13,6 @@ export const useExecutionsStore = defineStore('executions', () => {
   const statsLoading = ref(false)
   const error = ref(null)
   const hasMore = ref(false)
-  const wsStatus = ref('connected') // 'connected' | 'polling' | 'disconnected'
 
   const filters = ref({
     agent: '',
@@ -116,10 +115,13 @@ export const useExecutionsStore = defineStore('executions', () => {
   // WS: agent_activity events with schedule_start / schedule_end trigger a refresh.
   // We refetch rather than patch in-place because the event payload doesn't carry
   // the full row data (cost, duration, etc.) needed to update the list accurately.
+  // Guard: if a refresh is already in flight, skip — the in-flight call will see the
+  // latest state once it lands.
   function handleWebSocketEvent(data) {
     if (
       data.type === 'agent_activity' &&
-      (data.activity_type === 'schedule_start' || data.activity_type === 'schedule_end')
+      (data.activity_type === 'schedule_start' || data.activity_type === 'schedule_end') &&
+      !loading.value
     ) {
       refresh()
     }
@@ -145,7 +147,6 @@ export const useExecutionsStore = defineStore('executions', () => {
     statsLoading,
     error,
     hasMore,
-    wsStatus,
     filters,
     hasActiveFilters,
     runningCount,

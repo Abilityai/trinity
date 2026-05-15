@@ -16,13 +16,9 @@
           <span class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400" :title="wsTooltip">
             <span
               class="inline-block w-2 h-2 rounded-full"
-              :class="{
-                'bg-status-success-500': store.wsStatus === 'connected',
-                'bg-status-warning-500 animate-pulse': store.wsStatus === 'polling',
-                'bg-status-danger-500': store.wsStatus === 'disconnected',
-              }"
+              :class="isConnected ? 'bg-status-success-500' : 'bg-status-warning-500 animate-pulse'"
             ></span>
-            {{ store.wsStatus === 'connected' ? 'Live' : store.wsStatus === 'polling' ? 'Polling' : 'Offline' }}
+            {{ isConnected ? 'Live' : 'Polling' }}
           </span>
           <!-- Refresh -->
           <button
@@ -88,6 +84,7 @@
             <option value="queued">queued</option>
             <option value="success">success</option>
             <option value="failed">failed</option>
+            <option value="error">error</option>
             <option value="cancelled">cancelled</option>
             <option value="skipped">skipped</option>
           </select>
@@ -107,6 +104,7 @@
             <option value="mcp">mcp</option>
             <option value="public">public</option>
             <option value="webhook">webhook</option>
+            <option value="fan_out">fan_out</option>
           </select>
 
           <!-- Time range filter -->
@@ -272,21 +270,21 @@ import NavBar from '../components/NavBar.vue'
 import { useExecutionsStore } from '../stores/executions'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
+import { useWebSocket } from '../utils/websocket'
 
 const router = useRouter()
 const store = useExecutionsStore()
 const authStore = useAuthStore()
 const agentsStore = useAgentsStore()
+const { isConnected } = useWebSocket()
 
 const agentNames = computed(() =>
   agentsStore.agents.map(a => a.name).sort()
 )
 
-const wsTooltip = computed(() => {
-  if (store.wsStatus === 'connected') return 'Live updates connected'
-  if (store.wsStatus === 'polling') return 'Polling every 30s'
-  return 'Disconnected — click Refresh'
-})
+const wsTooltip = computed(() =>
+  isConnected.value ? 'Live updates connected' : 'Polling every 30s'
+)
 
 // Threshold ladder for success rate (DS §3.4, inverted: good rate = low danger)
 const successRateClass = computed(() => {
