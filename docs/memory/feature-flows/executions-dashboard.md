@@ -118,3 +118,105 @@ validation_execution_id, queued_at.
 
 **`FleetExecutionStats`** (`models.py`): total, success_count, failed_count,
 running_count, queued_count, total_cost, success_rate, hours.
+
+## Testing
+
+**Prerequisites**:
+- [ ] Trinity running locally (`./scripts/deploy/start.sh`)
+- [ ] At least one agent with completed schedule executions in the DB
+- [ ] Admin user + at least one non-admin user configured
+- [ ] Backend API accessible at `http://localhost:8000`
+
+**Test Steps**:
+
+### 1. Admin sees all executions
+**Action**:
+- Log in as admin, navigate to `/executions`
+
+**Expected**: All agents' runs appear; stat cards show non-zero totals
+
+**Verify**:
+- [ ] Total count in stat card matches row count across all agents
+- [ ] `running_count` badge in NavBar matches "N running now" strip count
+- [ ] Live status dot is green when WebSocket connected
+
+### 2. Non-admin access control
+**Action**:
+- Log in as a non-admin user who owns/is shared on a subset of agents
+- Navigate to `/executions`
+
+**Expected**: Only executions for accessible agents are shown
+
+**Verify**:
+- [ ] Rows for agents the user cannot access do not appear
+- [ ] `GET /api/executions` returns 200 (not 403) with filtered results
+- [ ] User with zero accessible agents sees empty state, not 500
+
+### 3. Filters update list and stat cards
+**Action**:
+- Apply status filter (e.g. `failed`), then trigger filter (`schedule`), then time range (`Last 1h`)
+
+**Expected**: Each filter narrows both the row list and the stat card totals
+
+**Verify**:
+- [ ] Stat card "Total" reflects filtered window
+- [ ] "Success rate" recalculates per filter
+- [ ] "X shown" count below filter bar matches visible rows
+- [ ] "Clear filters" resets to default 24h view
+
+### 4. Running strip and live updates
+**Action**:
+- Trigger a schedule manually while `/executions` is open
+
+**Expected**: "N running now" yellow strip appears; row for the running execution appears at top
+
+**Verify**:
+- [ ] Strip disappears when execution completes (WS event fires refresh)
+- [ ] NavBar badge updates to match running count
+- [ ] No manual refresh required
+
+### 5. Load more pagination
+**Action**:
+- Ensure >50 executions exist; navigate to `/executions` with no filters
+
+**Expected**: "Load more" button appears; clicking appends next 50 rows
+
+**Verify**:
+- [ ] First 50 rows loaded on mount
+- [ ] "Load more" appends without duplicating existing rows
+- [ ] Button disappears when all rows are loaded
+
+### 6. Search
+**Action**:
+- Type a substring of a known task message into the search box
+
+**Expected**: After 300ms debounce, only matching executions are shown
+
+**Verify**:
+- [ ] Partial match works (message contains substring)
+- [ ] Clearing search restores full list
+
+### 7. `running_count` is always live (independent of hours filter)
+**Action**:
+- Set time range to "Last 1h"; ensure a running execution started >1h ago exists
+
+**Expected**: `running_count` still reflects it; "Total" does not
+
+**Verify**:
+- [ ] `GET /api/executions/stats?hours=1` returns `running_count > 0` for old running row
+- [ ] `total` in same response does NOT count that old row
+
+**Edge Cases**:
+- [ ] `?hours=0` (all-time): stat card totals include rows older than 30 days
+- [ ] Invalid `?status=__bad__` silently ignored — all rows returned
+- [ ] Invalid `?hours=99` falls back to 24h window
+- [ ] `?limit=200` (max) returns up to 200 rows without error
+- [ ] Rapid filter changes do not stack concurrent fetches (loading guard)
+
+**Cleanup**:
+- [ ] No cleanup needed — read-only dashboard
+
+**Last Tested**: Not yet tested
+**Tested By**: Not yet tested
+**Status**: Not Tested
+**Issues**: None
