@@ -3,6 +3,7 @@ import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
+import { useExecutionsStore } from '../stores/executions'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -21,6 +22,7 @@ export function useWebSocket() {
   const agentsStore = useAgentsStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
+  const executionsStore = useExecutionsStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -142,6 +144,9 @@ export function useWebSocket() {
         // Handle events keyed by 'type' instead of 'event'
         if (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_acknowledged') {
           operatorQueueStore.handleWebSocketEvent(data)
+        }
+        if (data.type === 'agent_activity') {
+          executionsStore.handleWebSocketEvent(data)
         }
         break
     }

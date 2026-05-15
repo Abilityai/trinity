@@ -210,6 +210,18 @@ def get_accessible_agents(current_user: User) -> list:
     return accessible_agents
 
 
+def accessible_agent_names(current_user: User) -> Optional[List[str]]:
+    """Return the set of agent names the caller may access, for SQL IN filters.
+
+    Returns None for admins (no filter — see every agent).
+    Returns a list (possibly empty) for non-admins.
+    Used by fleet-level endpoints that filter schedule_executions by agent_name.
+    """
+    if current_user.role == "admin":
+        return None
+    return [a["name"] for a in get_accessible_agents(current_user)]
+
+
 def sanitize_and_validate_name(name: str) -> str:
     """
     Sanitize and validate an agent name.

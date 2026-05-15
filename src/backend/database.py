@@ -815,6 +815,14 @@ class DatabaseManager:
         """Get schedule counts (total and enabled) for all agents."""
         return self._schedule_ops.get_all_agents_schedule_counts()
 
+    def get_fleet_executions(self, agent_names, **kwargs):
+        """Cross-fleet execution list (EXEC-022 / Issue #18)."""
+        return self._schedule_ops.get_fleet_executions(agent_names, **kwargs)
+
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
     # =========================================================================

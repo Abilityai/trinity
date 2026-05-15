@@ -482,3 +482,54 @@ class AgentDefaultResourcesUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/resources (RES-001)."""
     cpu: Optional[str] = None
     memory: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Fleet Executions (EXEC-022 / Issue #18)
+# ---------------------------------------------------------------------------
+
+class FleetExecutionSummary(BaseModel):
+    """Lightweight execution row for the Unified Executions Dashboard list.
+
+    Excludes large fields (response, tool_calls, execution_log).
+    error_summary is a 200-char truncation for failed-row one-liners.
+    """
+    id: str
+    schedule_id: str
+    agent_name: str
+    status: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+    message: str
+    triggered_by: str
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cost: Optional[float] = None
+    error_summary: Optional[str] = None
+    source_user_id: Optional[int] = None
+    source_user_email: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    source_mcp_key_id: Optional[str] = None
+    source_mcp_key_name: Optional[str] = None
+    model_used: Optional[str] = None
+    fan_out_id: Optional[str] = None
+    business_status: Optional[str] = None
+    validation_execution_id: Optional[str] = None
+    queued_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+        json_encoders = {datetime: lambda v: to_utc_iso(v) if v else None}
+
+
+class FleetExecutionStats(BaseModel):
+    """Aggregate stats for the Unified Executions Dashboard stat cards."""
+    total: int
+    success_count: int
+    failed_count: int
+    running_count: int
+    queued_count: int
+    total_cost: float
+    success_rate: float
+    hours: int  # 0 = all-time

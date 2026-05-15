@@ -77,6 +77,12 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/executions',
+    name: 'Executions',
+    component: () => import('../views/Executions.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     // #302 — /api-keys absorbed into /settings as the "MCP Keys" tab.
     // Permanent redirect preserves bookmarks and external doc links.
     path: '/api-keys',

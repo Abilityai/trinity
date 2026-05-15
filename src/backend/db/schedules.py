@@ -2105,3 +2105,147 @@ class ScheduleOperations:
                 "trend_cost_pct": trend_pct,
                 "daily_breakdown": daily_breakdown,
             }
+
+    # -------------------------------------------------------------------------
+    # Fleet-level execution queries (EXEC-022 / Issue #18)
+    # -------------------------------------------------------------------------
+
+    def get_fleet_executions(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        *,
+        status: Optional[str] = None,
+        triggered_by: Optional[str] = None,
+        hours: Optional[int] = 24,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """Cross-fleet execution list for the Unified Executions Dashboard.
+
+        Returns summary rows (no large text fields: response, tool_calls,
+        execution_log). The error column is truncated to 200 chars for the
+        failed-row one-liner.
+
+        agent_names=None → admin path, no agent_name filter applied.
+        agent_names=[]   → non-admin with zero accessible agents, returns [].
+        hours=0 or None  → no time-window filter (all-time).
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return []
+
+        conditions = []
+        params: List = []
+
+        if agent_names is not None:
+            placeholders = ",".join("?" * len(agent_names))
+            conditions.append(f"agent_name IN ({placeholders})")
+            params.extend(agent_names)
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if triggered_by:
+            conditions.append("triggered_by = ?")
+            params.append(triggered_by)
+
+        if hours:
+            conditions.append("started_at > ?")
+            params.append(iso_cutoff(hours))
+
+        if search:
+            conditions.append("message LIKE ?")
+            params.append(f"%{search}%")
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        params.extend([limit, offset])
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT
+                    id, schedule_id, agent_name, status, started_at, completed_at,
+                    duration_ms, message, triggered_by,
+                    context_used, context_max, cost,
+                    CASE WHEN status IN ('failed', 'error')
+                         THEN SUBSTR(error, 1, 200)
+                         ELSE NULL END AS error_summary,
+                    source_user_id, source_user_email, source_agent_name,
+                    source_mcp_key_id, source_mcp_key_name,
+                    model_used, fan_out_id, business_status, validation_execution_id,
+                    queued_at
+                FROM schedule_executions
+                {where}
+                ORDER BY started_at DESC
+                LIMIT ? OFFSET ?
+            """, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_fleet_execution_stats(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        hours: int = 24,
+    ) -> Dict:
+        """Aggregate stats for the fleet executions stat cards.
+
+        Returns total/success/failed/cost within the time window, plus a
+        current running + queued count (not time-windowed — a run that started
+        before the window is still live).
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return {
+                "total": 0, "success_count": 0, "failed_count": 0,
+                "total_cost": 0.0, "success_rate": 0.0,
+                "running_count": 0, "queued_count": 0, "hours": hours,
+            }
+
+        agent_params: List = []
+        agent_where = ""
+        if agent_names is not None:
+            placeholders = ",".join("?" * len(agent_names))
+            agent_where = f"WHERE agent_name IN ({placeholders})"
+            agent_params = list(agent_names)
+
+        # Single-pass query: windowed totals via conditional aggregation +
+        # live running/queued counts without a time filter, all in one scan.
+        # time_cond = "1" when hours=0 (all-time) so CASE expressions are unconditional.
+        if hours:
+            time_cond = "started_at > ?"
+            time_params: List = [iso_cutoff(hours)] * 4  # used in 4 CASE expressions
+        else:
+            time_cond = "1"
+            time_params = []
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT
+                    SUM(CASE WHEN {time_cond} THEN 1 ELSE 0 END) AS total,
+                    SUM(CASE WHEN {time_cond} AND status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN {time_cond} AND status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN {time_cond} THEN COALESCE(cost, 0) ELSE 0 END) AS total_cost,
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count
+                FROM schedule_executions
+                {agent_where}
+            """, time_params + agent_params)
+            row = cursor.fetchone()
+            total = row["total"] or 0
+            success_count = row["success_count"] or 0
+            failed_count = row["failed_count"] or 0
+            total_cost = row["total_cost"] or 0.0
+            terminal = success_count + failed_count
+            success_rate = round(success_count / terminal * 100, 1) if terminal > 0 else 0.0
+
+            return {
+                "total": total,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_cost": round(total_cost, 4),
+                "success_rate": success_rate,
+                "running_count": row["running_count"] or 0,
+                "queued_count": row["queued_count"] or 0,
+                "hours": hours,
+            }
