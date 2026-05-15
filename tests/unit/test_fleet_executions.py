@@ -18,35 +18,18 @@ in a minimal test fixture that mirrors the production SQL exactly.
 
 from __future__ import annotations
 
-import os
 import sqlite3
-import sys
-import tempfile
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import List, Optional
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path bootstrap
-# ---------------------------------------------------------------------------
-_THIS = Path(__file__).resolve()
-_BACKEND = _THIS.parent.parent.parent / "src" / "backend"
-if str(_BACKEND) not in sys.path:
-    sys.path.insert(0, str(_BACKEND))
 
-# utils.helpers must win over any test-helpers shadow
-for _k in list(sys.modules):
-    if _k == "utils" or _k.startswith("utils."):
-        sys.modules.pop(_k, None)
-
-import importlib as _il
-_h_spec = _il.util.spec_from_file_location("utils.helpers", str(_BACKEND / "utils" / "helpers.py"))
-_h_mod = _il.util.module_from_spec(_h_spec)
-sys.modules["utils.helpers"] = _h_mod
-_h_spec.loader.exec_module(_h_mod)
-from utils.helpers import iso_cutoff  # noqa: E402
+def iso_cutoff(hours: int) -> str:
+    """Mirrors utils.helpers.iso_cutoff — inlined to avoid sys.modules manipulation."""
+    return (
+        datetime.now(timezone.utc) - timedelta(hours=hours)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 # ---------------------------------------------------------------------------
