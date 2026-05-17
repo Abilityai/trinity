@@ -265,6 +265,9 @@ onMounted(async () => {
   // Start polling for notifications
   notificationsStore.startPolling(60000)
 
+  // Populate running-count badge on initial load from any page
+  executionsStore.fetchStats().catch((e) => console.warn('NavBar fetchStats failed:', e))
+
   // Fetch user role from backend
   try {
     const response = await axios.get('/api/users/me', {
