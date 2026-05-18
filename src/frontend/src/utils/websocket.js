@@ -140,7 +140,12 @@ export function useWebSocket() {
         break
       default:
         // Handle events keyed by 'type' instead of 'event'
-        if (data.type === 'operator_queue_new' || data.type === 'operator_queue_responded' || data.type === 'operator_queue_acknowledged') {
+        if (
+          data.type === 'operator_queue_new' ||
+          data.type === 'operator_queue_responded' ||
+          data.type === 'operator_queue_acknowledged' ||
+          data.type === 'operator_queue_recovered'
+        ) {
           operatorQueueStore.handleWebSocketEvent(data)
         }
         break

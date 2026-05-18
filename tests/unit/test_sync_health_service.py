@@ -16,6 +16,7 @@ import asyncio
 import importlib.util
 import sqlite3
 import sys
+from types import ModuleType
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,11 +26,20 @@ import pytest
 _THIS = Path(__file__).resolve()
 _BACKEND = _THIS.parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
+_croniter_stub = ModuleType("croniter")
+_croniter_stub.croniter = object
+sys.modules.setdefault("croniter", _croniter_stub)
 for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
     sys.modules.pop(_shadow, None)
 while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)
+
+
+def _install_services_namespace():
+    services_pkg = ModuleType("services")
+    services_pkg.__path__ = [str(_BACKEND / "services")]
+    sys.modules["services"] = services_pkg
 
 
 def _load(rel: str, name: str):
@@ -50,6 +60,7 @@ pytestmark = pytest.mark.unit
 def tmp_db(tmp_path, monkeypatch):
     db_path = tmp_path / "trinity.db"
     monkeypatch.setenv("TRINITY_DB_PATH", str(db_path))
+    monkeypatch.setenv("REDIS_URL", "redis://user:pass@localhost:6379")
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -61,7 +72,7 @@ def tmp_db(tmp_path, monkeypatch):
     # DatabaseManager singleton especially) sees the new DB path.
     for modname in list(sys.modules):
         if modname == "database" or modname.startswith("db.") \
-                or modname == "services.sync_health_service":
+                or modname == "services" or modname.startswith("services."):
             sys.modules.pop(modname, None)
     yield db_path
 
@@ -115,6 +126,7 @@ def _status_payload(status="success", ahead_working=0, behind_working=0, error=N
 @pytest.fixture
 def service(tmp_db):
     """SyncHealthService instance with a stub AgentClient."""
+    _install_services_namespace()
     from services.sync_health_service import SyncHealthService  # noqa: WPS433
     svc = SyncHealthService(poll_interval=0)
     return svc
@@ -190,6 +202,76 @@ class TestOperatorQueueEmission:
         assert len(sync_failing) == 1
         assert "boom" in (sync_failing[0].get("context") or {}).get(
             "last_error_summary", "")
+        assert sync_failing[0]["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_success_marks_sync_alert_recovered_with_evidence(
+        self, service, seed_agent
+    ):
+        seed_agent("alpha")
+        fail = _status_payload(status="failed", error="push failed")
+        ok = _status_payload(status="success")
+
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=fail)):
+            await service._poll_cycle()
+            await service._poll_cycle()
+            await service._poll_cycle()
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=ok)):
+            await service._poll_cycle()
+
+        from database import db
+        items = db.list_operator_queue_items(agent_name="alpha")
+        sync_failing = [i for i in items if i["type"] == "sync_failing"]
+        assert len(sync_failing) == 1
+        item = sync_failing[0]
+        assert item["status"] == "recovered"
+        assert item["priority"] == "low"
+        context = item["context"] or {}
+        assert context["resolution_state"] == "recovered_unacknowledged"
+        assert context["recovered_by"] == "system"
+        evidence = context["recovery_evidence"]
+        assert evidence["source"] == "sync_health_service"
+        assert evidence["verified_status"] == "success"
+        assert evidence["previous_consecutive_failures"] == 3
+        assert evidence["current_consecutive_failures"] == 0
+        assert evidence["last_error_summary"] == "push failed"
+
+    @pytest.mark.asyncio
+    async def test_recovery_does_not_change_human_action_items(
+        self, service, seed_agent
+    ):
+        seed_agent("alpha")
+        fail = _status_payload(status="failed", error="push failed")
+        ok = _status_payload(status="success")
+
+        from database import db
+        db.create_operator_queue_item("alpha", {
+            "id": "approval-alpha-1",
+            "agent_name": "alpha",
+            "type": "approval",
+            "status": "pending",
+            "priority": "high",
+            "title": "Approval needed",
+            "question": "Proceed?",
+            "context": {"human_response_required": True},
+            "created_at": "2026-04-18T10:00:00.000000Z",
+        })
+
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=fail)):
+            await service._poll_cycle()
+            await service._poll_cycle()
+            await service._poll_cycle()
+        with patch.object(service, "_fetch_git_status",
+                           AsyncMock(return_value=ok)):
+            await service._poll_cycle()
+
+        approval = db.get_operator_queue_item("approval-alpha-1")
+        assert approval["status"] == "pending"
+        assert approval["priority"] == "high"
+        assert approval["context"] == {"human_response_required": True}
 
     @pytest.mark.asyncio
     async def test_success_resets_counter_and_allows_future_emissions(
@@ -218,6 +300,9 @@ class TestOperatorQueueEmission:
         sync_failing = [i for i in items if i["type"] == "sync_failing"]
         # Two distinct failure series → two entries (distinct IDs by timestamp).
         assert len(sync_failing) == 2
+        assert sorted(i["status"] for i in sync_failing) == [
+            "pending", "recovered"
+        ]
 
 
 class TestBehindWorkingRedFlag:

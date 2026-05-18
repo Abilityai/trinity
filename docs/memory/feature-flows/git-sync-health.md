@@ -146,6 +146,15 @@ transition from `N-1 < 3` to `N >= 3`. A fresh failure series after a
 `success` reset produces a distinct entry (the ID embeds the emission
 timestamp).
 
+Recovery is also stateful. When a later poll verifies
+`last_sync_status='success'` after an alerting failure series, pending
+`sync_failing` queue entries for that agent are marked `recovered` and
+downgraded to low priority. The row is not deleted: its `context` gains
+`resolution_state='recovered_unacknowledged'`, `recovered_at`, and
+`recovery_evidence` with the verified status, check timestamp, previous
+failure count, last error summary, and current ahead/behind values. Other
+pending operator-queue item types are left untouched.
+
 ### 3. Dual ahead/behind (P6 fix)
 
 `docker/base-image/agent_server/routers/git.py::_dual_ahead_behind_payload`

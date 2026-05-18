@@ -42,6 +42,7 @@
           <option value="">All Status</option>
           <option value="pending">Pending</option>
           <option value="responded">Responded</option>
+          <option value="recovered">Recovered</option>
           <option value="acknowledged">Acknowledged</option>
         </select>
       </div>
@@ -172,6 +173,7 @@ function typeIconColor(type) {
 function statusBadge(status) {
   const badges = {
     responded: 'bg-status-success-100 text-status-success-700 dark:bg-status-success-900/30 dark:text-status-success-400',
+    recovered: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
     acknowledged: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400',
     expired: 'bg-status-danger-100 text-status-danger-600 dark:bg-status-danger-900/30 dark:text-status-danger-400'
   }

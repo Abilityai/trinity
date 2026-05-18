@@ -1804,6 +1804,11 @@ class DatabaseManager:
     def cancel_operator_queue_item(self, item_id):
         return self._operator_queue_ops.cancel_item(item_id)
 
+    def mark_operator_queue_items_recovered(self, agent_name, item_type, recovery_evidence):
+        return self._operator_queue_ops.mark_pending_items_recovered(
+            agent_name, item_type, recovery_evidence
+        )
+
     def mark_operator_queue_acknowledged(self, item_id):
         return self._operator_queue_ops.mark_acknowledged(item_id)
 

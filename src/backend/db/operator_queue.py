@@ -6,7 +6,7 @@ Supports listing, filtering, responding, and statistics.
 """
 
 import json
-from typing import Optional, List, Dict, Set
+from typing import Any, Optional, List, Dict, Set
 from datetime import datetime
 
 from .connection import get_db_connection
@@ -223,6 +223,58 @@ class OperatorQueueOperations:
 
         return self.get_item(item_id)
 
+    def mark_pending_items_recovered(
+        self,
+        agent_name: str,
+        item_type: str,
+        recovery_evidence: Dict[str, Any],
+    ) -> List[Dict]:
+        """Mark pending items recovered without deleting operator history.
+
+        This is intentionally narrow: callers must provide both an agent and a
+        queue type so human-action-required items are not swept up by a broad
+        recovery pass.
+        """
+        now = utc_now_iso()
+        recovered_ids: List[str] = []
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, context, priority
+                FROM operator_queue
+                WHERE agent_name = ?
+                  AND type = ?
+                  AND status = 'pending'
+            """, (agent_name, item_type))
+            rows = cursor.fetchall()
+
+            for row in rows:
+                context = self._parse_context(row[1])
+                context["resolution_state"] = "recovered_unacknowledged"
+                context["recovered_at"] = now
+                context["recovered_by"] = "system"
+                context["previous_priority"] = row[2]
+                context["recovery_evidence"] = recovery_evidence
+
+                cursor.execute("""
+                    UPDATE operator_queue
+                    SET status = 'recovered',
+                        priority = 'low',
+                        context = ?
+                    WHERE id = ?
+                      AND status = 'pending'
+                """, (json.dumps(context), row[0]))
+                if cursor.rowcount:
+                    recovered_ids.append(row[0])
+
+            conn.commit()
+
+        return [
+            item for item_id in recovered_ids
+            if (item := self.get_item(item_id)) is not None
+        ]
+
     def mark_acknowledged(self, item_id: str) -> bool:
         """Mark an item as acknowledged by the agent."""
         now = utc_now_iso()
@@ -368,3 +420,16 @@ class OperatorQueueOperations:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM operator_queue WHERE id = ?", (item_id,))
             return cursor.fetchone() is not None
+
+    @staticmethod
+    def _parse_context(raw_context) -> Dict:
+        """Parse queue context defensively for recovery annotation."""
+        if not raw_context:
+            return {}
+        try:
+            parsed = json.loads(raw_context)
+        except (TypeError, json.JSONDecodeError):
+            return {"previous_context": raw_context}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"previous_context": parsed}

@@ -18,6 +18,7 @@ tighter loop would multiply SQLite writes for no benefit (PERF-269).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Dict, Optional
 
@@ -142,6 +143,15 @@ class SyncHealthService:
         new_failures = updated["consecutive_failures"]
         if prior_failures < ALERT_THRESHOLD <= new_failures:
             self._emit_sync_failing_alert(agent_name, updated)
+        elif (
+            prior_failures >= ALERT_THRESHOLD
+            and new_failures == 0
+            and last_sync_status == "success"
+        ):
+            recovered = self._mark_sync_failing_alerts_recovered(
+                agent_name, prior, updated
+            )
+            await self._broadcast_recovered_alerts(recovered)
 
     async def _fetch_git_status(self, agent_name: str) -> Optional[Dict]:
         """Fetch /api/git/status from the agent. None on unreachable."""
@@ -194,6 +204,66 @@ class SyncHealthService:
             )
         except Exception:
             logger.exception("failed to emit sync_failing alert")
+
+    def _mark_sync_failing_alerts_recovered(
+        self,
+        agent_name: str,
+        prior_state: Optional[Dict],
+        state: Dict,
+    ) -> list[Dict]:
+        """Mark pending sync_failing rows recovered after verified success."""
+        evidence = {
+            "source": "sync_health_service",
+            "agent_name": agent_name,
+            "verified_status": state.get("last_sync_status"),
+            "verified_at": state.get("last_check_at"),
+            "last_sync_at": state.get("last_sync_at"),
+            "previous_consecutive_failures": (
+                prior_state.get("consecutive_failures") if prior_state else None
+            ),
+            "current_consecutive_failures": state.get("consecutive_failures"),
+            "last_error_summary": (
+                prior_state.get("last_error_summary") if prior_state else None
+            ),
+            "ahead_main": state.get("ahead_main", 0),
+            "behind_main": state.get("behind_main", 0),
+            "ahead_working": state.get("ahead_working", 0),
+            "behind_working": state.get("behind_working", 0),
+        }
+        try:
+            recovered = db.mark_operator_queue_items_recovered(
+                agent_name, "sync_failing", evidence
+            )
+            if recovered:
+                logger.info(
+                    "sync_failing recovered for %s (items=%s)",
+                    agent_name, len(recovered),
+                )
+            return recovered
+        except Exception:
+            logger.exception("failed to mark sync_failing alert recovered")
+            return []
+
+    async def _broadcast_recovered_alerts(self, items: list[Dict]) -> None:
+        """Broadcast recovered operator-queue items when websocket is present."""
+        if not _websocket_manager or not items:
+            return
+        for item in items:
+            try:
+                await _websocket_manager.broadcast(json.dumps({
+                    "type": "operator_queue_recovered",
+                    "data": {
+                        "id": item["id"],
+                        "agent_name": item["agent_name"],
+                        "item_type": item["type"],
+                        "status": item["status"],
+                        "recovered_at": (
+                            item.get("context") or {}
+                        ).get("recovered_at"),
+                    },
+                }))
+            except Exception:
+                logger.exception("failed to broadcast recovered queue item")
 
 
 # Module-level singleton mirrors operator_queue_service.

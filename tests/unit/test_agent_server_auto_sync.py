@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,6 +151,54 @@ class TestRunAutoSyncOnce:
         assert state["last_sync_status"] == "failed"
         assert state["consecutive_failures"] == 1
         assert state["last_error_summary"]
+
+    def test_live_index_lock_backs_off_without_removing_lock(self, repo):
+        lock_path = repo / ".git" / "index.lock"
+        lock_path.write_text("")
+
+        with (
+            patch(
+                "agent_server.routers.git._git_index_lock_has_live_owner",
+                return_value=True,
+            ),
+            patch("agent_server.routers.git.subprocess.run") as git_run,
+        ):
+            result = _run_auto_sync_once(repo)
+
+        assert result["status"] == "failed"
+        assert "git index lock active" in result["error"]
+        assert "action=backoff" in result["error"]
+        assert str(repo) not in result["error"]
+        assert lock_path.exists()
+        git_run.assert_not_called()
+
+        state = _read_sync_state_file(repo)
+        assert state["last_sync_status"] == "failed"
+        assert state["last_error_summary"] == result["error"]
+
+    def test_stale_index_lock_is_removed_and_sync_continues(self, repo):
+        lock_path = repo / ".git" / "index.lock"
+        lock_path.write_text("")
+        old_mtime = time.time() - 120
+        os.utime(lock_path, (old_mtime, old_mtime))
+
+        with (
+            patch(
+                "agent_server.routers.git._git_index_lock_has_live_owner",
+                return_value=False,
+            ),
+            patch(
+                "agent_server.routers.git._git_index_lock_stale_seconds",
+                return_value=60,
+            ),
+        ):
+            result = _run_auto_sync_once(repo)
+
+        assert result["status"] == "success"
+        assert not lock_path.exists()
+        state = _read_sync_state_file(repo)
+        assert state["last_sync_status"] == "success"
+        assert state["consecutive_failures"] == 0
 
 
 class TestAutoSyncStartupGate:

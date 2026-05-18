@@ -76,6 +76,38 @@ class TaskExecutionResult:
     error_code: Optional[TaskExecutionErrorCode] = None
 
 
+def _classify_timeout(exc: BaseException) -> str:
+    """Return a stable timeout kind for diagnostics and failure state."""
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "read_timeout"
+    if isinstance(exc, httpx.WriteTimeout):
+        return "write_timeout"
+    if isinstance(exc, httpx.PoolTimeout):
+        return "pool_timeout"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "asyncio_timeout"
+    return "timeout"
+
+
+def _format_timeout_error(
+    *,
+    timeout_seconds: Optional[int],
+    timeout_kind: str,
+    elapsed_seconds: int,
+    termination_attempted: bool,
+    termination_succeeded: bool,
+) -> str:
+    """Build a persisted timeout error that is distinguishable from HTTP failures."""
+    return (
+        f"Execution timeout ({timeout_kind}): agent task did not complete within "
+        f"{timeout_seconds} seconds; backend waited {elapsed_seconds}s; "
+        f"termination_attempted={str(termination_attempted).lower()}; "
+        f"termination_succeeded={str(termination_succeeded).lower()}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agent HTTP helper (moved from routers/chat.py)
 # ---------------------------------------------------------------------------
@@ -535,14 +567,25 @@ class TaskExecutionService:
                 raw_response=response_data,
             )
 
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, asyncio.TimeoutError) as e:
             elapsed = int((datetime.utcnow() - start_time).total_seconds())
-            error_msg = f"Task execution timed out after {timeout_seconds} seconds"
-            logger.error(f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s (limit={timeout_seconds}s)")
+            timeout_kind = _classify_timeout(e)
+            logger.error(
+                f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
+                f"(limit={timeout_seconds}s, kind={timeout_kind})"
+            )
 
             # Issue #61: Terminate the execution on the agent to prevent orphaned
             # Claude processes from accumulating. Best-effort — watchdog is safety net.
-            await terminate_execution_on_agent(agent_name, execution_id)
+            termination_attempted = bool(execution_id)
+            termination_succeeded = await terminate_execution_on_agent(agent_name, execution_id)
+            error_msg = _format_timeout_error(
+                timeout_seconds=timeout_seconds,
+                timeout_kind=timeout_kind,
+                elapsed_seconds=elapsed,
+                termination_attempted=termination_attempted,
+                termination_succeeded=termination_succeeded,
+            )
 
             # Don't overwrite cancelled executions
             if execution_id:
@@ -565,6 +608,12 @@ class TaskExecutionService:
                 response="",
                 error=error_msg,
                 error_code=TaskExecutionErrorCode.TIMEOUT,
+                raw_response={
+                    "failure_kind": "timeout",
+                    "timeout_kind": timeout_kind,
+                    "termination_attempted": termination_attempted,
+                    "termination_succeeded": termination_succeeded,
+                },
             )
 
         except httpx.HTTPError as e:
@@ -610,6 +659,8 @@ class TaskExecutionService:
             if agent_status_code == 503:
                 logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
                 error_code = TaskExecutionErrorCode.AUTH
+            elif isinstance(e, httpx.TransportError) and agent_status_code is None:
+                error_code = TaskExecutionErrorCode.NETWORK
 
             if execution_id:
                 existing = db.get_execution(execution_id)

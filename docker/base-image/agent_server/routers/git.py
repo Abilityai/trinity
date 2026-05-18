@@ -98,6 +98,14 @@ _SYNC_STATE_DEFAULT: Dict = {
 }
 
 
+def _git_index_lock_stale_seconds() -> int:
+    """Age threshold before auto-sync may clear an unowned git index lock."""
+    try:
+        return max(60, int(os.getenv("GIT_INDEX_LOCK_STALE_SECONDS", "900")))
+    except ValueError:
+        return 900
+
+
 def _sync_state_path(home_dir: Path) -> Path:
     return home_dir / ".trinity" / "sync-state.json"
 
@@ -149,6 +157,104 @@ def _write_sync_state_file(
     return prior
 
 
+def _is_same_or_child_path(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_git_process_name(comm: str, args: list) -> bool:
+    name = Path((args or [comm])[0]).name.lower()
+    comm = Path(comm).name.lower()
+    return (
+        name == "git"
+        or name.startswith("git-")
+        or comm == "git"
+        or comm.startswith("git-")
+    )
+
+
+def _git_index_lock_has_live_owner(home_dir: Path) -> bool:
+    """Best-effort check for a live git process associated with this repo."""
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return False
+
+    try:
+        home = home_dir.resolve()
+    except OSError:
+        home = home_dir
+    home_text = str(home)
+    git_dir_text = str(home / ".git")
+
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        try:
+            comm = (proc / "comm").read_text(errors="ignore").strip()
+            raw = (proc / "cmdline").read_bytes()
+            args = [arg.decode(errors="ignore") for arg in raw.split(b"\x00") if arg]
+            cwd = (proc / "cwd").resolve()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        if not _is_git_process_name(comm, args):
+            continue
+        if _is_same_or_child_path(cwd, home):
+            return True
+        joined_args = " ".join(args)
+        if home_text in joined_args or git_dir_text in joined_args:
+            return True
+    return False
+
+
+def _prepare_git_index_lock_for_auto_sync(home_dir: Path, now: datetime) -> Optional[str]:
+    """Clear stale, unowned `.git/index.lock` before auto-sync mutates git."""
+    lock_path = home_dir / ".git" / "index.lock"
+    try:
+        stat = lock_path.stat()
+    except FileNotFoundError:
+        return None
+
+    age_seconds = max(0, int(now.timestamp() - stat.st_mtime))
+    stale_after = _git_index_lock_stale_seconds()
+
+    if _git_index_lock_has_live_owner(home_dir):
+        err = f"git index lock active; age_seconds={age_seconds}; action=backoff"
+        logger.warning("auto-sync: %s", err)
+        return err
+
+    if age_seconds < stale_after:
+        err = (
+            "git index lock present below stale threshold; "
+            f"age_seconds={age_seconds}; "
+            f"stale_threshold_seconds={stale_after}; action=backoff"
+        )
+        logger.warning("auto-sync: %s", err)
+        return err
+
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        err = (
+            "git index lock stale but removal failed; "
+            f"age_seconds={age_seconds}; action=backoff; reason={exc.__class__.__name__}"
+        )
+        logger.warning("auto-sync: %s", err)
+        return err
+
+    logger.warning(
+        "auto-sync: git index lock stale; age_seconds=%s; "
+        "stale_threshold_seconds=%s; action=removed",
+        age_seconds,
+        stale_after,
+    )
+    return None
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
     """One auto-sync cycle: stage, commit if dirty, push. Records outcome.
 
@@ -156,8 +262,16 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
     initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
     rescue.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     try:
+        lock_error = _prepare_git_index_lock_for_auto_sync(home_dir, now_dt)
+        if lock_error:
+            _write_sync_state_file(
+                home_dir, "failed", last_sync_at=now, last_error_summary=lock_error
+            )
+            return {"status": "failed", "error": lock_error}
+
         # Stage everything.
         subprocess.run(
             ["git", "add", "-A"],

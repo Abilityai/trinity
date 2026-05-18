@@ -530,6 +530,7 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - 15-min `GIT_SYNC_AUTO` heartbeat loop in the agent container (default-on for non-source-mode GitHub-template agents)
   - Dual `ahead_main`/`ahead_working` tuples in `GET /api/git/status` (P6 fix)
   - `SyncHealthService` emits `sync_failing` operator-queue entries at `consecutive_failures ≥ 3`
+  - Recovered sync failures are marked `recovered` with structured recovery evidence instead of being deleted or left as active failures
   - `GET /api/agents/sync-health` (batch) + dashboard dot
   - `GET /api/fleet/sync-audit` with `duplicate_binding` flag (§P5 query)
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`

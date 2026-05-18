@@ -14,19 +14,22 @@
 
         <p class="text-sm text-gray-600 dark:text-gray-400">{{ item.title }}</p>
 
-        <!-- Response -->
+        <!-- Resolution -->
         <div class="mt-2 flex items-center gap-2">
-          <span class="inline-flex items-center gap-1 text-xs text-status-success-600 dark:text-status-success-400">
+          <span
+            class="inline-flex items-center gap-1 text-xs"
+            :class="resolutionColor"
+          >
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
             </svg>
-            {{ item.response }}
+            {{ resolutionLabel }}
           </span>
-          <span v-if="item.response_text" class="text-xs text-gray-400 dark:text-gray-500">
+          <span v-if="item.response_text && item.status !== 'recovered'" class="text-xs text-gray-400 dark:text-gray-500">
             &mdash; {{ item.response_text }}
           </span>
           <span class="text-xs text-gray-400 dark:text-gray-500 ml-auto">
-            {{ timeAgo(item.responded_at) }}
+            {{ timeAgo(resolutionTime) }}
           </span>
         </div>
       </div>
@@ -50,6 +53,17 @@ const agentAvatarUrl = computed(() => {
   const agent = agentsStore.agents.find(a => a.name === props.item.agent_name)
   return agent?.avatar_url || null
 })
+const resolutionTime = computed(() =>
+  props.item.context?.recovered_at || props.item.responded_at || props.item.created_at
+)
+const resolutionLabel = computed(() =>
+  props.item.status === 'recovered' ? 'Recovered' : props.item.response
+)
+const resolutionColor = computed(() =>
+  props.item.status === 'recovered'
+    ? 'text-blue-600 dark:text-blue-400'
+    : 'text-status-success-600 dark:text-status-success-400'
+)
 
 function timeAgo(isoString) {
   if (!isoString) return ''

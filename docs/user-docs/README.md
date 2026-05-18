@@ -53,6 +53,7 @@
 - [Dashboard](operations/dashboard.md) — Network graph, timeline view, tag clouds
 - [Operating Room](operations/operating-room.md) — Operator queue, notifications, cost alerts
 - [Monitoring](operations/monitoring.md) — Health checks, cleanup service, fleet dashboard
+- [Sync and Network Alert Runbook](operations/sync-and-network-alert-runbook.md) — Triage for sync_failing and network-unreachable alerts
 - [Executions](operations/executions.md) — Execution list, detail, live streaming, termination
 - [Audit Trail](operations/audit-trail.md) — Append-only administrative action log
 - [Agent Quotas](operations/agent-quotas.md) — Per-role agent creation limits

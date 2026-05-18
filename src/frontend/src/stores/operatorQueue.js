@@ -51,8 +51,12 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
 
   const resolvedItems = computed(() => {
     return items.value
-      .filter(i => i.status === 'responded' || i.status === 'acknowledged')
-      .sort((a, b) => new Date(b.responded_at || b.created_at) - new Date(a.responded_at || a.created_at))
+      .filter(i => i.status === 'responded' || i.status === 'acknowledged' || i.status === 'recovered')
+      .sort((a, b) => {
+        const aTime = a.context?.recovered_at || a.responded_at || a.created_at
+        const bTime = b.context?.recovered_at || b.responded_at || b.created_at
+        return new Date(bTime) - new Date(aTime)
+      })
   })
 
   const pendingCount = computed(() =>
@@ -152,6 +156,20 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       const item = items.value.find(i => i.id === data.data?.id)
       if (item) {
         item.status = 'acknowledged'
+      }
+    } else if (data.type === 'operator_queue_recovered') {
+      // Backend verified the underlying failure has recovered.
+      const item = items.value.find(i => i.id === data.data?.id)
+      if (item) {
+        item.status = 'recovered'
+        item.priority = item.priority === 'critical' || item.priority === 'high' ? 'low' : item.priority
+        item.context = {
+          ...(item.context || {}),
+          resolution_state: 'recovered_unacknowledged',
+          recovered_at: data.data?.recovered_at || new Date().toISOString()
+        }
+      } else {
+        fetchItems()
       }
     }
   }

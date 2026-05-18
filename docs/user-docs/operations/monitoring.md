@@ -95,5 +95,6 @@ Agents can query monitoring data through these MCP tools:
 
 ## See Also
 
+- [Sync and Network Alert Runbook](sync-and-network-alert-runbook.md) -- Triage for sync_failing and network-unreachable alerts
 - [Dashboard](dashboard.md) -- Admin dashboard overview
 - [Operating Room](operating-room.md) -- Real-time operations view

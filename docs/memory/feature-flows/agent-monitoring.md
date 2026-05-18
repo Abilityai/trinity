@@ -533,6 +533,16 @@ async def _send_degradation_alert(self, ...):
     await self._broadcast_alert(notification)
 ```
 
+Degradation notifications include `metadata.resolution_state='active_failure'`.
+When the aggregate health check later recovers to `healthy`, pending health
+alert notifications for that agent are dismissed by `system:recovered` and a
+new pending info notification is created with
+`metadata.resolution_state='recovered_unacknowledged'` plus
+`recovery_evidence` (`verified_status`, `verified_at`,
+`recovered_from_status`, and the recovered alert IDs). This keeps active
+failures distinct from recovered-but-unacknowledged alerts without deleting
+history.
+
 **Specific Alert Types** (lines 272-410):
 - `alert_container_stopped()` - OOM kill, crash, unexpected stop
 - `alert_high_restart_count()` - Container restarting frequently

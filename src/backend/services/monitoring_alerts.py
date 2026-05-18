@@ -176,6 +176,7 @@ class MonitoringAlertService:
             "current_status": curr.value,
             "issues": issues,
             "check_timestamp": utc_now_iso(),
+            "resolution_state": "active_failure",
         }
         if details:
             metadata.update(details)
@@ -212,6 +213,9 @@ class MonitoringAlertService:
         # Clear any active cooldowns for this agent
         db.cleanup_alert_cooldowns(agent_name)
 
+        recovery_timestamp = utc_now_iso()
+        recovered_alert_ids = self._dismiss_recovered_health_alerts(agent_name)
+
         # Build recovery notification
         title = f"Agent {agent_name} recovered"
         message = f"Status changed from {prev.value} to {curr.value}"
@@ -220,7 +224,15 @@ class MonitoringAlertService:
             "agent_name": agent_name,
             "previous_status": prev.value,
             "current_status": curr.value,
-            "recovery_timestamp": utc_now_iso(),
+            "recovery_timestamp": recovery_timestamp,
+            "resolution_state": "recovered_unacknowledged",
+            "recovery_evidence": {
+                "source": "monitoring_alert_service",
+                "verified_status": curr.value,
+                "verified_at": recovery_timestamp,
+                "recovered_from_status": prev.value,
+                "recovered_alert_ids": recovered_alert_ids,
+            },
         }
         if details:
             metadata.update(details)
@@ -242,6 +254,38 @@ class MonitoringAlertService:
         await self._broadcast_alert(notification)
 
         return notification.id
+
+    def _dismiss_recovered_health_alerts(self, agent_name: str) -> List[str]:
+        """Dismiss prior pending health alerts once health is verified clean.
+
+        A new recovery notification remains pending, so the UI can show
+        recovered-but-unacknowledged state without keeping stale active-failure
+        rows in the default alert list.
+        """
+        try:
+            pending = db.list_notifications(
+                agent_name=agent_name,
+                status="pending",
+                category="health",
+                limit=100,
+            )
+        except Exception:
+            return []
+
+        recovered_ids: List[str] = []
+        for notification in pending:
+            if notification.notification_type != "alert":
+                continue
+            try:
+                dismissed = db.dismiss_notification(
+                    notification.id,
+                    dismissed_by="system:recovered",
+                )
+            except Exception:
+                continue
+            if dismissed:
+                recovered_ids.append(notification.id)
+        return recovered_ids
 
     async def _broadcast_alert(self, notification: 'Notification'):
         """Broadcast an alert via WebSocket."""
