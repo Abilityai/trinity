@@ -8,6 +8,8 @@ import json
 import logging
 import secrets
 import sqlite3
+import statistics
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 
@@ -20,6 +22,12 @@ from models import TaskExecutionStatus
 from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timestamp
 
 logger = logging.getLogger(__name__)
+
+# Cap on rows fed into percentile compute and tool-call aggregation
+# (#868). Counts and the daily timeline always use the unsampled rowset;
+# only the percentile / tool-call pool is bounded. Test-only override is
+# via `monkeypatch.setattr(db.schedules, "_PERCENTILE_ROWSET_CAP", N)`.
+_PERCENTILE_ROWSET_CAP = 5000
 
 # #378: Error-message marker written by cleanup_service._process_stale_slot_reclaims
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
@@ -1514,6 +1522,183 @@ class ScheduleOperations:
                 })
 
             return results
+
+    def get_schedule_analytics(
+        self,
+        schedule_id: str,
+        hours: int,
+        agent_name: str,
+    ) -> Optional[Dict]:
+        """Compute per-schedule analytics over a rolling time window.
+
+        Returns the analytics envelope, or `None` when the schedule
+        does not exist, is soft-deleted, or belongs to a different
+        agent than `agent_name`. The router maps `None` → 404, which
+        is the load-bearing tenant-boundary check — `AuthorizedAgent`
+        only validates the URL's agent name, not that the user-supplied
+        `schedule_id` belongs to it.
+
+        Counts and timeline buckets use the unsampled rowset;
+        percentiles and tool-call distribution are computed over the
+        newest `_PERCENTILE_ROWSET_CAP` success rows (`sampled=True`
+        when the cap was hit). Bucketing is UTC — documented in the
+        route's OpenAPI description.
+        """
+        schedule = self.get_schedule(schedule_id)
+        if not schedule or schedule.agent_name != agent_name:
+            return None
+
+        cutoff = iso_cutoff(hours)
+        cap = _PERCENTILE_ROWSET_CAP
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    substr(started_at, 1, 10) AS day,
+                    status,
+                    COUNT(*) AS n,
+                    SUM(COALESCE(cost, 0)) AS cost_sum
+                FROM schedule_executions
+                WHERE schedule_id = ? AND started_at > ?
+                GROUP BY day, status
+                """,
+                (schedule_id, cutoff),
+            )
+            agg_rows = cursor.fetchall()
+
+            # `cap + 1` so we can detect sampling without a separate COUNT.
+            cursor.execute(
+                """
+                SELECT duration_ms, tool_calls
+                FROM schedule_executions
+                WHERE schedule_id = ?
+                  AND started_at > ?
+                  AND status = 'success'
+                  AND duration_ms IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (schedule_id, cutoff, cap + 1),
+            )
+            detail_rows = cursor.fetchall()
+
+        counts: Dict[str, int] = defaultdict(int)
+        cost_by_status: Dict[str, float] = defaultdict(float)
+        for row in agg_rows:
+            counts[row["status"]] += int(row["n"] or 0)
+            cost_by_status[row["status"]] += float(row["cost_sum"] or 0.0)
+
+        total_executions = sum(counts.values())
+        success_count = counts.get(TaskExecutionStatus.SUCCESS, 0)
+        failed_count = counts.get(TaskExecutionStatus.FAILED, 0)
+        cancelled_count = counts.get(TaskExecutionStatus.CANCELLED, 0)
+        success_rate = (
+            round(success_count / total_executions, 4) if total_executions else 0.0
+        )
+        cost_total = round(sum(cost_by_status.values()), 4)
+
+        sampled = len(detail_rows) > cap
+        sample_size = cap if sampled else len(detail_rows)
+        capped_rows = detail_rows[:cap]
+        durations = [int(r["duration_ms"]) for r in capped_rows]
+
+        if len(durations) >= 2:
+            # `inclusive` matches "x% of observations were ≤ this value"
+            # for small N; the default `exclusive` shifts p99 noticeably.
+            cuts = statistics.quantiles(durations, n=100, method="inclusive")
+            p50, p95, p99 = int(cuts[49]), int(cuts[94]), int(cuts[98])
+        elif len(durations) == 1:
+            only = int(durations[0])
+            p50 = p95 = p99 = only
+        else:
+            p50 = p95 = p99 = None
+
+        # Top-5 weighted by total wall time (NOT raw count) — avoids
+        # `Read`/`Bash` dominating because they're frequent but cheap.
+        tool_duration: Dict[str, int] = defaultdict(int)
+        tool_call_total = 0
+        for row in capped_rows:
+            raw = row["tool_calls"]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "get_schedule_analytics: malformed tool_calls JSON "
+                    "skipped (schedule_id=%s): %s",
+                    schedule_id, exc,
+                )
+                continue
+            if not isinstance(parsed, list):
+                continue
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("tool")
+                if not name:
+                    continue
+                tool_call_total += 1
+                dur = entry.get("duration_ms")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    tool_duration[name] += int(dur)
+                # Entries without a usable duration count toward
+                # total_calls but stay out of the top-5 ranking.
+
+        tool_top5 = [
+            {"name": name, "total_duration_ms": dur_total}
+            for name, dur_total in sorted(
+                tool_duration.items(), key=lambda kv: kv[1], reverse=True
+            )[:5]
+        ]
+
+        timeline_by_day: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"success": 0, "failed": 0, "cost": 0.0}
+        )
+        for row in agg_rows:
+            day = row["day"]
+            if not day:
+                continue
+            n = int(row["n"] or 0)
+            cost_sum = float(row["cost_sum"] or 0.0)
+            timeline_by_day[day]["cost"] += cost_sum
+            if row["status"] == TaskExecutionStatus.SUCCESS:
+                timeline_by_day[day]["success"] += n
+            elif row["status"] == TaskExecutionStatus.FAILED:
+                timeline_by_day[day]["failed"] += n
+
+        # Gap-fill so the chart x-axis stays continuous for zero-days.
+        now_utc = datetime.now(timezone.utc).date()
+        start_utc = (datetime.now(timezone.utc) - timedelta(hours=hours)).date()
+        timeline: List[Dict] = []
+        day = start_utc
+        while day <= now_utc:
+            iso = day.isoformat()
+            bucket = timeline_by_day.get(iso, {"success": 0, "failed": 0, "cost": 0.0})
+            timeline.append({
+                "date": iso,
+                "success": int(bucket["success"]),
+                "failed": int(bucket["failed"]),
+                "cost": round(float(bucket["cost"]), 4),
+            })
+            day = day + timedelta(days=1)
+
+        return {
+            "window_hours": hours,
+            "total_executions": total_executions,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "cancelled_count": cancelled_count,
+            "success_rate": success_rate,
+            "duration_ms": {"p50": p50, "p95": p95, "p99": p99},
+            "cost": {"total": cost_total},
+            "tool_calls": {"top": tool_top5, "total_calls": tool_call_total},
+            "timeline": timeline,
+            "sampled": sampled,
+            "sample_size": sample_size,
+        }
 
     def get_all_agents_schedule_counts(self) -> Dict[str, Dict[str, int]]:
         """Get schedule counts (total and enabled) for all agents.

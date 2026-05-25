@@ -510,3 +510,75 @@ class SoftDeletedSchedule(BaseModel):
     enabled: bool
     deleted_at: str
     purge_eta: Optional[str]
+
+
+# =============================================================================
+# Schedule Analytics (#868)
+# =============================================================================
+#
+# Per-schedule distributions over `schedule_executions`. Per-agent rollup
+# and per-chat-session analytics deferred to #18 and a follow-up issue
+# respectively — see #868 issue body "Out of Scope" section for the
+# decision context.
+
+
+class DurationPercentiles(BaseModel):
+    """Duration percentiles in milliseconds. All null when the schedule
+    has fewer than 1 successful execution in the window."""
+    p50: Optional[int] = None
+    p95: Optional[int] = None
+    p99: Optional[int] = None
+
+
+class CostTotals(BaseModel):
+    """Cost totals in USD for the analytics window."""
+    total: float = 0.0
+
+
+class ToolCallEntry(BaseModel):
+    """One row of the top-N tool-call distribution."""
+    name: str
+    total_duration_ms: int
+
+
+class ToolCallSummary(BaseModel):
+    """Tool-call distribution weighted by total wall time per tool.
+
+    Top-N is intentionally weighted by `sum(duration_ms)` rather than
+    raw count — raw count is dominated by `Read` / `Bash` on every
+    agent and has low signal-to-noise. Locked by /autoplan strategy
+    finding #6.
+    """
+    top: List[ToolCallEntry] = []
+    total_calls: int = 0
+
+
+class TimelineEntry(BaseModel):
+    """One UTC-day bucket on the analytics timeline. Zero-filled for
+    days that had no executions (Python-side gap fill) so chart
+    libraries render a continuous x-axis."""
+    date: str
+    success: int
+    failed: int
+    cost: float
+
+
+class ScheduleAnalyticsResponse(BaseModel):
+    """Response envelope for GET /api/agents/{name}/schedules/{schedule_id}/analytics.
+
+    `sampled` reports whether the percentile / tool-call pool was
+    capped (currently 5000 newest success rows). Counts and timeline
+    are always unsampled. UTC day boundaries.
+    """
+    window_hours: int
+    total_executions: int
+    success_count: int
+    failed_count: int
+    cancelled_count: int
+    success_rate: float
+    duration_ms: DurationPercentiles
+    cost: CostTotals
+    tool_calls: ToolCallSummary
+    timeline: List[TimelineEntry]
+    sampled: bool = False
+    sample_size: int = 0

@@ -1570,6 +1570,12 @@ class DatabaseManager:
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
 
+    def get_schedule_analytics(self, schedule_id: str, hours: int,
+                                agent_name: str):
+        return self._schedule_ops.get_schedule_analytics(
+            schedule_id, hours, agent_name,
+        )
+
     def get_agent_token_stats(self, agent_name: str):
         return self._schedule_ops.get_agent_token_stats(agent_name)
 

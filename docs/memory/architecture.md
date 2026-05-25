@@ -596,7 +596,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/access-requests` | List pending access requests |
 | POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares) or reject |
 
-### Schedules (12 endpoints)
+### Schedules (13 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents/{name}/schedules` | List schedules |
@@ -608,9 +608,12 @@ picks up on its next poll. (#389 S1a)
 | POST | `/api/agents/{name}/schedules/{id}/disable` | Disable schedule |
 | POST | `/api/agents/{name}/schedules/{id}/trigger` | Manual trigger |
 | GET | `/api/agents/{name}/schedules/{id}/executions` | Execution history |
+| GET | `/api/agents/{name}/schedules/{id}/analytics` | Per-schedule analytics — counts, success rate, duration p50/p95/p99, cost total, tool-call top-5 by total duration, daily timeline. `?window_hours=` ∈ {24, 168, 720}, default 168 (#868) |
 | POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token (WEBHOOK-001) |
 | GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL (WEBHOOK-001) |
 | DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token (WEBHOOK-001) |
+
+**Analytics endpoint (#868):** Percentiles computed Python-side via `statistics.quantiles` over the newest 5,000 success rows (`sampled: true, sample_size: 5000` reported back when cap is hit); counts and the daily timeline use the full unsampled rowset. UTC day buckets via `substr(started_at, 1, 10)` then Python gap-fill so chart x-axis is continuous. Tenant boundary lives in the DB layer (`db.schedules.get_schedule_analytics(schedule_id, hours, agent_name=name)`) — `AuthorizedAgent` only validates the path-param agent name, not that `schedule_id` belongs to it. Soft-deleted schedules return 404; the audit/billing surface (cross-trigger per-agent rollup with soft-deleted schedules included) is the deferred #18 endpoint.
 
 ### Webhook Triggers (WEBHOOK-001)
 | Method | Path | Auth | Description |

@@ -17,10 +17,12 @@ import os
 import logging
 import httpx
 
-from models import User
+from models import User, ScheduleAnalyticsResponse
 from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
+
+_ANALYTICS_VALID_WINDOWS = frozenset({24, 168, 720})  # #868
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +281,57 @@ async def create_schedule(
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
     return ScheduleResponse(**schedule.model_dump())
+
+
+@router.get(
+    "/{name}/schedules/{schedule_id}/analytics",
+    response_model=ScheduleAnalyticsResponse,
+)
+async def get_schedule_analytics(
+    name: AuthorizedAgent,
+    schedule_id: str,
+    window_hours: int = 168,
+):
+    """Per-schedule execution analytics (#868).
+
+    Counts, success rate, duration percentiles (p50/p95/p99),
+    cost totals, tool-call distribution (top-5 by total wall time),
+    and a daily timeline. UTC day boundaries.
+
+    Args:
+        window_hours: One of 24, 168 (7d), or 720 (30d). Default 7d.
+
+    Authorisation:
+        - `AuthorizedAgent` validates the caller can access this agent.
+        - The DB layer additionally verifies `schedule_id` belongs to
+          `name` (the path param) — caller cannot read analytics for
+          another agent's schedule by guessing/stealing schedule_ids.
+        - Soft-deleted schedules return 404 (matches `db.get_schedule`).
+
+    Sampling:
+        Counts and timeline use the full unsampled rowset. Percentiles
+        and tool-call top-N are computed over the newest 5,000 success
+        rows in the window — `sampled=true` in the response when the
+        cap was hit. The UI surfaces this as a small badge.
+    """
+    if window_hours not in _ANALYTICS_VALID_WINDOWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "window_hours must be one of "
+                f"{sorted(_ANALYTICS_VALID_WINDOWS)}"
+            ),
+        )
+
+    analytics = db.get_schedule_analytics(schedule_id, window_hours, name)
+    if analytics is None:
+        # Collapse missing / soft-deleted / cross-tenant into one 404
+        # so existence of another agent's schedule can't be probed.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule not found",
+        )
+    return ScheduleAnalyticsResponse(**analytics)
 
 
 @router.get("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)

@@ -468,6 +468,10 @@
               </div>
             </div>
           </div>
+          <ScheduleAnalyticsCard
+            :agent-name="agentName"
+            :schedule-id="schedule.id"
+          />
         </div>
       </div>
     </div>
@@ -613,6 +617,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
+import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
 import { useAuthStore } from '../stores/auth'
 
 // Platform default model fetched from /api/settings/feature-flags (#831)
