@@ -250,7 +250,7 @@
                   class="max-w-full max-h-full object-contain rounded-lg"
                   @error="imageError = true"
                 />
-                <div v-else class="text-sm" :class="imageError ? 'text-status-error-400' : 'text-gray-500'">
+                <div v-else class="text-sm" :class="imageError ? 'text-status-danger-400' : 'text-gray-500'">
                   {{ imageError ? 'Image could not be loaded.' : 'Loading image…' }}
                 </div>
                 <p v-if="displayedPanel.caption" class="text-sm text-gray-400 text-center max-w-prose">
