@@ -12,6 +12,7 @@ Architecture:
 import asyncio
 import json
 import logging
+import posixpath
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,7 +34,13 @@ _TOOL_PROMPT_MAX = 2000
 # Max bytes stored in panel_state["content"] to bound memory per session
 _PANEL_CONTENT_MAX = 524_288  # 512 KB
 
-_PANEL_TOOL_NAMES = {"show_markdown", "update_panel", "append_to_panel", "clear_panel"}
+# Agent workspace root inside the container; show_image file paths must resolve under it.
+_WORKSPACE_ROOT = "/home/developer"
+
+_PANEL_TOOL_NAMES = {
+    "show_markdown", "update_panel", "append_to_panel", "clear_panel",
+    "show_diagram", "show_image",
+}
 
 _PANEL_TOOLS = genai_types.Tool(
     function_declarations=[
@@ -84,6 +91,41 @@ _PANEL_TOOLS = genai_types.Tool(
                 properties={},
             ),
         ),
+        genai_types.FunctionDeclaration(
+            name="show_diagram",
+            description=(
+                "Render a Mermaid diagram in the canvas panel — flowcharts, sequence "
+                "diagrams, mindmaps, timelines, state/class/ER diagrams. Pass the raw "
+                "Mermaid source (e.g. 'graph TD; A-->B'). Use this to visualize "
+                "structure, flow, or relationships you're explaining out loud."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "diagram": genai_types.Schema(type=genai_types.Type.STRING, description="Mermaid diagram source code"),
+                    "title": genai_types.Schema(type=genai_types.Type.STRING, description="Optional panel title"),
+                },
+                required=["diagram"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="show_image",
+            description=(
+                "Display an image in the canvas panel. `src` is either a web URL "
+                "(https://...) or a path to a file in your workspace "
+                "(e.g. 'content/chart.png' or '/home/developer/content/chart.png'). "
+                "Use to show a generated chart, screenshot, or diagram asset."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "src": genai_types.Schema(type=genai_types.Type.STRING, description="Web URL or workspace file path"),
+                    "title": genai_types.Schema(type=genai_types.Type.STRING, description="Optional panel title"),
+                    "caption": genai_types.Schema(type=genai_types.Type.STRING, description="Optional caption shown under the image"),
+                },
+                required=["src"],
+            ),
+        ),
     ]
 )
 
@@ -94,20 +136,62 @@ You have a visual canvas panel visible to the user on the right side of the scre
 
 Panel tools:
 - `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis.
+- `show_diagram(diagram, title?)` — Render a Mermaid diagram. Use for flowcharts, sequence diagrams, mindmaps, timelines, state/class/ER diagrams — anytime structure or flow is easier shown than spoken.
+- `show_image(src, title?, caption?)` — Display an image by web URL or workspace file path.
 - `update_panel(html, title?)` — Replace panel with HTML for richer layouts.
 - `append_to_panel(html)` — Add to existing panel without clearing.
 - `clear_panel()` — Clear when shifting to a new topic.
 
 Guidelines:
-- The panel is a persistent whiteboard — voice is transient, the panel is the artefact.
-- Use `show_markdown` by default. Reach for `update_panel` only when structure genuinely adds value.
+- The panel is a persistent whiteboard — voice is transient, the panel is the artefact. Each update is kept in history, so the user can scroll back through what you drew.
+- Use `show_markdown` by default. Reach for `show_diagram` when a picture of the structure helps, `update_panel` only when custom layout genuinely adds value.
 - Don't mirror every voice response in the panel — use it when structured content helps.
 - Clear when the topic changes significantly.
+
+Mermaid rule (for `show_diagram`):
+- Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
+- Keep diagrams focused; invalid syntax shows a contained error in the panel.
 
 Chart.js rule (for `update_panel` HTML):
 - Chart.js 4 is available as `window.Chart` in the workspace (bundled, no CDN needed). NEVER add a `<script src>` tag for it.
 - Use `new Chart(...)` directly. Always give the canvas a fixed height: `<canvas id="c" style="max-height:380px"></canvas>`.
 """
+
+def _classify_image_src(src: str) -> Optional[tuple[str, str]]:
+    """Classify a show_image src as a web URL or a workspace-confined file path.
+
+    Returns (value, kind) where kind is "url" or "path", or None if the src is
+    neither an allowed web URL nor a path that resolves inside the agent
+    workspace. The frontend renders "url" directly and fetches "path" through the
+    authenticated /files/preview endpoint, so this is the only confinement gate
+    on the panel side — and it is stricter than the agent-server's prefix check,
+    rejecting sibling escapes like /home/developer-evil and any '..' traversal.
+    """
+    if not src:
+        return None
+    low = src.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return (src, "url")
+    if low.startswith("data:") or "://" in low:
+        # data: URIs (unbounded inline bytes) and other schemes (file:, ftp:, …)
+        # are not allowed.
+        return None
+
+    # Treat as a workspace file path. Accept absolute (/home/developer/...) or
+    # relative (resolved against the workspace root). '~/' is workspace-relative.
+    path = src[2:] if src.startswith("~/") else src
+    # A ':' in the first path segment is a URI scheme (javascript:, mailto:, …),
+    # not a real path segment — reject before resolving.
+    if ":" in path.split("/", 1)[0]:
+        return None
+    if path.startswith("/"):
+        candidate = posixpath.normpath(path)
+    else:
+        candidate = posixpath.normpath(posixpath.join(_WORKSPACE_ROOT, path))
+    if candidate != _WORKSPACE_ROOT and not candidate.startswith(_WORKSPACE_ROOT + "/"):
+        return None
+    return (candidate, "path")
+
 
 # Single tool declaration for all voice sessions
 _RUN_TASK_TOOL = genai_types.Tool(
@@ -439,6 +523,33 @@ class GeminiVoiceService:
             session.panel_state = {
                 "type": "markdown",
                 "content": args.get("content", ""),
+                "title": args.get("title"),
+                "updated_at": now,
+            }
+        elif tool_name == "show_diagram":
+            session.panel_state = {
+                "type": "mermaid",
+                "content": args.get("diagram", ""),
+                "title": args.get("title"),
+                "updated_at": now,
+            }
+        elif tool_name == "show_image":
+            src = str(args.get("src", "")).strip()
+            if not src:
+                return "No image source provided."
+            kind = _classify_image_src(src)
+            if kind is None:
+                # Not a web URL and not a workspace-confined file path — reject.
+                return (
+                    "Image rejected: src must be an https:// URL or a path inside "
+                    "your workspace (/home/developer). Path traversal is not allowed."
+                )
+            value, image_kind = kind
+            session.panel_state = {
+                "type": "image",
+                "content": value,
+                "image_kind": image_kind,   # "url" | "path"
+                "caption": args.get("caption"),
                 "title": args.get("title"),
                 "updated_at": now,
             }

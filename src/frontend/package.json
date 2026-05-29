@@ -28,6 +28,7 @@
     "dompurify": "^3.3.3",
     "js-yaml": "^4.1.1",
     "marked": "^17.0.0",
+    "mermaid": "^11.15.0",
     "monaco-editor": "^0.52.0",
     "pinia": "^2.3.0",
     "uplot": "^1.6.32",

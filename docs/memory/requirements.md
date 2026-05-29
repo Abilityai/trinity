@@ -2061,7 +2061,18 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ### 29.8 Voice Workspace (VOICE-008)
 - **Status**: ✅ Implemented (#699)
 - **Description**: Full-page workspace at `/agents/:name/workspace` with split layout — orb + controls left, agent-controlled canvas panel right; gated behind `voice_available` feature flag
-- **Key Features**: 4 in-process panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+- **Key Features**: 6 in-process panel tools (`show_markdown`, `show_diagram`, `show_image`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+
+### 29.9 Voice Workspace Canvas Enrichment (VOICE-009)
+- **Status**: ✅ Implemented (#979)
+- **Description**: Enriches the VOICE-008 canvas with Mermaid diagrams, image display, client-side panel history, and orb/transition polish — endpoint contract unchanged
+- **Key Features**:
+  - `show_diagram(diagram, title?)` → `mermaid` panel type rendered strictly inside the existing opaque-origin `sandbox="allow-scripts"` iframe via a self-contained `mermaid.min.js` IIFE bundle (no runtime chunk fetches); agent diagram text injected as a JS string (`JSON.stringify` + `<`→`<`, no `</script>` breakout) with `securityLevel:'strict'`; invalid syntax renders a contained error + source, not a broken panel
+  - `show_image(src, title?, caption?)` → `image` panel type; web URLs render directly via Vue `:src`, workspace file paths fetched through the authenticated `/files/preview` endpoint as a blob (a bare `<img src>` would 401). Path confinement enforced in-process by `_classify_image_src` (rejects `..`, absolute escapes, the `/home/developer-evil` sibling, `data:`, and non-http schemes — stricter than the agent-server prefix check)
+  - Client-side panel history: ring buffer of the last 40 snapshots with prev/next + dropdown selector; "live" follows the latest, navigating back pins a snapshot until a new update arrives; frontend-only, no backend change; image blob objectURLs revoked on eviction + unmount
+  - Orb polish: asymmetric attack/release smoothing on energy (0.18/0.10), smoothed core size, idle "breathe" floor, larger core (58) and glow swing (32×)
+  - Graceful canvas-update cross-fade + header "updated" flash, honoring `prefers-reduced-motion`
+- **Security**: agent markup/diagrams render only inside the opaque-origin sandboxed iframe; images render via `:src` (no `v-html`); panel tools are backend+frontend only (not on the MCP surface — Invariant #13 N/A)
 
 ### Phase Roadmap
 1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt ✅

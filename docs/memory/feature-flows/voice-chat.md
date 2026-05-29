@@ -69,11 +69,37 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
    Trinity Backend (routers/voice.py)
          │
          ├─ Panel tools handled in-process (_execute_panel_tool)
-         │   show_markdown, update_panel, append_to_panel, clear_panel
+         │   show_markdown, show_diagram, show_image,
+         │   update_panel, append_to_panel, clear_panel
          │   → session.panel_state (in-memory, capped at 512 KB)
+         │   show_image src validated by _classify_image_src
+         │   (web URL | workspace-confined path; rejects traversal)
          │
          └─ run_task → Agent Container (Claude Code)
 ```
+
+### Canvas enrichment (#979 / VOICE-009)
+
+The workspace canvas renders five live panel types plus history:
+
+- **markdown** — `renderMarkdown` (marked + DOMPurify) in the parent DOM.
+- **mermaid** (`show_diagram`) — rendered strictly inside the opaque-origin
+  `sandbox="allow-scripts"` iframe via a self-contained `mermaid.min.js` IIFE
+  bundle (same `?url` mechanism as Chart.js, no runtime chunk fetches). Diagram
+  text is injected as a JS string (`JSON.stringify` + `<`→`<`, so a
+  `</script>` in the text can't break out) and rendered with
+  `securityLevel:'strict'`; invalid syntax shows a contained error + source.
+- **image** (`show_image`) — web URLs render directly via Vue `:src`;
+  workspace file paths are fetched through the authenticated `/files/preview`
+  endpoint as a blob (a bare `<img src>` would 401) and bound as an objectURL.
+- **html** (`update_panel`) — sandboxed iframe with Chart.js (unchanged).
+- **empty** — placeholder.
+
+Frontend-only additions (no backend change): a 40-snapshot history ring buffer
+(prev/next + dropdown; "live" follows the latest, navigating back pins until a
+new update arrives; image blobs revoked on eviction/unmount), orb smoothing
+(asymmetric attack/release energy lerp, idle breathe floor, larger core/glow),
+and a `prefers-reduced-motion`-aware cross-fade on canvas updates.
 
 ---
 

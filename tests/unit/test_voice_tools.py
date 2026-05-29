@@ -144,6 +144,7 @@ sys.modules.pop("services.gemini_voice", None)
 # Now we can import the service
 from services.gemini_voice import (  # noqa: E402
     GeminiVoiceService, VoiceSession, _TOOL_PROMPT_MAX, _PANEL_CONTENT_MAX,
+    _PANEL_TOOL_NAMES, _classify_image_src, _WORKSPACE_ROOT,
 )
 
 # gemini_voice has captured what it needed from the docker/template stubs.
@@ -468,6 +469,170 @@ class TestExecutePanelTool:
             mock_exec.assert_not_awaited()
 
         assert session.panel_state["type"] == "markdown"
+        gemini_session.send_tool_response.assert_awaited_once()
+
+    # ── #979: show_diagram (Mermaid) ─────────────────────────────────────────
+
+    def test_show_diagram_sets_mermaid_state(self, svc):
+        session = _make_session()
+        result = svc._execute_panel_tool(
+            session, "show_diagram", {"diagram": "graph TD; A-->B", "title": "Flow"}
+        )
+        assert result == "Panel updated."
+        assert session.panel_state["type"] == "mermaid"
+        assert session.panel_state["content"] == "graph TD; A-->B"
+        assert session.panel_state["title"] == "Flow"
+        assert session.panel_state["updated_at"] is not None
+
+    def test_show_diagram_missing_arg_defaults_empty(self, svc):
+        session = _make_session()
+        svc._execute_panel_tool(session, "show_diagram", {})
+        assert session.panel_state["type"] == "mermaid"
+        assert session.panel_state["content"] == ""
+
+    # ── #979: show_image (web URL + workspace path) ──────────────────────────
+
+    def test_show_image_web_url(self, svc):
+        session = _make_session()
+        result = svc._execute_panel_tool(
+            session, "show_image",
+            {"src": "https://example.com/chart.png", "caption": "A chart"},
+        )
+        assert result == "Panel updated."
+        assert session.panel_state["type"] == "image"
+        assert session.panel_state["image_kind"] == "url"
+        assert session.panel_state["content"] == "https://example.com/chart.png"
+        assert session.panel_state["caption"] == "A chart"
+
+    def test_show_image_relative_workspace_path_normalized(self, svc):
+        session = _make_session()
+        svc._execute_panel_tool(session, "show_image", {"src": "content/chart.png"})
+        assert session.panel_state["type"] == "image"
+        assert session.panel_state["image_kind"] == "path"
+        # Relative path resolved under the workspace root.
+        assert session.panel_state["content"] == f"{_WORKSPACE_ROOT}/content/chart.png"
+
+    def test_show_image_absolute_workspace_path(self, svc):
+        session = _make_session()
+        svc._execute_panel_tool(
+            session, "show_image", {"src": "/home/developer/content/a.png"}
+        )
+        assert session.panel_state["image_kind"] == "path"
+        assert session.panel_state["content"] == "/home/developer/content/a.png"
+
+    def test_show_image_tilde_is_workspace_relative(self, svc):
+        session = _make_session()
+        svc._execute_panel_tool(session, "show_image", {"src": "~/content/a.png"})
+        assert session.panel_state["image_kind"] == "path"
+        assert session.panel_state["content"] == f"{_WORKSPACE_ROOT}/content/a.png"
+
+    def test_show_image_empty_src_rejected(self, svc):
+        session = _make_session()
+        before = dict(session.panel_state)
+        result = svc._execute_panel_tool(session, "show_image", {"src": "   "})
+        assert "No image source" in result
+        # Panel unchanged on rejection.
+        assert session.panel_state == before
+
+    @pytest.mark.parametrize("bad_src", [
+        "../../etc/passwd",                       # relative traversal escapes root
+        "/home/developer/../etc/passwd",          # absolute traversal escapes root
+        "/etc/passwd",                            # outside the workspace entirely
+        "/home/developer-evil/secret",            # sibling-prefix escape (the startswith bug)
+        "data:image/png;base64,AAAA",             # inline data URI not allowed
+        "file:///etc/passwd",                     # non-http scheme not allowed
+        "ftp://host/x.png",                        # non-http scheme not allowed
+    ])
+    def test_show_image_rejects_unsafe_src(self, svc, bad_src):
+        session = _make_session()
+        before = dict(session.panel_state)
+        result = svc._execute_panel_tool(session, "show_image", {"src": bad_src})
+        assert "rejected" in result.lower() or "no image source" in result.lower()
+        # Panel state must NOT be updated for a rejected source.
+        assert session.panel_state == before
+
+
+# ── #979: _classify_image_src path-confinement unit tests ────────────────────
+
+class TestClassifyImageSrc:
+    """Direct tests of the show_image src classifier / confinement gate."""
+
+    @pytest.mark.parametrize("url", [
+        "http://example.com/a.png",
+        "https://example.com/a.png",
+        "HTTPS://EXAMPLE.COM/A.PNG",  # scheme match is case-insensitive
+    ])
+    def test_web_urls_classified_as_url(self, url):
+        out = _classify_image_src(url)
+        assert out is not None and out[1] == "url"
+        assert out[0] == url  # value preserved verbatim
+
+    def test_relative_path_resolved_under_root(self):
+        out = _classify_image_src("content/x.png")
+        assert out == (f"{_WORKSPACE_ROOT}/content/x.png", "path")
+
+    def test_root_itself_allowed(self):
+        out = _classify_image_src("/home/developer")
+        assert out == (_WORKSPACE_ROOT, "path")
+
+    @pytest.mark.parametrize("bad", [
+        "",
+        "../escape.png",
+        "/home/developer/../../etc/passwd",
+        "/etc/passwd",
+        "/home/developer-evil/x.png",  # the sibling-prefix bug this gate fixes
+        "data:text/html,<script>alert(1)</script>",
+        "file:///etc/passwd",
+        "javascript:alert(1)",         # has no scheme://, treated as path, escapes → rejected
+    ])
+    def test_unsafe_inputs_rejected(self, bad):
+        assert _classify_image_src(bad) is None
+
+
+# ── #979: new panel tools are registered + declared ──────────────────────────
+
+class TestNewPanelToolRegistration:
+
+    def test_new_tools_in_panel_tool_names(self):
+        assert "show_diagram" in _PANEL_TOOL_NAMES
+        assert "show_image" in _PANEL_TOOL_NAMES
+
+    def test_new_tools_declared(self):
+        from services.gemini_voice import _PANEL_TOOLS
+        names = {fd.name for fd in _PANEL_TOOLS.function_declarations}
+        assert "show_diagram" in names
+        assert "show_image" in names
+
+    def test_show_diagram_requires_diagram_arg(self):
+        from services.gemini_voice import _PANEL_TOOLS
+        fd = next(f for f in _PANEL_TOOLS.function_declarations if f.name == "show_diagram")
+        assert "diagram" in (fd.parameters.required or [])
+
+    def test_show_image_requires_src_arg(self):
+        from services.gemini_voice import _PANEL_TOOLS
+        fd = next(f for f in _PANEL_TOOLS.function_declarations if f.name == "show_image")
+        assert "src" in (fd.parameters.required or [])
+
+    def test_show_diagram_routed_not_forwarded_to_agent(self, svc):
+        """show_diagram executes in-process, never reaching the agent container."""
+        session = _make_session()
+        session._active = True
+        gemini_session = MagicMock()
+        gemini_session.send_tool_response = AsyncMock()
+        session._gemini_session = gemini_session
+        session._on_tool_call = None
+        session._on_tool_result = None
+
+        fc = MagicMock()
+        fc.id = "fc_diag"
+        fc.name = "show_diagram"
+        fc.args = {"diagram": "graph TD; A-->B"}
+
+        with patch.object(svc, "_execute_tool", AsyncMock()) as mock_exec:
+            _run(svc._execute_and_respond(session, "fc_diag", fc))
+            mock_exec.assert_not_awaited()
+
+        assert session.panel_state["type"] == "mermaid"
         gemini_session.send_tool_response.assert_awaited_once()
 
 
