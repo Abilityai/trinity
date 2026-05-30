@@ -188,8 +188,17 @@ class McpKeyOperations:
             conn.commit()
             return deleted
 
-    def validate_mcp_api_key(self, api_key: str) -> Optional[Dict]:
+    def validate_mcp_api_key(
+        self, api_key: str, *, track_usage: bool = True
+    ) -> Optional[Dict]:
         """Validate an MCP API key and return user/agent info if valid.
+
+        Args:
+            api_key: The raw MCP API key to validate.
+            track_usage: When True (default) the call bumps ``last_used_at`` /
+                ``usage_count`` as before. High-frequency, low-value callers
+                (the agent heartbeat — #307) pass ``False`` to validate without
+                amplifying the usage counter or writing to SQLite on every beat.
 
         Returns:
             Dict with key info including:
@@ -217,14 +226,17 @@ class McpKeyOperations:
             if not row["is_active"]:
                 return None
 
-            # Update usage statistics
-            now = utc_now_iso()
-            cursor.execute("""
-                UPDATE mcp_api_keys
-                SET last_used_at = ?, usage_count = usage_count + 1
-                WHERE id = ?
-            """, (now, row["id"]))
-            conn.commit()
+            # Update usage statistics. Skipped for high-frequency, low-value
+            # callers (heartbeat — #307) so a 5s beat doesn't amplify the
+            # counter or write to SQLite ~12x/min/agent.
+            if track_usage:
+                now = utc_now_iso()
+                cursor.execute("""
+                    UPDATE mcp_api_keys
+                    SET last_used_at = ?, usage_count = usage_count + 1
+                    WHERE id = ?
+                """, (now, row["id"]))
+                conn.commit()
 
             # Include agent collaboration fields
             return {

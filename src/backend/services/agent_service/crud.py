@@ -527,6 +527,11 @@ async def create_agent_internal(
     if agent_mcp_key:
         env_vars['TRINITY_MCP_URL'] = trinity_mcp_url
         env_vars['TRINITY_MCP_API_KEY'] = agent_mcp_key.api_key
+        # RELIABILITY-004 / #307: backend base URL for the liveness heartbeat
+        # loop. The agent authenticates the beat with the MCP key injected
+        # above (Option B — no master internal secret in agents); the agent
+        # heartbeat is gated on both this URL and the MCP key being present.
+        env_vars['TRINITY_BACKEND_URL'] = os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000')
 
     if github_repo_for_agent and github_pat_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent

@@ -475,6 +475,17 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to cancel backlog for agent {agent_name}: {e}")
 
+    # RELIABILITY-004 / #307: clear the agent's heartbeat Redis keys now. The
+    # `seen` marker has no TTL, so without this it would leak past delete; the
+    # hb/misses keys self-expire but are cleared too for cleanliness. The
+    # watch loop bounds itself to live agents, so a stopped container is never
+    # read regardless — this just stops the slow key accumulation. Best-effort.
+    try:
+        from services import heartbeat_service
+        heartbeat_service.clear_heartbeat(agent_name)
+    except Exception as e:
+        logger.warning(f"Failed to clear heartbeat keys for agent {agent_name}: {e}")
+
     # Mark the row as soft-deleted. Children stay until the retention
     # sweep; the unique constraint on agent_name naturally blocks reuse
     # during the retention window.
@@ -693,6 +704,48 @@ async def reset_circuit_breaker_endpoint(
         "new_state": "closed",
         "reset_at": utc_now_iso(),
     }
+
+
+# ============================================================================
+# Heartbeat Endpoint (RELIABILITY-004 / #307)
+# ============================================================================
+
+class HeartbeatPayload(BaseModel):
+    """Lightweight liveness payload POSTed by the agent every ~5s."""
+    memory_mb: Optional[float] = None
+    active_executions: Optional[int] = None
+    uptime_s: Optional[float] = None
+
+
+@router.post("/{agent_name}/heartbeat")
+async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: Request):
+    """Receive a liveness heartbeat from an agent (RELIABILITY-004 / #307).
+
+    Authenticated with the agent's own ``TRINITY_MCP_API_KEY`` (Option B,
+    least-privilege) — *not* the user JWT and not the master internal secret.
+    An agent may only heartbeat itself: the key must be agent-scoped and its
+    bound ``agent_name`` must equal the path. User/system/null keys → 403.
+
+    Validation runs with ``track_usage=False`` so a 5s beat doesn't amplify the
+    key's ``usage_count`` or write to SQLite on every beat. The write is
+    best-effort: a Redis blip returns ``stored=false`` rather than 5xx, since
+    the heartbeat is an additive signal and the 30s monitor stays authoritative.
+    """
+    from services import heartbeat_service
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Heartbeat requires the agent's own MCP key")
+    token = auth_header[7:]  # strip "Bearer "
+
+    res = db.validate_mcp_api_key(token, track_usage=False)
+    if not heartbeat_service.authorize_heartbeat(res, agent_name):
+        raise HTTPException(status_code=403, detail="Heartbeat requires the agent's own MCP key")
+
+    stored = heartbeat_service.record_heartbeat(
+        agent_name, payload.model_dump(exclude_none=True)
+    )
+    return {"ok": True, "stored": stored}
 
 
 # ============================================================================

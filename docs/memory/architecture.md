@@ -185,6 +185,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `activity_service.py` - Activity tracking and timeline
 - `monitoring_service.py` - Fleet-wide health monitoring (MON-001)
 - `monitoring_alerts.py` - Alert threshold configuration
+- `heartbeat_service.py` - Agent push-heartbeat liveness layer (RELIABILITY-004, #307). Owns all Redis heartbeat keys; `record_heartbeat` (SETEX 15s + persistent `seen` marker), `read_heartbeat`, `heartbeat_status`/`heartbeat_status_bulk` (one pipelined round-trip, D4), `authorize_heartbeat` (Option B — only the agent's own agent-scoped MCP key), and `run_heartbeat_watch_loop`/`process_watch_tick` (5s loop, 3-miss guard, fires a cooldown-debounced operator alert via `monitoring_alerts` on the alive→stale transition; writes no health row). Additive to the 30s `monitoring_service.py`, which stays authoritative.
 - `operator_queue_service.py` - Operating Room sync with agent containers (OPS-001)
 
 *Auth & Credentials:*
@@ -403,6 +404,7 @@ Services that run continuously in the backend process:
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
+| **Heartbeat Watch Loop** | `heartbeat_service.py` | 5s loop (staggered +10s) that fires a soft, cooldown-debounced operator alert (via the existing `monitoring_alerts` notification path) after 3 consecutive missed agent push-heartbeats — and a recovery notification when beats resume. Reads `seen`-marked agents via a batched Redis pipeline; per-tick miss counters live in Redis. Alerts fire **only on the alive→stale transition** (and recovery only after a prior downgrade), so the operator gets one alert per loss episode. It writes **no** health-check row — the 30s monitoring loop stays authoritative for aggregate status. Soft severity + 3-miss guard keep the silent-fail heartbeat's false positives recoverable. Old-image agents (no `seen` marker) resolve to `unsupported` and are ignored. (RELIABILITY-004, #307) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
 | **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. On each successful sweep, writes a unix-timestamp heartbeat to Redis key `canary:drain_tick_at` (read by canary B-02 to distinguish stuck drains from "drain just hasn't run yet"). (BACKLOG-001 / CAPACITY-CONSOLIDATE #428; B-02 heartbeat #882) |
 | **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
@@ -415,6 +417,16 @@ by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
 agents) that stages/commits/pushes in-container changes and writes the
 outcome to `.trinity/sync-state.json` — which the Sync Health Service
 picks up on its next poll. (#389 S1a)
+
+The agent server additionally runs a 5s **liveness heartbeat loop**
+(`agent_server/heartbeat.py`, gated on both `TRINITY_BACKEND_URL` and
+`TRINITY_MCP_API_KEY` being present) that POSTs `{memory_mb,
+active_executions, uptime_s}` to `POST /api/agents/{name}/heartbeat`,
+authenticated with the agent's own `TRINITY_MCP_API_KEY` (Option B,
+least-privilege — no master secret injected). `memory_mb` is read from
+`/proc/self/status` `VmRSS` (no psutil dep). The loop sleeps-first and
+swallows **all** exceptions — a failed beat is silent by design; the
+backend's watch loop is what acts on the absence. (RELIABILITY-004, #307)
 
 ---
 
@@ -522,6 +534,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/shared-files` | List active (non-revoked, non-expired) shared files with download counts |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
 | POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; resolves user email from execution_id server-side (MEM-001, #888) |
+| POST | `/api/agents/{name}/heartbeat` | Agent liveness heartbeat (RELIABILITY-004, #307). Auth = the agent's own agent-scoped `TRINITY_MCP_API_KEY` (Option B); 403 unless the key is agent-scoped and its `agent_name` matches the path (user/system/null keys rejected). Validated with `track_usage=False` so a 5s beat doesn't amplify `usage_count`. Best-effort `record_heartbeat`; returns `{ok, stored}`. The five `heartbeat_*` fields surface on `GET /api/monitoring/status` via a single batched Redis read. |
 
 **Note**: Route ordering is critical. `/context-stats` and `/autonomy-status` must be defined BEFORE `/{name}` catch-all route to avoid 404 errors.
 
@@ -1623,6 +1636,14 @@ oauth_state:{state} → {
     "user_id": "..."
 }
 ```
+
+**Agent Heartbeat (RELIABILITY-004, #307):**
+```
+agent:heartbeat:{name}        → STRING, 15s TTL (SETEX). JSON {ts, memory_mb, active_executions, uptime_s}
+agent:heartbeat:seen:{name}   → STRING "1", no TTL. Backward-compat hinge: absent ⇒ unsupported (never marked dead), present+TTL-key ⇒ alive, present+TTL-gone ⇒ stale
+agent:heartbeat:misses:{name} → STRING(int), ~60s TTL. Consecutive-miss counter (watch loop INCR/EXPIRE/DEL); never persisted to SQLite
+```
+All ops (`SETEX`/`SET`/`GET`/`GETs via pipeline`/`INCR`/`EXPIRE`/`DEL`) are within the backend Redis ACL (`-@dangerous`) and follow the `agent:*` naming convention.
 
 ---
 

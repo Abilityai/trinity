@@ -872,6 +872,15 @@ class AgentHealthSummary(BaseModel):
     runtime_available: Optional[bool] = None
     last_check_at: Optional[str] = None
     issues: List[str] = []
+    # RELIABILITY-004 / #307: heartbeat liveness layer (additive — all default
+    # None so old payloads and old-image agents stay non-breaking).
+    # heartbeat_state ∈ {"alive","stale","unsupported"}; heartbeat_alive is
+    # None for `unsupported` (an agent that never beat — never marked dead).
+    heartbeat_alive: Optional[bool] = None
+    last_heartbeat_age_s: Optional[float] = None
+    heartbeat_active_executions: Optional[int] = None
+    heartbeat_memory_mb: Optional[float] = None
+    heartbeat_state: Optional[str] = None
 
 
 class FleetHealthSummary(BaseModel):

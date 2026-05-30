@@ -466,6 +466,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Error wiring CapacityManager: {e}")
 
+    # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
+    # staggered +10s. Actively downgrades an agent to a soft `degraded` health
+    # state after 3 consecutive missed heartbeats (additive to the 30s
+    # monitoring loop, which stays authoritative). Self-survives Redis/Docker
+    # blips; old-image agents that never heartbeat resolve to `unsupported`
+    # and are ignored.
+    async def _start_heartbeat_watch_delayed():
+        await asyncio.sleep(10)
+        try:
+            from services.heartbeat_service import schedule_heartbeat_watch
+            schedule_heartbeat_watch()
+            print("Heartbeat watch loop started (staggered +10s, 5s cadence)")
+        except Exception as e:
+            print(f"Error starting heartbeat watch loop: {e}")
+    asyncio.create_task(_start_heartbeat_watch_delayed())
+
     # Recover orphaned regular task executions (Issue #128).
     # #748: flip the warming-up gate open in a finally block so the
     # /internal/execute-task route doesn't 503 forever if recovery raises.

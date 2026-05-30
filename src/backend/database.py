@@ -669,8 +669,8 @@ class DatabaseManager:
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 
-    def validate_mcp_api_key(self, api_key: str):
-        return self._mcp_key_ops.validate_mcp_api_key(api_key)
+    def validate_mcp_api_key(self, api_key: str, *, track_usage: bool = True):
+        return self._mcp_key_ops.validate_mcp_api_key(api_key, track_usage=track_usage)
 
     def get_mcp_api_key(self, key_id: str, username: str):
         return self._mcp_key_ops.get_mcp_api_key(key_id, username)
