@@ -90,14 +90,16 @@ def _build_payload() -> Dict:
 # ---------------------------------------------------------------------------
 # POST
 # ---------------------------------------------------------------------------
-async def _post_heartbeat_once(backend_url: str, mcp_key: str, agent_name: str) -> None:
-    """Build + POST one heartbeat. Raises on transport error (caller swallows)."""
+async def _post_heartbeat_once(
+    client: httpx.AsyncClient, backend_url: str, mcp_key: str, agent_name: str
+) -> None:
+    """Build + POST one heartbeat on the shared client. Raises on transport
+    error (caller swallows)."""
     payload = _build_payload()
     url = f"{backend_url}/api/agents/{agent_name}/heartbeat"
-    async with httpx.AsyncClient(timeout=_POST_TIMEOUT) as client:
-        resp = await client.post(
-            url, json=payload, headers={"Authorization": f"Bearer {mcp_key}"}
-        )
+    resp = await client.post(
+        url, json=payload, headers={"Authorization": f"Bearer {mcp_key}"}
+    )
     # A non-2xx (e.g. 403 from a mis-provisioned key) is not a transport error,
     # so the outer loop wouldn't otherwise notice it. Surface it at debug so a
     # stuck-forever auth/provisioning bug is diagnosable — without changing the
@@ -110,21 +112,34 @@ async def _post_heartbeat_once(backend_url: str, mcp_key: str, agent_name: str) 
 # Loop + wiring
 # ---------------------------------------------------------------------------
 async def run_heartbeat_loop(interval: int = _DEFAULT_INTERVAL) -> None:
-    """Background loop. Swallows every exception to keep beating."""
+    """Background loop. Swallows every exception to keep beating.
+
+    Reuses a single ``AsyncClient`` across beats so a 5s cadence doesn't pay
+    TCP setup/teardown every tick — one warm keep-alive connection to the
+    backend instead of a fresh handshake 12x/min.
+    """
     backend_url = os.getenv("TRINITY_BACKEND_URL")
     mcp_key = os.getenv("TRINITY_MCP_API_KEY")
     agent_name = agent_state.agent_name
+    # schedule_heartbeat() already gates on both being present; narrow here too
+    # so a direct call can't NoneType the POST and the values type as `str`.
+    if not backend_url or not mcp_key:
+        logger.info(
+            "heartbeat loop: TRINITY_BACKEND_URL / TRINITY_MCP_API_KEY missing — not starting"
+        )
+        return
     logger.info("heartbeat loop started (interval=%ss, agent=%s)", interval, agent_name)
 
     # Sleep first so a just-started container isn't penalized by a beat that
     # races container init.
     await asyncio.sleep(interval)
-    while True:
-        try:
-            await _post_heartbeat_once(backend_url, mcp_key, agent_name)
-        except Exception:  # noqa: BLE001 — silent by design; loop must not die
-            logger.debug("heartbeat: POST failed", exc_info=True)
-        await asyncio.sleep(interval)
+    async with httpx.AsyncClient(timeout=_POST_TIMEOUT) as client:
+        while True:
+            try:
+                await _post_heartbeat_once(client, backend_url, mcp_key, agent_name)
+            except Exception:  # noqa: BLE001 — silent by design; loop must not die
+                logger.debug("heartbeat: POST failed", exc_info=True)
+            await asyncio.sleep(interval)
 
 
 def schedule_heartbeat(app) -> None:

@@ -160,19 +160,24 @@ class _FakeAsyncClient:
 
 
 def test_post_heartbeat_logs_non_2xx(monkeypatch, caplog):
-    """A 403 (e.g. mis-provisioned key) is debug-logged and does NOT raise."""
+    """A 403 (e.g. mis-provisioned key) is debug-logged and does NOT raise.
+
+    The loop now owns the client and passes it in, so the test supplies its
+    own fake client instance rather than monkeypatching httpx.AsyncClient.
+    """
     import logging
 
     class _Client403(_FakeAsyncClient):
         _status_code = 403
 
     monkeypatch.setattr(heartbeat, "_build_payload", lambda: {"memory_mb": 1})
-    monkeypatch.setattr(heartbeat.httpx, "AsyncClient", _Client403)
 
     with caplog.at_level(logging.DEBUG, logger=heartbeat.logger.name):
         # Must not raise on a non-2xx status.
         asyncio.run(
-            heartbeat._post_heartbeat_once("http://backend:8000", "key", "agent-a")
+            heartbeat._post_heartbeat_once(
+                _Client403(), "http://backend:8000", "key", "agent-a"
+            )
         )
 
     assert any("backend returned 403" in r.getMessage() for r in caplog.records)
@@ -182,11 +187,12 @@ def test_post_heartbeat_no_log_on_2xx(monkeypatch, caplog):
     import logging
 
     monkeypatch.setattr(heartbeat, "_build_payload", lambda: {"memory_mb": 1})
-    monkeypatch.setattr(heartbeat.httpx, "AsyncClient", _FakeAsyncClient)  # 200
 
     with caplog.at_level(logging.DEBUG, logger=heartbeat.logger.name):
         asyncio.run(
-            heartbeat._post_heartbeat_once("http://backend:8000", "key", "agent-a")
+            heartbeat._post_heartbeat_once(
+                _FakeAsyncClient(), "http://backend:8000", "key", "agent-a"
+            )
         )
 
     assert not any("backend returned" in r.getMessage() for r in caplog.records)

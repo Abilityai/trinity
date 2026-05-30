@@ -73,6 +73,35 @@ class TestHeartbeatAuthGate:
         )
         assert_status(resp, 403)
 
+    def test_non_bearer_header_returns_403(
+        self, api_client: TrinityApiClient, created_agent: dict
+    ):
+        """A non-Bearer Authorization scheme → 403 (exercises the endpoint's
+        `startswith("Bearer ")` guard, not just a missing header)."""
+        name = created_agent["name"]
+        resp = api_client.post(
+            f"/api/agents/{name}/heartbeat",
+            json={"memory_mb": 1.0},
+            auth=False,
+            headers={"Authorization": "Basic dXNlcjpwYXNz"},
+        )
+        assert_status(resp, 403)
+
+    def test_invalid_bearer_token_returns_403(
+        self, api_client: TrinityApiClient, created_agent: dict
+    ):
+        """A well-formed but unknown Bearer token → 403 (validate_mcp_api_key
+        returns None → authorize_heartbeat rejects). Verifies the None-result
+        path is wired at the HTTP layer, not just in the predicate unit test."""
+        name = created_agent["name"]
+        resp = api_client.post(
+            f"/api/agents/{name}/heartbeat",
+            json={"memory_mb": 1.0},
+            auth=False,
+            headers={"Authorization": "Bearer trinity_mcp_thisisnotarealkey0000000000"},
+        )
+        assert_status(resp, 403)
+
 
 class TestHeartbeatSurfacing:
     """Fleet-status exposes the new fields; never-beaten agents are unsupported."""

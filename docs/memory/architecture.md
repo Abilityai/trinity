@@ -1643,6 +1643,8 @@ agent:heartbeat:{name}        → STRING, 15s TTL (SETEX). JSON {ts, memory_mb, 
 agent:heartbeat:seen:{name}   → STRING "1", no TTL. Backward-compat hinge: absent ⇒ unsupported (never marked dead), present+TTL-key ⇒ alive, present+TTL-gone ⇒ stale
 agent:heartbeat:misses:{name} → STRING(int), ~60s TTL. Consecutive-miss counter (watch loop INCR/EXPIRE/DEL); never persisted to SQLite
 ```
+All three keys are deleted by `heartbeat_service.clear_heartbeat(name)`, called best-effort from the agent **delete** handler and from **rename** (old name) — the `seen` marker has no TTL, so without this it would leak one permanent key per agent ever created and orphan the old name on rename. The `hb`/`misses` keys self-expire but are cleared too.
+
 All ops (`SETEX`/`SET`/`GET`/`GETs via pipeline`/`INCR`/`EXPIRE`/`DEL`) are within the backend Redis ACL (`-@dangerous`) and follow the `agent:*` naming convention.
 
 ---

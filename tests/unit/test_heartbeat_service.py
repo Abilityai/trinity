@@ -99,11 +99,16 @@ class FakeRedis:
             return True
         return False
 
-    def delete(self, key):
-        existed = key in self.store
-        self.store.pop(key, None)
-        self.ttls.pop(key, None)
-        return 1 if existed else 0
+    def delete(self, *keys):
+        # Real redis-py delete(*names) accepts multiple keys and returns the
+        # count removed. clear_heartbeat() deletes all three keys in one call.
+        deleted = 0
+        for key in keys:
+            if key in self.store:
+                deleted += 1
+            self.store.pop(key, None)
+            self.ttls.pop(key, None)
+        return deleted
 
     def pipeline(self):
         return _FakePipeline(self.store)
@@ -152,6 +157,29 @@ def test_record_heartbeat_sets_ttl_and_seen(fake_redis):
 
 def test_record_heartbeat_redis_none_returns_false(no_redis):
     assert hb.record_heartbeat("agent-a", {"memory_mb": 1}) is False
+
+
+# ---------------------------------------------------------------------------
+# clear_heartbeat — delete/rename cleanup of every heartbeat key
+# ---------------------------------------------------------------------------
+def test_clear_heartbeat_removes_all_keys(fake_redis):
+    """The no-TTL `seen` marker would otherwise leak past delete/rename; clear
+    removes hb + seen + misses in one call so a removed agent leaves nothing."""
+    hb.record_heartbeat("agent-a", {"memory_mb": 1.0})
+    fake_redis.store["agent:heartbeat:misses:agent-a"] = 2  # simulate active counter
+    assert "agent:heartbeat:agent-a" in fake_redis.store
+    assert "agent:heartbeat:seen:agent-a" in fake_redis.store
+
+    hb.clear_heartbeat("agent-a")
+
+    assert "agent:heartbeat:agent-a" not in fake_redis.store
+    assert "agent:heartbeat:seen:agent-a" not in fake_redis.store
+    assert "agent:heartbeat:misses:agent-a" not in fake_redis.store
+
+
+def test_clear_heartbeat_redis_none_is_noop(no_redis):
+    # Best-effort: must not raise when Redis is unavailable.
+    hb.clear_heartbeat("agent-a")
 
 
 # ---------------------------------------------------------------------------
