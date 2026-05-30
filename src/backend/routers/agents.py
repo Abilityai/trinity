@@ -22,12 +22,11 @@ from models import AgentConfig, AgentStatus, User, DeployLocalRequest
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
 from services.docker_service import (
-    docker_client,
     get_agent_container,
     get_agent_by_name,
 )
 from services.docker_utils import (
-    container_stop, container_remove, container_reload,
+    container_stop, container_remove,
     volume_get, volume_remove
 )
 from services import git_service
@@ -41,14 +40,8 @@ from services.platform_audit_service import (
 from services.agent_service import (
     # Helpers - re-exported for external modules
     get_accessible_agents,
-    get_agents_by_prefix,
-    get_next_version_name,
-    get_latest_version,
-    check_shared_folder_mounts_match,
-    check_api_key_env_matches,
     # Lifecycle
     start_agent_internal,
-    recreate_container_with_updated_config,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
@@ -289,7 +282,6 @@ async def get_all_agent_slots(
     """
     from db_models import BulkSlotState
     from services.capacity_manager import get_capacity_manager
-    from datetime import datetime
 
     # Get all agents with their capacities
     agent_capacities = db.get_all_agents_parallel_capacity()
