@@ -229,15 +229,18 @@
                   prose-td:text-gray-300 prose-td:border-gray-700"
               />
 
-              <!-- Mermaid diagram — sandboxed iframe (same opaque-origin model as
-                   HTML); agent diagram text never reaches the parent DOM. -->
-              <iframe
-                v-else-if="displayedPanel.type === 'mermaid'"
-                :srcdoc="mermaidSrcdoc"
-                sandbox="allow-scripts"
-                class="w-full h-full bg-transparent border-0 block"
-                title="Agent diagram"
-              />
+              <!-- Mermaid diagram — rendered in-parent via the bundled mermaid lib
+                   (securityLevel:'strict') then DOMPurify-sanitized before v-html
+                   (H-005). No iframe: the production CSP (script-src 'self') blocks
+                   inline scripts in a srcdoc iframe and CORP blocks the bundle from
+                   the iframe's opaque origin (#979 prod-CSP regression). -->
+              <div v-else-if="displayedPanel.type === 'mermaid'" class="flex items-center justify-center h-full">
+                <pre
+                  v-if="mermaidError"
+                  class="text-xs text-status-danger-400 whitespace-pre-wrap font-mono max-w-full overflow-auto"
+                >{{ mermaidError }}</pre>
+                <div v-else v-html="mermaidSvg" class="mermaid-host max-w-full max-h-full" />
+              </div>
 
               <!-- Image — rendered in the parent DOM via a Vue :src binding (safe;
                    no markup injection). Workspace-path images come from an
@@ -258,16 +261,14 @@
                 </p>
               </div>
 
-              <!-- HTML content — sandboxed iframe so agent-supplied scripts run in
-                   an opaque origin and cannot reach parent localStorage / cookies /
-                   JWT. Deliberately omits allow-same-origin / allow-forms /
-                   allow-popups / allow-top-navigation / allow-modals. -->
-              <iframe
+              <!-- HTML content — DOMPurify-sanitized and rendered in-parent (H-005),
+                   same trust model as markdown. Scripts are stripped, so agent JS
+                   (e.g. chart.js) does NOT execute — static layout only. Replaces
+                   the prior srcdoc iframe, which the production CSP blocked (#979). -->
+              <div
                 v-else-if="displayedPanel.type === 'html'"
-                :srcdoc="htmlSrcdoc"
-                sandbox="allow-scripts"
-                class="w-full h-full bg-transparent border-0 block"
-                title="Agent panel"
+                v-html="sanitizedHtml"
+                class="agent-html-panel text-sm text-gray-300 max-w-none"
               />
             </div>
           </Transition>
@@ -287,15 +288,16 @@ import { useAgentsStore } from '../stores/agents'
 import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
 import AgentAvatar from '../components/AgentAvatar.vue'
-// Chart.js and Mermaid are loaded inside the sandboxed iframe (see
-// renderHtmlPanel / renderMermaidPanel). The relative path is intentional:
-// chart.js 4 doesn't expose the UMD bundle via its package `exports` field, and
-// mermaid's `exports['.']` only points at the ESM `mermaid.core.mjs`. Both ship
-// a self-contained IIFE bundle (chart.umd.js / mermaid.min.js) that assigns a
-// browser global; the relative path bypasses module resolution and Vite's `?url`
-// import emits each as a hashed same-origin asset.
-import chartJsUrl from '../../node_modules/chart.js/dist/chart.umd.js?url'
-import mermaidJsUrl from '../../node_modules/mermaid/dist/mermaid.min.js?url'
+// Mermaid renders in-parent (not in a sandboxed iframe): the production CSP
+// (script-src 'self') blocks inline scripts in a srcdoc iframe, and CORP blocks
+// the bundle from the iframe's opaque origin (#979). securityLevel:'strict'
+// disables interactivity/htmlLabels; the output SVG is DOMPurify-sanitized before
+// it touches the DOM (H-005). Imported as a normal ESM dep so it lands in this
+// route's chunk.
+import mermaid from 'mermaid'
+import DOMPurify from 'dompurify'
+
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' })
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -423,80 +425,42 @@ function pushHistory(snap) {
   }
 }
 
-// ── Iframe panel rendering (HTML + Mermaid) ──────────────────────────────────
+// ── In-parent panel rendering (HTML + Mermaid) ───────────────────────────────
 
-// Agent-supplied markup renders inside a sandboxed iframe with an opaque origin
-// (sandbox="allow-scripts" without allow-same-origin): agent JS cannot read
-// parent localStorage / cookies / JWT, submit forms, navigate the parent, or
-// open popups. The iframe is driven by a reactive `:srcdoc` binding (computed
-// below) so it re-renders declaratively on update/navigation — no element ref or
-// nextTick, which keeps it safe when the content transition recreates the node.
-//
-// Tag delimiters are built via string concat (s_open / s_close) so the SFC
-// parser doesn't see them as nested block tags.
-const s_open = '<' + 's' + 'cript'
-const s_close = '<' + '/' + 's' + 'cript' + '>'
+// HTML panels render via DOMPurify (same trust model as markdown, H-005). Scripts
+// are stripped, so agent JS (chart.js) does not run — static layout only. This
+// replaces the prior srcdoc iframe, which the production CSP (script-src 'self')
+// + CORP blocked entirely (#979).
+const sanitizedHtml = computed(() =>
+  displayedPanel.value.type === 'html'
+    ? DOMPurify.sanitize(displayedPanel.value.content || '')
+    : ''
+)
 
-// Encode an arbitrary string as a JS string literal safe to embed in an inline
-// script. JSON.stringify handles quotes/backslashes/newlines; the extra
-// `<` → < replacement prevents a diagram containing a script close-tag from
-// terminating the script element early (the JS engine restores < to "<").
-// Load-bearing guard for the agent-supplied diagram text (review F4).
-function jsString(s) {
-  return JSON.stringify(s == null ? '' : String(s)).replace(/</g, '\\u003c')
+// Mermaid renders to an SVG string off-DOM (securityLevel:'strict' disables
+// interactivity + htmlLabels), then DOMPurify-sanitizes the SVG before v-html.
+// mermaid.render is async and the displayed snapshot can change while a render is
+// in flight (live update or history navigation), so a monotonic seq token drops
+// stale results. Invalid syntax surfaces a contained error + the source.
+const mermaidSvg = ref('')
+const mermaidError = ref('')
+let mermaidRenderSeq = 0
+
+async function renderMermaid(src) {
+  const seq = ++mermaidRenderSeq
+  mermaidError.value = ''
+  mermaidSvg.value = ''
+  if (!src) return
+  try {
+    const { svg } = await mermaid.render(`voice-mmd-${seq}`, String(src))
+    if (seq !== mermaidRenderSeq) return  // superseded by a newer snapshot
+    mermaidSvg.value = DOMPurify.sanitize(svg)
+  } catch (e) {
+    if (seq !== mermaidRenderSeq) return
+    mermaidSvg.value = ''
+    mermaidError.value = `Diagram error:\n${(e && e.message) ? e.message : String(e)}\n\n${src}`
+  }
 }
-
-// Chart.js is loaded inside the iframe via a same-origin asset URL so
-// new Chart(...) calls in agent HTML still work.
-const htmlSrcdoc = computed(() => {
-  if (displayedPanel.value.type !== 'html') return ''
-  const chartUrl = new URL(chartJsUrl, window.location.origin).href
-  return [
-    '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
-    'body{margin:0;padding:8px;color:#d1d5db;background:transparent;',
-    'font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}',
-    'canvas{max-width:100%}',
-    'table{border-collapse:collapse}th,td{padding:4px 8px}',
-    'a{color:#818cf8}',
-    '</style>',
-    s_open, ' src="', chartUrl, '">', s_close,
-    '</head><body>',
-    displayedPanel.value.content ?? '',
-    '</body></html>',
-  ].join('')
-})
-
-// Mermaid renders strictly inside the sandboxed iframe — agent diagram text never
-// touches the parent DOM. mermaid.min.js is a self-contained IIFE bundle (no
-// runtime chunk fetches) that exposes window.mermaid. Invalid syntax renders a
-// contained error + the source, not a broken panel.
-const mermaidSrcdoc = computed(() => {
-  if (displayedPanel.value.type !== 'mermaid') return ''
-  const mermaidUrl = new URL(mermaidJsUrl, window.location.origin).href
-  return [
-    '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
-    'body{margin:0;padding:12px;background:transparent;',
-    'font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}',
-    '#out svg{max-width:100%;height:auto}',
-    '#err{display:none;color:#fca5a5;white-space:pre-wrap;',
-    'font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}',
-    '</style></head><body>',
-    '<div id="out"></div><pre id="err"></pre>',
-    s_open, ' src="', mermaidUrl, '">', s_close,
-    s_open, '>',
-    'var SRC=', jsString(displayedPanel.value.content), ';',
-    'function fail(e){var p=document.getElementById("err");',
-    'p.style.display="block";p.textContent="Diagram error:\\n"+',
-    '((e&&e.message)?e.message:String(e))+"\\n\\n"+SRC;}',
-    'try{if(!window.mermaid){throw new Error("mermaid failed to load");}',
-    'window.mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:"dark"});',
-    'window.mermaid.render("d",SRC).then(function(r){',
-    'document.getElementById("out").innerHTML=r.svg;}).catch(fail);',
-    '}catch(e){fail(e);}',
-    s_close,
-    '</body></html>',
-  ].join('')
-})
 
 // Fetch a workspace-path image through the authenticated /files/preview endpoint
 // (reuses the store's blob helper) and bind the objectURL. Web-URL images bypass
@@ -523,13 +487,16 @@ async function loadImageBlob(path) {
   }
 }
 
-// Image is the only type needing async work on display: a workspace-path image
-// must be fetched as an authenticated blob. HTML/Mermaid render via :srcdoc.
+// Image and mermaid need work on display: a workspace-path image is fetched as an
+// authenticated blob; a mermaid diagram is rendered to SVG asynchronously. HTML
+// renders synchronously via the sanitizedHtml computed.
 watch(displayedPanel, (panel) => {
   if (panel.type === 'image') {
     imageError.value = false
     if (panel.image_kind === 'path') loadImageBlob(panel.content)
     else imageObjectUrl.value = null  // url-kind renders content directly
+  } else if (panel.type === 'mermaid') {
+    renderMermaid(panel.content)
   }
 }, { deep: true })
 
@@ -924,5 +891,26 @@ const statusLabel = computed(() => {
 }
 .canvas-fade-leave-to {
   opacity: 0;
+}
+
+/* v-html'd panel content (mermaid SVG + sanitized agent HTML) needs :deep() to be
+   reached by scoped styles. */
+.mermaid-host :deep(svg) {
+  max-width: 100%;
+  height: auto;
+}
+.agent-html-panel :deep(table) {
+  border-collapse: collapse;
+}
+.agent-html-panel :deep(th),
+.agent-html-panel :deep(td) {
+  padding: 4px 8px;
+}
+.agent-html-panel :deep(a) {
+  color: #818cf8;
+}
+.agent-html-panel :deep(img),
+.agent-html-panel :deep(canvas) {
+  max-width: 100%;
 }
 </style>

@@ -104,6 +104,14 @@ CORS_ORIGINS = [
 # Falls back to GOOGLE_API_KEY (used for Gemini-powered agents) if GEMINI_API_KEY not set
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 
+# Dispatch Circuit Breaker — global master switch (RELIABILITY-007, #526).
+# Producer-side per-agent breaker that fast-fails NEW executions (HTTP 503)
+# when an agent is auth-dead, instead of poisoning the persistent backlog.
+# Default OFF: this is the global gate; per-agent opt-in lives in
+# agent_ownership.circuit_breaker_enabled (also default OFF). Both must be on
+# for the breaker to engage — a true opt-in canary (D7/D11).
+DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
+
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 VOICE_MODEL = os.getenv("VOICE_MODEL", "models/gemini-3.1-flash-live-preview")

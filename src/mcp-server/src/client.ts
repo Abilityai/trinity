@@ -481,7 +481,8 @@ export class TrinityClient {
     name: string,
     message: string,
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
@@ -493,6 +494,12 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key so an SDK-level retry of
+    // the same tool call dedupes instead of dispatching a second execution.
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -636,7 +643,8 @@ export class TrinityClient {
       chat_session_id?: string;
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<ChatResponse | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }> {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -644,6 +652,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -745,7 +758,8 @@ export class TrinityClient {
       allowed_tools?: string[];
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<{
     fan_out_id: string;
     status: string;
@@ -769,6 +783,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
@@ -1666,6 +1685,50 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/telegram/groups/${encodeURIComponent(chatId)}/messages`,
       { message }
+    );
+  }
+
+  // ============================================================================
+  // Sequential Agent Loops (#740)
+  // ============================================================================
+
+  async startAgentLoop(
+    agentName: string,
+    data: {
+      message: string;
+      max_runs: number;
+      stop_signal?: string;
+      delay_seconds?: number;
+      timeout_per_run?: number;
+      model?: string;
+      allowed_tools?: string[];
+    }
+  ): Promise<{
+    loop_id: string;
+    status: string;
+    agent_name: string;
+    max_runs: number;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/loops`,
+      data
+    );
+  }
+
+  async getLoopStatus(loopId: string): Promise<unknown> {
+    return this.request(
+      "GET",
+      `/api/loops/${encodeURIComponent(loopId)}`
+    );
+  }
+
+  async stopAgentLoop(
+    loopId: string
+  ): Promise<{ loop_id: string; status: string }> {
+    return this.request(
+      "POST",
+      `/api/loops/${encodeURIComponent(loopId)}/stop`
     );
   }
 }

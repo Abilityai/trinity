@@ -557,6 +557,38 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Operator queue notification on validation failure
 - **Flow**: `docs/memory/feature-flows/business-validation.md`
 
+### 10.10 Idempotency Keys at Trigger Boundaries (RELIABILITY-006)
+- **Status**: ✅ Implemented (2026-06-02)
+- **Requirement ID**: RELIABILITY-006
+- **GitHub Issue**: #525
+- **Description**: An `Idempotency-Key` contract at every execution-creating trigger boundary. The same key within a 24h window produces exactly one execution; duplicates short-circuit with the original result (`HTTP 200/202 + X-Idempotent-Replay: true`) instead of dispatching a second execution. Closes the producer-boundary dedup gap that the unified funnel made more acute — webhook re-deliveries, MCP client retries, and scheduler→backend network blips no longer create phantom executions.
+- **Key Features**:
+  - New `idempotency_keys` table — `PRIMARY KEY (scope, idempotency_key)` gives the atomic claim; `(execution_id, status, response_snapshot, created_at)` carry the replay payload. Cross-process safe (uvicorn workers + standalone scheduler share one DB file).
+  - Enforcement at each **router boundary** (not solely the service) because sync `/chat` runs an inline path and `/api/webhooks/{token}` creates no execution: `/chat`, `/task` (async+sync, self-task), `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`.
+  - Webhook auto-derives a key from `(token, body_hash)` when none supplied — covers naive senders that retry without idempotency awareness.
+  - Scheduler sends a deterministic `Idempotency-Key: sched:{execution_id}` so a transient backend 5xx + resend resolves to the same key; intentional #271 retries (fresh execution_id) are not suppressed.
+  - MCP `chat_with_agent` / `fan_out` forward a deterministic key over the call args so a transport retry dedupes.
+  - Header is OPTIONAL on chat/task/MCP (absent → no dedup, full back-compat); upfront at-capacity rejections release the claim so the caller can retry; in-flight duplicate → 409.
+  - Audit event `idempotent_replay` on every replay (duplicate-storms observable); 24h TTL purge folded into the cleanup-service retention sweep.
+- **Architectural Invariant**: #18 — every new trigger type must accept an `Idempotency-Key` before merge.
+
+### 10.11 Dispatch Circuit Breaker (RELIABILITY-007)
+- **Status**: ✅ Implemented (2026-05-30); default-OFF opt-in canary
+- **Requirement ID**: RELIABILITY-007
+- **GitHub Issue**: #526
+- **Description**: Per-agent **producer-side** circuit breaker at the dispatch layer. When an agent is *auth-dead* (reachable but answering HTTP 503 → execution `error_code == AUTH`), the breaker fast-fails NEW executions with HTTP 503 instead of poisoning the persistent backlog with doomed tasks, fails the doomed backlog immediately, and self-heals via a half-open probe. Distinct from and namespace-isolated from the transport-reachability breaker (#631) — the two never contaminate each other's counter.
+- **Key Features**:
+  - New `services/dispatch_breaker.py` — consecutive-failure state machine (`closed → open → half-open(probe) → closed`) in Redis `agent:dispatch:{name}` via atomic Lua (threshold 3, base cooldown 30s → 300s exponential backoff, one-probe-at-a-time `SET NX EX` lock); fail-open on Redis down, never raises
+  - **AUTH-only counting** (D10): TIMEOUT / AGENT_ERROR never count, to avoid false trips on long/bad-prompt tasks
+  - **No-enqueue invariant** (D2 + F1): `CapacityManager.acquire(breaker_enabled=…)` raises `CircuitOpen` *before* the overflow branch; a half-open probe is admitted only into a free slot (never enqueued) so the invariant spans the half-open window
+  - Drain-on-trip: `task_execution_service` records outcomes at the terminals and on `→open` backgrounds `db.fail_queued_for_agent` (QUEUED→FAILED) + clear in-memory queue + audit; 60s `run_maintenance` breaker-aware backstop re-fails still-open-breaker backlog if an inline drain is lost (~60s worst case, not 24h)
+  - Shared Redis plumbing extracted to top-level `redis_breaker_util.py` (fail-open client, Lua `ScriptCache`, decode helpers) reused by both breakers
+  - Per-agent `agent_ownership.circuit_breaker_enabled` opt-in column (default OFF) + global `DISPATCH_BREAKER_ENABLED` env master switch — both must be on to engage
+  - Operator API: `GET/PUT /api/agents/{name}/circuit-breaker` (read = authorized, config = owner-only + audit); `reset` (admin) clears BOTH breakers; unified block embedded in `GET /api/agents/{name}` and agent-health detail; `circuit_breakers` field on `/api/agents/slots` (pipelined HGETALL, no SCAN)
+  - Frontend: distinct ⚡ "circuit open" danger badge in `AgentHeader` (detail page) and `AgentNode` (dashboard graph)
+  - Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam
+- **Flow**: `docs/memory/feature-flows/dispatch-circuit-breaker.md`, `docs/memory/feature-flows/capacity-management.md`, `docs/memory/feature-flows/task-execution-service.md`
+
 ---
 
 ## 11. GitHub Integration
@@ -699,6 +731,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - 3 MCP tools: `get_fleet_health`, `get_agent_health`, `trigger_health_check`
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
+
+### 12.8a Richer Agent `/health` Signal (#1020)
+- **Status**: ✅ Implemented (2026-06-02)
+- **GitHub Issue**: #1020
+- **Description**: Promote the agent container's `/health` from `{status}` + ad-hoc diagnostics to a named, contractual signal the platform acts on — an incremental step toward `TARGET_ARCHITECTURE.md` §Agent Runtime.
+- **Key Features**:
+  - New top-level fields: `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure).
+  - Counters tracked in `agent_server/state.py` (`record_task_start`/`record_task_finish`), wired at both execution chokepoints in `agent_server/routers/chat.py`. Thread-safe (concurrent tasks).
+  - `consecutive_failures` is the signal the dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness; both feed the heartbeat push (#307).
+  - Backend `monitoring_service.py` reads `consecutive_failures`/`last_task_at` into `BusinessHealthCheck` (graceful `None` default for pre-#1020 agent images).
+  - `mailbox_depth` intentionally NOT emitted — no agent-side mailbox until the actor model (#945); backend derives queue depth from `CapacityManager`.
+  - Back-compat: existing `/health` keys unchanged; new keys additive.
 
 ### 12.9 Cleanup Service for Stuck Resources
 - **Status**: ✅ Implemented (Updated 2026-03-25, Issue #129)
@@ -2638,6 +2682,86 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - Backend-side change to return `execution_id` as a streaming
     response header on long calls — would obsolete the heuristic
     lookup but requires a `chat_with_agent` API contract change.
+## 38. Sequential Agent Loops (#740)
+
+### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #740
+- **Description**: Server-side primitive for sequential bounded
+  repetition of agent tasks. Complements `chat_with_agent` (single
+  turn) and `fan_out` (parallel batch) with a third execution
+  pattern: run a task N times in order, each iteration optionally
+  using the previous response. Caller fires once, gets a `loop_id`,
+  and disconnects — loop state lives in the backend.
+- **Modes**:
+  - **Fixed** (`stop_signal` unset): runs exactly `max_runs` times.
+  - **Until** (`stop_signal` set, recommended sentinel `[[DONE]]`):
+    stops early when any iteration's response contains the signal.
+- **Endpoints**:
+  - `POST /api/agents/{name}/loops` — start a loop. Returns
+    `{loop_id, status: "queued", agent_name, max_runs}` immediately
+    (fire-and-disconnect). Body: `message` (template, supports
+    `{{run}}` 1-indexed and `{{previous_response}}` truncated to the
+    last 2000 chars), `max_runs` (1–100, required), `stop_signal`,
+    `delay_seconds` (between runs, default 0), `timeout_per_run`
+    (defaults to agent's configured `execution_timeout_seconds`),
+    `model`, `allowed_tools`.
+  - `GET /api/loops/{loop_id}` — status + per-run summaries + last
+    full response.
+  - `POST /api/loops/{loop_id}/stop` — graceful stop. Sets
+    `should_stop`; the current iteration finishes, the loop exits.
+    Returns `{status: "stopping" | "already_done"}`.
+- **MCP tools**: `run_agent_loop`, `get_loop_status`, `stop_loop`.
+  Permission rules match `chat_with_agent` (owner/admin/shared or
+  explicit `agent_permissions` for agent-scoped keys).
+- **Execution model**: each iteration goes through the standard
+  `task_execution_service.execute_task()` path → `capacity_manager`
+  admit/slot → execute → release. Each iteration is recorded in
+  `schedule_executions` with `triggered_by="loop"` and `loop_id` set
+  so the dashboard/timeline shows iterations as normal execution
+  rows tagged with their loop. Sequential: iteration N+1 does not
+  start until iteration N's row reaches a terminal status.
+- **Template substitution**: applied before each iteration.
+  `{{run}}` → `"1"`, `"2"`, … `{{previous_response}}` → empty on
+  iteration 1, otherwise the previous iteration's response trimmed
+  to the trailing 2000 chars.
+- **Stop signal check**: substring match (`stop_signal in response`)
+  applied to the full response after each iteration. Recommended
+  sentinel `[[DONE]]` is documentation only — the loop honors any
+  user-supplied string.
+- **Terminal states + stop reasons**:
+  - `completed` / `max_runs_reached` — fixed mode hit `max_runs`,
+    or until mode hit `max_runs` without seeing the signal.
+  - `completed` / `stop_signal_matched` — until mode saw the signal.
+  - `stopped` / `user_stopped` — `POST /loops/{id}/stop` triggered.
+  - `failed` / `error` — an iteration's task execution returned a
+    non-success terminal status; loop aborts at the failed iteration.
+  - `interrupted` / `interrupted` — backend restart while running.
+- **Restart recovery**: the cleanup-service startup hook re-marks
+  any `agent_loops` row in `running` status as `interrupted` with
+  `stop_reason="interrupted"`. Loops do not auto-resume —
+  callers re-issue if needed.
+- **WebSocket events**: `loop_run_completed` per iteration (carries
+  `run_number`, `execution_id`, `cost`, `duration_ms`),
+  `loop_completed` once when the loop exits any terminal state.
+- **Storage**: two new tables in main SQLite DB.
+  - `agent_loops` (id, agent_name, message_template, max_runs,
+    stop_signal, delay_seconds, timeout_per_run, model,
+    allowed_tools JSON, status, runs_completed, stop_reason,
+    last_response, started_by_user_id, started_by_user_email,
+    source_agent_name, source_mcp_key_id, source_mcp_key_name,
+    created_at, started_at, completed_at).
+  - `agent_loop_runs` (id, loop_id, run_number, execution_id,
+    status, response, cost, duration_ms, started_at, completed_at)
+    — one row per iteration; `execution_id` joins back to
+    `schedule_executions`.
+  - `schedule_executions.loop_id TEXT` column added for the
+    timeline-tag join.
+- **Out of scope (Phase 1)**: dedicated dashboard surface for loops
+  (current timeline is sufficient — iterations appear as normal
+  rows; a follow-up PR may add a collapse-group affordance);
+  auto-resume after restart; cross-agent loops (`agent` parameter
+  is `"self"` only for v1, matching `fan_out`).
 
 ---
 

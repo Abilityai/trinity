@@ -51,6 +51,15 @@
           >
             SYSTEM
           </span>
+          <!-- #526: dispatch circuit breaker open badge (distinct danger styling) -->
+          <span
+            v-if="circuitOpen"
+            data-testid="circuit-open-badge"
+            class="ml-2 px-1.5 py-0.5 text-xs font-semibold rounded bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-900/50 dark:text-status-danger-300 flex-shrink-0"
+            title="Dispatch circuit breaker OPEN — agent unhealthy; new tasks fast-fail until it recovers"
+          >
+            ⚡ circuit open
+          </span>
         </div>
         <!-- Status indicator dot -->
         <div
@@ -260,6 +269,11 @@ const isSystemAgent = computed(() => {
 // Check if autonomy mode is enabled
 const autonomyEnabled = computed(() => {
   return props.data.autonomy_enabled === true
+})
+
+// #526: dispatch circuit breaker open — agent is auth-dead, dispatches fast-fail
+const circuitOpen = computed(() => {
+  return props.data.circuitBreaker?.state === 'open'
 })
 
 // Compute activity state (active, idle, offline)

@@ -1,7 +1,7 @@
 # Voice Chat — Gemini 2.5 Flash Native Audio
 
 **Status**: ✅ Phase 1 + Tool Calling + Workspace Mode (BETA) Complete
-**Date**: 2026-05-07
+**Date**: 2026-05-30 (workspace canvas rendering moved in-parent — #979 prod-CSP fix)
 **Priority**: P1
 
 ---
@@ -54,9 +54,9 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 │  │                         │  │                               │   │
 │  │  <canvas> orb (same     │  │  Panel content rendered via   │   │
 │  │   particle system as    │  │  show_markdown → renderMarkdown│  │
-│  │   VoiceOverlay)         │  │  update_panel → DOMPurify +   │   │
-│  │                         │  │  _execScripts (Chart.js ok)   │   │
-│  │  Status label           │  │  Chart.js 4 pre-loaded        │   │
+│  │   VoiceOverlay)         │  │  html/mermaid → DOMPurify     │   │
+│  │                         │  │  in parent DOM (H-005);       │   │
+│  │  Status label           │  │  scripts stripped — no JS     │   │
 │  │  Tool name badge        │  │                               │   │
 │  │  [Mute] [Start/End]     │  │  Polled 300ms; updated_at     │   │
 │  │  Voice selector         │  │  gate + in-flight guard       │   │
@@ -83,16 +83,20 @@ Anthropic has no speech-to-speech or realtime audio API. Any Claude voice pipeli
 The workspace canvas renders five live panel types plus history:
 
 - **markdown** — `renderMarkdown` (marked + DOMPurify) in the parent DOM.
-- **mermaid** (`show_diagram`) — rendered strictly inside the opaque-origin
-  `sandbox="allow-scripts"` iframe via a self-contained `mermaid.min.js` IIFE
-  bundle (same `?url` mechanism as Chart.js, no runtime chunk fetches). Diagram
-  text is injected as a JS string (`JSON.stringify` + `<`→`<`, so a
-  `</script>` in the text can't break out) and rendered with
-  `securityLevel:'strict'`; invalid syntax shows a contained error + source.
+- **mermaid** (`show_diagram`) — rendered **in-parent** via the bundled `mermaid`
+  ESM lib (no iframe). `mermaid.initialize({securityLevel:'strict', theme:'dark'})`
+  disables interactivity + htmlLabels; `mermaid.render()` runs off-DOM and the
+  output SVG is **DOMPurify-sanitized** before `v-html` (H-005). A monotonic seq
+  token drops stale async renders during live update / history navigation; invalid
+  syntax shows a contained error + source. The prior `srcdoc` iframe was dropped
+  because the production CSP (`script-src 'self'`) blocks its inline render script
+  and CORP blocks the bundle from the iframe's opaque origin (#979).
 - **image** (`show_image`) — web URLs render directly via Vue `:src`;
   workspace file paths are fetched through the authenticated `/files/preview`
   endpoint as a blob (a bare `<img src>` would 401) and bound as an objectURL.
-- **html** (`update_panel`) — sandboxed iframe with Chart.js (unchanged).
+- **html** (`update_panel`) — **DOMPurify-sanitized and rendered in-parent**
+  (same trust model as markdown, H-005). Scripts are stripped, so agent JS
+  (e.g. Chart.js) does **not** execute — static layout only (#979).
 - **empty** — placeholder.
 
 Frontend-only additions (no backend change): a 40-snapshot history ring buffer
@@ -272,14 +276,14 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 | Route | `/agents/:name/workspace` → `AgentWorkspace.vue` |
 | Layout | Left 40% (orb + controls) + Right 60% (canvas panel) |
 | `workspace_mode` flag | Passed in `POST /voice/start` body; appends `WORKSPACE_PANEL_INSTRUCTIONS` to system prompt |
-| Panel tools | `show_markdown`, `update_panel`, `append_to_panel`, `clear_panel` — handled in-process via `_execute_panel_tool()`, never forwarded to agent container |
-| Panel state | `VoiceSession.panel_state` dict (in-memory); type ∈ {empty, markdown, html}; content capped at `_PANEL_CONTENT_MAX=524288` (512 KB) |
+| Panel tools | `show_markdown`, `show_diagram`, `show_image`, `update_panel`, `append_to_panel`, `clear_panel` — handled in-process via `_execute_panel_tool()`, never forwarded to agent container |
+| Panel state | `VoiceSession.panel_state` dict (in-memory); type ∈ {empty, markdown, mermaid, image, html}; content capped at `_PANEL_CONTENT_MAX=524288` (512 KB) |
 | Panel endpoint | `GET /api/agents/{name}/voice/{session_id}/panel` — returns empty state for missing sessions (no 404 during teardown window); ownership-gated (user_id + agent_name check, admin bypass) |
 | Frontend poll | `setInterval(fetchPanel, 300)` — in-flight guard (`panelFetching` flag) prevents overlapping requests; skips state update when `updated_at` unchanged (prevents 3×/sec Vue re-renders and preserves content after session ends) |
 | Content preservation | Panel content preserved on session end (poll stops, state not reset); reset on new session **start** via `resetPanelState()` |
-| HTML rendering | `update_panel`/`append_to_panel` → `ref="htmlPanelEl"` + `renderHtmlPanel()`: `DOMPurify.sanitize(html, {ADD_TAGS:['script']})` then `_execScripts()` re-clones `<script>` nodes as live DOM elements so Chart.js `new Chart(...)` calls execute |
-| Chart.js | Chart.js 4.4.0 pre-loaded globally via `injectChartJs()` on mount (CDN `<script>` tag injected once into `document.head`, guarded by `#chartjs-cdn` id check) |
-| XSS protection | `show_markdown` → `renderMarkdown()` (DOMPurify-wrapped); `update_panel` HTML — DOMPurify strips event handlers and `javascript:` hrefs; `<script>` tags are re-executed (Chart.js init) — trade-off: accepted per issue #707 security review, same trust level as agent MCP calls |
+| HTML rendering | `update_panel`/`append_to_panel` → `v-html="sanitizedHtml"`, where `sanitizedHtml = DOMPurify.sanitize(content)` (default profile) renders **in-parent**. `<script>` tags are stripped — agent JS does **not** execute. Replaces the prior `srcdoc` iframe, which the production CSP (`script-src 'self'`) + CORP blocked entirely (#979) |
+| Mermaid rendering | `show_diagram` → `mermaid.render()` (`securityLevel:'strict'`, htmlLabels off) off-DOM → `DOMPurify.sanitize(svg)` → `v-html`. Monotonic seq token drops stale async renders during live-update / history nav |
+| XSS protection | All three `v-html` sites (`show_markdown`, `show_diagram` SVG, `update_panel` HTML) are DOMPurify-sanitized in the parent DOM — same trust model as platform markdown (H-005). DOMPurify strips `<script>`, event handlers, and `javascript:` hrefs. The opaque-origin iframe boundary from #981 is dropped (it was non-functional under the prod CSP, so it protected nothing in production); residual risk is a DOMPurify bypass, identical to every other markdown surface on the platform |
 | BETA indicator | Amber "BETA" badge in header button and page header |
 
 ---
@@ -346,7 +350,7 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 **Response:**
 ```json
 {
-  "type": "empty|markdown|html",
+  "type": "empty|markdown|mermaid|image|html",
   "content": "...",
   "title": "optional title or null",
   "updated_at": "ISO-Z timestamp or null"
@@ -362,7 +366,8 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 | Setting | Description |
 |---------|-------------|
 | `GEMINI_API_KEY` | API key for Gemini Live API |
-| `VOICE_ENABLED` | Global toggle |
+| `VOICE_ENABLED` | Global voice toggle (default `true`; effective only when `GEMINI_API_KEY` is set). Wired into backend compose `environment:` (#979) |
+| `WORKSPACE_ENABLED` | Workspace canvas toggle — opt-in BETA, default `false` (#860). `workspace_available = voice_available && WORKSPACE_ENABLED`. Wired into backend compose `environment:` (#979 — previously never passed through, so the canvas couldn't be enabled via `.env`) |
 | `VOICE_MODEL` | Model ID (default: `gemini-2.5-flash-native-audio-preview-12-2025`) |
 | `VOICE_MAX_DURATION` | Max session duration in seconds (default: 300) |
 
@@ -389,7 +394,7 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 | **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | `start(sessionId, voiceName, workspaceMode)` — passes `workspace_mode` to backend |
 | **Frontend** | `src/frontend/src/stores/sessions.js` | `voiceAvailable` state from feature flags |
 | **Frontend** | `src/frontend/src/utils/audio.js` | AudioWorklet-first capture/playback, `getAmplitude()` via `AnalyserNode` |
-| **Tests** | `tests/unit/test_voice_tools.py` | 26 unit tests: tool execution, panel tool handlers, content cap, routing guard, Redis session fallback (#704) |
+| **Tests** | `tests/unit/test_voice_tools.py` | 58 unit tests: tool execution (`run_task` reads `.response_text`, guards the #979 regression), panel tool handlers, `show_diagram`/`show_image` registration, image-src classification, content cap, routing guard, Redis session fallback (#704) |
 | **Tests** | `tests/unit/test_voice_auth.py` | 19 unit tests: WS auth, stop auth, panel ownership, audit attribution kwargs (#705) |
 
 ---
@@ -431,7 +436,7 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 - ✅ 512 KB content cap on accumulated `append_to_panel` content
 - ✅ Panel flicker fixed: `updated_at` change-detection gate + in-flight fetch guard (#707)
 - ✅ Panel content preserved on session end; reset on new session start (#707)
-- ✅ Chart.js 4 pre-loaded; `update_panel` HTML with `<script>` tags executes correctly (#707)
+- ✅ `update_panel` HTML + `show_diagram` Mermaid render **in-parent** via DOMPurify (H-005); scripts stripped, no JS execution (#979 — replaced the #981 `srcdoc` iframe that the production CSP blocked)
 - ⏳ Export panel content as PDF/markdown
 - ⏳ Multi-page / tabbed canvas
 

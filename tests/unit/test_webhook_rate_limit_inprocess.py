@@ -69,6 +69,27 @@ def webhooks(monkeypatch):
     monkeypatch.setitem(sys.modules, "services", services_pkg)
     monkeypatch.setitem(sys.modules, "services.platform_audit_service", audit_stub)
 
+    # Stub `services.idempotency_service` — webhooks.py imports it at top level
+    # (RELIABILITY-006, #525). These tests exercise rate limiting, not dedup,
+    # so begin() returns a disabled/no-replay decision and the rest are no-ops.
+    _idem_decision = types.SimpleNamespace(
+        enabled=False, replay=False, in_flight=False,
+        scope=None, key=None, execution_id=None, snapshot=None,
+    )
+    idem_stub = _stub_module(
+        "services.idempotency_service",
+        make_agent_scope=lambda n: f"agent:{n}",
+        make_webhook_scope=lambda t: f"webhook:{t}",
+        derive_webhook_key=lambda t, b: "stub-key",
+        derive_schedule_key=lambda e: f"sched:{e}",
+        begin=lambda scope, key: _idem_decision,
+        attach_execution=lambda *a, **k: None,
+        complete=lambda *a, **k: None,
+        fail=lambda *a, **k: None,
+    )
+    setattr(services_pkg, "idempotency_service", idem_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", idem_stub)
+
     # Make `from config import REDIS_URL` resolve without re-running config.py
     # in the heavy mode — config.py is fine to load (REDIS_URL is set above)
     # but ensure src/backend is on sys.path for it.

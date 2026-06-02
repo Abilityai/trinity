@@ -24,6 +24,7 @@ import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
 import { createFileTools } from "./tools/files.js";
 import { createMemoryTools } from "./tools/memory.js";
+import { createLoopTools } from "./tools/loops.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -215,6 +216,7 @@ export async function createServer(config: ServerConfig = {}) {
     createChannelTools(client, requireApiKey),
     createMessageTools(client, requireApiKey),
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
+    createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
   ];
   for (const group of toolGroups) {
     addAllTools(group);

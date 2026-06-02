@@ -435,7 +435,7 @@ These decisions are already correct and should not be revisited without strong e
 
 These are architectural decisions not yet resolved. They should be answered before the relevant components are built. Each has a tracking issue.
 
-1. **Journal format** (issue #945): What does `journal.ndjson` contain per entry? The envelope fields are defined; the payload schema for each `kind` is not. The one-page postcard (envelope + journal format) is required before the Phase 2 actor-model experiment (#946) can be scheduled.
+1. **Journal format** (issue #945): What does `journal.ndjson` contain per entry? The envelope fields are defined; the payload schema for each `kind` is not. The one-page postcard (envelope + journal format) is required before the Phase 2 actor-model experiment (#946) can be scheduled. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the pre-postcard work — `ParallelTaskRequest` has 15 fields today, and the postcard cannot fit honestly until those are demoted to session/agent state or quarantined.
 
 2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
 

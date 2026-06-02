@@ -9,14 +9,59 @@ Reference: src/backend/routers/telemetry.py (existing correct pattern)
 Issue: https://github.com/abilityai/trinity/issues/42
 """
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 from services.docker_service import docker_client
 
+logger = logging.getLogger(__name__)
+
 # Shared executor - limited to 4 workers to avoid overwhelming Docker daemon
 # This matches the pattern in telemetry.py
 _docker_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="docker-")
+
+
+def _invalidate_agent_stats_for(container) -> None:
+    """#73: drop the per-agent live-stats cache for this container's agent.
+
+    docker_utils is the chokepoint for nearly every container lifecycle op
+    (stop/start/remove/rename), so invalidating here — rather than in
+    individual router handlers — drops the stale stats entry immediately for
+    the paths that go through these primitives (UI, ops restart, deploy,
+    subscription re-assign, system restart) instead of waiting out the cache
+    TTL. The one deliberate exception is the Operating Room emergency-stop fast
+    path (routers/ops.py:_stop_agent_container), which calls container.stop()
+    directly in a thread pool for parallel shutdown and so relies on the cache
+    TTL (<=12s) rather than explicit invalidation — an accepted bound on an
+    already-coarse gauge.
+
+    Best-effort by design:
+    - a lazy import breaks the docker_utils -> agent_service import cycle
+      (agent_service modules import docker_utils);
+    - the agent name is read from the `trinity.agent-name` label, falling back
+      to the `agent-{name}` container-name convention; non-agent containers
+      yield None and are skipped;
+    - any failure is logged and swallowed — cache invalidation must never break
+      the container operation it follows.
+    """
+    try:
+        labels = getattr(container, "labels", None) or {}
+        agent_name = labels.get("trinity.agent-name")
+        if not agent_name:
+            cname = getattr(container, "name", "") or ""
+            if cname.startswith("agent-"):
+                agent_name = cname[len("agent-"):]
+        if not agent_name:
+            return
+        # Lazy import: docker_utils <- agent_service would otherwise be circular.
+        from services.agent_service.stats import invalidate_agent_stats_cache
+        invalidate_agent_stats_cache(agent_name)
+    except Exception as exc:  # never let cache invalidation break a lifecycle op
+        # warning (not debug): a per-call miss is harmless, but a SYSTEMATIC
+        # failure here (e.g. the lazy import regressing) would silently no-op
+        # every invalidation fleet-wide, visible only as <=TTL stale stats.
+        logger.warning("stats-cache invalidation skipped: %s", exc)
 
 
 # =============================================================================
@@ -32,6 +77,7 @@ async def container_stop(container, timeout: int = 10) -> None:
     """
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_docker_executor, lambda: container.stop(timeout=timeout))
+    _invalidate_agent_stats_for(container)  # #73
 
 
 async def container_remove(container, force: bool = False) -> None:
@@ -43,6 +89,7 @@ async def container_remove(container, force: bool = False) -> None:
     """
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_docker_executor, lambda: container.remove(force=force))
+    _invalidate_agent_stats_for(container)  # #73
 
 
 async def container_start(container) -> None:
@@ -53,6 +100,7 @@ async def container_start(container) -> None:
     """
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_docker_executor, container.start)
+    _invalidate_agent_stats_for(container)  # #73
 
 
 async def container_reload(container) -> None:
@@ -86,6 +134,11 @@ async def container_rename(container, new_name: str) -> None:
         container: Docker container object
         new_name: New name for the container
     """
+    # #73: capture the OLD agent identity BEFORE the rename — the freed name is
+    # what must be evicted (a reused name must not serve the renamed-away
+    # agent's stale stats). The container's label/name still reflect the old
+    # value here.
+    _invalidate_agent_stats_for(container)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(_docker_executor, lambda: container.rename(new_name))
 

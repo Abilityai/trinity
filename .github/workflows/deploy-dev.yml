@@ -117,19 +117,29 @@ jobs:
             fi
 
             echo "=== Build ==="
-            # Build-time provenance (#926 / #958). docker-compose.prod.yml
+            # Build-time provenance (#926 / #958 / #993). docker-compose.prod.yml
             # backend.build.args reads these env vars; absent them, the
             # Dockerfile defaults to "unknown" and Build Info in the UI
             # shows a wall of unknown values. Mirrors scripts/deploy/start.sh.
-            # Inline VAR=val form bypasses sudo's default env_reset — `sudo -E`
-            # would depend on env_keep being permissive in sudoers, which it
-            # is not by default on Ubuntu.
+            #
+            # #993: pass via `sudo env VAR=val …` — NOT `sudo VAR=val …`.
+            # Under default Ubuntu sudoers (env_reset on, setenv off), env
+            # assignments placed before the command are filtered out, so the
+            # prior form silently dropped every var and compose fell back to
+            # ${VAR:-unknown}. `env` is the program sudo execs, so the
+            # assignments are its arguments and reach docker compose intact.
             GIT_COMMIT=$(git rev-parse HEAD)
             GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
             GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
             GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
             BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            sudo \
+            # #993: dynamic version = VERSION file + git short sha (+ .dirty).
+            BASE_VER=$(cat VERSION 2>/dev/null || echo unknown)
+            SHORT_SHA=$(git rev-parse --short=8 HEAD)
+            git diff --quiet HEAD 2>/dev/null || SHORT_SHA="${SHORT_SHA}.dirty"
+            VERSION="${BASE_VER}+g${SHORT_SHA}"
+            sudo env \
+              VERSION="${VERSION}" \
               GIT_COMMIT="${GIT_COMMIT}" \
               GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}" \
               GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \

@@ -121,6 +121,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         if user is None:
             raise credentials_exception
 
+        # #995 — deactivation primitive: reject suspended users here, so
+        # setting users.suspended_at invalidates live tokens on the next
+        # request (not only new logins). Edition-agnostic; only the
+        # enterprise user-management knob sets/clears the column.
+        if user.get("suspended_at"):
+            raise credentials_exception
+
         return User(
             id=user["id"],
             username=user["username"],
@@ -140,7 +147,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # Get full user record - try email first, then username
         # Note: user_id from MCP key is the username string, not the database id
         user = db.get_user_by_email(user_email) if user_email else db.get_user_by_username(user_id)
-        if user:
+        if user and not user.get("suspended_at"):  # #995 — suspended users blocked here too
             # For agent-scoped keys, include the agent_name
             agent_name = mcp_key_info.get("agent_name") if mcp_key_info.get("scope") == "agent" else None
             return User(

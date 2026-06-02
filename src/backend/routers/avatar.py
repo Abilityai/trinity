@@ -27,6 +27,47 @@ logger = logging.getLogger(__name__)
 
 AVATAR_DIR = Path("/data/avatars")
 
+
+# #957: Map image-generation error_kind → (HTTP status, user-facing detail).
+# Keeps the Gemini-internal error strings out of the dialog; gives the
+# operator/owner an actionable message per failure mode.
+_AVATAR_ERROR_HTTP = {
+    "not_configured": (
+        501,
+        "Avatar generation isn't configured on this server. Ask an admin "
+        "to set GEMINI_API_KEY.",
+    ),
+    "invalid_input": (400, "Avatar request was rejected by the image service."),
+    "safety_filter": (
+        422,
+        "The prompt was blocked by the image service's safety filters. "
+        "Try rephrasing and avoid descriptions of real people, sensitive "
+        "content, or trademarked characters.",
+    ),
+    "rate_limited": (
+        429,
+        "Image generation is rate-limited right now. Wait a minute and retry.",
+    ),
+    "upstream_error": (
+        502,
+        "Image generation service returned an error. This is usually transient — please retry.",
+    ),
+    "timeout": (
+        504,
+        "Image generation timed out. The model can be slow under load — please retry.",
+    ),
+    "unknown": (
+        422,
+        "Avatar generation failed. Check server logs for details.",
+    ),
+}
+
+
+def _avatar_http_for_result(result) -> tuple[int, str]:
+    """Pick the HTTP status + detail for an unsuccessful ImageGenerationResult."""
+    kind = getattr(result, "error_kind", None) or "unknown"
+    return _AVATAR_ERROR_HTTP.get(kind, _AVATAR_ERROR_HTTP["unknown"])
+
 # Diverse visual styles for default avatars — deterministically assigned from agent name hash
 # so each agent gets a unique look even when they share the same Docker type.
 _DEFAULT_AVATAR_STYLES = [
@@ -374,10 +415,8 @@ async def generate_avatar(
 
     service = get_image_generation_service()
     if not service.available:
-        raise HTTPException(
-            status_code=501,
-            detail="Image generation not available: GEMINI_API_KEY not configured",
-        )
+        status, detail = _AVATAR_ERROR_HTTP["not_configured"]
+        raise HTTPException(status_code=status, detail=detail)
 
     result = await service.generate_image(
         prompt=identity_prompt,
@@ -388,7 +427,8 @@ async def generate_avatar(
     )
 
     if not result.success:
-        raise HTTPException(status_code=422, detail=result.error)
+        status, detail = _avatar_http_for_result(result)
+        raise HTTPException(status_code=status, detail=detail)
 
     # Save optimized display avatar (.webp) and full-quality reference (.png)
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
@@ -454,10 +494,8 @@ async def regenerate_avatar(
 
     service = get_image_generation_service()
     if not service.available:
-        raise HTTPException(
-            status_code=501,
-            detail="Image generation not available: GEMINI_API_KEY not configured",
-        )
+        status, detail = _AVATAR_ERROR_HTTP["not_configured"]
+        raise HTTPException(status_code=status, detail=detail)
 
     reference_bytes = ref_path.read_bytes()
     result = await service.generate_variation(
@@ -468,7 +506,8 @@ async def regenerate_avatar(
     )
 
     if not result.success:
-        raise HTTPException(status_code=422, detail=result.error)
+        status, detail = _avatar_http_for_result(result)
+        raise HTTPException(status_code=status, detail=detail)
 
     # Save as optimized display avatar only (reference stays the same)
     avatar_path = AVATAR_DIR / f"{agent_name}.webp"

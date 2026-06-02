@@ -306,6 +306,11 @@ async def get_agent_health(
     if aggregate_check.get("error_message"):
         issues = aggregate_check["error_message"].split("; ")
 
+    # #526: unified circuit-breaker block (same shape as
+    # GET /api/agents/{name}/circuit-breaker).
+    from services.circuit_breaker_view import build_circuit_breaker_block
+    circuit_breaker = build_circuit_breaker_block(agent_name)
+
     return AgentHealthDetail(
         agent_name=agent_name,
         aggregate_status=aggregate_check.get("status", "unknown"),
@@ -316,7 +321,8 @@ async def get_agent_health(
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
         uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None,
+        circuit_breaker=circuit_breaker,
     )
 
 

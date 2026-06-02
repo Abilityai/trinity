@@ -209,7 +209,9 @@ class TestExecuteTool:
     def test_success_real(self, svc):
         """Test _execute_tool with a mocked get_agent_client."""
         mock_response = MagicMock()
-        mock_response.response = "Task result text."
+        # AgentChatResponse exposes `.response_text`, not `.response` — guards the
+        # #979 regression where _execute_tool read the wrong attribute.
+        mock_response.response_text = "Task result text."
         mock_client = MagicMock()
         mock_client.task = AsyncMock(return_value=mock_response)
 
@@ -244,7 +246,7 @@ class TestExecuteTool:
     def test_prompt_truncated_to_max(self, svc):
         """Prompts longer than _TOOL_PROMPT_MAX are truncated before forwarding."""
         mock_response = MagicMock()
-        mock_response.response = "ok"
+        mock_response.response_text = "ok"
         mock_client = MagicMock()
         mock_client.task = AsyncMock(return_value=mock_response)
 

@@ -444,6 +444,17 @@ On approval the endpoint:
 2. Calls `db.share_agent(agent_name, current_user.username, email)` — idempotent insert into `agent_sharing`. Future messages from this email are admitted by `email_has_agent_access`.
 3. If `email_auth_enabled` setting is true, auto-adds the email to the platform whitelist with `source="access_request"`.
 4. Broadcasts a `agent_shared` WebSocket event so the Sharing panel refreshes for owners viewing it.
+5. **Notifies the requester on their originating channel** (#951). For `telegram | slack | whatsapp`, fires `proactive_message_service.send_access_grant_notification` as an `asyncio.create_task` so a missing binding or transport hiccup can't block the HTTP response. The notification bypasses the `allow_proactive` opt-in (the user explicitly initiated the request) and the per-recipient rate limit (one-shot). Delivery outcome (`delivered` / `recipient_not_found` / channel error) is captured in the `proactive_message` audit event. Rejection is intentionally silent.
+
+### Manual test path (#951)
+
+The notification fires only after a real approval, so set up one access request per channel and approve from the admin UI.
+
+- **Telegram**: bind a bot to the agent in Settings → Channels → Telegram. From a second Telegram account, `/login <verified-email>` against the bot, then DM the agent — you should get "🔒 Your access request is pending approval." Approve from the owner's web UI; the same Telegram chat should immediately receive "✅ Access to {agent_name} approved by the agent owner. You can now message the agent here."
+- **Slack**: bind a Slack workspace under Settings → Channels → Slack. From a Slack workspace user whose email is verified, DM the agent — same pending reply. Approve from the owner's web UI; the same DM should receive the same approval text.
+- **WhatsApp**: bind a Twilio WhatsApp sender to the agent. From a WhatsApp number whose verified email is linked, DM the agent — same pending reply. Approve; same approval text arrives.
+- **Negative path (web)**: approve a request whose `access_requests.channel = 'web'` and confirm only the existing `agent_shared` WebSocket dashboard event fires — no proactive send.
+- **Negative path (missing binding)**: approve a Telegram-channel request on an agent without a Telegram binding. Approval HTTP response must still be 200; check `GET /api/audit-log?event_type=proactive_message` for an entry with `details.success=false` and `details.error="recipient_not_found: …"`.
 
 ### Pydantic models (`routers/sharing.py:22-42`)
 

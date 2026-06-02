@@ -1,5 +1,32 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-05-30 (#526, RELIABILITY-007):** This service is the single
+> point where the per-agent **dispatch** circuit breaker records execution
+> outcomes (full mechanics in [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md)).
+> `execute_task()` reads the combined gate once via `dispatch_breaker_active(agent_name)`
+> (global `DISPATCH_BREAKER_ENABLED` master switch AND per-agent
+> `circuit_breaker_enabled`; fail-safe False) and threads it through three places:
+> (1) the `acquire(..., breaker_enabled=…)` call (Step 2) can now raise
+> `CircuitOpen` → a new `except CircuitOpen` arm closes the row
+> `FAILED(circuit_open)` with `error_code=CIRCUIT_OPEN` (no agent call, nothing
+> enqueued); (2) the **Step 3b** fast-fail now checks BOTH breakers — the transport
+> breaker (#631) always, and the dispatch breaker only on the
+> `slot_already_held and not dispatch_gate_checked` drain path via a non-probe
+> state read (`DispatchBreaker(...).to_dict()["state"] == "open"`), so it never
+> double-consumes a half-open probe an upstream `acquire()` gate already admitted;
+> (3) outcome recording at the terminals — `_record_dispatch_terminal(agent, enabled, None)`
+> at the success terminal (resets the consecutive-failure counter) and the same
+> with `error_code=AUTH` at the HTTP-error terminal, **gated on `error_code == AUTH`**
+> (D10 — TIMEOUT / AGENT_ERROR never count). On the →open transition the caller
+> backgrounds the backlog drain + audit via `_spawn_bg(_fail_backlog_and_audit(agent))`
+> (a strong task ref is held so the fire-and-forget drain can't be GC'd mid-flight);
+> on →closed it backgrounds a recovery audit. New router param
+> `dispatch_gate_checked` (set `True` by the `/task` async + sync routers, which
+> already gated at `acquire()`) suppresses the redundant 3b dispatch check. The
+> `record_outcome`/drain logic adds no circular import — `dispatch_breaker.py`
+> imports neither `capacity` nor `db`; the caller owns the drain. New
+> `error_code` value `TaskExecutionErrorCode.CIRCUIT_OPEN`.
+
 > **Updated 2026-05-13 (#678):** Builds on #520 (502 classification) and #531 (drain reordering) by closing the stdout reader-race loophole inside `execute_task`. New gate `_looks_like_reader_race(detail)` at `task_execution_service.py:110-128` matches 502 dict bodies with `num_turns < 5`, `raw_message_count == 0`, `parse_failure_count == 0` and triggers ONE in-line auto-retry reusing the same `execution_id` (around `task_execution_service.py:543`, `:558-602`, `:707`), with both call-side and remote timeout capped at 300s so a long task can't double its wallclock budget; previous-attempt cost is rolled forward via `prev_cost` (`:587`) and accumulated into the salvage write at `:841-847`, and `retry_count=retry_count or None` is persisted at `:707`. The agent server's `_classify_empty_result` (`docker/base-image/agent_server/services/error_classifier.py:341+`) now returns a structured dict body — `{message, metadata, raw_message_count, parse_failure_count, recovery_attempted}` — which the service's HTTPError handler at `task_execution_service.py:768-868` parses via the `partial_metadata` block (`:772`) and salvage cost/context block (`:824-858`), writing `cost=salvage_cost`, `context_used=salvage_context`, `context_max=salvage_context_max` onto the FAILED row at `:856-858` instead of nulling everything. The same salvage shape is mirrored in `routers/chat.py:466-516` (`isinstance(detail, dict)` at `:474`, salvage write at `:514-516`). Shared helper `_compute_context_used(metadata)` at `task_execution_service.py:83-108` is the single context-window math used by both the success path and the salvage path (`routers/chat.py:504`, `task_execution_service.py:832`); migration 59 in `db/schema.py` + `db/migrations.py` adds `schedule_executions.retry_count INTEGER DEFAULT 0`, and `db.get_execution_result()` in `db/schedules.py` surfaces it so the MCP `get_execution_result` tool and executions REST endpoint can display it.
 
 > **Updated 2026-05-11 (#686 UC1):** Interactive `/chat` endpoint now mirrors the service's dispatched-sentinel pattern + real-UUID persistence inline in `routers/chat.py` (parallel of #279). The dispatched-sentinel mechanism is no longer exclusive to `TaskExecutionService.execute_task()`.
@@ -296,6 +323,7 @@ The service catches all errors and returns `TaskExecutionResult` with `status=Ta
 | Error Case | Service Result | chat.py HTTP | public.py HTTP |
 |------------|---------------|--------------|----------------|
 | Slot not acquired | `status=FAILED, error="Agent at capacity..."` | 429 | 429 |
+| Dispatch breaker open (#526) | `acquire()` raises `CircuitOpen` → `status=FAILED, error="circuit_open: agent unhealthy...", error_code=CIRCUIT_OPEN` (no agent call, nothing enqueued) | 503 + `X-Circuit-Open`/`Retry-After` | 503 |
 | Agent timeout (#61) | Terminates agent process, then `status=FAILED, error="timed out...", error_code=TIMEOUT` | 504 | 504 |
 | Agent signal-killed (#516) | Agent classifies SIGINT/SIGKILL/SIGTERM exit and returns 504 with "Execution terminated by …" detail; service treats as `status=FAILED, error=detail` (no AUTH code) | 504 | 504 |
 | Agent empty result (#520) | Agent returns 502 when `return_code == 0` but `cost_usd` and `duration_ms` are both `None` (final `result` JSON line lost — typically a child subprocess inherited stdout); service treats as `status=FAILED, error=detail` (no AUTH code) | 502 | 502 |
@@ -454,3 +482,4 @@ Expected response from agent:
 - [dashboard-timeline-view.md](dashboard-timeline-view.md) -- timeline that shows execution events
 - [continue-execution-as-chat.md](continue-execution-as-chat.md) -- EXEC-023, resume_session_id support
 - [scheduler-service.md](scheduler-service.md) -- dedicated scheduler that calls this service via internal API
+- [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) -- #526 per-agent dispatch breaker; this service is its outcome-recording producer (AUTH-only) and owns the drain-on-open backgrounding

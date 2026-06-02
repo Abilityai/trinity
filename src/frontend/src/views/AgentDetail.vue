@@ -190,6 +190,11 @@
               <FoldersPanel :agent-name="agent.name" :agent-status="agent.status" :can-share="agent.can_share" />
             </div>
 
+            <!-- Guardrails Tab Content (GUARD-001 UI, #967) -->
+            <div v-if="activeTab === 'guardrails' && agent.can_share">
+              <GuardrailsPanel :agent-name="agent.name" :notify="showNotification" />
+            </div>
+
           </div>
         </div>
       </div>
@@ -264,6 +269,7 @@ import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
+import GuardrailsPanel from '../components/GuardrailsPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
@@ -626,6 +632,11 @@ const visibleTabs = computed(() => {
   // Folders - hide for system agent
   if (agent.value?.can_share && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
+  }
+
+  // Guardrails - owner-only (GUARD-001 UI, #967)
+  if (agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'guardrails', label: 'Guardrails' })
   }
 
   // Info at the end (reference/metadata)

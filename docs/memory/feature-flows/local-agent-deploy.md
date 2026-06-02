@@ -1,6 +1,6 @@
 # Feature: Local Agent Deployment via MCP
 
-> **Updated**: 2026-04-03 - Remove credential injection from deploy flow. Archive is self-contained (.env included).
+> **Updated**: 2026-05-29 - #950 deferred hardening: require non-empty CLAUDE.md, advisory MCP credential-gap `warnings[]`. The API/CLI accept an optional `credentials` map (the MCP tool forwards archive + name only).
 
 ## Overview
 
@@ -45,7 +45,7 @@ As a developer working with a Trinity-compatible local agent, I want to deploy i
 
 ### Tool: `deploy_local_agent`
 
-**Location**: `src/mcp-server/src/tools/agents.ts:426-525`
+**Location**: `src/mcp-server/src/tools/agents.ts:556-643`
 
 **Parameters**:
 ```typescript
@@ -55,9 +55,9 @@ As a developer working with a Trinity-compatible local agent, I want to deploy i
 }
 ```
 
-The archive should include all files needed by the agent — `.env`, `.mcp.json`, `CLAUDE.md`, etc. No separate credential injection step.
+The archive should include all files needed by the agent — `.env`, `.mcp.json`, `CLAUDE.md`, etc. **The MCP tool exposes only `archive` and `name`** and forwards just those two fields to the backend (no credential parameter on this path). The underlying API and `trinity deploy` CLI additionally accept an optional `credentials` map that is merged into the deployed `.env` (see Request Model + step 9 below) — that path is what surfaces the MCP credential-gap `warnings[]`.
 
-**Validation** (lines 464-476):
+**Validation** (lines 588-600):
 - Checks archive is provided and non-empty
 - Validates base64 format with regex: `/^[A-Za-z0-9+/=]+$/`
 
@@ -115,16 +115,16 @@ The local agent deployment uses a **thin router + service layer** architecture:
 
 ### Endpoint: POST /api/agents/deploy-local
 
-**Router**: `src/backend/routers/agents.py:212-225`
+**Router**: `src/backend/routers/agents.py:418-430`
 
 ```python
 @router.post("/deploy-local")
 async def deploy_local_agent(
     body: DeployLocalRequest,
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_role("creator"))
 ):
-    """Deploy a Trinity-compatible local agent."""
+    """Deploy a Trinity-compatible local agent. Requires creator role or above."""
     return await deploy_local_agent_logic(
         body=body,
         current_user=current_user,
@@ -133,13 +133,25 @@ async def deploy_local_agent(
     )
 ```
 
+Deploy requires the **creator** role or above (`require_role("creator")`),
+consistent with `create_agent` — see [role-model.md](role-model.md).
+
 **Request Model** (`src/backend/models.py`):
 ```python
 class DeployLocalRequest(BaseModel):
     """Request to deploy a local agent."""
     archive: str  # Base64-encoded tar.gz
     name: Optional[str] = None  # Override name from template.yaml
+    credentials: Optional[Dict[str, str]] = None  # Optional {KEY: value} merged into .env
+
+# Maximum credentials allowed per deploy-local request
+MAX_DEPLOY_CREDENTIALS = 100
 ```
+
+`credentials` is capped at `MAX_DEPLOY_CREDENTIALS` (100); exceeding it returns
+HTTP 400. The MCP `deploy_local_agent` tool does not pass this field — it is
+used by the API and `trinity deploy` CLI to fold operator-supplied secrets into
+the archive's `.env` at deploy time.
 
 **Response Model** (`src/backend/models.py`):
 ```python
@@ -148,15 +160,25 @@ class DeployLocalResponse(BaseModel):
     status: str  # "success" or "error"
     agent: Optional[AgentStatus] = None
     versioning: Optional[VersioningInfo] = None
+    credentials_imported: Optional[Dict[str, str]] = None
+    credentials_injected: Optional[int] = None
+    warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 ```
+
+`warnings` carries non-fatal advisories — currently MCP servers whose
+`${VAR}` references have no matching credential after the request `credentials`
+are merged into `.env` (see step 9 below). The MCP `deploy_local_agent` tool
+`JSON.stringify`s the whole response, so warnings reach `/trinity:onboard`
+automatically.
 
 ### Deployment Flow (`deploy.py`)
 
 1. **Decode & Validate Archive**
    - Decode base64 archive
    - Check size limit (50MB max)
+   - Reject `body.credentials` exceeding `MAX_DEPLOY_CREDENTIALS` (100) → HTTP 400
 
 2. **Extract Archive**
    - Extract to temp directory using `_safe_extract_tar()`
@@ -168,6 +190,11 @@ class DeployLocalResponse(BaseModel):
 4. **Trinity-Compatible Validation**
    - `is_trinity_compatible()` in `services/template_service.py`
    - Requires template.yaml with `name` and `resources` fields
+   - Requires a non-empty, UTF-8-readable `CLAUDE.md` — missing / empty /
+     whitespace-only / non-UTF-8 → HTTP 400 `NOT_TRINITY_COMPATIBLE` (#950).
+     **Behavior change**: agents that previously deployed without a CLAUDE.md
+     (a warning, not an error) are now rejected at deploy time. A redeploy of
+     a CLAUDE.md-less local agent will 400 until a CLAUDE.md is added.
 
 5. **Determine Agent Name**
    - Use body.name override or template.yaml name
@@ -185,19 +212,25 @@ class DeployLocalResponse(BaseModel):
    - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running
 
-8. **Template Persist + Workspace Pre-population** (#950)
-   - Write the validated archive contents to `/data/deployed-templates/{version_name}/` for inspection and future `template.yaml` lookups. On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE`.
-   - **Pre-populate the agent's workspace volume directly** via `put_archive` into an ephemeral `alpine:3.20` container that mounts `agent-{version_name}-workspace`. Includes a `.trinity-initialized` marker so the agent's `startup.sh` skips its `/template` → `/home/developer` copy on boot.
+8. **Persist Template** (#950)
+   - Write the validated archive contents to `/data/deployed-templates/{version_name}/` (`dest_path`) for inspection and future `template.yaml` lookups. On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE` (fail-fast, no silent fallback).
    - Curated catalog at `/agent-configs/templates` stays read-only (operators' source of truth).
-   - **Why no bind-mount transport for deploy-local**: dev compose uses a docker-managed named volume for `/data` while prod uses a host bind. Any host-path math in `crud.py` was right on prod and wrong on dev, producing empty agents on dev. Pre-populating the workspace volume directly is uniform across both.
 
-9. **Agent Creation**
+9. **Merge Credentials + MCP Credential-Gap Warnings** (#950)
+   - If `body.credentials` is provided, merge the `{KEY: value}` pairs into the persisted `.env` at `dest_path/.env` (returned `credentials_injected` count; `credentials_imported` records `.env`/`.mcp.json` provenance: `from_archive` / `merged` / `created`).
+   - `collect_mcp_credential_warnings(dest_path)` then scans `.mcp.json.template` (falling back to `.mcp.json`) for `${VAR}` references whose key is neither present in the **post-merge** `.env` nor platform-injected, and returns them as advisory `warnings[]` — non-fatal. The platform-injected allowlist (`_PLATFORM_INJECTED_EXACT` + `TRINITY_`/`GIT_`/`OTEL_`/`CLAUDE_CODE_` prefixes) is a deliberate static mirror of the env vars Trinity sets at create time (`crud.py`), so those don't produce false-positive gaps. The MCP server name (an arbitrary, operator-supplied JSON key) is passed through `_sanitize_for_warning()` before interpolation — non-printable characters (ANSI escapes, newlines, C0/C1 controls) are stripped and the length is bounded — so a hostile template can't smuggle terminal-escape sequences into the operator-facing warning rendered by `/trinity:onboard` (CSO L1).
+
+10. **Workspace Volume Pre-population** (#950)
+    - **Pre-populate the agent's workspace volume directly** via `put_archive` into an ephemeral `alpine:3.20` container that mounts `agent-{version_name}-workspace`. Includes a `.trinity-initialized` marker so the agent's `startup.sh` skips its `/template` → `/home/developer` copy on boot. On failure: HTTP 500 with `code=WORKSPACE_PREPOP_FAILED`.
+    - **Why no bind-mount transport for deploy-local**: dev compose uses a docker-managed named volume for `/data` while prod uses a host bind. Any host-path math in `crud.py` was right on prod and wrong on dev, producing empty agents on dev. Pre-populating the workspace volume directly is uniform across both.
+
+11. **Agent Creation**
     - Extract runtime config from template
     - Call `create_agent_fn()` (injected `create_agent_internal`) with local template
     - Agent container starts with all files from the archive (including `.env`)
 
-9. **Return Response**
-    - Return DeployLocalResponse with agent status and versioning info
+12. **Return Response**
+    - Return DeployLocalResponse with agent status, versioning info, `credentials_injected`/`credentials_imported`, and any advisory `warnings`
 
 ### Safe Tar Extraction (`deploy.py:39-181`)
 
@@ -224,7 +257,7 @@ The extraction uses comprehensive security validation:
 
 ## Template Validation
 
-**Location**: `src/backend/services/template_service.py:309-358`
+**Location**: `src/backend/services/template_service.py:608-728` (`is_trinity_compatible` + `collect_mcp_credential_warnings`)
 
 ```python
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:
@@ -235,6 +268,7 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     1. template.yaml file
     2. name field in template.yaml
     3. resources field in template.yaml
+    4. a non-empty CLAUDE.md (agent instructions)
     """
 ```
 
@@ -244,7 +278,9 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 3. File is not empty
 4. `name` field present
 5. `resources` field present and is a dictionary
-6. Warning (non-blocking) if `CLAUDE.md` missing
+6. `CLAUDE.md` present, readable as UTF-8, and non-empty after `.strip()`
+   (blocking — #950; a binary/non-UTF-8 CLAUDE.md is rejected with a clean
+   400 rather than crashing the generic handler with a 500)
 
 ---
 
@@ -252,11 +288,13 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 
 | Code | HTTP | Description |
 |------|------|-------------|
-| `NOT_TRINITY_COMPATIBLE` | 400 | Missing or invalid template.yaml |
+| `NOT_TRINITY_COMPATIBLE` | 400 | Missing/invalid template.yaml, or missing/empty/non-UTF-8 CLAUDE.md (#950) |
 | `ARCHIVE_TOO_LARGE` | 400 | Exceeds 50MB limit |
 | `INVALID_ARCHIVE` | 400 | Not valid tar.gz, bad base64, or path traversal |
 | `TOO_MANY_FILES` | 400 | Exceeds 1000 file limit |
 | `MISSING_NAME` | 400 | No name specified and template.yaml has no name |
+| `DEPLOYED_TEMPLATES_DIR_UNWRITABLE` | 500 | `/data/deployed-templates` could not be created — fail-fast, no silent fallback (#950/#971) |
+| `WORKSPACE_PREPOP_FAILED` | 500 | Workspace volume pre-population (`put_archive`/chown) failed (#950) |
 
 ---
 
@@ -279,9 +317,9 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 
 2. **Temp Cleanup**: Temp directory always cleaned up in finally block (lines 430-436)
 
-3. **Self-Contained Archives**: Credentials (`.env`) are included in the archive — no separate injection step
+3. **Self-Contained Archives**: Credentials (`.env`) travel inside the archive. The optional `credentials` map is an additive merge into that `.env` at deploy time (step 9), not an out-of-band injection into a running container.
 
-4. **Auth Required**: Uses standard JWT authentication via `get_current_user`
+4. **Auth Required**: JWT authentication plus the **creator** role gate (`require_role("creator")`, which wraps `get_current_user`)
 
 5. **Write Permission Check**: Templates directory write-tested before use
 
@@ -420,7 +458,8 @@ rm -f "$ARCHIVE"
 
 | Date | Changes |
 |------|---------|
-| 2026-04-03 | **#251**: Removed `credentials` parameter entirely. Archive is self-contained — `.env` and credential files included in tar.gz. Removed credential injection block that caused hangs. |
+| 2026-05-29 | **#950 (deferred hardening)**: `is_trinity_compatible()` now requires a non-empty, UTF-8 `CLAUDE.md` (blocking 400, was a non-fatal warning). New `collect_mcp_credential_warnings()` surfaces MCP servers with unsatisfied `${VAR}` refs as advisory `DeployLocalResponse.warnings[]` (also added to the MCP tool response type). Documented the `credentials` request field (reinstated after #251) + `MAX_DEPLOY_CREDENTIALS`, the credential-merge step, and the `DEPLOYED_TEMPLATES_DIR_UNWRITABLE`/`WORKSPACE_PREPOP_FAILED` error codes. Refreshed router snippet (`require_role("creator")`, `agents.py:418-430`). |
+| 2026-04-03 | **#251**: Removed `credentials` parameter from the deploy flow. Archive is self-contained — `.env` and credential files included in tar.gz. Removed credential injection block that caused hangs. *(Note: a `credentials` map was later reinstated as an optional API/CLI field — see 2026-05-29.)* |
 | 2026-02-05 | **CRED-002**: Removed `credential_manager` parameter from deploy flow. |
 | 2026-01-23 | Verified all line numbers. Updated deploy.py references (now 437 lines). Added safe tar extraction details. Updated router line numbers (212-225). Added template validation location. |
 | 2025-12-30 | Verified line numbers |

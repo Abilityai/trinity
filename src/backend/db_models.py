@@ -195,6 +195,8 @@ class ScheduleExecution(BaseModel):
     model_used: Optional[str] = None           # Model used for this execution
     # Fan-out linkage (FANOUT-001)
     fan_out_id: Optional[str] = None           # Parent fan-out operation ID
+    # Loop linkage (#740)
+    loop_id: Optional[str] = None              # Parent agent_loops.id for sequential-loop iterations
     # Subscription usage tracking (SUB-004)
     subscription_id: Optional[str] = None      # Subscription active at record time
     # Persistent backlog (BACKLOG-001)
@@ -846,6 +848,11 @@ class BusinessHealthCheck(BaseModel):
     stuck_execution_count: int = 0
     recent_error_rate: float = 0.0  # 0.0 - 1.0
     credential_status: Optional[str] = None  # null, "ok", "missing" (SUB-001/MON-001)
+    # #1020: richer /health signal. None when the agent image predates #1020
+    # (older agents omit these keys). `consecutive_failures` is the signal the
+    # dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness.
+    consecutive_failures: Optional[int] = None
+    last_task_at: Optional[str] = None
     checked_at: str
 
 
@@ -861,6 +868,9 @@ class AgentHealthDetail(BaseModel):
     recent_alerts: List[dict] = []
     uptime_percent_24h: Optional[float] = None
     avg_latency_24h_ms: Optional[float] = None
+    # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
+    # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
+    circuit_breaker: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):
@@ -1073,6 +1083,10 @@ class BulkSlotState(BaseModel):
     """Response model for bulk slot state query (Dashboard)."""
     agents: dict  # {agent_name: {"max": N, "active": M}}
     timestamp: str
+    # #526: per-agent dispatch-breaker state, ONLY for agents whose breaker is
+    # non-closed (open). Empty when the global breaker is off or all closed.
+    # {agent_name: {"state","failure_count","retry_after_seconds"}}
+    circuit_breakers: dict = {}
 
 
 # =========================================================================

@@ -364,6 +364,7 @@ class DeployLocalResponse(BaseModel):
     versioning: Optional[VersioningInfo] = None
     credentials_imported: Optional[Dict[str, str]] = None  # Files found in archive
     credentials_injected: Optional[int] = None  # Count of credentials injected
+    warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 
@@ -482,6 +483,15 @@ class AgentDefaultResourcesUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/resources (RES-001)."""
     cpu: Optional[str] = None
     memory: Optional[str] = None
+
+
+class CircuitBreakerConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch breaker. Gated again by the global
+    DISPATCH_BREAKER_ENABLED master switch — both must be on to engage.
+    """
+    enabled: bool
 
 
 # =============================================================================

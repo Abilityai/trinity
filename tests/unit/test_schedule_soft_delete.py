@@ -78,7 +78,8 @@ def _make_db_schema(conn: sqlite3.Connection) -> None:
             email TEXT,
             created_at TEXT,
             updated_at TEXT,
-            last_login TEXT
+            last_login TEXT,
+            suspended_at TEXT
         )
         """
     )

@@ -152,9 +152,10 @@ Mermaid rule (for `show_diagram`):
 - Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
 - Keep diagrams focused; invalid syntax shows a contained error in the panel.
 
-Chart.js rule (for `update_panel` HTML):
-- Chart.js 4 is available as `window.Chart` in the workspace (bundled, no CDN needed). NEVER add a `<script src>` tag for it.
-- Use `new Chart(...)` directly. Always give the canvas a fixed height: `<canvas id="c" style="max-height:380px"></canvas>`.
+HTML rule (for `update_panel`):
+- Panel HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, inline `style=` attributes, images.
+- Do NOT use `<script>`, `<canvas>` + JS charting, or any JS-driven rendering — it will be stripped and show nothing.
+- For data visualisation, prefer `show_diagram` (Mermaid: fl/pie/quadrant/xychart) or `show_image` (a chart image by URL or workspace path). Reserve `update_panel` for rich static layouts that markdown can't express.
 """
 
 def _classify_image_src(src: str) -> Optional[tuple[str, str]]:
@@ -635,7 +636,7 @@ class GeminiVoiceService:
         try:
             client = get_agent_client(agent_name)
             response = await client.task(prompt, timeout=28.0)
-            return response.response or "Task completed with no response."
+            return response.response_text or "Task completed with no response."
         except AgentNotReachableError:
             return f"Agent {agent_name!r} is not currently running."
         except AgentRequestError as e:

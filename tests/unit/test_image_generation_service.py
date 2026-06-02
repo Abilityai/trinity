@@ -220,6 +220,64 @@ class TestImageGenerationResult:
         assert result.mime_type == "image/png"
         assert result.use_case == "general"
         assert result.aspect_ratio == "1:1"
+        assert result.error_kind is None  # #957
+
+    def test_error_kind_field_is_settable(self):
+        """#957: error_kind drives router status/detail mapping."""
+        mod = _load_service()
+        result = mod.ImageGenerationResult(
+            success=False,
+            error="GEMINI_API_KEY not configured",
+            error_kind="not_configured",
+        )
+        assert result.error_kind == "not_configured"
+
+
+# =============================================================================
+# #957 — _classify_exception
+# =============================================================================
+
+@pytest.mark.unit
+class TestClassifyException:
+    """Map upstream exceptions to coarse error_kind values for the router."""
+
+    def test_timeout_exception_classified_as_timeout(self):
+        import httpx
+        mod = _load_service()
+        kind = mod._classify_exception(httpx.ReadTimeout("read timed out"))
+        assert kind == "timeout"
+
+    def test_connect_error_classified_as_upstream(self):
+        import httpx
+        mod = _load_service()
+        kind = mod._classify_exception(httpx.ConnectError("nope"))
+        assert kind == "upstream_error"
+
+    def test_safety_filter_runtimeerror(self):
+        mod = _load_service()
+        kind = mod._classify_exception(
+            RuntimeError("Gemini image API returned no image data. ...")
+        )
+        assert kind == "safety_filter"
+
+    def test_rate_limit_runtimeerror(self):
+        mod = _load_service()
+        kind = mod._classify_exception(
+            RuntimeError("Gemini text API error 429: rate limit")
+        )
+        assert kind == "rate_limited"
+
+    def test_upstream_5xx(self):
+        mod = _load_service()
+        kind = mod._classify_exception(
+            RuntimeError("Gemini image API error 503: service unavailable")
+        )
+        assert kind == "upstream_error"
+
+    def test_unknown_default(self):
+        mod = _load_service()
+        kind = mod._classify_exception(ValueError("something else"))
+        assert kind == "unknown"
 
 
 # =============================================================================

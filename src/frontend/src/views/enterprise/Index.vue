@@ -28,6 +28,15 @@ onMounted(() => {
 // display "Coming soon" with the planned scope.
 const features = [
   {
+    id: 'user_management',
+    title: 'User Management',
+    icon: '👤',
+    description: 'Invite users, deactivate accounts, and review per-user activity — in Settings → User Management.',
+    route: '/settings',
+    entitlement: 'user_management',
+    soon: false,
+  },
+  {
     id: 'sso',
     title: 'Single Sign-On',
     icon: '🔐',

@@ -100,6 +100,26 @@ def webhooks(monkeypatch):
     monkeypatch.setitem(sys.modules, "services", services_pkg)
     monkeypatch.setitem(sys.modules, "services.platform_audit_service", audit_stub)
 
+    # Stub `services.idempotency_service` — webhooks.py imports it at top level
+    # (RELIABILITY-006, #525). These tests exercise rate limiting, not dedup.
+    _idem_decision = types.SimpleNamespace(
+        enabled=False, replay=False, in_flight=False,
+        scope=None, key=None, execution_id=None, snapshot=None,
+    )
+    idem_stub = _stub_module(
+        "services.idempotency_service",
+        make_agent_scope=lambda n: f"agent:{n}",
+        make_webhook_scope=lambda t: f"webhook:{t}",
+        derive_webhook_key=lambda t, b: "stub-key",
+        derive_schedule_key=lambda e: f"sched:{e}",
+        begin=lambda scope, key: _idem_decision,
+        attach_execution=lambda *a, **k: None,
+        complete=lambda *a, **k: None,
+        fail=lambda *a, **k: None,
+    )
+    setattr(services_pkg, "idempotency_service", idem_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", idem_stub)
+
     backend_str = str(_BACKEND)
     if backend_str not in sys.path:
         sys.path.insert(0, backend_str)

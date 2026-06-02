@@ -135,6 +135,8 @@ from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.sync_state import SyncStateOperations
+from db.idempotency import IdempotencyOperations
+from db.loops import LoopOperations
 
 
 def init_database():
@@ -292,6 +294,8 @@ class DatabaseManager:
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
+        self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
+        self._loop_ops = LoopOperations()  # #740 sequential agent loops
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -558,6 +562,19 @@ class DatabaseManager:
         return self._agent_ops.get_all_agents_parallel_capacity()
 
     # =========================================================================
+    # Dispatch Circuit Breaker opt-in (delegated to db/agents.py) - #526
+    # =========================================================================
+
+    def get_circuit_breaker_enabled(self, agent_name: str) -> bool:
+        return self._agent_ops.get_circuit_breaker_enabled(agent_name)
+
+    def set_circuit_breaker_enabled(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_circuit_breaker_enabled(agent_name, enabled)
+
+    def get_all_circuit_breaker_enabled(self):
+        return self._agent_ops.get_all_circuit_breaker_enabled()
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 
@@ -601,6 +618,9 @@ class DatabaseManager:
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
+
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)
@@ -771,6 +791,7 @@ class DatabaseManager:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        loop_id: str = None,
         subscription_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
@@ -783,6 +804,7 @@ class DatabaseManager:
             source_mcp_key_name=source_mcp_key_name,
             model_used=model_used,
             fan_out_id=fan_out_id,
+            loop_id=loop_id,
             subscription_id=subscription_id,
         )
 
@@ -884,6 +906,9 @@ class DatabaseManager:
 
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
+
+    def get_all_git_auto_sync_enabled(self, agent_names=None):
+        return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
 
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
@@ -2047,6 +2072,71 @@ class DatabaseManager:
     def get_canary_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate canary violation counts by invariant_id and severity."""
         return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
+
+    # =========================================================================
+    # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
+    # =========================================================================
+
+    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+        """Atomically claim (scope, key). See IdempotencyOperations.claim."""
+        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours)
+
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+        """Record the execution_id for an in-flight idempotency claim."""
+        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+        """Mark an idempotency claim completed and store the replay snapshot."""
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+
+    def idempotency_release(self, scope: str, key: str) -> None:
+        """Delete an in-flight idempotency claim so a failed attempt can retry."""
+        return self._idempotency_ops.release(scope, key)
+
+    def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
+        """Purge idempotency rows older than ttl_hours. Returns rows removed."""
+        return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
+
+    # =========================================================================
+    # Sequential Agent Loops (delegated to db/loops.py) - #740
+    # =========================================================================
+
+    def create_loop(self, *args, **kwargs):
+        return self._loop_ops.create_loop(*args, **kwargs)
+
+    def get_loop(self, loop_id: str):
+        return self._loop_ops.get_loop(loop_id)
+
+    def mark_loop_running(self, loop_id: str):
+        return self._loop_ops.mark_loop_running(loop_id)
+
+    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response):
+        return self._loop_ops.update_loop_progress(
+            loop_id, runs_completed=runs_completed, last_response=last_response,
+        )
+
+    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None):
+        return self._loop_ops.finalize_loop(
+            loop_id, status=status, stop_reason=stop_reason, error=error,
+        )
+
+    def list_loops_for_agent(self, agent_name: str, *, status=None, limit: int = 50):
+        return self._loop_ops.list_loops_for_agent(agent_name, status=status, limit=limit)
+
+    def list_non_terminal_loops(self):
+        return self._loop_ops.list_non_terminal_loops()
+
+    def mark_orphan_loops_interrupted(self) -> int:
+        return self._loop_ops.mark_orphans_interrupted()
+
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+        return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
+
+    def finalize_loop_run(self, run_id: str, **kwargs):
+        return self._loop_ops.finalize_loop_run(run_id, **kwargs)
+
+    def list_loop_runs(self, loop_id: str):
+        return self._loop_ops.list_runs(loop_id)
 
 
 # Global database manager instance

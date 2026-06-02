@@ -620,6 +620,7 @@ export function createAgentTools(
             previous_version_stopped: boolean;
             new_version: string;
           };
+          warnings?: string[];
           error?: string;
           code?: string;
         }

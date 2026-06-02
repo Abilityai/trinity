@@ -23,6 +23,10 @@ opentelemetry-sdk>=1.29.0
 # floors set in docker/backend/Dockerfile.
 pytz>=2024.1
 redis>=5.2.0
+# fakeredis: dispatch-breaker fail-open unit tests (#526). No Lua/EVALSHA
+# support → those tests exercise the breaker's fail-open path; the Lua state
+# machine itself is covered by tests/integration/test_dispatch_breaker.py.
+fakeredis>=2.20.0
 croniter>=5.0.0
 psutil>=6.1.0
 aiofiles>=24.1.0

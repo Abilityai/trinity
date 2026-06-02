@@ -163,6 +163,8 @@ class CleanupReport:
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
     soft_deleted_schedules_purged: int = 0
+    # RELIABILITY-006 / #525: idempotency keys purged past their 24h TTL
+    idempotency_keys_purged: int = 0
 
     @property
     def total(self) -> int:
@@ -172,7 +174,7 @@ class CleanupReport:
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
-                self.soft_deleted_schedules_purged)
+                self.soft_deleted_schedules_purged + self.idempotency_keys_purged)
 
     def to_dict(self) -> Dict:
         return {
@@ -190,6 +192,7 @@ class CleanupReport:
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
+            "idempotency_keys_purged": self.idempotency_keys_purged,
             "total": self.total,
         }
 
@@ -503,6 +506,19 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning soft-deleted schedules: {e}")
 
+        # 4c-quater. RELIABILITY-006 (#525): purge idempotency keys past their
+        # 24h TTL. Fixed window (not an ops setting) — the contract guarantees
+        # dedup for 24h, no longer. Cheap point-delete on the created_at index.
+        try:
+            purged = db.idempotency_purge_expired(ttl_hours=24)
+            report.idempotency_keys_purged = purged
+            if purged > 0:
+                logger.info(
+                    f"[Cleanup] Purged {purged} idempotency key(s) past 24h TTL (#525)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error purging idempotency keys: {e}")
+
         # 4d. Issue #772: after a retention sweep reclaims meaningful space,
         # truncate the WAL so the OS sees the free pages. Checkpoint is cheap
         # and safe to run per-cycle when there's work to do; full VACUUM is
@@ -511,7 +527,8 @@ class CleanupService:
                            + report.execution_rows_pruned
                            + report.health_checks_pruned
                            + report.soft_deleted_agents_purged
-                           + report.soft_deleted_schedules_purged)
+                           + report.soft_deleted_schedules_purged
+                           + report.idempotency_keys_purged)
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()
@@ -1023,6 +1040,18 @@ class CleanupService:
 
     async def _cleanup_loop(self):
         """Main cleanup loop."""
+        # One-shot startup hook for #740: any non-terminal agent_loops left
+        # over from a prior process get marked `interrupted`. Loops do not
+        # auto-resume. Runs once on boot, not every cycle.
+        try:
+            interrupted = db.mark_orphan_loops_interrupted()
+            if interrupted > 0:
+                logger.info(
+                    f"[Cleanup] Startup: marked {interrupted} orphan agent_loops as interrupted (#740)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+
         # Run initial cleanup on startup
         try:
             startup_report = await self.run_cleanup()

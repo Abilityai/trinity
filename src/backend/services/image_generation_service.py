@@ -47,6 +47,35 @@ class ImageGenerationResult:
     use_case: str = "general"
     aspect_ratio: str = "1:1"
     error: Optional[str] = None
+    # #957: coarse classification so the router can pick a meaningful HTTP
+    # status and the frontend can render an actionable message instead of a
+    # raw upstream error. Kinds:
+    #   not_configured  — GEMINI_API_KEY missing
+    #   invalid_input   — use_case / aspect_ratio rejected before API call
+    #   safety_filter   — upstream returned no image (prompt blocked)
+    #   rate_limited    — upstream HTTP 429
+    #   upstream_error  — upstream HTTP 5xx or unparseable response
+    #   timeout         — httpx timeout / connect error
+    #   unknown         — anything else
+    error_kind: Optional[str] = None
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Map a generation-path exception to one of the error_kind values."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError)):
+        return "upstream_error"
+    msg = str(exc)
+    if "no image data" in msg or "safety filter" in msg.lower():
+        return "safety_filter"
+    if "API error 429" in msg:
+        return "rate_limited"
+    if "API error 5" in msg:  # 500/502/503/504
+        return "upstream_error"
+    if "API error 4" in msg:  # 400/401/403 — surfaced as upstream for now
+        return "upstream_error"
+    return "unknown"
 
 
 class ImageGenerationService:
@@ -95,6 +124,7 @@ class ImageGenerationService:
                 use_case=use_case,
                 aspect_ratio=aspect_ratio,
                 error="GEMINI_API_KEY not configured",
+                error_kind="not_configured",
             )
 
         if use_case not in VALID_USE_CASES:
@@ -104,6 +134,7 @@ class ImageGenerationService:
                 use_case=use_case,
                 aspect_ratio=aspect_ratio,
                 error=f"Invalid use_case: {use_case}. Must be one of: {VALID_USE_CASES}",
+                error_kind="invalid_input",
             )
 
         if aspect_ratio not in VALID_ASPECT_RATIOS:
@@ -113,6 +144,7 @@ class ImageGenerationService:
                 use_case=use_case,
                 aspect_ratio=aspect_ratio,
                 error=f"Invalid aspect_ratio: {aspect_ratio}. Must be one of: {VALID_ASPECT_RATIOS}",
+                error_kind="invalid_input",
             )
 
         log_prefix = f"[IMG {agent_name or 'platform'}]"
@@ -145,7 +177,19 @@ class ImageGenerationService:
                 aspect_ratio=aspect_ratio,
             )
         except Exception as e:
-            logger.error(f"{log_prefix} Image generation failed: {e}")
+            kind = _classify_exception(e)
+            logger.error(
+                "image_generation_failed",
+                extra={
+                    "agent_name": agent_name or "platform",
+                    "use_case": use_case,
+                    "aspect_ratio": aspect_ratio,
+                    "error_kind": kind,
+                    "exception_type": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "prompt_length": len(prompt),
+                },
+            )
             return ImageGenerationResult(
                 success=False,
                 refined_prompt=refined if refined != prompt else None,
@@ -153,6 +197,7 @@ class ImageGenerationService:
                 use_case=use_case,
                 aspect_ratio=aspect_ratio,
                 error=str(e),
+                error_kind=kind,
             )
 
     async def refine_prompt(
@@ -336,6 +381,7 @@ class ImageGenerationService:
                 original_prompt=prompt,
                 aspect_ratio=aspect_ratio,
                 error="GEMINI_API_KEY not configured",
+                error_kind="not_configured",
             )
 
         log_prefix = f"[IMG {agent_name or 'platform'}]"
@@ -370,13 +416,24 @@ class ImageGenerationService:
                 aspect_ratio=aspect_ratio,
             )
         except Exception as e:
-            logger.error(f"{log_prefix} Variation generation failed: {e}")
+            kind = _classify_exception(e)
+            logger.error(
+                "image_variation_failed",
+                extra={
+                    "agent_name": agent_name or "platform",
+                    "aspect_ratio": aspect_ratio,
+                    "error_kind": kind,
+                    "exception_type": type(e).__name__,
+                    "error_message": str(e)[:500],
+                },
+            )
             return ImageGenerationResult(
                 success=False,
                 original_prompt=prompt,
                 use_case="avatar",
                 aspect_ratio=aspect_ratio,
                 error=str(e),
+                error_kind=kind,
             )
 
     async def generate_emotion_variation(
@@ -408,6 +465,7 @@ class ImageGenerationService:
                 original_prompt=emotion_prompt,
                 aspect_ratio=aspect_ratio,
                 error="GEMINI_API_KEY not configured",
+                error_kind="not_configured",
             )
 
         log_prefix = f"[IMG {agent_name or 'platform'}]"
@@ -433,13 +491,24 @@ class ImageGenerationService:
                 aspect_ratio=aspect_ratio,
             )
         except Exception as e:
-            logger.error(f"{log_prefix} Emotion variation generation failed: {e}")
+            kind = _classify_exception(e)
+            logger.error(
+                "image_emotion_variation_failed",
+                extra={
+                    "agent_name": agent_name or "platform",
+                    "aspect_ratio": aspect_ratio,
+                    "error_kind": kind,
+                    "exception_type": type(e).__name__,
+                    "error_message": str(e)[:500],
+                },
+            )
             return ImageGenerationResult(
                 success=False,
                 original_prompt=emotion_prompt,
                 use_case="avatar",
                 aspect_ratio=aspect_ratio,
                 error=str(e),
+                error_kind=kind,
             )
 
     async def close(self):

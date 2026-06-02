@@ -2,6 +2,10 @@
 
 > Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-05-27.
 
+## What's New
+
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.6.0](whats-new/v0.6.0.md))
+
 ## Guides
 
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step

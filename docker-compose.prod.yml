@@ -20,6 +20,7 @@ services:
       # exports these from the checked-out repo before `docker compose
       # build`; absent that, the Dockerfile defaults to "unknown".
       args:
+        VERSION: ${VERSION:-unknown}
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
         GIT_COMMIT_SUBJECT: ${GIT_COMMIT_SUBJECT:-unknown}
         GIT_COMMIT_TIMESTAMP: ${GIT_COMMIT_TIMESTAMP:-unknown}

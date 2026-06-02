@@ -4,6 +4,7 @@ Agent Service Deploy - Local agent deployment logic.
 Contains the business logic for deploying local agents via MCP.
 """
 import base64
+import os
 import tarfile
 import tempfile
 import shutil
@@ -24,7 +25,10 @@ from models import (
     MAX_DEPLOY_CREDENTIALS,
 )
 from database import db
-from services.template_service import is_trinity_compatible
+from services.template_service import (
+    is_trinity_compatible,
+    collect_mcp_credential_warnings,
+)
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop
 from utils.helpers import sanitize_agent_name
@@ -464,6 +468,31 @@ async def deploy_local_agent_logic(
             )
 
         dest_path = templates_dir / version_name
+
+        # Path-containment guard (#950). version_name is already a single
+        # sanitized slug (sanitize_agent_name strips path separators), but
+        # normalize + verify containment so the value reaching every downstream
+        # file access provably stays under templates_dir. This is
+        # defense-in-depth AND the CodeQL-recognized path-injection barrier:
+        # normalize, inline startswith prefix-check, and use the normalized
+        # value downstream.
+        _templates_base = os.path.normpath(str(templates_dir))
+        _normalized_dest = os.path.normpath(str(dest_path))
+        if _normalized_dest != _templates_base and not _normalized_dest.startswith(
+            _templates_base + os.sep
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Resolved template path escapes deployed-templates "
+                        f"directory: {version_name}"
+                    ),
+                    "code": "TEMPLATE_PATH_ESCAPE",
+                },
+            )
+        dest_path = Path(_normalized_dest)
+
         if dest_path.exists():
             shutil.rmtree(dest_path)
 
@@ -519,6 +548,16 @@ async def deploy_local_agent_logic(
             credentials_injected = len(body.credentials)
             logger.info(f"Wrote {credentials_injected} credentials to template for agent {version_name}")
 
+        # 9b-advisory. Warn about MCP servers whose ${VAR} references have no
+        # matching credential in the post-merge .env (#950 deferred hardening).
+        # Read dest_path/.env — that's where body.credentials were merged just
+        # above; extract_root still holds the un-merged archive copy.
+        warnings = collect_mcp_credential_warnings(dest_path)
+        if warnings:
+            logger.info(
+                f"Deploy {version_name}: {len(warnings)} MCP credential warning(s)"
+            )
+
         # 9c. Pre-populate the agent's workspace volume from the extracted
         # template (#950). Sidesteps the bind-mount transport entirely:
         # dev compose uses a docker-managed named volume for /data while
@@ -549,6 +588,7 @@ async def deploy_local_agent_logic(
             ),
             credentials_imported=credentials_imported,
             credentials_injected=credentials_injected,
+            warnings=warnings,
         )
 
     except HTTPException:

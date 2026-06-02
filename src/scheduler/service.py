@@ -1033,6 +1033,15 @@ class SchedulerService:
         if config.internal_api_secret:
             headers["X-Internal-Secret"] = config.internal_api_secret
 
+        # RELIABILITY-006 (#525): deterministic idempotency key per fire. The
+        # execution_id is created once per schedule fire and reused across an
+        # HTTP-level resend of this same dispatch, so a transient backend 5xx +
+        # resend resolves to the same key and the backend short-circuits the
+        # duplicate instead of starting a second execution. Intentional #271
+        # retries create a fresh execution_id → fresh key → not suppressed.
+        if execution_id:
+            headers["Idempotency-Key"] = f"sched:{execution_id}"
+
         payload = {
             "agent_name": agent_name,
             "message": message,

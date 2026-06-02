@@ -11,12 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl git libmag
 # and `GET /api/version` can return commit/branch/build-date for the
 # image actually in flight. Defaults to "unknown" so local builds and
 # operators who skip start.sh still get a well-typed response.
+ARG VERSION=unknown
 ARG GIT_COMMIT=unknown
 ARG GIT_COMMIT_SUBJECT=unknown
 ARG GIT_COMMIT_TIMESTAMP=unknown
 ARG GIT_BRANCH=unknown
 ARG BUILD_DATE=unknown
-ENV GIT_COMMIT=${GIT_COMMIT} \
+ENV VERSION=${VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
     GIT_COMMIT_SUBJECT=${GIT_COMMIT_SUBJECT} \
     GIT_COMMIT_TIMESTAMP=${GIT_COMMIT_TIMESTAMP} \
     GIT_BRANCH=${GIT_BRANCH} \
@@ -76,6 +78,11 @@ COPY ../../src/backend/canary /app/canary/
 # Copy configuration files (documentation, templates)
 COPY ../../config/process-docs /app/config/process-docs/
 COPY ../../config/process-templates /app/config/process-templates/
+
+# Platform version file — read by /api/version (#958). The dev compose also
+# bind-mounts ./VERSION:/app/VERSION:ro for hot edits, but prod compose
+# doesn't, so without this COPY the version field falls back to "unknown".
+COPY ../../VERSION /app/VERSION
 
 # Ensure all files are readable
 RUN chmod -R 644 /app/*.py && \

@@ -177,6 +177,13 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     export GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
     export GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
     export GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    # #993: dynamic version = curated semver (VERSION file) + git short sha
+    # (+ ".dirty" when the tree has uncommitted changes), e.g.
+    # "0.9.0+g4c640b6e". Env-stamped so dev and prod agree per commit.
+    _base_ver=$(cat VERSION 2>/dev/null || echo unknown)
+    _short_sha=$(git rev-parse --short=8 HEAD)
+    git diff --quiet HEAD 2>/dev/null || _short_sha="${_short_sha}.dirty"
+    export VERSION="${_base_ver}+g${_short_sha}"
 fi
 export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

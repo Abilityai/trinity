@@ -1237,11 +1237,4 @@ async function removeBulkTag(tag) {
 .border-l-3 {
   border-left-width: 3px;
 }
-
-/* Dark hover shade between gray-700 and gray-800 */
-@media (prefers-color-scheme: dark) {
-  .dark\:hover\:bg-gray-750:hover {
-    background-color: rgb(42, 48, 60);
-  }
-}
 </style>

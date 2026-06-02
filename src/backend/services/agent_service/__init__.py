@@ -65,6 +65,7 @@ from .stats import (
     get_agents_context_stats_logic,
     get_agent_stats_logic,
     invalidate_context_stats_cache,
+    invalidate_agent_stats_cache,
 )
 from .api_key import (
     get_agent_api_key_setting_logic,
@@ -138,6 +139,7 @@ __all__ = [
     "get_agents_context_stats_logic",
     "get_agent_stats_logic",
     "invalidate_context_stats_cache",
+    "invalidate_agent_stats_cache",
     # API Key
     "get_agent_api_key_setting_logic",
     "update_agent_api_key_setting_logic",

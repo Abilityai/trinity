@@ -899,6 +899,22 @@ def _migrate_agent_ownership_guardrails(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_circuit_breaker(cursor, conn):
+    """Add circuit_breaker_enabled column to agent_ownership (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch circuit breaker. Default 0 (OFF) — a true
+    opt-in canary; the global DISPATCH_BREAKER_ENABLED master switch must ALSO
+    be on for the breaker to engage (D7/D11).
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "circuit_breaker_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN circuit_breaker_enabled INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_voice_prompt(cursor, conn):
     """Add voice_system_prompt column to agent_ownership (VOICE-005).
 
@@ -2183,6 +2199,125 @@ def _migrate_agent_ownership_soft_delete(cursor, conn):
     conn.commit()
 
 
+def _migrate_idempotency_keys_table(cursor, conn):
+    """Create idempotency_keys table + index (RELIABILITY-006 / Issue #525).
+
+    Backs the Idempotency-Key contract at every execution trigger boundary.
+    Schema is also defined in db/schema.py for fresh installs; this migration
+    handles existing installs.
+    """
+    cursor.execute("PRAGMA table_info(idempotency_keys)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            scope TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            execution_id TEXT,
+            status TEXT NOT NULL,
+            response_snapshot TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope, idempotency_key)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_idempotency_created "
+        "ON idempotency_keys(created_at)"
+    )
+    conn.commit()
+    print("Created idempotency_keys table with index (RELIABILITY-006, #525)")
+
+
+def _migrate_agent_loops_tables(cursor, conn):
+    """Create agent_loops + agent_loop_runs tables and link to schedule_executions (#740).
+
+    Adds the two new tables for sequential bounded task execution and a
+    `loop_id` column on `schedule_executions` so each iteration's
+    execution row joins back to its parent loop (timeline tagging).
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_loops (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message_template TEXT NOT NULL,
+            max_runs INTEGER NOT NULL,
+            stop_signal TEXT,
+            delay_seconds INTEGER NOT NULL DEFAULT 0,
+            timeout_per_run INTEGER,
+            model TEXT,
+            allowed_tools TEXT,
+            status TEXT NOT NULL,
+            runs_completed INTEGER NOT NULL DEFAULT 0,
+            stop_reason TEXT,
+            last_response TEXT,
+            error TEXT,
+            started_by_user_id INTEGER,
+            started_by_user_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            source_mcp_key_name TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_loop_runs (
+            id TEXT PRIMARY KEY,
+            loop_id TEXT NOT NULL,
+            run_number INTEGER NOT NULL,
+            execution_id TEXT,
+            status TEXT NOT NULL,
+            response TEXT,
+            error TEXT,
+            cost REAL,
+            duration_ms INTEGER,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_loops_agent ON agent_loops(agent_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_loops_status ON agent_loops(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_loops_user ON agent_loops(started_by_user_id)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)"
+    )
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "loop_id",
+        "ALTER TABLE schedule_executions ADD COLUMN loop_id TEXT",
+        log_msg="Adding loop_id column to schedule_executions for #740 loop linkage...",
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_loop "
+        "ON schedule_executions(loop_id) WHERE loop_id IS NOT NULL"
+    )
+    conn.commit()
+
+
+def _migrate_users_suspended_at(cursor, conn):
+    """#995 — user deactivation primitive.
+
+    Adds `suspended_at TEXT` (NULL = active) to `users`. The OSS auth path
+    (`get_current_user`) rejects any user whose `suspended_at` is set, so
+    setting it blocks new logins AND invalidates live tokens on the next
+    request. Edition-agnostic primitive: only the enterprise
+    user-management module exposes a way to set/clear it (core-primitive +
+    enterprise-knob, same pattern as #834).
+    """
+    _safe_add_column(
+        cursor,
+        "users",
+        "suspended_at",
+        "ALTER TABLE users ADD COLUMN suspended_at TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2250,4 +2385,8 @@ MIGRATIONS = [
     # #913 — must come AFTER default_execution_timeout_to_3600 so we null out
     # both 900 (legacy) and 3600 (post-#665 rewrite) in one pass.
     ("null_legacy_schedule_timeouts", _migrate_null_legacy_schedule_timeouts),
+    ("idempotency_keys_table", _migrate_idempotency_keys_table),
+    ("agent_loops_tables", _migrate_agent_loops_tables),
+    ("users_suspended_at", _migrate_users_suspended_at),
+    ("agent_ownership_circuit_breaker", _migrate_agent_ownership_circuit_breaker),
 ]

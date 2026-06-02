@@ -22,11 +22,13 @@ from time import monotonic
 from typing import Deque, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from database import db
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import idempotency_service
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +250,7 @@ async def trigger_webhook(
     webhook_token: str,
     request: Request,
     body: Optional[WebhookTriggerRequest] = None,
+    idempotency_key: Optional[str] = Header(None),
 ):
     """
     Trigger a schedule execution via its webhook URL.
@@ -292,6 +295,46 @@ async def trigger_webhook(
 
     # Trigger execution via the scheduler service
     caller_ip = request.client.host if request.client else "unknown"
+
+    # RELIABILITY-006 (#525): idempotency gate. External senders retry on 5xx
+    # and perceived timeouts; without a key we auto-derive one from
+    # (token, body_hash) so naive re-deliveries don't fire the schedule twice.
+    try:
+        raw_body = await request.body()
+    except Exception:
+        raw_body = b""
+    idem_key = idempotency_key or idempotency_service.derive_webhook_key(
+        webhook_token, raw_body
+    )
+    idem = idempotency_service.begin(
+        idempotency_service.make_webhook_scope(webhook_token), idem_key
+    )
+    if idem.replay:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="idempotent_replay",
+            source="api",
+            actor_ip=caller_ip,
+            target_type="agent",
+            target_id=schedule.agent_name,
+            endpoint=f"/api/webhooks/{webhook_token[:8]}…",
+            details={
+                "schedule_id": schedule.id,
+                "in_flight": idem.in_flight,
+                "auto_derived_key": idempotency_key is None,
+            },
+        )
+        if idem.in_flight:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A duplicate webhook delivery is still being processed.",
+            )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=idem.snapshot or {"status": "triggered", "schedule_id": schedule.id},
+            headers={"X-Idempotent-Replay": "true"},
+        )
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -321,9 +364,13 @@ async def trigger_webhook(
             )
 
     except HTTPException:
+        # Nothing dispatched — release the claim so a legitimate re-delivery
+        # can retry rather than getting a stuck 409 (#525).
+        idempotency_service.fail(idem)
         raise
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.error(f"Webhook trigger: cannot reach scheduler — {exc}")
+        idempotency_service.fail(idem)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Scheduler service unavailable — try again later",
@@ -355,10 +402,15 @@ async def trigger_webhook(
         f"Webhook triggered: schedule={schedule.id} agent={schedule.agent_name} ip={caller_ip}"
     )
 
-    return {
+    trigger_payload = {
         "status": "triggered",
         "schedule_id": schedule.id,
         "schedule_name": schedule.name,
         "agent_name": schedule.agent_name,
         "message": "Execution started — poll GET /api/agents/{name}/executions for status",
     }
+    # Store the ack so a duplicate delivery within the TTL replays it instead of
+    # firing the schedule again (#525). No execution_id here — the webhook is
+    # fire-and-forget into the scheduler.
+    idempotency_service.complete(idem, None, trigger_payload)
+    return trigger_payload

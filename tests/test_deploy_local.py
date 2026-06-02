@@ -12,6 +12,7 @@ Note: This is the backend endpoint used by the MCP deploy_local_agent tool.
 
 import pytest
 import base64
+import json
 import tarfile
 import io
 import uuid
@@ -29,17 +30,30 @@ from utils.assertions import (
 from utils.cleanup import cleanup_test_agent
 
 
-def create_test_archive(template_yaml_content: str, files: dict = None) -> str:
+def create_test_archive(
+    template_yaml_content: str,
+    files: dict = None,
+    include_claude_md: bool = True,
+) -> str:
     """Create a base64-encoded tar.gz archive with template.yaml and optional files.
 
     Args:
         template_yaml_content: Content for template.yaml
         files: Optional dict of {filename: content} for additional files
+        include_claude_md: When True (default), inject a non-empty CLAUDE.md
+            unless `files` already supplies one. The deploy endpoint hard-fails
+            archives with no usable CLAUDE.md (#950), so the success-path tests
+            need one present. Pass False to exercise the rejection path.
 
     Returns:
         Base64-encoded tar.gz archive string
     """
     buffer = io.BytesIO()
+
+    # Copy so the default injection doesn't mutate the caller's dict.
+    files = dict(files) if files else {}
+    if include_claude_md and "CLAUDE.md" not in files:
+        files["CLAUDE.md"] = "# Test Agent\nDefault test instructions.\n"
 
     with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
         # Add template.yaml
@@ -172,6 +186,33 @@ display_name: Test Agent
         )
         # Should fail validation
         assert_status(response, 400)
+
+    def test_deploy_missing_claude_md_rejected(self, api_client: TrinityApiClient):
+        """An archive with a valid template.yaml but no CLAUDE.md is rejected (#950).
+
+        Before the hardening this deployed an instruction-less, effectively
+        empty agent; now it fails fast with NOT_TRINITY_COMPATIBLE at deploy
+        time.
+        """
+        template_content = """
+name: test-no-claude
+display_name: No Claude Agent
+resources:
+  cpu: "1"
+  memory: "2g"
+"""
+        archive = create_test_archive(template_content, include_claude_md=False)
+
+        response = api_client.post(
+            "/api/agents/deploy-local",
+            json={"archive": archive}
+        )
+        assert_status(response, 400)
+        data = response.json()
+        detail = data.get("detail", "")
+        detail_str = detail.get("error", "") if isinstance(detail, dict) else str(detail)
+        assert data.get("code") == "NOT_TRINITY_COMPATIBLE" \
+            or "CLAUDE.md" in detail_str
 
 
 class TestDeployLocalSuccessful:
@@ -318,6 +359,58 @@ resources:
             # Should have credential import info
             assert "credentials_imported" in data
             assert "credentials_injected" in data
+
+        finally:
+            cleanup_test_agent(api_client, agent_name)
+
+    @pytest.mark.slow
+    @pytest.mark.requires_agent
+    @pytest.mark.timeout(120)
+    def test_deploy_mcp_missing_cred_warns(self, api_client: TrinityApiClient, request):
+        """MCP servers with unsatisfied ${VAR} references surface as advisory
+        warnings (#950); REST-merged credentials suppress their warning.
+
+        - HEYGEN_API_KEY: referenced, never provided -> warned.
+        - BLOTATO_API_KEY: referenced, provided via request `credentials`
+          (the REST merge path) -> NOT warned. This also pins the
+          dest_path/.env read: if the helper read the un-merged extract_root
+          copy instead, BLOTATO would wrongly warn.
+        """
+        agent_name = f"test-mcpwarn-{uuid.uuid4().hex[:6]}"
+        template_content = f"""
+name: {agent_name}
+display_name: MCP Warn Agent
+resources:
+  cpu: "1"
+  memory: "2g"
+"""
+        mcp_template = json.dumps({
+            "mcpServers": {
+                "heygen": {"command": "x", "env": {"KEY": "${HEYGEN_API_KEY}"}},
+                "blotato": {"command": "y", "env": {"KEY": "${BLOTATO_API_KEY}"}},
+            }
+        })
+        archive = create_test_archive(
+            template_content, files={".mcp.json.template": mcp_template}
+        )
+
+        try:
+            response = api_client.post(
+                "/api/agents/deploy-local",
+                json={
+                    "archive": archive,
+                    "credentials": {"BLOTATO_API_KEY": "satisfied-value"},
+                }
+            )
+
+            assert_status(response, 200)
+            data = response.json()
+            assert "warnings" in data
+            joined = "\n".join(data["warnings"])
+            # Unsatisfied user var -> warned.
+            assert "HEYGEN_API_KEY" in joined, f"warnings: {data['warnings']!r}"
+            # Satisfied via REST merge into dest_path/.env -> not warned.
+            assert "BLOTATO_API_KEY" not in joined, f"warnings: {data['warnings']!r}"
 
         finally:
             cleanup_test_agent(api_client, agent_name)

@@ -219,7 +219,7 @@
       @click.self="showBuildInfoModal = false"
     >
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
-        <div class="flex justify-between items-start mb-4">
+        <div class="flex justify-between items-start mb-2">
           <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Build Info</h2>
           <button
             @click="showBuildInfoModal = false"
@@ -230,6 +230,16 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+          Commit, branch, and build date the running platform was built from.
+        </p>
+        <div
+          v-if="buildInfo.isMissing.value"
+          class="mb-4 p-3 rounded bg-gray-50 dark:bg-gray-900 text-xs text-gray-600 dark:text-gray-400"
+        >
+          Build metadata not available — rebuild with
+          <code class="font-mono">scripts/deploy/start.sh</code> to populate.
         </div>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between">
