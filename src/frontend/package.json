@@ -30,7 +30,7 @@
     "marked": "^17.0.0",
     "mermaid": "^11.15.0",
     "monaco-editor": "^0.55.1",
-    "pinia": "^2.3.0",
+    "pinia": "^3.0.4",
     "uplot": "^1.6.32",
     "vue": "^3.5.35",
     "vue-chartjs": "^5.3.2",
