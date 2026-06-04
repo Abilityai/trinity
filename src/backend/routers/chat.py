@@ -1193,6 +1193,17 @@ async def _run_async_task_with_persistence(
         signal_sync_waiter(execution_id, result, chat_session_id)
 
 
+def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
+    """#1068 (demotion PR 1): deprecated per-task timeout override — honor but clamp
+    to the agent cap (closing the pre-#1068 unclamped escape around the #929 invariant
+    schedules respect). Returns (resolved, warning_or_None); None → pass-through."""
+    if requested is None:
+        return None, None
+    if requested > agent_cap:
+        return agent_cap, f"timeout_seconds={requested}s exceeds agent cap {agent_cap}s; clamping (field deprecated, will be removed)."
+    return requested, f"timeout_seconds={requested}s deprecated; agent cap ({agent_cap}s) is authoritative."
+
+
 @router.post("/{name}/task")
 async def execute_parallel_task(
     request: ParallelTaskRequest,
@@ -1226,6 +1237,17 @@ async def execute_parallel_task(
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
+    # here — in place, so every downstream site (acquire, execute_task, backlog
+    # payload) sees the clamped value and the warning fires once. No-override path skipped.
+    if request.timeout_seconds is not None:
+        _resolved_timeout, _timeout_warning = _resolve_deprecated_task_timeout(
+            request.timeout_seconds, db.get_execution_timeout(name)
+        )
+        if _timeout_warning:
+            logger.warning("[#1068] agent '%s': %s", name, _timeout_warning)
+        request.timeout_seconds = _resolved_timeout
 
     # SELF-EXEC-001: Security validation - verify X-Source-Agent matches MCP key's agent scope
     # This prevents header spoofing where a caller claims to be a different agent

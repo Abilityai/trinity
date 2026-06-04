@@ -203,8 +203,10 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           .number()
           .optional()
           .describe(
-            "Execution timeout in seconds. If omitted, uses the target agent's " +
-            "configured execution_timeout_seconds (default 900s, max 7200s). " +
+            "DEPRECATED (#1068): per-task timeout override. Prefer the target " +
+            "agent's configured execution_timeout_seconds — this per-call value " +
+            "is now clamped to that cap and will be removed in a future release. " +
+            "If omitted, the agent cap applies (default 900s, max 7200s). " +
             "Only applies when parallel=true."
           ),
         async: z
