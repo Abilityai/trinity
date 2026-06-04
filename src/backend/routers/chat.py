@@ -487,7 +487,6 @@ async def chat_with_agent(
     if isinstance(admission, JSONResponse):
         return admission
     idem = admission.idem
-    idem_done = False
     chat_execution_id = admission.execution_id
     capacity_result = admission.capacity_result
     capacity = admission.capacity
@@ -522,6 +521,62 @@ async def chat_with_agent(
     session = ctx.session
     is_queued = ctx.is_queued
 
+    # Execute + finalize (#1026 slice 3): dispatch to the agent, persist the
+    # assistant message + observability, complete activities, write the terminal
+    # execution row, store the idempotency snapshot, and (on error) run SUB-003
+    # auto-switch + map the HTTPException. Always releases the slot + idem claim.
+    return await _run_chat_and_finalize(
+        name=name,
+        request=request,
+        current_user=current_user,
+        x_source_agent=x_source_agent,
+        x_mcp_key_name=x_mcp_key_name,
+        triggered_by=triggered_by,
+        task_execution_id=task_execution_id,
+        _chat_subscription_id=_chat_subscription_id,
+        chat_activity_id=chat_activity_id,
+        collaboration_activity_id=collaboration_activity_id,
+        session=session,
+        execution=execution,
+        queue_result=queue_result,
+        is_queued=is_queued,
+        chat_timeout=chat_timeout,
+        idem=idem,
+        capacity=capacity,
+    )
+
+
+async def _run_chat_and_finalize(
+    *,
+    name: str,
+    request: ChatMessageRequest,
+    current_user: User,
+    x_source_agent: Optional[str],
+    x_mcp_key_name: Optional[str],
+    triggered_by: str,
+    task_execution_id: object,
+    _chat_subscription_id: object,
+    chat_activity_id: object,
+    collaboration_activity_id: object,
+    session: object,
+    execution: object,
+    queue_result: str,
+    is_queued: bool,
+    chat_timeout: int,
+    idem: object,
+    capacity: object,
+):
+    """Execute the chat against the agent and finalize (#1026 slice 3).
+
+    Dispatches the request to the agent server, persists the assistant message +
+    observability, completes the chat/collaboration activities, writes the
+    terminal execution-status row, and stores the idempotency snapshot. On the
+    agent-call error paths it records the failure, runs SUB-003 auto-switch
+    (429/auth), and raises the mapped HTTPException. The ``finally`` always
+    releases the capacity slot and any still-in-flight idempotency claim.
+    Returns the agent response dict (the endpoint's response body).
+    """
+    idem_done = False
     execution_success = False
     try:
         # chat_timeout already fetched above for slot acquisition (Issue #98)

@@ -1,13 +1,19 @@
 """
-Characterization tests for the admission gate of routers.chat.chat_with_agent
-(#1026, slice 1).
+Characterization tests for the decomposition of routers.chat.chat_with_agent
+(#1026, slices 1-3).
 
-The front of chat_with_agent gates a request before any work: idempotency
-replay/in-flight (#525), dispatch-breaker fast-fail (#526), and the
-CapacityManager.acquire (#428) with its CapacityFull→429 + idempotency-release.
-These pin the four exit modes so the extraction of `_admit_chat_request` is
-provably behavior-preserving. The admitted (happy) path is covered separately
-against the extracted helper.
+- Slice 1 (`_admit_chat_request`): idempotency replay/in-flight (#525),
+  dispatch-breaker fast-fail (#526), CapacityManager.acquire (#428) with its
+  CapacityFull→429 + idempotency-release. The four deny/replay exits are pinned.
+- Slice 2 (`_prepare_chat_execution`): execution record, subscription lookup,
+  collaboration broadcast/activity, session, chat-start activity, user-msg log.
+- Slice 3 (`_run_chat_and_finalize`): agent dispatch, response persistence,
+  activity completion, terminal execution write, idempotency snapshot, the
+  httpx/SUB-003 error paths, and the slot + idempotency release in `finally`.
+
+The full admitted path is covered end-to-end via the real `chat_with_agent`
+(`test_admitted_full_endpoint_path_succeeds`) so no extracted local can be
+stranded without a test failing.
 """
 from __future__ import annotations
 
@@ -220,3 +226,37 @@ def test_prepare_agent_to_agent_broadcasts_collaboration():
     assert ctx.triggered_by == "agent"
     assert ctx.collaboration_activity_id == "act1"   # collaboration activity tracked
     bcast.assert_awaited_once()                       # agent-to-agent broadcast fired
+
+
+# --- #1026 slice 3: _run_chat_and_finalize --------------------------------
+
+def test_run_finalize_http_error_releases_slot_and_idem_then_503():
+    """A non-auth agent transport error maps to 503 and the `finally` releases
+    BOTH the capacity slot and the in-flight idempotency claim (idem_done stays
+    False). SUB-003 is not triggered for a transport error with no status code."""
+    import httpx
+    from routers.chat import _run_chat_and_finalize
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=AsyncMock())), \
+         patch.object(_CHAT, "agent_post_with_retry",
+                      AsyncMock(side_effect=httpx.ConnectError("boom"))), \
+         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
+         patch("services.subscription_auto_switch.handle_subscription_failure",
+               AsyncMock(return_value=None)):
+        idem = m["isvc"].begin.return_value
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(_run_chat_and_finalize(
+                name="agent1", request=ChatMessageRequest(message="hi"),
+                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
+                chat_activity_id="ca1", collaboration_activity_id=None,
+                session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
+                queue_result="running", is_queued=False, chat_timeout=3600,
+                idem=idem, capacity=m["cap"],
+            ))
+    assert exc.value.status_code == 503
+    assert "Failed to communicate with agent" in str(exc.value.detail)
+    m["cap"].release.assert_awaited_once()   # slot released in finally
+    m["isvc"].fail.assert_called_once()      # idem claim released (idem_done False)
