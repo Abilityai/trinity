@@ -231,7 +231,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Post or update sticky comment per PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PATHS: ${{ steps.list.outputs.paths }}
         with:
