@@ -53,6 +53,7 @@ def _env(idem, breaker_state=None, acquire_exc=None):
     isvc.begin.return_value = idem
 
     cap = MagicMock()
+    cap.release = AsyncMock()
     if acquire_exc is not None:
         cap.acquire = AsyncMock(side_effect=acquire_exc)
     else:
@@ -136,3 +137,38 @@ def test_admitted_returns_chat_admission():
     assert admission.capacity_result is cap_result
     assert isinstance(admission.execution_id, str) and admission.execution_id
     assert admission.idem is m["isvc"].begin.return_value
+    # The handoff must carry queue_result + chat_timeout, otherwise the
+    # downstream endpoint body NameErrors on them (regression guard for the
+    # #1051 review finding).
+    assert admission.queue_result == "running"  # state == "admitted"
+    assert admission.chat_timeout == 3600        # db.get_execution_timeout
+
+
+def test_admitted_full_endpoint_path_succeeds():
+    """End-to-end admitted path through the *whole* chat_with_agent body.
+
+    Pins the two values threaded via ChatAdmission that the downstream body
+    consumes: `chat_timeout` (agent_post_with_retry timeout) and `queue_result`
+    (response `execution.queue_status`). Before the #1051 fix these were stranded
+    in the helper's scope and the admitted path raised NameError before the agent
+    was ever called — uncaught because no test drove the full endpoint.
+    """
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"response": "hi back", "metadata": {}, "session": {}}
+
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service",
+                      MagicMock(track_activity=AsyncMock(return_value="act1"),
+                                complete_activity=AsyncMock())), \
+         patch.object(_CHAT, "agent_post_with_retry", AsyncMock(return_value=resp)) as post, \
+         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CHAT, "is_execution_context_enabled", return_value=False):
+        result = _call()
+
+    # No NameError; the endpoint returned the agent response augmented with the
+    # execution block built from queue_result + is_queued.
+    assert result["execution"]["queue_status"] == "running"
+    assert result["execution"]["was_queued"] is False
+    # chat_timeout (3600) + 10s HTTP buffer was forwarded to the agent call.
+    assert post.await_args.kwargs["timeout"] == 3610

@@ -113,6 +113,8 @@ class ChatAdmission(NamedTuple):
     execution_id: str
     capacity_result: object
     capacity: object
+    queue_result: str
+    chat_timeout: int
 
 
 async def _admit_chat_request(
@@ -208,6 +210,10 @@ async def _admit_chat_request(
         _disp = DispatchBreaker(name).to_dict()
         if _disp.get("state") == "open":
             logger.warning(f"[Chat] Agent '{name}' dispatch circuit open, rejecting request")
+            # Nothing dispatched — release the idempotency claim so the caller
+            # can retry with the same key once the breaker recovers (#525),
+            # mirroring the CapacityFull branch below.
+            idempotency_service.fail(idem)
             _raise_circuit_open_503(
                 name, None, CircuitOpen(name, int(_disp.get("retry_after_seconds") or 0))
             )
@@ -272,6 +278,8 @@ async def _admit_chat_request(
         execution_id=chat_execution_id,
         capacity_result=capacity_result,
         capacity=capacity,
+        queue_result=queue_result,
+        chat_timeout=chat_timeout,
     )
 
 
@@ -329,6 +337,8 @@ async def chat_with_agent(
     chat_execution_id = admission.execution_id
     capacity_result = admission.capacity_result
     capacity = admission.capacity
+    queue_result = admission.queue_result
+    chat_timeout = admission.chat_timeout
 
     # Track queue position for observability
     is_queued = capacity_result.state == "queued_in_memory"
