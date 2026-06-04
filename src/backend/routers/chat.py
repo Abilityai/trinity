@@ -493,7 +493,6 @@ async def chat_with_agent(
     queue_result = admission.queue_result
     chat_timeout = admission.chat_timeout
 
-    # Track queue position for observability
     # Execution setup (#1026 slice 2): exec record (#96) + subscription (SUB-004)
     # + collaboration broadcast/activity + session + chat-start activity + inbound
     # user-message log. Returns the ids/records the execute+finalize body below

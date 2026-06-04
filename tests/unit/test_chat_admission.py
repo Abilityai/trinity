@@ -116,6 +116,10 @@ def test_breaker_open_raises_503():
             _call()
     assert exc.value.status_code == 503
     m["cap"].acquire.assert_not_awaited()  # fast-fail before acquire
+    # Nothing dispatched: the idempotency claim is released so the caller can
+    # retry with the same key once the breaker recovers (#525), mirroring the
+    # CapacityFull branch. Pins the behavior change called out in #1051 review.
+    m["isvc"].fail.assert_called_once()
 
 
 def test_capacity_full_raises_429_and_releases_idem():
