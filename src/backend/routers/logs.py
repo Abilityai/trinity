@@ -63,7 +63,7 @@ async def get_retention_config(current_user: User = Depends(require_admin)):
     import os
 
     return RetentionConfig(
-        retention_days=int(os.getenv("LOG_RETENTION_DAYS", "90")),
+        retention_days=int(os.getenv("LOG_RETENTION_DAYS", "5")),
         archive_enabled=os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
         cleanup_hour=int(os.getenv("LOG_CLEANUP_HOUR", "3")),
     )
@@ -166,6 +166,6 @@ async def log_service_health(current_user: User = Depends(require_admin)):
         "scheduler_running": log_archive_service.scheduler.running if log_archive_service.scheduler else False,
         "archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
         "archive_path": os.getenv("LOG_ARCHIVE_PATH", "/data/archives"),
-        "retention_days": int(os.getenv("LOG_RETENTION_DAYS", "90")),
+        "retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
         "cleanup_hour": int(os.getenv("LOG_CLEANUP_HOUR", "3")),
     }

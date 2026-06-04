@@ -203,6 +203,61 @@ async def get_public_feature_flags(
     }
 
 
+@router.get("/retention")
+async def get_retention_status(
+    current_user: User = Depends(get_current_user),
+):
+    """Effective data-retention windows actually in use, plus the active
+    edition (#1039).
+
+    Reports the value resolved for each operator-tunable class — log archival
+    (env LOG_*), execution log/row, health-check, and agent/schedule
+    soft-delete (OPS settings, DB → default precedence) — and the audit-log
+    window (separate 365-day integrity floor, exempt from the community floor).
+
+    ``edition`` is ``enterprise`` when the ``retention`` entitlement is present
+    (license-driven once #1040 lands; registry-driven today) and ``community``
+    otherwise. In the community edition the windows default to the 5-day floor;
+    the env/OPS values remain an unsupported self-host escape hatch — OSS does
+    not hard-clamp (the enterprise module is the managed, supported surface).
+
+    Admin-only.
+    """
+    require_admin(current_user)
+
+    from services.entitlement_service import entitlement_service
+    from services.settings_service import (
+        COMMUNITY_RETENTION_FLOOR_DAYS,
+        RETENTION_OPS_KEYS,
+    )
+
+    def _ops_int(key: str) -> int:
+        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        try:
+            return max(int(raw), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    entitled = entitlement_service.is_entitled("retention")
+    audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
+
+    return {
+        "edition": "enterprise" if entitled else "community",
+        "community_floor_days": COMMUNITY_RETENTION_FLOOR_DAYS,
+        # enterprise (license) DB setting → env var → 5-day community default
+        "precedence": "enterprise → env → community-default",
+        "windows": {
+            # Log archival (env-driven; LOG_* escape hatch)
+            "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
+            "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
+            # Execution + health + soft-delete (OPS settings, 0 = disabled)
+            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Audit log — exempt from the community floor (365-day integrity floor)
+            "audit_log_retention_days": audit_days,
+        },
+    }
+
+
 # ============================================================================
 # API Keys Management Endpoints
 # NOTE: These routes MUST be defined BEFORE the /{key} catch-all route
