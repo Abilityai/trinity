@@ -53,6 +53,74 @@
           <!-- #32 — Single Sign-On (enterprise, gated by `sso`) -->
           <SsoPanel v-if="activeTab === 'sso'" />
 
+          <!-- Retention Tab Content (#1039) -->
+          <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+            <div class="px-6 py-5">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Data Retention</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    How long Trinity keeps logs, executions, health checks, and soft-deleted agents/schedules.
+                  </p>
+                </div>
+                <span
+                  v-if="retention"
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                  :class="retention.edition === 'enterprise'
+                    ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200'
+                    : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'"
+                >{{ retention.edition === 'enterprise' ? 'Enterprise' : 'Community' }}</span>
+              </div>
+
+              <div v-if="retentionLoading" class="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading…</div>
+              <div v-else-if="retentionError" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ retentionError }}</div>
+
+              <div v-else-if="retention" class="mt-5 space-y-4">
+                <!-- Community: read-only fixed floor + upgrade hint -->
+                <div v-if="!retentionEntitled" class="rounded-md bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 p-4">
+                  <p class="text-sm text-indigo-800 dark:text-indigo-200">
+                    The community edition keeps a fixed
+                    <strong>{{ retention.community_floor_days }}-day</strong> retention floor.
+                    An enterprise license unlocks configurable, longer windows — set per class, applied live with no restart.
+                  </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div v-for="f in RETENTION_FIELDS" :key="f.key">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ f.label }}</label>
+                    <div class="mt-1 flex items-center gap-2">
+                      <input
+                        type="number" min="0" max="3650"
+                        v-model.number="retentionForm[f.key]"
+                        :disabled="!retentionEntitled || retentionSaving"
+                        class="block w-28 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 shadow-sm text-sm disabled:opacity-60"
+                      />
+                      <span class="text-sm text-gray-500 dark:text-gray-400">days</span>
+                    </div>
+                  </div>
+                  <!-- Audit log — always shown, never editable (integrity floor) -->
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Audit log</label>
+                    <div class="mt-1 flex items-center gap-2">
+                      <input type="number" :value="retention.windows.audit_log_retention_days" disabled
+                        class="block w-28 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-400 shadow-sm text-sm opacity-60" />
+                      <span class="text-xs text-gray-400">days (365-day integrity floor)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="retentionEntitled" class="flex items-center gap-3 pt-2">
+                  <button
+                    @click="saveRetention" :disabled="retentionSaving"
+                    class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                  >{{ retentionSaving ? 'Saving…' : 'Save retention' }}</button>
+                  <span v-if="retentionSaved" class="text-sm text-green-600 dark:text-green-400">Saved — applied live.</span>
+                  <span class="text-xs text-gray-400">0 disables a sweep · values below the {{ retention.community_floor_days }}-day floor are raised to it.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2190,6 +2258,7 @@ const ALL_TABS = [
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
+  { id: 'retention',    label: 'Retention',    adminOnly: true  },
 ]
 const { isAdmin } = useRole()
 const visibleTabs = computed(() =>
@@ -2238,6 +2307,63 @@ const loadingUsers = ref(false)
 // #995 — enterprise per-user activity audit (gated by user_management).
 // (enterpriseStore is declared near the top — visibleTabs needs it during setup.)
 const umEntitled = computed(() => enterpriseStore.isEntitled('user_management'))
+
+// #1039 — data-retention. The read surface (GET /api/settings/retention) is
+// available in every edition; editing is enterprise-only (PUT to the gated
+// /api/enterprise/retention/config). Community shows the fixed 5-day floor +
+// an upgrade hint.
+const retentionEntitled = computed(() => enterpriseStore.isEntitled('retention'))
+const RETENTION_FIELDS = [
+  { key: 'log_retention_days', label: 'Log archival' },
+  { key: 'execution_log_retention_days', label: 'Execution logs' },
+  { key: 'execution_row_retention_days', label: 'Execution rows' },
+  { key: 'health_check_retention_days', label: 'Health checks' },
+  { key: 'agent_soft_delete_retention_days', label: 'Soft-deleted agents' },
+  { key: 'schedule_soft_delete_retention_days', label: 'Soft-deleted schedules' },
+]
+const retention = ref(null)        // { edition, community_floor_days, windows{} }
+const retentionForm = reactive({}) // editable copy of the OPS/log windows
+const retentionLoading = ref(false)
+const retentionSaving = ref(false)
+const retentionError = ref('')
+const retentionSaved = ref(false)
+
+async function loadRetention() {
+  retentionLoading.value = true
+  retentionError.value = ''
+  try {
+    const r = await axios.get('/api/settings/retention', { headers: authStore.authHeader })
+    retention.value = r.data
+    for (const f of RETENTION_FIELDS) {
+      retentionForm[f.key] = r.data?.windows?.[f.key]
+    }
+  } catch (e) {
+    retentionError.value = e?.response?.data?.detail || e?.message || 'Failed to load retention'
+  } finally {
+    retentionLoading.value = false
+  }
+}
+
+async function saveRetention() {
+  if (!retentionEntitled.value) return
+  retentionSaving.value = true
+  retentionError.value = ''
+  retentionSaved.value = false
+  try {
+    const body = {}
+    for (const f of RETENTION_FIELDS) {
+      const n = parseInt(retentionForm[f.key], 10)
+      if (!Number.isNaN(n)) body[f.key] = n
+    }
+    await axios.put('/api/enterprise/retention/config', body, { headers: authStore.authHeader })
+    retentionSaved.value = true
+    await loadRetention()
+  } catch (e) {
+    retentionError.value = e?.response?.data?.detail || e?.message || 'Failed to save retention'
+  } finally {
+    retentionSaving.value = false
+  }
+}
 const activityUser = ref(null)
 const activityData = ref(null)
 const activityLoading = ref(false)
@@ -3808,6 +3934,9 @@ onMounted(() => {
   // #995: enterprise entitlements — cached/no-op if NavBar already loaded.
   // Gates the per-user activity column in User Management.
   enterpriseStore.loadFeatureFlags().catch(() => {})
+
+  // #1039: data-retention read surface (available in every edition).
+  if (isAdmin.value) loadRetention().catch(() => {})
 
   // Handle Slack OAuth callback
   if (route.query.slack === 'installed') {
