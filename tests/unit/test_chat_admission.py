@@ -172,3 +172,51 @@ def test_admitted_full_endpoint_path_succeeds():
     assert result["execution"]["was_queued"] is False
     # chat_timeout (3600) + 10s HTTP buffer was forwarded to the agent call.
     assert post.await_args.kwargs["timeout"] == 3610
+
+
+# --- #1026 slice 2: _prepare_chat_execution -------------------------------
+
+def _prep(x_source_agent=None):
+    """Run the extracted execution-setup helper under the same patched env."""
+    from routers.chat import _prepare_chat_execution
+    cap_result = MagicMock(state="admitted", queue_position=0)
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service",
+                      MagicMock(track_activity=AsyncMock(return_value="act1"),
+                                complete_activity=AsyncMock())), \
+         patch.object(_CHAT, "broadcast_collaboration_event", AsyncMock()) as bcast:
+        ctx = asyncio.run(_prepare_chat_execution(
+            name="agent1", request=ChatMessageRequest(message="hi"),
+            current_user=_user(), x_source_agent=x_source_agent, x_via_mcp=None,
+            x_mcp_key_id=None, x_mcp_key_name=None,
+            idem=m["isvc"].begin.return_value,
+            chat_execution_id="cex1", capacity_result=cap_result, queue_result="running",
+        ))
+    return ctx, m, bcast
+
+
+def test_prepare_returns_full_context():
+    """Every field the downstream body consumes is populated; the user message
+    is logged and the execution row is linked to the idempotency claim."""
+    from routers.chat import ChatExecutionContext
+    ctx, m, bcast = _prep(x_source_agent=None)
+    assert isinstance(ctx, ChatExecutionContext)
+    assert ctx.execution.id == "cex1"
+    assert ctx.task_execution_id is not None
+    assert ctx.triggered_by == "chat"
+    assert ctx.session is not None
+    assert ctx.chat_activity_id == "act1"
+    assert ctx.collaboration_activity_id is None   # not agent-to-agent
+    assert ctx.is_queued is False
+    m["isvc"].attach_execution.assert_called_once()  # exec linked to idem claim
+    m["db"].add_chat_message.assert_called_once()    # inbound user message logged
+    bcast.assert_not_awaited()                       # no collaboration for human caller
+
+
+def test_prepare_agent_to_agent_broadcasts_collaboration():
+    """Agent-to-agent path: triggered_by flips to 'agent', the collaboration
+    event is broadcast, and a collaboration activity is tracked."""
+    ctx, m, bcast = _prep(x_source_agent="caller-agent")
+    assert ctx.triggered_by == "agent"
+    assert ctx.collaboration_activity_id == "act1"   # collaboration activity tracked
+    bcast.assert_awaited_once()                       # agent-to-agent broadcast fired
