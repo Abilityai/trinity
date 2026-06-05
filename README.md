@@ -1,46 +1,39 @@
-<div align="center">
-  <a href="https://www.ability.ai/workshopsgt"><strong>🛠️ Free Weekly Workshops — Learn to build AI agents on Trinity →</strong></a>
-  <br/><br/>
-  <img src="docs/assets/trinity-logo-white.svg#gh-dark-mode-only" alt="Trinity" width="120"/>
-  <img src="docs/assets/trinity-logo.svg#gh-light-mode-only" alt="Trinity" width="120"/>
-  <h1>Trinity</h1>
-  <p><strong>Autonomous agent orchestration and infrastructure</strong></p>
-  <p>Deploy, orchestrate, and govern fleets of autonomous AI agents — with real-time observability, fleet-wide scheduling, agent-to-agent delegation, and complete audit trails. On your own infrastructure.</p>
-
-  <p>
-    <a href="https://github.com/abilityai/trinity/stargazers"><img src="https://img.shields.io/github/stars/abilityai/trinity?style=social" alt="Stars"></a>
-    <a href="https://github.com/abilityai/trinity/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Polyform%20NC-blue.svg" alt="License"></a>
-    <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
-    <img src="https://img.shields.io/badge/vue-3.x-green.svg" alt="Vue">
-    <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
-    <a href="https://pypi.org/project/trinity-cli/"><img src="https://img.shields.io/pypi/v/trinity-cli?label=CLI&color=blue" alt="PyPI"></a>
-  </p>
-
-  <p>
-    <a href="#ways-to-use-trinity">How to Use</a> &bull;
-    <a href="#-quick-start">Quick Start</a> &bull;
-    <a href="#features">Features</a> &bull;
-    <a href="https://youtu.be/SWpNphnuPpQ">Demo Video</a> &bull;
-    <a href="#documentation">Docs</a> &bull;
-    <a href="#community--support">Community</a> &bull;
-    <a href="https://github.com/abilityai/trinity-ops-public">Ops Agent</a>
-  </p>
-
-  <br/>
-  <img src="docs/assets/trinity-explainer.gif" alt="Trinity Platform Overview" width="800"/>
-  <br/><br/>
-  <a href="https://youtu.be/ivljtZqsxeo">
-    <img src="https://img.shields.io/badge/▶_Watch_Full_Demo-YouTube-red?style=for-the-badge&logo=youtube" alt="Watch the Full Demo">
+<p align="center">
+  <a href="https://www.ability.ai/trinity">
+    <img src="docs/assets/trinity-hero.webp" alt="Trinity — Run agents like infrastructure" width="720" />
   </a>
-  &nbsp;
-  <a href="https://github.com/abilityai/trinity-ops-public">
-    <img src="https://img.shields.io/badge/🤖_Ops_Agent-GitHub-black?style=for-the-badge&logo=github" alt="Trinity Ops Agent">
-  </a>
-  <br/><br/>
-  <img src="docs/assets/screenshots/graph-view-fleet.png" alt="Trinity Agent Fleet — Graph View" width="800"/>
-</div>
+</p>
+
+<p align="center">
+  <a href="#quick-start"><strong>Quick start</strong></a> &middot;
+  <a href="#your-whole-fleet-in-one-console"><strong>See it</strong></a> &middot;
+  <a href="https://youtu.be/ivljtZqsxeo"><strong>Demo</strong></a> &middot;
+  <a href="#documentation"><strong>Docs</strong></a> &middot;
+  <a href="#community--support"><strong>Community</strong></a> &middot;
+  <a href="https://www.ability.ai/trinity"><strong>Website</strong></a> &middot;
+  <a href="https://www.ability.ai/workshopsgt"><strong>Free workshops</strong></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/abilityai/trinity/stargazers"><img src="https://img.shields.io/github/stars/abilityai/trinity?style=flat" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Polyform%20NC-blue.svg" alt="License: Polyform NC"></a>
+  <a href="https://pypi.org/project/trinity-cli/"><img src="https://img.shields.io/pypi/v/trinity-cli?label=CLI&color=blue" alt="CLI"></a>
+  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/vue-3.x-green.svg" alt="Vue">
+  <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
+</p>
 
 ---
+
+## Run agents like infrastructure
+
+Trinity is the production runtime for your AI agents — governed, auditable, on your own infrastructure.
+
+> **Claude Code writes the agent. Trinity runs it in production.**
+
+Each agent runs in its own isolated Docker container with real-time observability, fleet-wide scheduling, agent-to-agent delegation, and a tamper-evident audit trail. Self-host it, or run it on any cloud you control.
+
+> Source-available · **Polyform Noncommercial** — free for non-commercial use; commercial use needs a commercial license and deploys anywhere you run it · Independently pentested — **UnderDefense Grade A** · We run Trinity in production ourselves — and so do our customers.
 
 ## Why Trinity?
 
@@ -54,13 +47,94 @@
 | **Build Custom** | 6-12 months, $500K+ engineering | Deploy in minutes |
 | **Frameworks** | No observability, no fleet management | Real-time monitoring, scheduling, audit trails |
 
-> **Security**: Trinity received a **Grade A (Excellent)** in an independent web application penetration test by [UnderDefense](https://underdefense.com) (April 2026). All critical and high findings from the initial assessment were fully remediated. See the [attestation letter](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf).
+## See it move
+
+<!-- TODO (asset): record a 30–60s interface walkthrough (e.g. fleet graph → a schedule firing),
+     drag-drop the .mp4 into a GitHub PR/issue comment to mint a user-attachments URL, then
+     uncomment the <video> block below and delete the interim image + this comment. -->
+
+<p align="center">
+  <a href="https://youtu.be/ivljtZqsxeo">
+    <img src="docs/assets/trinity-explainer.gif" alt="Trinity in motion — watch the full demo" width="720"/>
+  </a>
+</p>
+
+<!--
+<div align="center">
+  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/assets/screenshots/graph-view-fleet.png"></video>
+</div>
+-->
+
+A short teaser of the live interface — the full, zoomable detail is in [the screenshots below](#your-whole-fleet-in-one-console).
+
+## Up and running in minutes, not months
+
+| | |
+|---|---|
+| **01 · Deploy an instance** | Self-host with one command, or run a managed instance on any cloud you control. |
+| **02 · Connect your agents** | Point Claude Code at it over MCP — shared state, identity, and memory. |
+| **03 · Run in production** | Scheduled, multi-user, audited — inside your own perimeter. |
 
 ---
 
-## Getting Started — Deploy an Agent in 3 Minutes
+## Quick Start
 
-You need: a Trinity instance running somewhere (localhost or remote) and a local agent directory with `CLAUDE.md` and `template.yaml`.
+Two paths. Pick the one that fits: **stand up an instance** (Phase A), then **deploy agents to it** with the CLI (Phase B).
+
+### Phase A — Stand up a Trinity instance
+
+**Prerequisites**
+
+- Docker and Docker Compose v2+
+- Anthropic API key (for Claude-powered agents) OR Google API key (for Gemini-powered agents)
+
+**One-line install**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
+```
+
+This clones the repository, configures the environment, builds the base image, and starts all services.
+
+**Manual installation**
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env - at minimum set:
+#   SECRET_KEY (generate with: openssl rand -hex 32)
+
+# 3. Build the base agent image
+./scripts/deploy/build-base-image.sh
+
+# 4. Start all services
+./scripts/deploy/start.sh
+```
+
+> Prefer a guided setup? `./quickstart.sh` walks you through it interactively (or `./quickstart.sh --defaults` for non-interactive bring-up with auto-generated secrets).
+
+**First-time setup**
+
+1. Open http://localhost — you'll be redirected to the setup wizard
+2. Set your **admin password** (minimum 8 characters)
+3. Log in with username `admin` and your new password
+4. Go to **Settings** → **API Keys** to configure your Anthropic API key
+
+**Access**
+
+- **Web UI**: http://localhost
+- **API Docs**: http://localhost:8000/docs
+- **MCP Server**: http://localhost:8080/mcp
+
+> **Don't want to self-host?** Trinity also runs as a managed instance on any cloud you control. [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
+
+### Phase B — Deploy an agent to it (CLI)
+
+You need: the instance from Phase A (localhost or remote) and a local agent directory with `CLAUDE.md` and `template.yaml`.
 
 ```bash
 # 1. Install the CLI
@@ -95,32 +169,11 @@ trinity health fleet                        # fleet overview
 trinity deploy .                            # updates the same agent
 ```
 
-### Multiple Instances
+> Managing multiple instances? The CLI supports named profiles (`trinity --profile staging.example.com agents list`). See the [CLI documentation](docs/CLI.md) for the full command reference and profile management.
 
-The CLI supports named profiles for managing multiple Trinity instances:
+### Other Ways to Use Trinity
 
-```bash
-# Each instance gets its own profile (derived from hostname by default)
-trinity login --instance trinity.example.com --admin
-trinity login --instance staging.example.com --admin
-
-# Switch between instances with --profile
-trinity --profile trinity.example.com agents list
-trinity --profile staging.example.com agents list
-
-# Check current profile
-trinity status
-```
-
-See the [CLI documentation](docs/CLI.md) for the full command reference.
-
----
-
-## Other Ways to Use Trinity
-
-### Deploy from Claude Code (Plugin)
-
-Already have a Claude Code agent? Deploy it with the Trinity plugin:
+**Deploy from Claude Code (Plugin)** — already have a Claude Code agent? Deploy it with the Trinity plugin:
 
 ```bash
 /plugin marketplace add abilityai/abilities
@@ -130,43 +183,48 @@ Already have a Claude Code agent? Deploy it with the Trinity plugin:
 
 After onboarding you get management skills: `/trinity:sync` (push/pull code), `/trinity:remote` (execute tasks), `/trinity:schedules` (cron automation).
 
-### Create via Web UI
+**Create via Web UI** — open the Trinity web UI → **Create Agent** → pick a template (blank, built-in, or `github:org/repo@branch`) → configure credentials → start chatting.
 
-Open the Trinity web UI → **Create Agent** → pick a template (blank, built-in, or `github:org/repo@branch`) → configure credentials → start chatting.
-
-### Deploy a Multi-Agent System
-
-```yaml
-# system-manifest.yaml
-name: content-pipeline
-agents:
-  orchestrator:
-    template: github:abilityai/agent-corbin
-    schedules:
-      - cron: "0 9 * * *"
-        message: "Run daily content review"
-  writer:
-    template: github:abilityai/agent-ruby
-permissions:
-  preset: full-mesh
-```
-
-Deploy via MCP: `mcp__trinity__deploy_system(manifest="...")`
-
-See the [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) for patterns.
+**Deploy a Multi-Agent System** — define a fleet in one YAML manifest and deploy via MCP (`mcp__trinity__deploy_system`) or the REST API. See [Multi-Agent Systems](#multi-agent-systems) below.
 
 ---
 
-### For AI Agents
+## Your whole fleet, in one console
 
-If you're an AI agent given this repository:
+*Real screenshots from the Trinity control plane — the agents pictured are ours.*
 
-1. **This repo is a Claude Code plugin** — Run `/plugin marketplace add abilityai/abilities` to install Trinity management skills
-2. **To deploy yourself to Trinity** — Run `/plugin install trinity@abilityai` then `/trinity:onboard`
-3. **To interact with a Trinity instance** — Use the MCP tools (list_agents, chat_with_agent, etc.) after configuring the MCP server connection
-4. **To contribute to Trinity itself** — Read `CLAUDE.md` for development guidelines
+<table>
+  <tr>
+    <td width="50%"><a href="docs/assets/screenshots/graph-view-fleet.png"><img src="docs/assets/screenshots/graph-view-fleet.png" alt="Graph view — fleet topology with live status"/></a><br/><sub><b>Graph view</b> — fleet topology, live status, cost & success rates per agent.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/timeline-fleet-activity.png"><img src="docs/assets/screenshots/timeline-fleet-activity.png" alt="Timeline — fleet execution activity"/></a><br/><sub><b>Timeline</b> — execution history color-coded by trigger type.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/assets/screenshots/agent-dashboard-detail.png"><img src="docs/assets/screenshots/agent-dashboard-detail.png" alt="Agent dashboard detail"/></a><br/><sub><b>Agent dashboard</b> — custom widgets, historical tracking, sparklines.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/agent-terminal.png"><img src="docs/assets/screenshots/agent-terminal.png" alt="Agent terminal via ephemeral SSH"/></a><br/><sub><b>Live terminal</b> — ephemeral SSH into any agent container.</sub></td>
+  </tr>
+</table>
 
----
+<!-- TODO (asset): capture the two shots called out in the update brief — a **schedules** view and the
+     **Operating Room / operator-queue** view — at web-legible resolution and swap them in above
+     (replacing agent-dashboard / agent-terminal, or extending the grid to 6). -->
+
+## You've built the agents. Trinity is where they run.
+
+<!-- TODO: confirm this competitor set matches the live /trinity landing page before publish. -->
+
+| You're using… | Great for | Reach for Trinity when… |
+|---|---|---|
+| **Claude Code** | Writing & iterating on an agent on your laptop | …you need it running in production — multi-user, scheduled, observed, and audited. Trinity runs your Claude Code agent over MCP. |
+| **OpenClaw / Hermes** | An open agent harness you control | …you want a production home for it: per-agent isolation, scheduling, and audit without building the platform yourself. |
+| **Multica / Paperclip** | A managed, hosted agent team | …you need it self-hosted and company-governed — your infra, your perimeter, not SaaS. |
+
+## Under the control plane, the infra you'd have built yourself
+
+- **Agents that remember** — context persists between runs, versioned in Git so state is durable and reviewable.
+- **Inside your perimeter** — self-hosted, behind your VPN, sandboxed per agent, credentials encrypted at rest.
+- **Reach them where you work** — Slack, Telegram, WhatsApp, and webhooks, with verified-email access control.
+
+The full feature set is below and in the [documentation](#documentation).
 
 ## Features
 
@@ -177,10 +235,6 @@ If you're an AI agent given this repository:
 - **Host Telemetry** — Real-time CPU, memory, and disk monitoring in the dashboard header
 - **Fleet Health Monitoring** — Multi-layer health checks (Docker, network, business) with alerting and WebSocket updates
 - **OpenTelemetry Metrics & Tracing** — Cost, token usage, and productivity tracking exportable to Grafana/Datadog; distributed traces across multi-agent calls
-
-<p align="center">
-  <img src="docs/assets/screenshots/timeline-fleet-activity.png" alt="Trinity Timeline — Fleet Activity" width="700"/>
-</p>
 
 ### Agent Runtime
 
@@ -197,10 +251,6 @@ If you're an AI agent given this repository:
 - **Guardrails** — Deterministic safety enforcement with configurable per-agent overrides (GUARD-001)
 - **Persistent Async Backlog** — SQLite-backed FIFO queue for tasks that exceed parallel capacity, survives restarts
 - **Execution Retry & Timeouts** — Automatic retry for failed scheduled executions; configurable per-agent execution timeouts
-
-<p align="center">
-  <img src="docs/assets/screenshots/agent-dashboard-detail.png" alt="Trinity Agent Dashboard" width="700"/>
-</p>
 
 ### Orchestration
 
@@ -234,82 +284,6 @@ If you're an AI agent given this repository:
 - **Paid Agent Access (x402)** — Per-agent monetization via Nevermined x402 payment protocol
 - **Mobile Admin PWA** — Standalone mobile admin at `/m`, installable as a home screen app
 - **First-Time Setup Wizard** — Guided setup for admin password and API key configuration
-
-## Comparison
-
-| Feature | Trinity | Custom Build | LangChain/CrewAI | SaaS Platforms |
-|---------|:-------:|:------------:|:----------------:|:--------------:|
-| Time to production | Minutes | 6-12 months | Weeks | Instant |
-| Data sovereignty | ✅ | ✅ | ✅ | ❌ |
-| Docker isolation per agent | ✅ | DIY | ❌ | ❌ |
-| Fleet observability | ✅ | DIY | ❌ | Basic |
-| Agent-to-agent delegation | ✅ | DIY | Limited | ❌ |
-| Cron scheduling & autonomy | ✅ | DIY | ❌ | Limited |
-| Cost tracking per agent | ✅ | DIY | ❌ | Basic |
-| Complete audit trail | ✅ | DIY | ❌ | Basic |
-| Multi-runtime (Claude/Gemini) | ✅ | DIY | ❌ | ❌ |
-| State persistence (GitHub sync) | ✅ | DIY | Partial | Session-only |
-| Open source | ✅ | N/A | ✅ | ❌ |
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Docker and Docker Compose v2+
-- Anthropic API key (for Claude-powered agents) OR Google API key (for Gemini-powered agents)
-
-### One-Line Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
-```
-
-This will clone the repository, configure environment, build the base image, and start all services.
-
-### Manual Installation
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/abilityai/trinity.git
-cd trinity
-
-# 2. Configure environment
-cp .env.example .env
-# Edit .env - at minimum set:
-#   SECRET_KEY (generate with: openssl rand -hex 32)
-
-# 3. Build the base agent image
-./scripts/deploy/build-base-image.sh
-
-# 4. Start all services
-./scripts/deploy/start.sh
-```
-
-### First-Time Setup
-
-On first launch, Trinity will guide you through initial setup:
-
-1. Open http://localhost — you'll be redirected to the setup wizard
-2. Set your **admin password** (minimum 8 characters)
-3. Log in with username `admin` and your new password
-4. Go to **Settings** → **API Keys** to configure your Anthropic API key
-
-### Access
-
-- **Web UI**: http://localhost
-- **API Docs**: http://localhost:8000/docs
-- **MCP Server**: http://localhost:8080/mcp
-
-### Create Your First Agent
-
-1. Open http://localhost
-2. Click **Create Agent**
-3. Enter a name and select a template (or leave blank for a basic agent)
-4. Click **Create**
-
-Your agent will start automatically. Use the Chat tab to interact with it.
 
 ## Architecture
 
@@ -414,6 +388,45 @@ These agents demonstrate:
 
 **Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.
 
+## Multi-Agent Systems
+
+Deploy coordinated multi-agent systems from a single YAML manifest:
+
+```yaml
+name: content-production
+description: Autonomous content pipeline
+
+agents:
+  orchestrator:
+    template: github:abilityai/agent-corbin
+    resources: {cpu: "2", memory: "4g"}
+    folders: {expose: true, consume: true}
+    schedules:
+      - name: daily-review
+        cron: "0 9 * * *"
+        message: "Review today's content pipeline"
+
+  writer:
+    template: github:abilityai/agent-ruby
+    folders: {expose: true, consume: true}
+
+permissions:
+  preset: full-mesh  # All agents can communicate
+```
+
+Deploy via MCP or API:
+```bash
+# Via MCP tool
+mcp__trinity__deploy_system(manifest="...")
+
+# Via REST API
+curl -X POST http://localhost:8000/api/systems/deploy \
+  -H "Content-Type: application/json" \
+  -d '{"manifest": "...", "dry_run": false}'
+```
+
+See the [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) for architecture patterns and best practices.
+
 ## Abilities — The Agent Development Toolkit
 
 > **[abilityai/abilities](https://github.com/abilityai/abilities)** is the canonical development workflow for building and managing autonomous agents with Claude Code.
@@ -515,45 +528,6 @@ Trinity includes an MCP server for external orchestration of agents:
 - **Notifications** (1 tool) — Send structured notifications from agents to platform
 - **Events** (4 tools) — Emit events, subscribe to agent events, list/delete subscriptions
 
-## Multi-Agent Systems
-
-Deploy coordinated multi-agent systems from a single YAML manifest:
-
-```yaml
-name: content-production
-description: Autonomous content pipeline
-
-agents:
-  orchestrator:
-    template: github:abilityai/agent-corbin
-    resources: {cpu: "2", memory: "4g"}
-    folders: {expose: true, consume: true}
-    schedules:
-      - name: daily-review
-        cron: "0 9 * * *"
-        message: "Review today's content pipeline"
-
-  writer:
-    template: github:abilityai/agent-ruby
-    folders: {expose: true, consume: true}
-
-permissions:
-  preset: full-mesh  # All agents can communicate
-```
-
-Deploy via MCP or API:
-```bash
-# Via MCP tool
-mcp__trinity__deploy_system(manifest="...")
-
-# Via REST API
-curl -X POST http://localhost:8000/api/systems/deploy \
-  -H "Content-Type: application/json" \
-  -d '{"manifest": "...", "dry_run": false}'
-```
-
-See the [Multi-Agent System Guide](docs/MULTI_AGENT_SYSTEM_GUIDE.md) for architecture patterns and best practices.
-
 ## Trinity Connect
 
 Trinity Connect enables real-time coordination between local Claude Code instances and Trinity-hosted agents via WebSocket event streaming.
@@ -611,10 +585,33 @@ ADMIN_PASSWORD=your-secure-password
 EMAIL_PROVIDER=console  # Use 'resend' or 'smtp' for production
 ```
 
+## We run on Trinity. So do our customers.
+
+<!-- TODO: verify these metrics are current before publishing — keep the qualifiers, they're what
+     make the numbers credible. -->
+
+- **1M+ agent runs / week** (internal)
+- **99.94% scheduler uptime** (trailing 90 days)
+- **0 unaudited tool calls** (in production)
+
+**Security** — Trinity received a **Grade A (Excellent)** in an independent web application penetration test by [UnderDefense](https://underdefense.com) (April 2026). All critical and high findings from the initial assessment were fully remediated. See the [attestation letter](docs/security/UnderDefense-Web-Pentest-Attestation-Apr-2026.pdf).
+
+**Data residency** — EU + US · BYOC available · no training on customer data.
+
+## For AI Agents
+
+If you're an AI agent given this repository:
+
+1. **This repo is a Claude Code plugin** — Run `/plugin marketplace add abilityai/abilities` to install Trinity management skills
+2. **To deploy yourself to Trinity** — Run `/plugin install trinity@abilityai` then `/trinity:onboard`
+3. **To interact with a Trinity instance** — Use the MCP tools (list_agents, chat_with_agent, etc.) after configuring the MCP server connection
+4. **To contribute to Trinity itself** — Read `CLAUDE.md` for development guidelines
+
 ## Documentation
 
 - [**User Documentation**](docs/user-docs/README.md) — Complete guide for UI workflows, agent management, and API reference
 - [**User Scenarios**](docs/user-scenarios/README.md) — Step-by-step task walkthroughs (CLI, UI, API)
+- [CLI Reference](docs/CLI.md) — Full `trinity` command reference and multi-instance profiles
 - [Deployment Guide](docs/DEPLOYMENT.md) — Production deployment instructions
 - [Versioning & Upgrades](docs/VERSIONING_AND_UPGRADES.md) — Version strategy and upgrade procedures
 - [Gemini Support Guide](docs/GEMINI_SUPPORT.md) — Using Gemini CLI runtime for cost optimization
@@ -675,7 +672,9 @@ This project is licensed under the [Polyform Noncommercial License 1.0.0](LICENS
 - Non-profit organizations
 - Hobby projects
 
-**Commercial use** requires a separate license. Contact [hello@ability.ai](mailto:hello@ability.ai) for commercial licensing.
+**Commercial use** requires a separate license — which you can run on your own infrastructure, any cloud, or a managed instance. Contact [hello@ability.ai](mailto:hello@ability.ai) for commercial licensing.
+
+> Trinity is **source-available** under Polyform Noncommercial — not an OSI open-source license. The source is public and free for the non-commercial uses above; commercial use needs a license.
 
 ## Contributing
 
@@ -683,10 +682,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Community & Support
 
-- **Ask Trinity Bot**: [Get instant answers about Trinity](https://us-central1-mcp-server-project-455215.cloudfunctions.net/ask-trinity) — AI-powered Q&A from the docs
+- **Ask Trinity**: [docs.ability.ai](https://docs.ability.ai) — full documentation with a built-in agent you can chat with for instant answers
 - **GitHub Issues**: [Report bugs and request features](https://github.com/abilityai/trinity/issues)
 - **GitHub Discussions**: [Ask questions and share ideas](https://github.com/abilityai/trinity/discussions)
 - **Demo Video**: [Watch Trinity in action](https://youtu.be/SWpNphnuPpQ)
+- **Free Workshops**: [Learn to build AI agents on Trinity](https://www.ability.ai/workshopsgt)
 - **Security Issues**: See [SECURITY.md](SECURITY.md) for reporting vulnerabilities
 - **Commercial inquiries**: [hello@ability.ai](mailto:hello@ability.ai)
 

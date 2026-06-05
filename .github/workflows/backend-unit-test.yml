@@ -45,7 +45,7 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Run sys.modules lint
@@ -78,7 +78,7 @@ jobs:
           mkdir -p "$HOME/.ci-tools"
           cp scripts/ci/diff-pytest-failures.py "$HOME/.ci-tools/diff-pytest-failures.py"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -114,7 +114,7 @@ jobs:
             --tb=no -q || true
 
       - name: Upload JUnit XML
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-${{ matrix.side }}-${{ matrix.seed }}
           path: junit-${{ matrix.side }}-${{ matrix.seed }}.xml
@@ -137,7 +137,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
