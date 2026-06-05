@@ -1,6 +1,24 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 entry. The single @import replaces the v3
+   @tailwind base/components/utilities trio. @config keeps the existing
+   v3-style JS config (content globs, darkMode: 'class', design-system
+   color tokens, @tailwindcss/typography) authoritative instead of
+   rewriting it as CSS-first @theme. */
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+/* v4 changed the default border/divide color from gray-200 to
+   currentColor. Restore the v3 default so existing `border` utilities
+   without an explicit color don't suddenly render in the text color.
+   (This is exactly the shim the official v4 upgrade tool injects.) */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentColor);
+  }
+}
 
 /* Reserve scrollbar gutter so pages that toggle between scrolling and
    non-scrolling layouts (e.g. AgentDetail Chat/Session vs other tabs)
