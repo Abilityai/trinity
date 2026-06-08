@@ -144,11 +144,19 @@ disk = psutil.disk_usage('/')
 ```
 
 #### GET /api/telemetry/containers
-`src/backend/routers/telemetry.py:112-173`
+`src/backend/routers/telemetry.py` — `get_container_stats`
 
 Returns aggregate statistics across all running agent containers.
 
 **Requires authentication** (Bearer token, SEC-180).
+
+**Non-blocking — stale-while-revalidate cache (#1096):** the request path
+NEVER awaits the Docker daemon. `container.stats(stream=False)` costs ~1-2s
+per container, so the original synchronous endpoint took
+`ceil(N/pool) * ~1.5s` (~6s at 11 agents), pinning a uvicorn worker for its
+whole duration and starving the rest of the UI on low-worker prod (2 workers).
+The handler now reads a short-TTL, background-refreshed cache and returns
+immediately; the expensive Docker work runs out-of-band.
 
 **Response Schema:**
 ```json
@@ -161,25 +169,48 @@ Returns aggregate statistics across all running agent containers.
     {"name": "agent-b", "cpu": 4.5, "memory_mb": 256.1},
     {"name": "agent-c", "cpu": 2.6, "memory_mb": 256.2}
   ],
-  "timestamp": "2026-01-13T12:00:00.000000Z"
+  "timestamp": "2026-01-13T12:00:00.000000Z",
+  "cached": true,
+  "stale": false,
+  "cache_age_seconds": 3.2
 }
 ```
 
+The original 5 fields are unchanged; `cached`, `stale`, and
+`cache_age_seconds` (float | null) are **additive** (the endpoint has no
+`response_model`, so existing consumers ignore the extra keys).
+
+**Caching behaviour:**
+
+| Cache state | Response | Refresh |
+|-------------|----------|---------|
+| Fresh (`age < TTL`) | live cached payload, `stale:false` | none |
+| Stale (`age ≥ TTL`) | last payload, `stale:true` | scheduled in background |
+| Cold (no data yet) | empty payload (`running_count:0`, `[]`), `cached:false, stale:true` | scheduled in background |
+
+Cold state only occurs on a worker's first poll after (re)start and
+self-heals within one TTL once the background refresh completes.
+
 **Performance Optimization:**
 ```python
-# Line 18-20: Thread pool for parallel Docker stats
-_docker_executor = ThreadPoolExecutor(max_workers=4)
+# Pool sized to the fleet (default 16, env TELEMETRY_DOCKER_POOL_SIZE,
+# clamped 1..64) — the refresh now runs off the request path, so a cold
+# refresh is ~one Docker-sample window instead of ceil(N/4) windows.
+_docker_executor = ThreadPoolExecutor(max_workers=_POOL_SIZE, ...)
 
-# Line 126: Use fast agent listing (labels only)
-agents = list_all_agents_fast()
+# TTL of a "fresh" payload (default 10s, env TELEMETRY_CONTAINER_STATS_TTL).
+_CACHE_TTL = ...
 
-# Line 140-147: Parallel execution with asyncio
-tasks = [
-    loop.run_in_executor(_docker_executor, _get_single_container_stats_sync, agent.name)
-    for agent in running_agents
-]
-containers_stats = await asyncio.gather(*tasks, return_exceptions=True)
+# Single-flight: one background refresh per process at a time, holding a
+# strong task ref so it can't be GC'd mid-run (_schedule_refresh).
+# _compute_container_stats() offloads the agent listing AND each container's
+# stats to the executor and aggregates via asyncio.gather(return_exceptions=True).
 ```
+
+Cache state is per-process (each uvicorn worker keeps its own); a failed
+refresh leaves the previous payload intact and never surfaces as a request
+error. Config env vars are defensively parsed — a bad value falls back to the
+default and can never crash the router at import.
 
 **Single Container Stats Helper:**
 ```python
@@ -262,9 +293,10 @@ Dashboard.vue
 
 | Error Case | HTTP Status | Handling |
 |------------|-------------|----------|
-| psutil error | 500 | `Error getting host stats: {message}` |
-| Docker unavailable | 503 | `Docker not available` |
-| Container stats error | - | Returns `{error: message}` per container, continues |
+| psutil error (`/host`) | 500 | `Error getting host stats: {message}` |
+| Docker unavailable (`docker_client` falsy) | 503 | `Docker not available` (`/containers`) |
+| Container stats error (per container) | - | Returns `{error: message}` for that container, continues |
+| Background refresh fails (`/containers`, #1096) | 200 | Logged at WARNING; previous (or empty) cached payload served — no 500 |
 | Fetch timeout | - | Frontend: 3s timeout, silently fails |
 
 **Frontend Error Handling:**
@@ -335,6 +367,8 @@ signal: AbortSignal.timeout(3000)
 |----------|-------------------|
 | No running agents | `running_count: 0`, empty `containers` array |
 | Docker unavailable | 503 error on `/containers`, host stats still work |
+| Cold cache (first poll after restart) | Instant empty payload, `stale:true`; real data on the next poll (#1096) |
+| Background refresh fails | Previous payload served (`stale:true`); warning logged; no 500 (#1096) |
 | High CPU load (>90%) | Red color class applied |
 | Disk nearly full (>90%) | Red progress bar |
 
@@ -343,7 +377,7 @@ No cleanup required - read-only endpoints.
 
 ### Status
 - Host Telemetry Display: Working
-- Container Aggregate Stats: Working (API only, no UI integration)
+- Container Aggregate Stats: Working (API only, no UI integration); non-blocking SWR cache since #1096
 
 ---
 
@@ -351,5 +385,6 @@ No cleanup required - read-only endpoints.
 
 | Date | Change |
 |------|--------|
+| 2026-06-08 | #1096: `/containers` made non-blocking via short-TTL background-refreshed cache (stale-while-revalidate); added `cached`/`stale`/`cache_age_seconds` fields |
 | 2026-03-27 | SEC-180: Authentication added to all telemetry endpoints |
 | 2026-01-13 | Initial documentation |
