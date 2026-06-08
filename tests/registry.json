@@ -22,6 +22,13 @@
       "description": "VoIP service helpers: E.164 validation, ws(s):// base + TwiML build (XML-escaped), and place_outbound_call abuse-control gates (flag/binding/cap/rate, mocked Twilio) (#1056)."
     },
     {
+      "file": "unit/test_1073_voip_media_stream_ticket.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip"],
+      "description": "Regression for #1073: Media Streams WS reads the auth ticket from the start frame's customParameters (<Parameter>), not the query string Twilio drops; accept()-then-authenticate ordering, start-frame parse, scope/intent rejection, and query-string fallback."
+    },
+    {
       "file": "test_agent_rename.py",
       "feature": "RENAME-001",
       "added": "2026-03-01",

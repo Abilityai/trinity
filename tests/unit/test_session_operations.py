@@ -32,6 +32,18 @@ def _load(name: str, path: Path):
     return module
 
 
+def _add(session_ops, session_id=None, agent_name=None, user_id=None,
+         user_email=None, role=None, content=None, **kw):
+    """#1027: add_session_message now takes a SessionMessageInsert request
+    object. This adapter lets the existing test call sites keep passing the
+    six identity/content fields positionally (Pydantic has no positional init)."""
+    from db_models import SessionMessageInsert
+    return session_ops.add_session_message(SessionMessageInsert(
+        session_id=session_id, agent_name=agent_name, user_id=user_id,
+        user_email=user_email, role=role, content=content, **kw,
+    ))
+
+
 _USERS_DDL = """
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,7 +170,7 @@ def test_list_sessions_filters_and_orders(session_ops):
     other = session_ops.create_session("agentB", 1, "alice@example.com")
 
     # Touch a so its last_message_at moves to "now-after-b".
-    session_ops.add_session_message(
+    _add(session_ops, 
         a.id, "agentA", 1, "alice@example.com", "user", "hi"
     )
 
@@ -180,14 +192,14 @@ def test_list_sessions_filters_and_orders(session_ops):
 def test_add_session_message_updates_aggregate(session_ops):
     s = session_ops.create_session("agentX", 1, "alice@example.com")
 
-    user_msg = session_ops.add_session_message(
+    user_msg = _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com", "user", "hello"
     )
     assert user_msg.role == "user"
     assert user_msg.cost is None
     assert user_msg.cache_read_tokens is None
 
-    asst_msg = session_ops.add_session_message(
+    asst_msg = _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "hi back",
         cost=0.0012, context_used=12000, context_max=200000,
@@ -224,7 +236,7 @@ def test_total_context_used_reflects_last_reading_not_watermark(session_ops):
     s = session_ops.create_session("agentX", 1, "alice@example.com")
 
     # Heavy assistant turn — pre-compact peak.
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "heavy",
         context_used=130_000, context_max=200_000,
@@ -232,7 +244,7 @@ def test_total_context_used_reflects_last_reading_not_watermark(session_ops):
     assert session_ops.get_session(s.id).total_context_used == 130_000
 
     # Auto-compact fires; next turn's reading drops sharply.
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "post-compact",
         context_used=15_000, context_max=200_000,
@@ -243,7 +255,7 @@ def test_total_context_used_reflects_last_reading_not_watermark(session_ops):
     )
 
     # Cap at total_context_max still applies — defends against accounting bugs.
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "impossible",
         context_used=10_000_000, context_max=200_000,
@@ -263,7 +275,7 @@ def test_compact_metadata_persists_and_count_accumulates(session_ops):
         {"trigger": "auto", "pre_tokens": 170_325, "post_tokens": 12_691,
          "duration_ms": 110_361, "timestamp": "t1"},
     ]
-    msg1 = session_ops.add_session_message(
+    msg1 = _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "first heavy turn",
         compact_metadata=_json.dumps(events_turn1),
@@ -279,7 +291,7 @@ def test_compact_metadata_persists_and_count_accumulates(session_ops):
         {"trigger": "auto", "pre_tokens": 167_261, "post_tokens": 14_298,
          "duration_ms": 113_181, "timestamp": "t3"},
     ]
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "second heavy turn",
         compact_metadata=_json.dumps(events_turn2),
@@ -288,7 +300,7 @@ def test_compact_metadata_persists_and_count_accumulates(session_ops):
     assert session_ops.get_session(s.id).compact_count == 3
 
     # Turn 3: no compact — message stores NULL, session counter stays.
-    msg3 = session_ops.add_session_message(
+    msg3 = _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "light turn",
     )
@@ -304,7 +316,7 @@ def test_total_context_used_unchanged_when_value_omitted(session_ops):
     """
     s = session_ops.create_session("agentX", 1, "alice@example.com")
 
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "first",
         context_used=42_000, context_max=200_000,
@@ -312,7 +324,7 @@ def test_total_context_used_unchanged_when_value_omitted(session_ops):
     assert session_ops.get_session(s.id).total_context_used == 42_000
 
     # Turn lands without context_used (None) — the existing value should hold.
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com",
         "assistant", "second",
         context_used=None, context_max=None,
@@ -323,7 +335,7 @@ def test_total_context_used_unchanged_when_value_omitted(session_ops):
 def test_get_session_messages_returns_oldest_first(session_ops):
     s = session_ops.create_session("agentX", 1, "alice@example.com")
     for i in range(3):
-        session_ops.add_session_message(
+        _add(session_ops, 
             s.id, "agentX", 1, "alice@example.com",
             "user" if i % 2 == 0 else "assistant",
             f"msg{i}",
@@ -371,10 +383,10 @@ def test_resume_failure_and_success_counters(session_ops):
 
 def test_delete_session_removes_messages(session_ops):
     s = session_ops.create_session("agentX", 1, "alice@example.com")
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com", "user", "hi"
     )
-    session_ops.add_session_message(
+    _add(session_ops, 
         s.id, "agentX", 1, "alice@example.com", "assistant", "back"
     )
     assert len(session_ops.get_session_messages(s.id)) == 2

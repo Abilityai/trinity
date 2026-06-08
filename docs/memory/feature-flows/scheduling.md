@@ -994,7 +994,7 @@ await mcp.call("create_agent_schedule", {
   enabled: true,
   timeout_seconds: 1800,                       // 30 min timeout
   allowed_tools: ["Read", "Glob", "Grep", "WebFetch"],  // Read-only + web
-  model: "claude-sonnet-4-20250514"             // Use Sonnet for cost efficiency
+  model: "claude-sonnet-4-6"                    // Use Sonnet for cost efficiency
 });
 ```
 

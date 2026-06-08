@@ -34,7 +34,7 @@ from adapters.transports.voip_audio import (
     pop_frames,
     ulaw8k_to_pcm16k,
 )
-from config import REDIS_URL
+from config import REDIS_URL, VOIP_MAX_CALL_DURATION
 from database import db
 from services.gemini_voice import voice_service
 from services.voip_service import voip_service, intent_key
@@ -42,7 +42,9 @@ from services.ws_ticket_service import consume_ticket
 
 logger = logging.getLogger(__name__)
 
-_FRAME_INTERVAL = 0.02      # 20ms pacing
+_FRAME_INTERVAL = 0.02       # 20ms pacing
+_START_FRAME_TIMEOUT = 10.0  # seconds to wait for Twilio's first `start` frame
+_START_FRAME_MAX_READS = 20  # frames to skim for `start` before giving up
 
 # Strong refs for fire-and-forget post-call processing tasks (avoid GC).
 _BG_TASKS: set = set()
@@ -167,19 +169,83 @@ class _CallBridge:
             # connected / mark / dtmf — ignore
 
 
+def _parse_start_frame(data: dict) -> tuple[Optional[str], Optional[str]]:
+    """Extract (ticket, stream_sid) from a Twilio Media Streams `start` event.
+
+    Twilio surfaces `<Parameter>` children under `start.customParameters` and
+    the stream id under `start.streamSid` (top-level `streamSid` as a fallback).
+    Either field may be absent; the caller validates the ticket.
+    """
+    start = data.get("start") or {}
+    ticket = (start.get("customParameters") or {}).get("ticket")
+    stream_sid = start.get("streamSid") or data.get("streamSid")
+    return ticket, stream_sid
+
+
+async def _read_until_start(websocket: WebSocket) -> Optional[dict]:
+    """Read frames until Twilio's `start` event (skipping `connected`).
+
+    Bounded by a timeout and a max-read cap so a client that completes the
+    handshake but never sends a `start` frame can't pin a worker. Returns the
+    parsed `start` frame dict, or None on timeout/disconnect/early-stop.
+    """
+    for _ in range(_START_FRAME_MAX_READS):
+        try:
+            raw = await asyncio.wait_for(
+                websocket.receive_text(), timeout=_START_FRAME_TIMEOUT
+            )
+        except (asyncio.TimeoutError, WebSocketDisconnect):
+            return None
+        except Exception:  # noqa: BLE001 — any transport error ends the wait
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        event = data.get("event")
+        if event == "start":
+            return data
+        if event == "stop":
+            return None
+        # connected / mark / other — keep skimming
+    return None
+
+
 async def handle_media_stream(websocket: WebSocket, call_id: str, ticket: Optional[str]):
     """Authenticate, consume the staged intent, and run the live bridge.
 
     Runs on whichever worker Twilio's Media Streams socket connects to — the
     Gemini session is created HERE, not at trigger time (cross-worker safety).
+
+    Twilio Media Streams does **not** forward the `<Stream url>` query string,
+    so the auth ticket arrives as a `<Parameter>` in the first `start` frame —
+    readable only AFTER the handshake completes. We therefore `accept()` first,
+    then authenticate (#1073). A query-string ticket is still honored as a
+    fallback for non-Twilio / diagnostic clients.
     """
-    # 1. Call-bound, single-use ticket (Twilio can't send a JWT).
+    # 1. Accept the transport first — the ticket lives in the `start` frame for
+    #    Twilio, and rejecting before accept() is what surfaced as the 403 that
+    #    dropped every call on answer (#1073).
+    await websocket.accept()
+
+    # 2. Resolve the call-bound, single-use ticket (Twilio can't send a JWT).
+    #    Query string wins when present (non-Twilio/diagnostic clients);
+    #    otherwise read it from the first Twilio `start` frame's customParameters
+    #    and capture the streamSid from that same frame.
+    prelude_stream_sid: Optional[str] = None
+    if not ticket:
+        start_data = await _read_until_start(websocket)
+        if start_data is None:
+            await websocket.close(code=4001, reason="No start frame / ticket")
+            return
+        ticket, prelude_stream_sid = _parse_start_frame(start_data)
+
     info = consume_ticket(ticket) if ticket else None
     if not info or info.get("scope") != f"voip:{call_id}":
         await websocket.close(code=4001, reason="Invalid or missing ticket")
         return
 
-    # 2. Consume the staged intent exactly once (GETDEL) — a double Twilio
+    # 3. Consume the staged intent exactly once (GETDEL) — a double Twilio
     #    connect for the same call finds nothing and is rejected.
     r = await _get_redis()
     try:
@@ -192,10 +258,8 @@ async def handle_media_stream(websocket: WebSocket, call_id: str, ticket: Option
         return
     intent = json.loads(raw)
 
-    # 3. Accept the transport, THEN create the Gemini session on THIS worker —
-    #    so an accept() failure can't orphan a created session.
-    await websocket.accept()
-
+    # 4. Create the Gemini session on THIS worker (only after auth succeeds, so
+    #    a rejected connection never orphans a session).
     session = None
     vs_id = None
     bridge = None
@@ -208,6 +272,8 @@ async def handle_media_stream(websocket: WebSocket, call_id: str, ticket: Option
             user_email=intent["user_email"],
             system_prompt=intent["system_prompt"],
             voice_name=intent.get("voice_name", "Kore"),
+            # Phone calls use the VoIP cap (default 10min), not the 5-min voice cap.
+            max_duration=VOIP_MAX_CALL_DURATION,
         )
         vs_id = session.session_id
         try:
@@ -216,6 +282,10 @@ async def handle_media_stream(websocket: WebSocket, call_id: str, ticket: Option
             pass
 
         bridge = _CallBridge(websocket, vs_id, call_id, intent)
+        # The Twilio `start` frame was already consumed during auth; carry its
+        # streamSid over so the sender can emit media before the next frame.
+        if prelude_stream_sid:
+            bridge._stream_sid = prelude_stream_sid
         gemini_task = asyncio.create_task(
             voice_service.connect_and_stream(
                 vs_id,

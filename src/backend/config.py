@@ -114,7 +114,15 @@ DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower(
 
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
-VOICE_MODEL = os.getenv("VOICE_MODEL", "models/gemini-3.1-flash-live-preview")
+# Coalesce empty → default (#1076): os.getenv(name, default) returns the
+# default only when the var is UNSET, not when it is set-but-empty. A blank
+# VOICE_MODEL (a stray `.env` line, a manual export, or an older compose that
+# injected `${VOICE_MODEL:-}`) would otherwise shadow the default and send
+# model="" to Gemini Live ("model is required" → every voice path DOA). `or`
+# defends against an empty value from any source. This line is the authoritative
+# source of the default model id — keep compose/.env.example in agreement.
+# (mirrors the GEMINI_API_KEY `or` coalesce above.)
+VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)

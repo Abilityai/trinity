@@ -50,7 +50,7 @@ Click **Mute** to silence your microphone mid-session. Gemini continues speaking
 | `GEMINI_API_KEY` | API key for Gemini Live API | — (required) |
 | `VOICE_ENABLED` | Global toggle | `true` |
 | `WORKSPACE_ENABLED` | Enable the Workspace Mode canvas (BETA, admin opt-in) | `false` |
-| `VOICE_MODEL` | Gemini model ID | `gemini-2.5-flash-native-audio-preview-12-2025` |
+| `VOICE_MODEL` | Gemini model ID (leave unset to use the built-in default) | `models/gemini-3.1-flash-live-preview` |
 | `VOICE_MAX_DURATION` | Max session duration in seconds | `300` |
 
 ### Per-Agent Voice Prompt

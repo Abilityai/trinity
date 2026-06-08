@@ -1093,121 +1093,21 @@ async def _run_async_task_with_persistence(
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
-        # ---- Post-task: chat session persistence (THINK-001) ----
-        if request.save_to_session and user_id and user_email:
-            chat_session_id = await _persist_chat_session(
-                agent_name=agent_name,
-                request=request,
-                result=result,
-                user_id=user_id,
-                user_email=user_email,
-                subscription_id=subscription_id,
-                execution_time_ms=execution_time_ms,
-            )
-            if chat_session_id and _websocket_manager:
-                try:
-                    await _websocket_manager.broadcast(json.dumps({
-                        "type": "chat_response_ready",
-                        "execution_id": execution_id,
-                        "agent_name": agent_name,
-                        "chat_session_id": chat_session_id,
-                        "timestamp": utc_now_iso(),
-                    }))
-                except Exception as e:
-                    logger.warning(f"[Task Async] chat_response_ready broadcast failed: {e}")
-
-        # ---- Post-task: complete collaboration activity ----
-        if collaboration_activity_id:
-            try:
-                await activity_service.complete_activity(
-                    activity_id=collaboration_activity_id,
-                    status=(
-                        ActivityState.COMPLETED
-                        if result.status == TaskExecutionStatus.SUCCESS
-                        else ActivityState.FAILED
-                    ),
-                    details={
-                        "response_length": len(result.response or ""),
-                        "execution_time_ms": execution_time_ms,
-                        "execution_id": execution_id,
-                    },
-                    error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
-                )
-            except Exception as e:
-                logger.warning(f"[Task Async] collaboration activity completion failed: {e}")
-
-        # ---- Post-task: complete self-task activity and inject result (SELF-EXEC-001) ----
-        if is_self_task and self_task_activity_id:
-            activity_status = (
-                ActivityState.COMPLETED
-                if result.status == TaskExecutionStatus.SUCCESS
-                else ActivityState.FAILED
-            )
-
-            # Complete the self-task activity
-            try:
-                await activity_service.complete_activity(
-                    activity_id=self_task_activity_id,
-                    status=activity_status,
-                    details={
-                        "response_length": len(result.response or ""),
-                        "execution_time_ms": execution_time_ms,
-                        "execution_id": execution_id,
-                        "inject_result": request.inject_result,
-                    },
-                    error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
-                )
-            except Exception as e:
-                logger.warning(f"[Task Async] self-task activity completion failed: {e}")
-
-            # Inject result into chat session if requested
-            if request.inject_result and request.chat_session_id and result.status == TaskExecutionStatus.SUCCESS:
-                try:
-                    # Validate session exists and belongs to user
-                    session = db.get_chat_session(request.chat_session_id)
-                    if session and session.get("user_id") == user_id:
-                        # Add self-task result as a chat message
-                        db.add_chat_message(
-                            session_id=request.chat_session_id,
-                            agent_name=agent_name,
-                            user_id=user_id,
-                            user_email=user_email or "",
-                            role="assistant",
-                            content=result.response or "",
-                            cost=result.cost,
-                            context_used=result.context_used,
-                            context_max=result.context_max,
-                            execution_time_ms=execution_time_ms,
-                            source="self_task",  # Mark as self-task result
-                        )
-                        logger.info(f"[Self-Task] Injected result into chat session {request.chat_session_id}")
-                    else:
-                        logger.warning(f"[Self-Task] Cannot inject result: session {request.chat_session_id} not found or not owned by user")
-                except Exception as e:
-                    logger.warning(f"[Self-Task] Failed to inject result into chat session: {e}")
-
-            # Broadcast self-task completion event
-            if _websocket_manager:
-                try:
-                    await _websocket_manager.broadcast(json.dumps({
-                        "type": "agent_activity",
-                        "agent_name": agent_name,
-                        "activity_type": "self_task",
-                        "activity_state": "completed" if result.status == TaskExecutionStatus.SUCCESS else "failed",
-                        "action": f"Background task completed",
-                        "timestamp": utc_now_iso(),
-                        "details": {
-                            "execution_id": execution_id,
-                            "chat_session_id": request.chat_session_id,
-                            "cost_usd": result.cost,
-                            "execution_time_ms": execution_time_ms,
-                            "response_preview": (result.response or "")[:200],
-                            "inject_result": request.inject_result,
-                            "result_injected": request.inject_result and request.chat_session_id is not None,
-                        }
-                    }))
-                except Exception as e:
-                    logger.warning(f"[Self-Task] WebSocket broadcast failed: {e}")
+        # Post-task side effects (each guarded + self-isolating; see helpers).
+        chat_session_id = await _persist_and_broadcast_chat_session(
+            agent_name=agent_name, request=request, result=result,
+            execution_id=execution_id, user_id=user_id, user_email=user_email,
+            subscription_id=subscription_id, execution_time_ms=execution_time_ms,
+        )
+        await _complete_collaboration_activity(
+            collaboration_activity_id, result, execution_id, execution_time_ms,
+        )
+        await _finalize_self_task(
+            is_self_task=is_self_task, self_task_activity_id=self_task_activity_id,
+            agent_name=agent_name, request=request, result=result,
+            execution_id=execution_id, user_id=user_id, user_email=user_email,
+            execution_time_ms=execution_time_ms,
+        )
 
         logger.info(
             f"[Task Async] Completed background task for agent '{agent_name}', "
@@ -1228,6 +1128,151 @@ def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -
     if requested > agent_cap:
         return agent_cap, f"timeout_seconds={requested}s exceeds agent cap {agent_cap}s; clamping (field deprecated, will be removed)."
     return requested, f"timeout_seconds={requested}s deprecated; agent cap ({agent_cap}s) is authoritative."
+
+
+async def _persist_and_broadcast_chat_session(
+    *, agent_name, request, result, execution_id, user_id, user_email,
+    subscription_id, execution_time_ms,
+):
+    """Post-task block 1 (THINK-001): persist the authenticated chat session and
+    broadcast chat_response_ready. Returns the chat_session_id (or None when
+    persistence isn't applicable) — the caller threads it to signal_sync_waiter.
+
+    The persist call is intentionally un-wrapped (a persistence failure
+    propagates, after the caller's finally signals the waiter); only the
+    best-effort broadcast is isolated — preserving the pre-refactor behavior.
+    """
+    if not (request.save_to_session and user_id and user_email):
+        return None
+    chat_session_id = await _persist_chat_session(
+        agent_name=agent_name,
+        request=request,
+        result=result,
+        user_id=user_id,
+        user_email=user_email,
+        subscription_id=subscription_id,
+        execution_time_ms=execution_time_ms,
+    )
+    if chat_session_id and _websocket_manager:
+        try:
+            await _websocket_manager.broadcast(json.dumps({
+                "type": "chat_response_ready",
+                "execution_id": execution_id,
+                "agent_name": agent_name,
+                "chat_session_id": chat_session_id,
+                "timestamp": utc_now_iso(),
+            }))
+        except Exception as e:
+            logger.warning(f"[Task Async] chat_response_ready broadcast failed: {e}")
+    return chat_session_id
+
+
+async def _complete_collaboration_activity(
+    collaboration_activity_id, result, execution_id, execution_time_ms,
+):
+    """Post-task block 2: complete the agent-to-agent collaboration activity.
+    No-op when there is no collaboration activity; self-isolating on error."""
+    if not collaboration_activity_id:
+        return
+    try:
+        await activity_service.complete_activity(
+            activity_id=collaboration_activity_id,
+            status=(
+                ActivityState.COMPLETED
+                if result.status == TaskExecutionStatus.SUCCESS
+                else ActivityState.FAILED
+            ),
+            details={
+                "response_length": len(result.response or ""),
+                "execution_time_ms": execution_time_ms,
+                "execution_id": execution_id,
+            },
+            error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
+        )
+    except Exception as e:
+        logger.warning(f"[Task Async] collaboration activity completion failed: {e}")
+
+
+async def _finalize_self_task(
+    *, is_self_task, self_task_activity_id, agent_name, request, result,
+    execution_id, user_id, user_email, execution_time_ms,
+):
+    """Post-task block 3 (SELF-EXEC-001): complete the self-task activity,
+    inject the result into the originating chat session when requested, and
+    broadcast the completion event. No-op unless this is a self-task."""
+    if not (is_self_task and self_task_activity_id):
+        return
+
+    activity_status = (
+        ActivityState.COMPLETED
+        if result.status == TaskExecutionStatus.SUCCESS
+        else ActivityState.FAILED
+    )
+
+    # Complete the self-task activity
+    try:
+        await activity_service.complete_activity(
+            activity_id=self_task_activity_id,
+            status=activity_status,
+            details={
+                "response_length": len(result.response or ""),
+                "execution_time_ms": execution_time_ms,
+                "execution_id": execution_id,
+                "inject_result": request.inject_result,
+            },
+            error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
+        )
+    except Exception as e:
+        logger.warning(f"[Task Async] self-task activity completion failed: {e}")
+
+    # Inject result into chat session if requested
+    if request.inject_result and request.chat_session_id and result.status == TaskExecutionStatus.SUCCESS:
+        try:
+            # Validate session exists and belongs to user
+            session = db.get_chat_session(request.chat_session_id)
+            if session and session.get("user_id") == user_id:
+                # Add self-task result as a chat message
+                db.add_chat_message(
+                    session_id=request.chat_session_id,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    user_email=user_email or "",
+                    role="assistant",
+                    content=result.response or "",
+                    cost=result.cost,
+                    context_used=result.context_used,
+                    context_max=result.context_max,
+                    execution_time_ms=execution_time_ms,
+                    source="self_task",  # Mark as self-task result
+                )
+                logger.info(f"[Self-Task] Injected result into chat session {request.chat_session_id}")
+            else:
+                logger.warning(f"[Self-Task] Cannot inject result: session {request.chat_session_id} not found or not owned by user")
+        except Exception as e:
+            logger.warning(f"[Self-Task] Failed to inject result into chat session: {e}")
+
+    # Broadcast self-task completion event
+    if _websocket_manager:
+        try:
+            await _websocket_manager.broadcast(json.dumps({
+                "type": "agent_activity",
+                "agent_name": agent_name,
+                "activity_type": "self_task",
+                "activity_state": "completed" if result.status == TaskExecutionStatus.SUCCESS else "failed",
+                "action": f"Background task completed",
+                "timestamp": utc_now_iso(),
+                "details": {
+                    "execution_id": execution_id,
+                    "chat_session_id": request.chat_session_id,
+                    "cost_usd": result.cost,
+                    "execution_time_ms": execution_time_ms,
+                    "response_preview": (result.response or "")[:200],
+                    "inject_result": request.inject_result,
+                    "result_injected": request.inject_result and request.chat_session_id is not None,
+                }
+            }))
+        except Exception as e:
+            logger.warning(f"[Self-Task] WebSocket broadcast failed: {e}")
 
 
 @router.post("/{name}/task")

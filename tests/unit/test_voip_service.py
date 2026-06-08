@@ -105,7 +105,7 @@ class TestWssBase:
 # ---------------------------------------------------------------------------
 
 class TestBuildTwiml:
-    def test_well_formed_and_contains_call_id_and_ticket(self):
+    def test_call_id_in_path_ticket_in_parameter(self):
         vs = _import_voip_service()
         svc = vs.VoipService()
         twiml = svc.build_stream_twiml("voip_abc123", "TICKET_xyz", "https://agent.example.com")
@@ -116,20 +116,43 @@ class TestBuildTwiml:
         stream = root.find("./Connect/Stream")
         assert stream is not None
         url = stream.attrib["url"]
-        assert url == "wss://agent.example.com/api/voip/voice/voip_abc123?ticket=TICKET_xyz"
+        # call_id stays in the PATH; no query string (Twilio drops it — #1073).
+        assert url == "wss://agent.example.com/api/voip/voice/voip_abc123"
+        # The ticket travels as a <Parameter> child — Twilio forwards these in
+        # the `start` event's customParameters; it does NOT forward the query
+        # string on the <Stream url> WebSocket.
+        param = stream.find("./Parameter")
+        assert param is not None
+        assert param.attrib["name"] == "ticket"
+        assert param.attrib["value"] == "TICKET_xyz"
 
-    def test_attribute_is_escaped_against_injection(self):
-        """A ticket containing a quote/angle-bracket must not break out of the
-        url attribute (quoteattr escaping). Defense-in-depth even though
+    def test_ticket_never_in_query_string_regression_1073(self):
+        """#1073: a query-string ticket is silently dropped by Twilio Media
+        Streams, so the WS handshake 403s on answer. Guard we never emit one."""
+        vs = _import_voip_service()
+        svc = vs.VoipService()
+        twiml = svc.build_stream_twiml("voip_abc", "TKT", "https://h.example.com")
+        assert "?ticket=" not in twiml
+        assert "/api/voip/voice/voip_abc?" not in twiml
+
+    def test_attributes_are_escaped_against_injection(self):
+        """A ticket containing quotes/angle-brackets must not break out of its
+        attribute (quoteattr escaping). Defense-in-depth even though
         call_id/ticket are server-generated tokens."""
         vs = _import_voip_service()
         svc = vs.VoipService()
-        twiml = svc.build_stream_twiml("voip_x", '"/><Hangup', "https://h.example.com")
-        # Still a single well-formed Stream element — no injected Hangup tag.
+        payload = '"/><Hangup/><Parameter value="'
+        twiml = svc.build_stream_twiml("voip_x", payload, "https://h.example.com")
+        # Still well-formed (escaping worked) — no injected Hangup element.
         import xml.etree.ElementTree as ET
         root = ET.fromstring(twiml)
         assert root.find("./Connect/Hangup") is None
-        assert root.find("./Connect/Stream") is not None
+        stream = root.find("./Connect/Stream")
+        assert stream is not None
+        # The malicious payload survives intact as the literal attribute value.
+        param = stream.find("./Parameter")
+        assert param is not None
+        assert param.attrib["value"] == payload
 
 
 # ---------------------------------------------------------------------------

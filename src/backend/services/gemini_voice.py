@@ -203,7 +203,10 @@ _RUN_TASK_TOOL = genai_types.Tool(
                 "Execute a task in the agent's workspace — look something up, "
                 "read a file, search for information, or perform an action. "
                 "Use this when you need live data or agent capabilities to answer accurately. "
-                "Returns a text response from the agent."
+                "Returns a text response from the agent. "
+                "This can take several seconds and you cannot speak while it runs — "
+                "ALWAYS say a brief out-loud filler (e.g. 'let me check that') before "
+                "calling it so the user isn't left in silence."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -218,6 +221,24 @@ _RUN_TASK_TOOL = genai_types.Tool(
         )
     ]
 )
+
+
+# Spoken-filler etiquette appended to every voice session's system_instruction
+# (browser + VoIP). `run_task` round-trips to the agent container and can take
+# several seconds, during which Gemini — a *blocking* function call — emits no
+# audio. On a phone call that dead air reads as a dropped line. Instruct the
+# model to verbally acknowledge BEFORE it calls run_task so the caller knows it
+# is still working. Cheap, model-side fix; no SDK change required.
+_TOOL_ETIQUETTE_INSTRUCTION = """
+
+## Looking things up out loud
+When you use the `run_task` tool it can take several seconds to return, and you
+cannot speak while it runs. Before EVERY `run_task` call, first say a short,
+natural filler so the user knows you're working and the line never falls
+silent — for example "let me check that for you", "one moment while I look that
+up", or "give me a second to pull that up". Vary the wording so it sounds
+natural. Never call `run_task` silently.
+"""
 
 
 @dataclass
@@ -238,6 +259,9 @@ class VoiceSession:
     system_prompt: str
     voice_name: str = "Kore"
     workspace_mode: bool = False
+    # Max session length (seconds) before the watchdog auto-ends it. Browser voice
+    # sessions use VOICE_MAX_DURATION; phone calls pass VOIP_MAX_CALL_DURATION.
+    max_duration: int = VOICE_MAX_DURATION
     transcript: list = field(default_factory=list)
     panel_state: dict = field(default_factory=lambda: {
         "type": "empty", "content": "", "title": None, "updated_at": None
@@ -256,9 +280,6 @@ class VoiceSession:
     _on_status: Optional[Callable] = field(default=None, repr=False)
     _on_tool_call: Optional[Callable] = field(default=None, repr=False)    # (name, args) → None
     _on_tool_result: Optional[Callable] = field(default=None, repr=False)  # (name, result) → None
-
-
-_REDIS_SESSION_TTL = VOICE_MAX_DURATION + 60  # grace buffer beyond max session length
 
 
 class GeminiVoiceService:
@@ -296,9 +317,16 @@ class GeminiVoiceService:
         system_prompt: str,
         voice_name: str = "Kore",
         workspace_mode: bool = False,
+        max_duration: Optional[int] = None,
     ) -> VoiceSession:
-        """Create a new voice session (does not connect yet)."""
+        """Create a new voice session (does not connect yet).
+
+        `max_duration` overrides the watchdog's auto-end timeout (seconds). The
+        browser voice path leaves it None (→ VOICE_MAX_DURATION); the phone path
+        passes VOIP_MAX_CALL_DURATION so calls aren't cut at the 5-min voice cap.
+        """
         session_id = f"vs_{secrets.token_urlsafe(16)}"
+        effective_max_duration = max_duration if max_duration is not None else VOICE_MAX_DURATION
         session = VoiceSession(
             session_id=session_id,
             agent_name=agent_name,
@@ -308,6 +336,7 @@ class GeminiVoiceService:
             system_prompt=system_prompt,
             voice_name=voice_name,
             workspace_mode=workspace_mode,
+            max_duration=effective_max_duration,
         )
         self._sessions[session_id] = session
 
@@ -322,10 +351,15 @@ class GeminiVoiceService:
             "voice_name": voice_name,
             "workspace_mode": workspace_mode,
             "system_prompt": system_prompt,
+            "max_duration": effective_max_duration,
         }
         try:
             r = await self._get_redis()
-            await r.setex(f"voice_session:{session_id}", _REDIS_SESSION_TTL, json.dumps(metadata))
+            # TTL spans the session's own max duration (+grace), not the shared
+            # voice cap — otherwise a 10-min phone session's metadata expires at
+            # ~6min and cross-worker validation would fail mid-call.
+            redis_ttl = effective_max_duration + 60
+            await r.setex(f"voice_session:{session_id}", redis_ttl, json.dumps(metadata))
         except Exception as e:
             # Fail loudly: better to 500 at /voice/start than issue a session_id
             # that will intermittently 403 when the WebSocket lands on another worker.
@@ -370,7 +404,7 @@ class GeminiVoiceService:
 
         config = genai_types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=session.system_prompt,
+            system_instruction=session.system_prompt + _TOOL_ETIQUETTE_INSTRUCTION,
             speech_config=genai_types.SpeechConfig(
                 voice_config=genai_types.VoiceConfig(
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -646,10 +680,11 @@ class GeminiVoiceService:
             return f"Execution error: {str(e)[:200]}"
 
     async def _timeout_watchdog(self, session: VoiceSession):
-        """Auto-end session after max duration."""
-        await asyncio.sleep(VOICE_MAX_DURATION)
+        """Auto-end session after its max duration (per-session; phone calls
+        use VOIP_MAX_CALL_DURATION, browser voice uses VOICE_MAX_DURATION)."""
+        await asyncio.sleep(session.max_duration)
         if session._active:
-            logger.info(f"Voice session {session.session_id} hit max duration ({VOICE_MAX_DURATION}s)")
+            logger.info(f"Voice session {session.session_id} hit max duration ({session.max_duration}s)")
             await self.end_session(session.session_id)
 
     async def send_audio(self, session_id: str, audio_data: bytes):
@@ -714,6 +749,7 @@ class GeminiVoiceService:
             system_prompt=meta["system_prompt"],
             voice_name=meta.get("voice_name", "Kore"),
             workspace_mode=meta.get("workspace_mode", False),
+            max_duration=meta.get("max_duration", VOICE_MAX_DURATION),
         )
         self._sessions[session_id] = session
         logger.info(f"Voice session {session_id} reconstructed from Redis on worker")

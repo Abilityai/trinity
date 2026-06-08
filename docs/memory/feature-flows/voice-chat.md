@@ -242,12 +242,12 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 | In-memory `_sessions` dict | Live state | Gemini connection, asyncio tasks, panel_state (unserializable) |
 | Redis key `voice_session:{id}` | Serializable metadata | Cross-worker auth lookup (agent_name, user_id, user_email, …) |
 
-- `create_session()` (now `async`) writes JSON metadata to Redis with TTL = `VOICE_MAX_DURATION + 60` (360s). If Redis write fails, in-memory state is rolled back and `RuntimeError` is raised — the client gets 500 at `/voice/start` rather than a session ID that will intermittently 403.
+- `create_session()` (now `async`) writes JSON metadata to Redis with TTL = `session.max_duration + 60` (browser voice: 360s; phone: `VOIP_MAX_CALL_DURATION + 60` = 660s — the TTL tracks the session's own cap so a 10-min phone session's metadata doesn't expire mid-call). If Redis write fails, in-memory state is rolled back and `RuntimeError` is raised — the client gets 500 at `/voice/start` rather than a session ID that will intermittently 403.
 - `get_session()` (now `async`) checks `_sessions` first; on cache miss, falls back to Redis, reconstructs a `VoiceSession` from the stored metadata, and registers it in the worker's `_sessions` for subsequent calls. Redis errors degrade gracefully to `None`.
 - `remove_session()` (now `async`) deletes the Redis key and pops from `_sessions`.
 - `_redis` client is lazy-initialized as `redis.asyncio` (async, non-blocking) reusing the existing platform Redis URL (`config.REDIS_URL`).
 
-**Key implementation:** `src/backend/services/gemini_voice.py` — `_get_redis()`, `_REDIS_SESSION_TTL`, async `create_session`/`get_session`/`remove_session`.
+**Key implementation:** `src/backend/services/gemini_voice.py` — `_get_redis()`, per-session Redis TTL (`session.max_duration + 60`), async `create_session`/`get_session`/`remove_session`.
 
 ---
 
@@ -258,6 +258,7 @@ Uvicorn runs `--workers 2` in production. HTTP requests (REST `/voice/start`, `/
 | Requirement | Detail |
 |-------------|--------|
 | Function declaration | `_RUN_TASK_TOOL` (`FunctionDeclaration` for `run_task`) registered in `LiveConnectConfig` |
+| Spoken-filler etiquette | `run_task` is a **blocking** Gemini function call — the model emits no audio from the moment it decides to call until `send_tool_response` returns (up to ~30s), which on a phone call reads as dead air. `_TOOL_ETIQUETTE_INSTRUCTION` is appended to every session's `system_instruction` (in `connect_and_stream`, so it covers browser **and** phone) and the `run_task` description is sharpened, instructing the model to say a brief filler ("let me check that for you") before calling. Prompt-side fix; no SDK change. A future upgrade to non-blocking async function calling (`Behavior.NON_BLOCKING` + `FunctionResponseScheduling`) would remove the dead air entirely but requires bumping `google-genai` past the pinned `1.12.1`. |
 | Execution | `_execute_and_respond()` coroutine, `asyncio.create_task` per call, 30s `wait_for` timeout |
 | Agent call | `agent_client.task(prompt)` (lazy import), truncated to `_TOOL_PROMPT_MAX=2000` chars |
 | Error handling | `AgentNotReachableError` → "not currently running"; `AgentRequestError` → "Task error: ..." |
@@ -368,8 +369,8 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 | `GEMINI_API_KEY` | API key for Gemini Live API |
 | `VOICE_ENABLED` | Global voice toggle (default `true`; effective only when `GEMINI_API_KEY` is set). Wired into backend compose `environment:` (#979) |
 | `WORKSPACE_ENABLED` | Workspace canvas toggle — opt-in BETA, default `false` (#860). `workspace_available = voice_available && WORKSPACE_ENABLED`. Wired into backend compose `environment:` (#979 — previously never passed through, so the canvas couldn't be enabled via `.env`) |
-| `VOICE_MODEL` | Model ID (default: `gemini-2.5-flash-native-audio-preview-12-2025`) |
-| `VOICE_MAX_DURATION` | Max session duration in seconds (default: 300) |
+| `VOICE_MODEL` | Model ID (default: `models/gemini-3.1-flash-live-preview`, set in `src/backend/config.py`). #1076: leave unset/commented — a set-but-empty value is coalesced to the default by `os.getenv("VOICE_MODEL") or …`. |
+| `VOICE_MAX_DURATION` | Max **browser** voice session duration in seconds (default: 300 / 5 min). Phone calls use `VOIP_MAX_CALL_DURATION` instead (default 600 / 10 min) — both flow through the same per-session `_timeout_watchdog`, which now sleeps on `session.max_duration` rather than a global. See [voip-telephony.md](voip-telephony.md). |
 
 ### Per-Agent
 

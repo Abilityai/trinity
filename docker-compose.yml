@@ -29,7 +29,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
-      - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override (default: gemini-2.5-flash-native-audio-preview-12-2025)
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must

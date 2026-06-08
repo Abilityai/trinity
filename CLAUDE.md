@@ -152,9 +152,9 @@ Long-running multi-stage work inside agents (perception → synthesis → publis
 |------|---------|
 | `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** - All features |
 | @docs/memory/architecture.md | **Current system design** — describes what is built today (~1000 lines max) |
-| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design** — describes the optimal destination; use when evaluating tradeoffs and prioritizing work |
+| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
-| `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` | Active multi-sprint plan for execution/orchestration reliability. **Current focus: Tier 2.5 Simplification — #306 (push event bus) → #428/#429/#430.** Consult before touching `task_execution_service`, `slot_service`, `backlog_service`, `execution_queue`, or `cleanup_service`. |
+| `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` | **Archived (historical)** — completed Sprint A–D′ execution-reliability plan (all shipped). Superseded 2026-06-05 by the pull-coordination direction in `TARGET_ARCHITECTURE.md`. Read for background on the slot/backlog/cleanup machinery. |
 | GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. |
 
 ---
@@ -340,7 +340,7 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 ## See Also
 
 - **SDLC & Development Workflow**: `.claude/DEVELOPMENT_WORKFLOW.md` ← Start here for dev process
-- **Orchestration Reliability Plan**: `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` ← Active direction for execution stack; read before extending orchestration primitives
+- **Orchestration Reliability Plan (archived)**: `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` ← Sprint A–D′ historical record; superseded by `docs/planning/TARGET_ARCHITECTURE.md` (pull coordination) as the active execution-stack direction
 - **Full Architecture**: @docs/memory/architecture.md
 - **All Requirements**: `.claude/memory/requirements.md`
 - **Current Roadmap**: https://github.com/abilityai/trinity/issues

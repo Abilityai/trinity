@@ -1,3 +1,13 @@
+> # ⚠️ ARCHIVED — 2026-06-05
+>
+> **Superseded by the pull / work-stealing coordination decision.** This was the active execution-reliability plan through **Sprints A–D′ — all shipped** (#95, #226, #285, #286, #132, #56, #305, #260, #271, #264, #291, #306, #428, #430, #524, #525, #526). Its forward-looking *actor-model* destination (per-agent mailbox + agent-authoritative journal) was **replaced** on 2026-06-05 by **pull / work-stealing**: a backend-owned per-agent queue, agents pull when they have free capacity, and the agent journal is **not** the source of truth.
+>
+> **Living docs:** [`TARGET_ARCHITECTURE.md`](../../planning/TARGET_ARCHITECTURE.md) §Coordination Model · **Epic #1045** (umbrella **#1081**). The remaining open work from this plan now lives there — **#429** → single lease-reaper, **#307** → gate→alert (unwired under pull), **#946** → pull pilot (replaces the §"actor model" Phase 2 experiment).
+>
+> Preserved verbatim below as the Sprint A–D′ historical record. **Not maintained** — do not act on its "next steps."
+
+---
+
 # Orchestration & Multi-Agent Reliability Plan
 
 **Date:** 2026-04-13 (revised 2026-04-20, 2026-04-26)

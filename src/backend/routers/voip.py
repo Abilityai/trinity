@@ -2,8 +2,8 @@
 VoIP telephony router (VOIP-001, #1056 — Phase 1, outbound).
 
 Surfaces:
-- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{name}/voip
-- Outbound trigger (any agent-accessor): POST /api/agents/{name}/voip/call
+- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{agent_name}/voip
+- Outbound trigger (any agent-accessor): POST /api/agents/{agent_name}/voip/call
 - Media Streams WebSocket (Twilio, ticket-authed): WS /api/voip/voice/{call_id}
 
 The feature is gated by `voip_service.is_available()` (VOIP_ENABLED + GEMINI_API_KEY,
@@ -27,7 +27,7 @@ from fastapi import (
 from pydantic import BaseModel
 
 from database import db
-from dependencies import AuthorizedAgent, OwnedAgentByName, get_current_user
+from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
 from models import User
 from services import idempotency_service
 from services.settings_service import settings_service
@@ -163,7 +163,7 @@ async def delete_voip_binding(agent_name: OwnedAgentByName):
 @auth_router.post("/{agent_name}/voip/call")
 async def place_voip_call(
     request: VoipCallRequest,
-    agent_name: AuthorizedAgent,
+    agent_name: AuthorizedAgentByName,
     current_user: User = Depends(get_current_user),
     idempotency_key: Optional[str] = Header(None),
 ):

@@ -228,7 +228,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `transports/twilio_webhook.py` - Twilio webhook transport: HMAC-SHA1 signature (via `twilio.request_validator`), MessageSid dedup, form-encoded body
 
 *VoIP Telephony (via Twilio Media Streams) — a voice transport, NOT a text `ChannelAdapter` (VOIP-001, #1056):*
-- `transports/twilio_media_stream.py` - Media Streams WS bridge (`handle_media_stream`): call-bound ticket + scope check, `GETDEL` staged intent (consume-once), creates the Gemini `VoiceSession` on the connecting worker, runs the unmodified `connect_and_stream`. Per-connection `_CallBridge`: inbound μ-law→PCM resample, outbound queue + paced 20ms 160-byte μ-law sender, `clear`-on-barge-in, `streamSid` capture, teardown ties Gemini-end→Twilio-close + SETNX-guarded single transcript save (`source="voice"`) + post-call processing dispatch.
+- `transports/twilio_media_stream.py` - Media Streams WS bridge (`handle_media_stream`): `accept()`-then-authenticate — Twilio does NOT forward the `<Stream url>` query string, so the call-bound ticket arrives as a `<Parameter>` in the first `start` frame (`start.customParameters.ticket`), read only after the handshake completes (#1073); a query-string `?ticket=` is still honored as a fallback for non-Twilio/diagnostic clients. Then scope check, `GETDEL` staged intent (consume-once), creates the Gemini `VoiceSession` on the connecting worker, runs the unmodified `connect_and_stream`. Per-connection `_CallBridge`: inbound μ-law→PCM resample, outbound queue + paced 20ms 160-byte μ-law sender, `clear`-on-barge-in, `streamSid` capture, teardown ties Gemini-end→Twilio-close + SETNX-guarded single transcript save (`source="voice"`) + post-call processing dispatch.
 - `transports/voip_audio.py` - Pure stdlib-`audioop` codec helpers (`ulaw8k_to_pcm16k`, `pcm24k_to_ulaw8k` direct 3:1, `pop_frames`). Carries per-direction `ratecv` state across chunks (anti-click). `audioop-lts` pinned for Python ≥ 3.13.
 
 *Database:*
@@ -555,7 +555,7 @@ picks up on its next poll. (#389 S1a)
 | PUT | `/api/agents/{name}/voip` | Owner | Configure Twilio voice creds (validated via Twilio Account fetch; AuthToken AES-256-GCM encrypted). |
 | DELETE | `/api/agents/{name}/voip` | Owner | Remove the voice binding. |
 | POST | `/api/agents/{name}/voip/call` | JWT/MCP (`AuthorizedAgent`) | Place an outbound call. Rate-limited per `(owner, destination)` + durable per-agent daily cap; optional `Idempotency-Key` (Invariant #18). Returns `{call_id, status:"ringing", twilio_call_sid}`. |
-| WS | `/api/voip/voice/{call_id}` | Call-bound ticket (`?ticket=`) | Twilio Media Streams audio bridge (no JWT — Twilio can't send one). Ticket `scope="voip:{call_id}"`; staged intent consumed once via Redis `GETDEL`. |
+| WS | `/api/voip/voice/{call_id}` | Call-bound ticket (`<Parameter>`; `?ticket=` fallback) | Twilio Media Streams audio bridge (no JWT — Twilio can't send one). Ticket arrives via the `start` frame's `customParameters` (Twilio drops the query string — #1073); `scope="voip:{call_id}"`; staged intent consumed once via Redis `GETDEL`. |
 
 MCP tool: `call_user` (`src/mcp-server/src/tools/voip.ts`). The call transcript
 is persisted to `chat_messages` (`source="voice"`) and, by default, dispatched

@@ -19,7 +19,7 @@ import pytest
 from scheduler.service import SchedulerService
 from scheduler.database import SchedulerDatabase
 from scheduler.locking import LockManager
-from scheduler.models import Schedule
+from scheduler.models import Schedule, ExecutionStatus
 
 
 class TestSchedulerService:
@@ -398,3 +398,60 @@ class TestBackendDelegation:
             mock_backend.assert_called_once()
             call_kwargs = mock_backend.call_args[1]
             assert call_kwargs["triggered_by"] == "manual"
+
+    # ----- dispatch-path characterization (#1026) -----
+
+    @pytest.mark.asyncio
+    async def test_execute_schedule_dispatched_updates_runtimes(self, db_with_data, mock_lock_manager):
+        """Fire-and-forget (#132): a 'dispatched' result updates run times
+        immediately and returns before any 'completed' event."""
+        service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
+             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub, \
+             patch.object(service.db, 'update_schedule_run_times') as rt:
+            backend.return_value = {"status": "dispatched", "execution_id": "x"}
+            await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
+        rt.assert_called_once()
+        assert pub.await_count == 1  # 'started' only — no 'completed' on dispatch
+
+    @pytest.mark.asyncio
+    async def test_execute_schedule_failed_publishes_failed(self, db_with_data, mock_lock_manager):
+        service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
+             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub:
+            backend.return_value = {"status": "failed", "error": "boom"}
+            await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
+        assert pub.await_count == 2  # started + completed(failed)
+        last = pub.await_args_list[-1].args[0]
+        assert last["status"] == "failed"
+        assert last["error"] == "boom"
+
+    @pytest.mark.asyncio
+    async def test_execute_schedule_exception_does_not_overwrite_finalized(self, db_with_data, mock_lock_manager):
+        """SCHED-ASYNC-001: a scheduler-side exception must not overwrite an
+        execution the backend already finalized (e.g. as 'success')."""
+        service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
+        finalized = MagicMock()
+        finalized.status = ExecutionStatus.SUCCESS
+        with patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
+             patch.object(service, '_publish_event', new_callable=AsyncMock) as pub, \
+             patch.object(service.db, 'get_execution', return_value=finalized), \
+             patch.object(service.db, 'update_execution_status') as upd:
+            backend.side_effect = RuntimeError("conn dropped")
+            await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
+        upd.assert_not_called()  # anti-overwrite
+        assert pub.await_args_list[-1].args[0]["status"] == ExecutionStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_execute_schedule_precheck_skip(self, db_with_data, mock_lock_manager):
+        """Pre-check fire=false (#454): record a skipped execution, never dispatch."""
+        service = SchedulerService(database=db_with_data, lock_manager=mock_lock_manager)
+        with patch.object(service, '_run_pre_check', new_callable=AsyncMock) as pc, \
+             patch.object(service, '_call_backend_execute_task', new_callable=AsyncMock) as backend, \
+             patch.object(service, '_publish_event', new_callable=AsyncMock), \
+             patch.object(service.db, 'create_skipped_execution') as skip, \
+             patch.object(service.db, 'update_schedule_run_times'):
+            pc.return_value = {"fire": False, "reason": "nope"}
+            await service._execute_schedule_with_lock("schedule-1", triggered_by="schedule")
+        skip.assert_called_once()
+        backend.assert_not_called()

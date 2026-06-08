@@ -99,12 +99,25 @@ class VoipService:
         return "wss://" + base
 
     def build_stream_twiml(self, call_id: str, ticket: str, public_url: str) -> str:
-        """`<Connect><Stream>` TwiML pointing Twilio at our Media Streams WS."""
+        """`<Connect><Stream>` TwiML pointing Twilio at our Media Streams WS.
+
+        The auth ticket is passed as a Media Streams `<Parameter>` (Twilio
+        surfaces these under the `start` event's `customParameters`), NOT a URL
+        query string — Twilio does **not** forward query params on the
+        `<Stream url>` WebSocket, so a query-string ticket arrives as `None` and
+        the handshake 403s on answer (#1073). `call_id` stays in the path so the
+        ticket scope (`voip:{call_id}`) can still be verified.
+        """
         from xml.sax.saxutils import quoteattr
-        wss_url = f"{self._wss_base(public_url)}/api/voip/voice/{call_id}?ticket={ticket}"
+        wss_url = f"{self._wss_base(public_url)}/api/voip/voice/{call_id}"
         # quoteattr returns a value WITH surrounding quotes and proper escaping.
+        # <Stream> now has a child so it cannot be self-closing.
         return (
-            f"<Response><Connect><Stream url={quoteattr(wss_url)}/></Connect></Response>"
+            f"<Response><Connect>"
+            f"<Stream url={quoteattr(wss_url)}>"
+            f"<Parameter name=\"ticket\" value={quoteattr(ticket)}/>"
+            f"</Stream>"
+            f"</Connect></Response>"
         )
 
     # =========================================================================

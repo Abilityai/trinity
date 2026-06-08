@@ -16,7 +16,7 @@ durable event log so:
 
 Issue: [#306](https://github.com/abilityai/trinity/issues/306) — RELIABILITY-003.
 Positioned as the keystone of Tier 2.5 simplification in
-[`docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md`](../../planning/ORCHESTRATION_RELIABILITY_2026-04.md).
+[`docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md`](../../archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md).
 
 ## User Story
 

@@ -185,7 +185,7 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           .string()
           .optional()
           .describe(
-            "Model override for this request (sonnet, opus, haiku). Only applies when parallel=true."
+            "Model override for this request — short alias (sonnet, opus, haiku) or a full ID (e.g., 'claude-opus-4-8', 'claude-sonnet-4-6'). Only applies when parallel=true."
           ),
         allowed_tools: z
           .array(z.string())
@@ -465,7 +465,7 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         model: z
           .string()
           .optional()
-          .describe("Model override for all subtasks (sonnet, opus, haiku)"),
+          .describe("Model override for all subtasks — short alias (sonnet, opus, haiku) or a full ID (e.g., 'claude-opus-4-8', 'claude-sonnet-4-6')"),
         system_prompt: z
           .string()
           .optional()

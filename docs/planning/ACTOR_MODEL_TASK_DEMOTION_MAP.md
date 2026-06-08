@@ -123,7 +123,7 @@ That fits on a postcard. #945 becomes the writeup of what we already shipped.
 ## Sequencing (6 PRs)
 
 Each PR is independently shippable, leaves the system in a working state, and
-follows the additive-first rule from `ORCHESTRATION_RELIABILITY_2026-04.md`
+follows the additive-first rule from `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md`
 §"Additive-first migration" — new behavior lands alongside the old field, old
 field deleted only after one release of soak.
 
@@ -216,7 +216,7 @@ empirically rather than by hand-waving.
 
 - `docs/planning/TARGET_ARCHITECTURE.md` §"Coordination Model (Actor Model)",
   §"Key Open Questions" #1
-- `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` §"Target architecture:
+- `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` §"Target architecture:
   actor model", §"Pre-experiment artifact", §"Additive-first migration"
 - Tracking issues: #945 (postcard), #946 (Phase 2 experiment), #927
   (replica groups — needs journal projection contract)

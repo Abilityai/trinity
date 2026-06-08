@@ -5,7 +5,7 @@
 Single public facade for per-agent execution capacity. Replaces the
 three-class pyramid `ExecutionQueue` + `SlotService` + `BacklogService`
 with one entry point: `services/capacity_manager.py`. Issue #428 (PR #527,
-Tier 2.5 of `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md`).
+Tier 2.5 of `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md`).
 
 ## Why one facade
 
@@ -205,7 +205,7 @@ APIs.
 - **BACKLOG-001 (#260)** — `BacklogService` (now internal). See [persistent-task-backlog.md](persistent-task-backlog.md).
 - **EXEC-024** — `TaskExecutionService` consumer. See [task-execution-service.md](task-execution-service.md).
 - **TIMEOUT-001** — per-agent dynamic slot TTL.
-- `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` — Tier 2.5 (Simplification) plan; this issue is the cornerstone of "one capacity surface, three policies."
+- `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` — Tier 2.5 (Simplification) plan; this issue is the cornerstone of "one capacity surface, three policies."
 
 ## Related flows
 

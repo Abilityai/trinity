@@ -520,7 +520,12 @@ export class TrinityClient {
     // is what drives naive callers into duplicate-queue retries. Aborting
     // before the gateway gives us a chance to look up the queued
     // execution_id and return a structured receipt instead.
-    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS ?? 25000);
+    // `||` (not `??`) so a set-but-empty value coalesces to the default —
+    // the TS twin of the #1076 os.getenv shadow bug. `'' ?? 25000` is `''`
+    // and `Number('')` is 0, which would abort every sync chat instantly.
+    // Compose injects `${MCP_CHAT_TIMEOUT_MS:-25000}` (non-empty) today, so
+    // this is defense-in-depth against a future empty injection / `-e VAR=`.
+    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const startTime = Date.now();

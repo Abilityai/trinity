@@ -61,7 +61,7 @@ services:
       # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
       # tune/disable voice in prod (code default is ON; without these lines the
       # knobs are inert — the #1039 packaging-gap class).
-      - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means

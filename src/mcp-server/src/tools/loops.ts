@@ -111,7 +111,7 @@ export function createLoopTools(
         model: z
           .string()
           .optional()
-          .describe("Model override for every iteration."),
+          .describe("Model override for every iteration (e.g., 'claude-opus-4-8', 'claude-sonnet-4-6'). If omitted, uses agent default."),
         allowed_tools: z
           .array(z.string())
           .optional()

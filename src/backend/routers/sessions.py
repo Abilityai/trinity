@@ -23,7 +23,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from database import db
-from db_models import WebFileUpload
+from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import User
 from services.docker_service import get_agent_container
@@ -594,14 +594,14 @@ async def send_session_message(
     # Persist the ORIGINAL user message (without the file_descs append) so
     # the visible chat log reads naturally. The agent sees effective_message
     # which has the file references inline.
-    db.add_session_message(
+    db.add_session_message(SessionMessageInsert(
         session_id=session.id,
         agent_name=name,
         user_id=current_user.id,
         user_email=user_email,
         role="user",
         content=body.message,
-    )
+    ))
 
     # In-flight sentinel brackets the turn so GET sessions/{id} can report
     # `turn_in_progress=true` to the UI's onActivated re-sync (Issue #759).
@@ -707,7 +707,7 @@ async def send_session_message(
         compact_events = metadata.get("compact_events") or []
         compact_metadata_json = json.dumps(compact_events) if compact_events else None
 
-        assistant_msg = db.add_session_message(
+        assistant_msg = db.add_session_message(SessionMessageInsert(
             session_id=session.id,
             agent_name=name,
             user_id=current_user.id,
@@ -723,7 +723,7 @@ async def send_session_message(
             claude_session_id=real_uuid,
             compact_metadata=compact_metadata_json,
             compact_event_count=len(compact_events),
-        )
+        ))
 
         # Refresh the session row so the response reflects the post-turn stats.
         refreshed = db.get_session(session.id)

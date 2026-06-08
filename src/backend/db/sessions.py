@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from .connection import get_db_connection
-from db_models import AgentSession, AgentSessionMessage
+from db_models import AgentSession, AgentSessionMessage, SessionMessageInsert
 from utils.helpers import utc_now_iso
 
 
@@ -135,24 +135,7 @@ class SessionOperations:
 
     # ---- messages ----------------------------------------------------------
 
-    def add_session_message(
-        self,
-        session_id: str,
-        agent_name: str,
-        user_id: int,
-        user_email: str,
-        role: str,
-        content: str,
-        cost: Optional[float] = None,
-        context_used: Optional[int] = None,
-        context_max: Optional[int] = None,
-        cache_read_tokens: Optional[int] = None,
-        tool_calls: Optional[str] = None,
-        execution_time_ms: Optional[int] = None,
-        claude_session_id: Optional[str] = None,
-        compact_metadata: Optional[str] = None,
-        compact_event_count: int = 0,
-    ) -> AgentSessionMessage:
+    def add_session_message(self, msg: SessionMessageInsert) -> AgentSessionMessage:
         """Insert a session message and update session aggregate stats.
 
         ``compact_metadata`` is a JSON-encoded list of CompactEvent dicts (the
@@ -177,11 +160,11 @@ class SessionOperations:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                message_id, session_id, agent_name, user_id, user_email,
-                role, content, now,
-                cost, context_used, context_max, cache_read_tokens,
-                tool_calls, execution_time_ms, claude_session_id,
-                compact_metadata,
+                message_id, msg.session_id, msg.agent_name, msg.user_id, msg.user_email,
+                msg.role, msg.content, now,
+                msg.cost, msg.context_used, msg.context_max, msg.cache_read_tokens,
+                msg.tool_calls, msg.execution_time_ms, msg.claude_session_id,
+                msg.compact_metadata,
             ))
 
             # total_context_used reflects the most recent assistant turn's
@@ -204,7 +187,7 @@ class SessionOperations:
                     total_context_max = COALESCE(?, total_context_max),
                     compact_count = compact_count + ?
                 WHERE id = ?
-            """, (now, cost or 0, context_used, context_max, compact_event_count, session_id))
+            """, (now, msg.cost or 0, msg.context_used, msg.context_max, msg.compact_event_count, msg.session_id))
 
             cursor.execute("SELECT * FROM agent_session_messages WHERE id = ?", (message_id,))
             return self._row_to_message(cursor.fetchone())

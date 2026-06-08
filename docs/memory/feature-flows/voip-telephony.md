@@ -22,7 +22,7 @@ what we discussed (updates memory, creates tasks, sends follow-ups)."
 
 ## Entry Points
 
-- **REST**: `POST /api/agents/{name}/voip/call` (JWT/MCP; `AuthorizedAgent`)
+- **REST**: `POST /api/agents/{name}/voip/call` (JWT/MCP; `AuthorizedAgentByName`)
 - **MCP**: `call_user` tool (`src/mcp-server/src/tools/voip.ts`)
 - **Binding config (owner-only)**: `GET/PUT/DELETE /api/agents/{name}/voip`
 - **Media Streams WS (Twilio, ticket-authed)**: `WS /api/voip/voice/{call_id}`
@@ -48,6 +48,15 @@ what we discussed (updates memory, creates tasks, sends follow-ups)."
 - `src/backend/adapters/transports/voip_audio.py` — pure, dependency-free codec
   helpers (`ulaw8k_to_pcm16k`, `pcm24k_to_ulaw8k`, `pop_frames`). Carries
   per-direction `audioop.ratecv` state across chunks (the anti-click guarantee).
+
+**Bridge no longer strictly "unmodified"**: codec work still lives entirely in
+the transport (above), but two non-codec session knobs are now threaded through
+`gemini_voice.py` and benefit both transports: a per-session `max_duration`
+(the watchdog honors `VOIP_MAX_CALL_DURATION` for phone calls — see Config) and
+a shared `_TOOL_ETIQUETTE_INSTRUCTION` appended to `system_instruction` so the
+agent says a brief filler ("let me check that") before a slow `run_task` call
+instead of going silent. Both are described in [voice-chat.md](voice-chat.md)
+(VOICE-007, VOICE-009).
 
 ### Outbound call flow
 
@@ -128,7 +137,7 @@ DDL in `db/schema.py`; migration `_migrate_voip_tables` in `db/migrations.py`
 |---------|---------|
 | Feature exposure | `voip_available` flag OFF by default (`VOIP_ENABLED`) + per-agent `voip_bindings` row required |
 | Binding CRUD | Owner-only (`OwnedAgentByName`); AuthToken AES-256-GCM at rest |
-| Outbound trigger | `AuthorizedAgent` (JWT/MCP); rate-limited per `(owner, destination)`; durable per-agent daily call cap; optional `Idempotency-Key` (Invariant #18) |
+| Outbound trigger | `AuthorizedAgentByName` (JWT/MCP); rate-limited per `(owner, destination)`; durable per-agent daily call cap; optional `Idempotency-Key` (Invariant #18) |
 | PSTN spend | On the **agent owner's** Twilio account (each owner brings their own creds) |
 | Media Streams WS | Twilio can't send a JWT → single-use, **call-bound** ticket (`scope="voip:{call_id}"`, 180s TTL); staged intent consumed once via Redis `GETDEL` |
 | TwiML | URL attribute `quoteattr`-escaped (no injection) |
@@ -146,11 +155,18 @@ agent-server mirror — the bridge is backend-only.
 
 ## Config
 
-`VOIP_ENABLED` (default `false`), `VOIP_MAX_CALL_DURATION` (600s),
+`VOIP_ENABLED` (default `false`), `VOIP_MAX_CALL_DURATION` (600s / 10 min),
 `VOIP_DEFAULT_DAILY_CALL_CAP` (50), `VOIP_TICKET_TTL_SECONDS` (180),
 `VOIP_INTENT_TTL_SECONDS` (180), `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW`.
 All read via `os.getenv` in `src/backend/config.py`. `audioop-lts` pinned for
 `python_version >= "3.13"` (stdlib `audioop` removed in 3.13).
+
+**Call duration**: `VOIP_MAX_CALL_DURATION` (default 600s / 10 min) is the phone
+call's hard cap, enforced by the shared `gemini_voice._timeout_watchdog`. The
+trigger path passes it into `voice_service.create_session(max_duration=…)` so the
+per-session watchdog sleeps on it rather than the 5-min browser `VOICE_MAX_DURATION`.
+(Until this wiring the constant was defined but unused — every session, phone
+included, inherited the 300s voice cap, so calls were silently cut at 5 min.)
 
 ### Deployment / packaging (env vars must reach the container)
 

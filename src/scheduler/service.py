@@ -756,49 +756,11 @@ class SchedulerService:
             logger.info(f"Schedule {schedule_id} skipped: agent {schedule.agent_name} autonomy is disabled")
             return
 
-        # Agent-owned pre-check hook (#454). Only for cron-triggered invocations:
-        # manual triggers from the UI represent an explicit operator decision and
-        # must always fire. Fail-open: any None return means the agent has no
-        # pre-check or the call errored — fall through to normal firing.
-        effective_message = schedule.message
-        if triggered_by == "schedule":
-            decision = await self._run_pre_check(schedule.agent_name)
-            if decision is not None:
-                if not decision.get("fire", True):
-                    reason = decision.get("reason") or "pre-check returned fire=false"
-                    skipped = self.db.create_skipped_execution(
-                        schedule_id=schedule.id,
-                        agent_name=schedule.agent_name,
-                        message=schedule.message,
-                        triggered_by=triggered_by,
-                        skip_reason=f"pre-check: {reason}",
-                    )
-                    logger.info(
-                        f"Schedule {schedule.name} skipped by pre-check: {reason}"
-                    )
-                    now = datetime.utcnow()
-                    next_run = self._get_next_run_time(
-                        schedule.cron_expression, schedule.timezone
-                    )
-                    self.db.update_schedule_run_times(
-                        schedule.id, last_run_at=now, next_run_at=next_run
-                    )
-                    await self._publish_event({
-                        "type": "schedule_execution_skipped",
-                        "agent": schedule.agent_name,
-                        "schedule_id": schedule.id,
-                        "execution_id": skipped.id if skipped else None,
-                        "schedule_name": schedule.name,
-                        "reason": reason,
-                    })
-                    return
-                override = decision.get("message")
-                if override and isinstance(override, str):
-                    effective_message = override
-                    logger.info(
-                        f"Schedule {schedule.name} pre-check overrode message "
-                        f"({len(override)} chars)"
-                    )
+        # Agent-owned pre-check gate (#454): may skip the firing entirely or
+        # override the message. Manual triggers always fire.
+        should_fire, effective_message = await self._apply_pre_check_gate(schedule, triggered_by)
+        if not should_fire:
+            return
 
         logger.info(f"Executing schedule: {schedule.name} for agent {schedule.agent_name} (triggered_by={triggered_by})")
 
@@ -825,10 +787,76 @@ class SchedulerService:
             "triggered_by": triggered_by
         })
 
-        # Delegate to backend's TaskExecutionService via internal API.
-        # This ensures scheduled tasks go through the same code path as manual
-        # and public tasks: slot acquisition, activity tracking, credential
-        # sanitization, and dashboard capacity meter visibility.
+        await self._dispatch_and_record_outcome(schedule, execution, effective_message, triggered_by)
+
+    async def _apply_pre_check_gate(self, schedule, triggered_by: str) -> tuple[bool, str]:
+        """Agent-owned pre-check hook (#454). Cron-triggered only — manual
+        triggers from the UI are an explicit operator decision and always fire.
+
+        Returns ``(should_fire, effective_message)``. On a ``fire=false``
+        decision this records a skipped execution, advances the schedule run
+        times, and publishes the skipped event, then returns
+        ``(False, ...)`` — the caller aborts. A string ``message`` override is
+        threaded back as ``effective_message``. Fail-open: a ``None`` decision
+        (no hook, or the call errored) falls through to normal firing.
+        """
+        effective_message = schedule.message
+        if triggered_by != "schedule":
+            return True, effective_message
+
+        decision = await self._run_pre_check(schedule.agent_name)
+        if decision is None:
+            return True, effective_message
+
+        if not decision.get("fire", True):
+            reason = decision.get("reason") or "pre-check returned fire=false"
+            skipped = self.db.create_skipped_execution(
+                schedule_id=schedule.id,
+                agent_name=schedule.agent_name,
+                message=schedule.message,
+                triggered_by=triggered_by,
+                skip_reason=f"pre-check: {reason}",
+            )
+            logger.info(
+                f"Schedule {schedule.name} skipped by pre-check: {reason}"
+            )
+            now = datetime.utcnow()
+            next_run = self._get_next_run_time(
+                schedule.cron_expression, schedule.timezone
+            )
+            self.db.update_schedule_run_times(
+                schedule.id, last_run_at=now, next_run_at=next_run
+            )
+            await self._publish_event({
+                "type": "schedule_execution_skipped",
+                "agent": schedule.agent_name,
+                "schedule_id": schedule.id,
+                "execution_id": skipped.id if skipped else None,
+                "schedule_name": schedule.name,
+                "reason": reason,
+            })
+            return False, effective_message
+
+        override = decision.get("message")
+        if override and isinstance(override, str):
+            effective_message = override
+            logger.info(
+                f"Schedule {schedule.name} pre-check overrode message "
+                f"({len(override)} chars)"
+            )
+        return True, effective_message
+
+    async def _dispatch_and_record_outcome(self, schedule, execution, effective_message: str, triggered_by: str):
+        """Dispatch the schedule to the backend's TaskExecutionService (same path
+        as manual/public tasks: slots, activity tracking, sanitization, capacity
+        meter) and record the outcome.
+
+        Handles the three result modes — fire-and-forget ``dispatched`` (#132,
+        advance run times + return, the background poll emits completion),
+        ``success``, and failure — plus the exception path's SCHED-ASYNC-001
+        anti-overwrite guard (don't clobber an execution the backend already
+        finalized).
+        """
         try:
             result = await self._call_backend_execute_task(
                 agent_name=schedule.agent_name,

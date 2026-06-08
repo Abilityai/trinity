@@ -338,6 +338,31 @@ class AgentSessionMessage(BaseModel):
     compact_metadata: Optional[str] = None   # JSON list of compact events fired during this turn
 
 
+class SessionMessageInsert(BaseModel):
+    """Request object for inserting an agent-session message (#1027).
+
+    Replaces the 16-positional-arg signature of
+    ``SessionOperations.add_session_message`` so call sites name every field and
+    can't transpose positional args. The 6 identity/content fields are required;
+    the rest are per-turn observability/compaction metadata with safe defaults.
+    """
+    session_id: str
+    agent_name: str
+    user_id: int
+    user_email: str
+    role: str  # "user" or "assistant"
+    content: str
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    tool_calls: Optional[str] = None  # JSON array
+    execution_time_ms: Optional[int] = None
+    claude_session_id: Optional[str] = None
+    compact_metadata: Optional[str] = None  # JSON list of compact events
+    compact_event_count: int = 0
+
+
 # =========================================================================
 # Agent Permission Models (Phase 9.10: Agent-to-Agent Permissions)
 # =========================================================================
