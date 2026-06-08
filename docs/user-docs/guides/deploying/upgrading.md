@@ -123,6 +123,15 @@ docker exec trinity-vector wget -q -O - http://localhost:8686/health
 
 All six probes must pass before you declare the upgrade complete.
 
+**Confirm the new version is live.** After the probes pass, check that the backend is actually running the build you just deployed:
+
+```bash
+curl -s http://localhost:8000/api/version
+# Expected: {"version":"0.6.0","git_commit_short":"<sha>","git_branch":"...","build_date":"..."}
+```
+
+The `git_commit_short`, `git_branch`, `git_commit_subject`, and `build_date` fields come from build-time provenance baked into the image. If they read `"unknown"`, the image was built without the deploy script's build args — rebuild with `scripts/deploy/start.sh` to populate them. The same metadata is visible in the UI via the version chip in the navigation bar (click it for the **Build Info** dialog) and in **Settings**.
+
 **Note:** JWT tokens are invalidated when the backend restarts. Users with active web UI sessions will need to log in again. MCP clients (Claude Code) will need to reconnect — run `/mcp` in your Claude Code session or restart the client.
 
 ---

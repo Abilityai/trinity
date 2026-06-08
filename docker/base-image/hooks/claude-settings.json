@@ -10,7 +10,8 @@
       {
         "matcher": "Edit|Write|NotebookEdit|MultiEdit",
         "hooks": [
-          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/file-guardrail.py"}
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/file-guardrail.py"},
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/read-only-guard.py"}
         ]
       }
     ],

@@ -38,6 +38,7 @@ async def list_users(current_user: User = Depends(require_admin)):
             "picture": u.get("picture"),
             "created_at": u.get("created_at"),
             "last_login": u.get("last_login"),
+            "suspended_at": u.get("suspended_at"),  # #995 — NULL = active
         }
         for u in users
     ]

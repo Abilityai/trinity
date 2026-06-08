@@ -33,11 +33,12 @@ from ._runtime_config import (
     _load_guardrails,
 )
 from .error_classifier import (
+    _classify_signal_exit,
     _diagnose_exit_failure,
     _format_rate_limit_error,
     _is_rate_limit_message,
 )
-from .headless_executor import execute_headless_task
+from .headless_executor import _attempt_empty_result_recovery, execute_headless_task
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime
 from .stream_parser import process_stream_line
@@ -259,6 +260,10 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         response_parts: List[str] = []
         # Use provided execution_id if available (enables termination tracking from backend)
         execution_id = execution_id or str(uuid.uuid4())
+        # #678: capture turn-start timestamp so JSONL recovery can scope
+        # records to this turn (the resumed JSONL accumulates across all
+        # turns of the session). Mirror format from headless_executor.py:217.
+        task_start_iso = datetime.utcnow().isoformat() + "Z"
 
         # Mark session as potentially running (will be set to running when first tool starts)
         logger.info(f"Starting Claude Code with streaming: {' '.join(cmd[:5])}...")
@@ -444,6 +449,18 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
 
             # Check for errors
             if return_code != 0:
+                # Issue #906: Signal terminations (SIGKILL/SIGTERM/SIGINT — OOM,
+                # timeout, operator cancel) must be classified before the
+                # auth-fallback heuristic in `_diagnose_exit_failure`, which
+                # would otherwise misread "zero tokens processed" as an
+                # expired subscription token. Mirrors the symmetric check
+                # in headless_executor (Issue #516).
+                signal_exit = _classify_signal_exit(return_code, metadata)
+                if signal_exit is not None:
+                    status_code, detail = signal_exit
+                    logger.warning(f"[Chat] {detail}")
+                    raise HTTPException(status_code=status_code, detail=detail)
+
                 error_detail = stderr_output[:500] if stderr_output else ""
                 if not error_detail:
                     error_detail = _diagnose_exit_failure(return_code, metadata)
@@ -458,6 +475,25 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     status_code=500,
                     detail=f"Claude Code execution failed (exit code {return_code}): {error_detail[:300]}"
                 )
+
+            # #678: empty-result recovery before falling through to the
+            # generic 500. Tries JSONL metadata back-fill then text
+            # recovery; raises a structured 502 dict body when truly empty.
+            # Parity with the async path's _finalize_headless_result.
+            parse_fail_count_for_recovery = int(parse_fail_state["count"])  # type: ignore[arg-type]
+            parse_fail_sample = parse_fail_state.get("first_sample")  # type: ignore[union-attr]
+            hard_failure = _attempt_empty_result_recovery(
+                metadata=metadata,
+                raw_messages=raw_messages,
+                response_parts=response_parts,
+                parse_failure_count=parse_fail_count_for_recovery,
+                parse_failure_sample=parse_fail_sample if isinstance(parse_fail_sample, str) else None,
+                task_start_iso=task_start_iso,
+            )
+            if hard_failure is not None:
+                status_code, body = hard_failure
+                logger.error(f"[Chat] {body['message']}")
+                raise HTTPException(status_code=status_code, detail=body)
 
             # Build final response text
             response_text = "\n".join(response_parts) if response_parts else ""

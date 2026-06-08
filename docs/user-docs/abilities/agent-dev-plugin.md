@@ -14,19 +14,13 @@ Development tools for extending existing agents with skills, memory systems, and
 |-------|-------------|
 | `/agent-dev:create-playbook` | Create a new skill/playbook for the agent |
 | `/agent-dev:adjust-playbook` | Modify an existing skill/playbook |
-| `/agent-dev:add-memory` | Add memory system (file-index, brain, json-state, workspace) |
-| `/agent-dev:add-backlog` | Add GitHub Issues backlog workflow |
-| `/agent-dev:add-git-sync` | Add git-as-state hooks (auto-commit on tool use) |
-| `/agent-dev:backlog` | View GitHub Issues backlog |
-| `/agent-dev:claim` | Claim the next issue from the backlog |
-| `/agent-dev:close` | Close current issue without a commit |
-| `/agent-dev:commit` | Commit changed skill files and close the in-progress issue |
-| `/agent-dev:autoplan` | Analyze an issue before implementing — research and planning phase |
-| `/agent-dev:groom` | Groom the backlog — tag untagged issues with size/priority |
-| `/agent-dev:roadmap` | Strategic view of the backlog — open issues grouped by milestone |
-| `/agent-dev:sprint` | Human-supervised development cycle |
-| `/agent-dev:work-loop` | Autonomous work loop — process backlog issues until empty |
-| `/agent-dev:plan` | Plan and execute large multi-session projects |
+| `/agent-dev:add-memory` | Add a memory system (file-index, brain, json-state, workspace) |
+| `/agent-dev:add-backlog` | Add a GitHub Issues backlog workflow to the agent |
+| `/agent-dev:backlog` | View the agent's current GitHub Issues backlog |
+| `/agent-dev:pick-work` | Claim the next issue from the backlog |
+| `/agent-dev:close-work` | Close the current in-progress issue |
+| `/agent-dev:work-loop` | Run an autonomous loop: pick → work → close → repeat |
+| `/agent-dev:plan` | Plan and execute a large multi-session project |
 
 ## Memory Systems
 
@@ -50,6 +44,7 @@ Memory systems are copied directly into the agent — no plugin dependency at ru
 ```
 
 Guides through:
+
 1. **Purpose** — What the playbook accomplishes
 2. **Triggers** — When it should run
 3. **Steps** — The workflow steps
@@ -62,6 +57,7 @@ Guides through:
 ```
 
 Options:
+
 - Add/remove steps
 - Change automation level
 - Update schedule
@@ -75,13 +71,12 @@ Add task management via GitHub Issues:
 /agent-dev:add-backlog
 ```
 
-This installs:
-- `/backlog` — View current issues
-- `/claim` — Claim next task to work on
-- `/close` — Mark current task done (without commit)
-- `/commit` — Commit skill changes and close the issue
-- `/groom` — Tag and prioritize untagged issues
-- `/roadmap` — View issues grouped by milestone
+This installs the backlog skills (`backlog`, `pick-work`, `close-work`) directly into the agent. After install, the agent has:
+
+- `/backlog` — view current issues
+- `/pick-work` — claim the next task to work on
+- `/close-work` — mark the current task done
+- (combined with `/agent-dev:work-loop` for autonomous mode)
 
 ### Autonomous Work Loop
 
@@ -92,21 +87,12 @@ Run the agent autonomously through its backlog:
 ```
 
 The agent:
-1. Claims the highest priority issue
+
+1. Picks the highest priority issue
 2. Works on it until complete
-3. Commits and closes the issue
-4. Claims the next one
-5. Repeats until backlog is empty or time limit reached
-
-### Human-Supervised Sprint
-
-For sessions where you want to stay in the loop:
-
-```bash
-/agent-dev:sprint
-```
-
-Prompts for approval at key decision points rather than running autonomously.
+3. Closes the issue
+4. Picks the next one
+5. Repeats until the backlog is empty or the time limit is reached
 
 ## Multi-Session Planning
 
@@ -117,20 +103,11 @@ For large projects that span multiple sessions:
 ```
 
 Creates a persistent plan that tracks:
+
 - Overall goals and milestones
 - Current session focus
 - Completed work
 - Next steps
-
-## Git Sync
-
-Add automatic git commits on every tool use:
-
-```bash
-/agent-dev:add-git-sync
-```
-
-Installs hooks that commit the agent's state after each tool call — useful for agents that modify their own skills or knowledge base.
 
 ## See Also
 

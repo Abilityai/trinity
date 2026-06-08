@@ -1,6 +1,6 @@
 """
 Unit tests for execution_log + schedule_executions + agent_health_checks
-retention pruning (Issue #772).
+retention pruning (Issue #772, bug fix #862).
 
 Covers:
 - ``ScheduleOperations.prune_execution_logs``  — nulls execution_log on
@@ -11,6 +11,13 @@ Covers:
   agent_health_checks older than the cutoff.
 - ``retention_days <= 0`` disables every sweep.
 - ``chunk_size`` is respected (multi-pass drain).
+
+Bug #862 regression coverage (appended at the bottom):
+- Pruning uses the correct TaskExecutionStatus values: 'success', 'failed',
+  'cancelled', 'skipped'.  The original #772 code used 'completed',
+  'terminated' — values that never existed in the enum — so only 'failed'
+  rows were ever pruned.  Tests verify all four correct statuses are pruned
+  and that old wrong status values are NOT pruned.
 """
 
 from __future__ import annotations
@@ -106,12 +113,11 @@ def db_setup(tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_SCHEDULE_EXECUTIONS_DDL)
     conn.executescript(_AGENT_HEALTH_CHECKS_DDL)
-    # Mirror the partial index from schema.py / migration #772 so the
-    # query planner picks the same path the production DB uses.
+    # Mirror the partial index from schema.py / migration #772 (fixed in #862).
     conn.execute(
         "CREATE INDEX idx_executions_completed_terminal "
         "ON schedule_executions(completed_at) "
-        "WHERE status IN ('completed', 'failed', 'terminated')"
+        "WHERE status IN ('success', 'failed', 'cancelled', 'skipped')"
     )
     conn.commit()
     conn.close()
@@ -223,33 +229,33 @@ def _health_ids(db_path: Path) -> set[str]:
 def test_prune_execution_logs_nulls_terminal_past_cutoff(db_setup):
     db_path, schedule_ops, _ = db_setup
 
-    # Past 30-day cutoff, terminal: should be nulled.
-    _insert_execution(db_path, id_="old-completed", status="completed",
+    # Past 30-day cutoff, terminal (correct status values): should be nulled.
+    _insert_execution(db_path, id_="old-success", status="success",
                       completed_days_ago=45, execution_log="big-jsonl")
     _insert_execution(db_path, id_="old-failed", status="failed",
                       completed_days_ago=60, execution_log="big-jsonl")
-    _insert_execution(db_path, id_="old-terminated", status="terminated",
+    _insert_execution(db_path, id_="old-cancelled", status="cancelled",
                       completed_days_ago=90, execution_log="big-jsonl")
     # Within retention window: keep the log.
-    _insert_execution(db_path, id_="recent-completed", status="completed",
+    _insert_execution(db_path, id_="recent-success", status="success",
                       completed_days_ago=5, execution_log="keep-me")
     # Non-terminal, must never be touched.
     _insert_execution(db_path, id_="old-running", status="running",
                       completed_days_ago=None, execution_log="active-jsonl")
     # Terminal but log already NULL — should not be counted again.
-    _insert_execution(db_path, id_="old-completed-nulled", status="completed",
+    _insert_execution(db_path, id_="old-success-nulled", status="success",
                       completed_days_ago=100, execution_log=None)
 
     nulled = schedule_ops.prune_execution_logs(retention_days=30, chunk_size=1000)
     assert nulled == 3
 
     logs = _execution_logs(db_path)
-    assert logs["old-completed"] is None
+    assert logs["old-success"] is None
     assert logs["old-failed"] is None
-    assert logs["old-terminated"] is None
-    assert logs["recent-completed"] == "keep-me"
+    assert logs["old-cancelled"] is None
+    assert logs["recent-success"] == "keep-me"
     assert logs["old-running"] == "active-jsonl"
-    assert logs["old-completed-nulled"] is None
+    assert logs["old-success-nulled"] is None
 
 
 def test_prune_execution_logs_respects_chunk_size(db_setup):
@@ -258,7 +264,7 @@ def test_prune_execution_logs_respects_chunk_size(db_setup):
 
     for i in range(7):
         _insert_execution(
-            db_path, id_=f"old-{i}", status="completed",
+            db_path, id_=f"old-{i}", status="success",
             completed_days_ago=60, execution_log="payload",
         )
 
@@ -269,7 +275,7 @@ def test_prune_execution_logs_respects_chunk_size(db_setup):
 
 def test_prune_execution_logs_disabled_when_retention_zero(db_setup):
     db_path, schedule_ops, _ = db_setup
-    _insert_execution(db_path, id_="old", status="completed",
+    _insert_execution(db_path, id_="old", status="success",
                       completed_days_ago=400, execution_log="payload")
 
     assert schedule_ops.prune_execution_logs(retention_days=0) == 0
@@ -290,23 +296,23 @@ def test_prune_execution_logs_empty_table(db_setup):
 def test_prune_execution_rows_deletes_terminal_past_cutoff(db_setup):
     db_path, schedule_ops, _ = db_setup
 
-    _insert_execution(db_path, id_="old-1", status="completed",
+    _insert_execution(db_path, id_="old-success", status="success",
                       completed_days_ago=120, execution_log=None)
-    _insert_execution(db_path, id_="old-2", status="failed",
+    _insert_execution(db_path, id_="old-failed", status="failed",
                       completed_days_ago=200, execution_log=None)
-    _insert_execution(db_path, id_="recent", status="completed",
+    _insert_execution(db_path, id_="recent-success", status="success",
                       completed_days_ago=30, execution_log=None)
     _insert_execution(db_path, id_="old-running", status="running",
                       completed_days_ago=None, execution_log=None)
 
     deleted = schedule_ops.prune_execution_rows(retention_days=90, chunk_size=1000)
     assert deleted == 2
-    assert _execution_ids(db_path) == {"recent", "old-running"}
+    assert _execution_ids(db_path) == {"recent-success", "old-running"}
 
 
 def test_prune_execution_rows_disabled_when_retention_zero(db_setup):
     db_path, schedule_ops, _ = db_setup
-    _insert_execution(db_path, id_="old", status="completed",
+    _insert_execution(db_path, id_="old", status="success",
                       completed_days_ago=400, execution_log=None)
 
     assert schedule_ops.prune_execution_rows(retention_days=0) == 0
@@ -346,3 +352,63 @@ def test_cleanup_old_health_records_respects_chunk_size(db_setup):
     deleted = monitoring_ops.cleanup_old_records(days=7, chunk_size=2)
     assert deleted == 5
     assert _health_ids(db_path) == set()
+
+
+# ---------------------------------------------------------------------------
+# Bug #862 regression: correct TaskExecutionStatus values
+# ---------------------------------------------------------------------------
+
+
+def test_prune_logs_all_four_terminal_statuses(db_setup):
+    """'success', 'failed', 'cancelled', 'skipped' must all be pruned (#862)."""
+    db_path, schedule_ops, _ = db_setup
+
+    for status in ("success", "failed", "cancelled", "skipped"):
+        _insert_execution(db_path, id_=f"old-{status}", status=status,
+                          completed_days_ago=40, execution_log="payload")
+
+    nulled = schedule_ops.prune_execution_logs(retention_days=30, chunk_size=100)
+    assert nulled == 4
+    for status in ("success", "failed", "cancelled", "skipped"):
+        assert _execution_logs(db_path)[f"old-{status}"] is None
+
+
+def test_prune_rows_all_four_terminal_statuses(db_setup):
+    """'success', 'failed', 'cancelled', 'skipped' rows are all deleted (#862)."""
+    db_path, schedule_ops, _ = db_setup
+
+    for status in ("success", "failed", "cancelled", "skipped"):
+        _insert_execution(db_path, id_=f"old-{status}", status=status,
+                          completed_days_ago=100, execution_log=None)
+
+    deleted = schedule_ops.prune_execution_rows(retention_days=90, chunk_size=100)
+    assert deleted == 4
+    assert _execution_ids(db_path) == set()
+
+
+def test_prune_logs_skips_wrong_legacy_status_values(db_setup):
+    """'completed' and 'terminated' never existed in TaskExecutionStatus — not pruned (#862)."""
+    db_path, schedule_ops, _ = db_setup
+
+    _insert_execution(db_path, id_="legacy-completed", status="completed",
+                      completed_days_ago=60, execution_log="payload")
+    _insert_execution(db_path, id_="legacy-terminated", status="terminated",
+                      completed_days_ago=60, execution_log="payload")
+
+    nulled = schedule_ops.prune_execution_logs(retention_days=30, chunk_size=100)
+    assert nulled == 0
+    assert _execution_logs(db_path)["legacy-completed"] == "payload"
+    assert _execution_logs(db_path)["legacy-terminated"] == "payload"
+
+
+def test_prune_rows_skips_non_terminal_statuses(db_setup):
+    """running, queued, pending_retry rows survive the row-delete sweep (#862)."""
+    db_path, schedule_ops, _ = db_setup
+
+    for status in ("running", "queued", "pending_retry"):
+        _insert_execution(db_path, id_=f"nterm-{status}", status=status,
+                          completed_days_ago=None, execution_log=None)
+
+    deleted = schedule_ops.prune_execution_rows(retention_days=90, chunk_size=100)
+    assert deleted == 0
+    assert len(_execution_ids(db_path)) == 3

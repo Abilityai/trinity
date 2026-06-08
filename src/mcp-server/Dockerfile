@@ -18,6 +18,11 @@ COPY src ./src
 # Install dev dependencies for build
 RUN npm install && npm run build && npm prune --production
 
+# Run as non-root (CSO hardening, issue #874).
+# node:22-alpine ships a built-in `node` user at UID 1000.
+RUN chown -R node:node /app
+USER node
+
 # Expose MCP server port
 EXPOSE 8080
 

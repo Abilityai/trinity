@@ -288,7 +288,8 @@ def test_migration_is_idempotent(tmp_path):
             id INTEGER PRIMARY KEY,
             agent_name TEXT UNIQUE NOT NULL,
             owner_id INTEGER NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
     """
     )

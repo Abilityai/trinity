@@ -375,3 +375,287 @@ agents:
         # cleanup_test_agent deletes the container, which reaps the burner
         # (Docker SIGKILLs every PID in the container's pid namespace).
         cleanup_test_agent(api_client, agent_name)
+
+
+# Timing constants for the cgroup-walk follow-up test (Eugene's production
+# class — no env tag, different pgid, FDs detached). 60s for the per-task
+# path + cgroup sweep is conservative: claude-side cleanup typically lands
+# inside 5s of execution end, and the sweep adds ~100ms.
+NO_TAG_CLEANUP_WAIT_SECONDS = 60
+
+
+def _inject_no_tag_burner(container_name: str) -> int | None:
+    """Inject the production-class orphan into the running container.
+
+    All four evasion vectors at once:
+        setsid     -> different pgid, escapes terminate_process_group
+        env -i     -> strips TRINITY_EXECUTION_ID, escapes the (deleted)
+                      env-tag sweep
+        </dev/null >/dev/null 2>&1  -> no shared pipe FDs, escapes the
+                      (deleted) pipe-writer sweep
+        nice -n 10 + while :; do :; done  -> burns CPU so docker stats
+                      attribution is unambiguous
+
+    Spawned via ``docker exec -d`` so it has no relationship to claude
+    inside the container — mimics Eugene's production observation where
+    the orphan was visible from inside the container but had no
+    ``TRINITY_EXECUTION_ID`` in ``/proc/<pid>/environ``.
+
+    Returns the burner's pid or None if the post-spawn ps probe failed.
+    """
+    subprocess.run(
+        [
+            "docker", "exec", "-d", container_name, "sh", "-c",
+            "exec setsid env -i /bin/bash -c \""
+            "nice -n 10 bash -c 'while :; do :; done' </dev/null >/dev/null 2>&1 &"
+            "disown\" </dev/null >/dev/null 2>&1",
+        ],
+        check=False, timeout=10,
+    )
+    # Give the burner ~1s to actually exec into the loop so ps can see it.
+    time.sleep(1.5)
+    try:
+        result = subprocess.run(
+            [
+                "docker", "exec", container_name,
+                "sh", "-c",
+                "ps -eo pid,cmd --no-headers | awk '/bash -c while :/ && !/awk/ {print $1; exit}'",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    pid_str = (result.stdout or "").strip().split()[0] if result.stdout.strip() else ""
+    try:
+        return int(pid_str)
+    except ValueError:
+        return None
+
+
+def _pid_alive(container_name: str, pid: int) -> bool:
+    """Return True iff `pid` is still alive inside the container."""
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "kill", "-0", str(pid)],
+            capture_output=True, text=True, timeout=8,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False  # docker exec broke — caller's outer assertion will surface
+    return result.returncode == 0
+
+
+@pytest.mark.slow
+def test_817_cgroup_sweep_catches_no_env_tag_orphan(api_client: TrinityApiClient):
+    """Regression gate for the cgroup-walk cleanup (#817 follow-up).
+
+    Eugene's 2026-05-13 production capture showed an orphan that
+    escaped all three prior cleanup passes — different pgid (setsid),
+    no shared pipe FDs (``</dev/null``), no ``TRINITY_EXECUTION_ID``
+    in ``/proc/<pid>/environ`` (env scrubbed via ``env -i`` / re-exec).
+    The env-tag scan reported `0 processes found` in his agent at
+    100+ minute orphan survival.
+
+    The fix replaces the three reactive passes with a single
+    exclusionary mechanism: walk ``/sys/fs/cgroup/cgroup.procs`` and
+    SIGKILL every PID not on the allowlist (platform essentials +
+    active execution descendants + user-configured persistent
+    daemons). Cgroup membership is the container boundary — a process
+    the kernel is attributing to this container's CPU/memory is by
+    definition inside the cgroup. There is no escape vector.
+
+    This test asserts that mechanism against the exact escape shape
+    that defeated the previous fix:
+
+      1. Deploy any agent with a working task path (the existing
+         ``test-leak-hook`` template happens to suit — the hook does
+         not need to fire for this test; we just need a container).
+      2. Trigger a short benign claude task so an execution is in
+         flight when we inject.
+      3. While claude is running, ``docker exec`` a setsid +
+         ``env -i`` + FD-detached CPU burner into the container.
+         This burner has zero relationship to claude or
+         agent-server: not a descendant, not in any tracked pgid,
+         no env tag, no shared pipes.
+      4. Wait for the execution to finish — drain_reader_threads
+         fires its terminal cgroup sweep.
+      5. Assert the burner is dead. If it survives, the cgroup-walk
+         regressed and Eugene's production scenario is once again
+         live.
+
+    A red run here means the sweep allowlist is too permissive or
+    the sweep itself is not being invoked from the cleanup path.
+    """
+    suffix = uuid.uuid4().hex[:6]
+    system_name = f"test-817cg-{suffix}"
+    agent_short = "victim"
+    agent_name = f"{system_name}-{agent_short}"
+    container_name = f"agent-{agent_name}"
+
+    # Reuse the existing repro template — the UserPromptSubmit hook is
+    # harmless to this test (claude's "ok" reply still happens), and we
+    # avoid shipping a second nearly-identical template just to flip a
+    # bit in CLAUDE.md.
+    manifest = f"""
+name: {system_name}
+agents:
+  {agent_short}:
+    template: local:test-leak-hook
+"""
+
+    schedule_id: str | None = None
+    burner_pid: int | None = None
+
+    try:
+        # -------- Stage 1: deploy + wait for healthy ----------------------
+        deploy = api_client.post(
+            "/api/systems/deploy",
+            json={"manifest": manifest, "dry_run": False},
+            timeout=120.0,
+        )
+        assert_status(deploy, 200)
+
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            agent_resp = api_client.get(f"/api/agents/{agent_name}")
+            if agent_resp.status_code == 200 and agent_resp.json().get("status") == "running":
+                break
+            time.sleep(2)
+        else:
+            pytest.fail(f"Agent {agent_name} did not reach running status within 90s")
+
+        deadline = time.monotonic() + 60
+        agent_ready = False
+        while time.monotonic() < deadline:
+            try:
+                probe = subprocess.run(
+                    [
+                        "docker", "exec", container_name,
+                        "curl", "-m", "3", "-s", "-o", "/dev/null",
+                        "-w", "%{http_code}",
+                        "http://localhost:8000/health",
+                    ],
+                    capture_output=True, text=True, timeout=8,
+                )
+                if probe.returncode == 0 and probe.stdout.strip() == "200":
+                    agent_ready = True
+                    break
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+            time.sleep(2)
+        if not agent_ready:
+            pytest.fail(f"Agent {agent_name} /health did not return 200 within 60s")
+
+        # -------- Stage 2: short benign schedule ---------------------------
+        # The hook in test-leak-hook spawns its own burners on every
+        # UserPromptSubmit; those are TAG-bearing and the cgroup sweep
+        # also catches them. They aren't the focus here — we want the
+        # NO-TAG burner injected from outside in stage 3 to be the
+        # specific PID we track. A short claude task gives the sweep a
+        # natural trigger point at execution-end.
+        sched_resp = api_client.post(
+            f"/api/agents/{agent_name}/schedules",
+            json={
+                "name": "no-tag-repro",
+                "cron_expression": "0 0 1 1 *",
+                "message": "Reply with the single word done.",
+                "timeout_seconds": 60,
+                "max_retries": 0,
+                "retry_delay_seconds": 30,
+                "enabled": True,
+            },
+        )
+        assert_status(sched_resp, 201)
+        schedule_id = sched_resp.json()["id"]
+
+        # -------- Stage 3: trigger + inject within 3s ----------------------
+        trigger = api_client.post(
+            f"/api/agents/{agent_name}/schedules/{schedule_id}/trigger",
+        )
+        assert trigger.status_code in (200, 202), (
+            f"Trigger returned {trigger.status_code}: {trigger.text}"
+        )
+
+        # Wait long enough for claude to start (so an execution is
+        # registered) but short enough that claude is still running
+        # when we inject the orphan. 3s is comfortably inside the
+        # typical 6-15s claude startup → first-tool-call window.
+        time.sleep(3)
+        burner_pid = _inject_no_tag_burner(container_name)
+        assert burner_pid is not None, (
+            "Failed to spawn or detect the no-env-tag burner inside "
+            f"{container_name}. The test cannot assert cleanup without a "
+            "live target."
+        )
+        # Sanity check: the burner is actually alive right after spawn.
+        assert _pid_alive(container_name, burner_pid), (
+            f"Injected burner pid={burner_pid} died before any sweep could "
+            "fire — engineered repro is broken."
+        )
+
+        # -------- Stage 4: wait for execution to terminate -----------------
+        # The benign message ("reply done") typically completes in
+        # 5-15s. drain_reader_threads runs on completion and fires the
+        # cgroup sweep in its finally block.
+        deadline = time.monotonic() + NO_TAG_CLEANUP_WAIT_SECONDS
+        terminal_status = None
+        while time.monotonic() < deadline:
+            exec_resp = api_client.get(
+                f"/api/agents/{agent_name}/schedules/{schedule_id}/executions",
+            )
+            if exec_resp.status_code == 200:
+                executions = exec_resp.json() or []
+                for e in executions:
+                    if e.get("status") in ("success", "failed", "cancelled", "pending_retry"):
+                        terminal_status = e.get("status")
+                        break
+                if terminal_status:
+                    break
+            time.sleep(2)
+
+        assert terminal_status is not None, (
+            f"Execution never reached a terminal status within "
+            f"{NO_TAG_CLEANUP_WAIT_SECONDS}s. Without a task-end the "
+            "cgroup sweep from drain_reader_threads cannot fire."
+        )
+
+        # The sweep is invoked from drain_reader_threads' finally
+        # block; allow a short settling window for SIGKILL delivery
+        # and the kernel's process-reap to complete.
+        time.sleep(2)
+
+        # -------- Stage 5: regression gate — burner must be dead -----------
+        alive = _pid_alive(container_name, burner_pid)
+        if alive:
+            # Capture diagnostics before failing so a CI failure is
+            # actionable. The cgroup contents tell us whether the
+            # sweep ran but missed it (sweep bug) versus didn't run
+            # at all (cleanup-path bug).
+            diag_ps = _ps_dump_for_diagnostics(container_name)
+            cgroup_dump = subprocess.run(
+                [
+                    "docker", "exec", container_name,
+                    "cat", "/sys/fs/cgroup/cgroup.procs",
+                ],
+                capture_output=True, text=True, timeout=8,
+            )
+            pytest.fail(
+                f"Cgroup sweep regression (#817): no-env-tag burner "
+                f"pid={burner_pid} survived execution-end cleanup "
+                f"(terminal_status={terminal_status}). This is Eugene's "
+                f"production class — the orphan has no TRINITY_EXECUTION_ID, "
+                f"different pgid, and detached FDs. The current cleanup "
+                f"path is not catching it.\n\n"
+                f"Surviving burner ps lines:\n{diag_ps}\n\n"
+                f"cgroup.procs contents at failure:\n"
+                f"{cgroup_dump.stdout if cgroup_dump.returncode == 0 else cgroup_dump.stderr}"
+            )
+
+    finally:
+        if schedule_id:
+            try:
+                api_client.delete(
+                    f"/api/agents/{agent_name}/schedules/{schedule_id}",
+                )
+            except Exception:
+                pass
+        cleanup_test_agent(api_client, agent_name)

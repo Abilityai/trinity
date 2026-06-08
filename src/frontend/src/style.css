@@ -2,6 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Reserve scrollbar gutter so pages that toggle between scrolling and
+   non-scrolling layouts (e.g. AgentDetail Chat/Session vs other tabs)
+   don't shift horizontally. Issue #954. */
+html {
+  scrollbar-gutter: stable;
+}
+
 /* Theme transition for smooth dark mode switching */
 * {
   transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;

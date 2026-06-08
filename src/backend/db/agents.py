@@ -97,8 +97,32 @@ class AgentOperations(
                     conn.commit()
                 return False
 
+    def is_agent_name_reserved(self, agent_name: str) -> bool:
+        """True if `agent_name` is present in agent_ownership, including
+        soft-deleted rows (#834).
+
+        The unique constraint on `agent_name` doesn't distinguish live
+        vs soft-deleted, so the create path needs an explicit check that
+        also sees soft-deleted rows — otherwise it walks past the
+        existence guard and crashes downstream on the SQL INTEGRITY
+        error (and worse: leaks side effects like a created container
+        before the failure).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
+            return cursor.fetchone() is not None
+
     def get_agent_owner(self, agent_name: str) -> Optional[Dict]:
-        """Get the owner of an agent, including is_system flag."""
+        """Get the owner of an agent, including is_system flag.
+
+        Excludes soft-deleted agents (#834): callers consume this to
+        gate user-facing access; soft-deleted agents should look like
+        they don't exist.
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -106,7 +130,7 @@ class AgentOperations(
                        ao.created_at, COALESCE(ao.is_system, 0) as is_system
                 FROM agent_ownership ao
                 JOIN users u ON ao.owner_id = u.id
-                WHERE ao.agent_name = ?
+                WHERE ao.agent_name = ? AND ao.deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -124,20 +148,143 @@ class AgentOperations(
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT agent_name FROM agent_ownership WHERE owner_id = ?
+                SELECT agent_name FROM agent_ownership
+                WHERE owner_id = ? AND deleted_at IS NULL
             """, (user["id"],))
             return [row["agent_name"] for row in cursor.fetchall()]
 
     def delete_agent_ownership(self, agent_name: str) -> bool:
-        """Remove agent ownership record, all sharing records, and pending access requests."""
+        """Soft-delete the agent ownership row (Issue #834 Phase 1a).
+
+        Marks `deleted_at = NOW`. Child rows (sharing, access requests,
+        schedules, chat history, …) are left intact — the retention sweep
+        in `cleanup_service.py` runs `cascade_delete()` to remove them
+        when the soft-delete window expires (default 180 days, configurable
+        via `agent_soft_delete_retention_days` in system_settings).
+
+        Idempotent: if the row is already soft-deleted, the UPDATE is a
+        no-op and we return True (the agent is in fact deleted, just not
+        yet purged). Returns False only if the row doesn't exist.
+        """
+        from utils.helpers import utc_now_iso
+
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            # Delete sharing records first (cascade)
-            cursor.execute("DELETE FROM agent_sharing WHERE agent_name = ?", (agent_name,))
-            # Delete access requests (issue #311)
-            cursor.execute("DELETE FROM access_requests WHERE agent_name = ?", (agent_name,))
-            # Delete ownership record
-            cursor.execute("DELETE FROM agent_ownership WHERE agent_name = ?", (agent_name,))
+            cursor.execute(
+                "UPDATE agent_ownership "
+                "SET deleted_at = ? "
+                "WHERE agent_name = ? AND deleted_at IS NULL",
+                (utc_now_iso(), agent_name),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                return True
+            # rowcount==0 — either already soft-deleted or doesn't exist
+            cursor.execute(
+                "SELECT 1 FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
+            return cursor.fetchone() is not None
+
+    def find_soft_deleted_agents_past_retention(
+        self, retention_days: int, limit: int = 5000
+    ) -> List[str]:
+        """List agent_names where `deleted_at` is older than `retention_days`.
+
+        Used by the retention sweep to find rows ready for hard-purge.
+        Bounded by `limit` to keep each cycle's work cap predictable
+        (same pattern as #772 sweeps).
+        """
+        from utils.helpers import iso_cutoff
+
+        if retention_days <= 0 or limit <= 0:
+            return []
+
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT agent_name FROM agent_ownership "
+                "WHERE deleted_at IS NOT NULL AND deleted_at < ? "
+                "LIMIT ?",
+                (cutoff, limit),
+            )
+            return [row["agent_name"] for row in cursor.fetchall()]
+
+    def recover_agent_ownership(self, agent_name: str) -> bool:
+        """Recover a soft-deleted agent by clearing `deleted_at` (#834).
+
+        Reverses a `delete_agent_ownership()` call within the retention
+        window. Refuses to operate on:
+          - a row that doesn't exist (returns False)
+          - a live row (already `deleted_at IS NULL`; returns False)
+
+        Returns True on successful recovery. Child rows survived the
+        soft-delete intact, so the agent is immediately accessible
+        again via the user-facing read paths. The Docker container is
+        NOT recreated — that's a separate operation (operator must
+        re-start the agent if they want a running container).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_ownership SET deleted_at = NULL "
+                "WHERE agent_name = ? AND deleted_at IS NOT NULL",
+                (agent_name,),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                return True
+            return False
+
+    def list_soft_deleted_agents(self, limit: int = 200) -> List[Dict]:
+        """List currently-soft-deleted agents with their `deleted_at`.
+
+        Used by the admin recovery endpoint. Returns agent_name,
+        owner_id (so admins can filter by owner), and the timestamp
+        the agent was soft-deleted. The purge ETA is computed at the
+        router layer using `agent_soft_delete_retention_days`.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT agent_name, owner_id, deleted_at, created_at "
+                "FROM agent_ownership "
+                "WHERE deleted_at IS NOT NULL "
+                "ORDER BY deleted_at DESC "
+                "LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def purge_agent_ownership(self, agent_name: str) -> bool:
+        """Hard-delete a soft-deleted agent (#834): runs #816 cascade_delete
+        on child tables then removes the agent_ownership row itself.
+
+        Called by the retention sweep AND by ad-hoc admin tooling. Refuses
+        to purge a live (non-soft-deleted) row — callers must soft-delete
+        first. Returns True if a row was actually removed.
+        """
+        from db.agent_cleanup import cascade_delete
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT deleted_at FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            if row["deleted_at"] is None:
+                # Refuse to purge a live agent — explicit safety guard.
+                return False
+
+            cascade_delete(conn, agent_name)
+            cursor.execute(
+                "DELETE FROM agent_ownership WHERE agent_name = ?",
+                (agent_name,),
+            )
             conn.commit()
             return cursor.rowcount > 0
 
@@ -201,7 +348,8 @@ class AgentOperations(
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT voice_system_prompt FROM agent_ownership WHERE agent_name = ?",
+                "SELECT voice_system_prompt FROM agent_ownership "
+                "WHERE agent_name = ? AND deleted_at IS NULL",
                 (agent_name,),
             )
             row = cursor.fetchone()

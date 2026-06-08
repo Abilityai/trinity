@@ -17,18 +17,40 @@
 #
 # Permissions are explicitly empty (preset: none) — fleet members observe
 # their own orchestration, not each other.
+#
+# ⚠️  POST-DEPLOY API CALLS REQUIRED
+#
+# `services/system_service.py:create_schedules` only honors:
+#   name, cron, message, enabled, timezone, description
+# and `SystemAgentConfig` has no `max_parallel_tasks` field. So the four
+# settings noted below must be applied via API after `systems/deploy`:
+#
+#   1. PUT /api/agents/canary-fleet-burst/schedules/{id}
+#        body: {"model": "claude-haiku-4-5-20251001"}
+#   2. PUT /api/agents/canary-fleet-slow/schedules/{id}
+#        body: {"model": "claude-haiku-4-5-20251001"}
+#   3. PUT /api/agents/canary-fleet-slow/capacity
+#        body: {"max_parallel_tasks": 1}
+#   4. PUT /api/agents/canary-fleet-slow/timeout
+#        body: {"execution_timeout_seconds": 180}   # >75s sleep + buffer
 
 name: canary-fleet
-description: Canary harness load generators (Issue #411 Phase 1)
+description: Canary harness load generators (Issue #411)
 
 agents:
-  # Constant slot churn — fires every minute (cron's minimum). Exercises
-  # S-01 (slot–row bijection) and E-02 (no phantom reversal) by producing
-  # a steady stream of acquire / release cycles.
+  # Frequent slot churn — fires every 2 minutes. Exercises:
+  #   - S-01 (slot–row bijection): in-flight task at canary snapshot
+  #   - E-02 (no phantom reversal): status transitions
+  #   - S-03 (slot TTL floor): slot existing at snapshot
+  #   - R-01 (no zombie claude): exec/wait cycles
   #
   # `test-echo` is Trinity's minimal stock template (no MCP servers, no
-  # credentials, deterministic short reply) — exactly what slot-churn
-  # invariants need.
+  # credentials, deterministic short reply, ~4s task) — exactly what
+  # slot-churn invariants need.
+  #
+  # Cron `*/2 * * * *` is the cheapest cadence that still phase-slides
+  # against the 5-min canary cycle. `*/5` would phase-lock and risk zero
+  # snapshot overlap for days. See ops notes in PR thread for #411.
   burst:
     template: local:test-echo
     resources:
@@ -36,26 +58,31 @@ agents:
       memory: "512m"
     schedules:
       - name: heartbeat
-        cron: "* * * * *"  # every minute
+        cron: "*/2 * * * *"
         message: "ok"
         timezone: UTC
-        description: Constant load to exercise slot–row bijection (S-01) and reversal (E-02)
+        description: Frequent short-task load (S-01, E-02, S-03, R-01)
 
-  # Slower cadence so multiple slots overlap across cycles. Phase 2
-  # invariants (S-03 / E-01 / E-06) want a longer-lived slot to scrutinize;
-  # Phase 1 only needs the slower cron to broaden snapshot coverage, so
-  # reusing `test-echo` is fine here too.
-  long:
-    template: local:test-echo
+  # Long-lived slot — sleeps 75s per task on a 3-min cron. Exercises:
+  #   - E-05 (dispatched rows have session): provides >60s running rows
+  #     so the invariant has something to inspect (currently trivially-
+  #     green because no fleet rows live that long).
+  #   - S-03 below_floor: TTL is checked on a slot that actually exists.
+  #
+  # 75s task duration > 60s E-05 SLA. 3-min cron > 75s task = no overlap
+  # in steady state; max_parallel_tasks=1 (set via post-deploy PUT) means
+  # any spill into the next cron tick would queue, which B-02 catches.
+  slow:
+    template: local:sleep-echo
     resources:
       cpu: "1"
-      memory: "1g"
+      memory: "512m"
     schedules:
-      - name: long-task
-        cron: "*/5 * * * *"  # every 5 min
-        message: "long-task ping"
+      - name: slow-task
+        cron: "*/3 * * * *"
+        message: "slow ping"
         timezone: UTC
-        description: Slower cadence to overlap slots across canary cycles (Phase 2 will swap in a real long task)
+        description: Long-lived slot to give E-05 / S-03 a row to inspect
 
 # No cross-agent permissions — the canary fleet observes the orchestration
 # layer, not each other.

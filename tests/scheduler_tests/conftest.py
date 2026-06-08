@@ -107,7 +107,8 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             next_run_at TEXT,
             model TEXT,
             max_retries INTEGER DEFAULT 0,
-            retry_delay_seconds INTEGER DEFAULT 60
+            retry_delay_seconds INTEGER DEFAULT 60,
+            deleted_at TEXT  -- #834 Phase 1b: scheduler read paths filter `WHERE deleted_at IS NULL`
         )
     """)
 
@@ -149,7 +150,8 @@ def initialized_db(temp_db_path: str) -> Generator[str, None, None]:
             agent_name TEXT PRIMARY KEY,
             owner_id INTEGER NOT NULL,
             autonomy_enabled INTEGER DEFAULT 0,
-            created_at TEXT
+            created_at TEXT,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
     """)
 

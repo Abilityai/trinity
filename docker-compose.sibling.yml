@@ -1,0 +1,79 @@
+## Sibling stack — minimal Redis-only override for running the worktree's
+## Redis-backed integration tests (`tests/integration/test_circuit_breaker.py`)
+## without touching the production stack on ports 6379 / 8000 / 80 / etc.
+##
+## Why Redis-only: the integration test is in-process pytest that imports
+## `agent_client.py` from this worktree via importlib and exercises the
+## circuit-breaker state machine against a real Redis. None of the rest of
+## the stack (backend, mcp-server, scheduler, frontend, vector, otel) is on
+## the test's call graph, so spinning the full stack would add 5–10 minutes
+## of build time + a fleet of port/name conflicts for no extra coverage.
+##
+## Usage:
+##   docker compose -p trinity-sibling -f docker-compose.sibling.yml up -d
+##   REDIS_URL="redis://backend:${REDIS_BACKEND_PASSWORD}@localhost:6390" \
+##       uv run --with-requirements tests/requirements-test.txt \
+##           pytest tests/integration/test_circuit_breaker.py -v
+##   docker compose -p trinity-sibling -f docker-compose.sibling.yml down -v
+##
+## Naming: `trinity-sibling-*` to make the sibling visually distinct from the
+## production `trinity-*` containers in `docker ps`. Volume + network are
+## project-scoped (`trinity-sibling_*`) so `down -v` cleanly removes them.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: trinity-sibling-redis
+    # Bind to a free loopback port — production sibling is on 6379, we use 6390.
+    ports:
+      - "127.0.0.1:6390:6379"
+    volumes:
+      - sibling-redis-data:/data
+    environment:
+      - "REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+      - "REDIS_BACKEND_PASSWORD=${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set}"
+    # ACL parity with the production stack: `default` admin + `backend` runtime
+    # user. Integration tests connect as `backend`, matching production semantics.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --user
+      - default
+      - "on"
+      - ">${REDIS_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@all"
+      - --user
+      - backend
+      - "on"
+      - ">${REDIS_BACKEND_PASSWORD}"
+      - "~*"
+      - "&*"
+      - "+@read"
+      - "+@write"
+      - "+@connection"
+      - "+@keyspace"
+      - "+@stream"
+      - "+@list"
+      - "+@set"
+      - "+@sortedset"
+      - "+@hash"
+      - "+@scripting"
+      - "+@transaction"
+      - "+@pubsub"
+      - "-@dangerous"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_BACKEND_PASSWORD" redis-cli --user backend --no-auth-warning ping | grep -q PONG
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+volumes:
+  sibling-redis-data:

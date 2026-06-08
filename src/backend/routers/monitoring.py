@@ -174,6 +174,25 @@ async def get_fleet_status(
         latest_checks = db.get_all_latest_health_checks(agent_names, "aggregate")
         summary = db.get_health_summary(agent_names)
         agents = [_build_agent_summary(name, latest_checks.get(name)) for name in agent_names]
+
+        # RELIABILITY-004 / #307: merge the heartbeat liveness layer in a single
+        # batched Redis round-trip (D4). This is the PASSIVE (pull) annotation —
+        # it does not change `status`; it just annotates each summary so the
+        # UI/MCP can show fast-path liveness. Heartbeat loss is surfaced ACTIVELY
+        # (push) by the watch loop via the monitoring_alerts notification path,
+        # not through this aggregation. Inside the try/except so a Redis blip
+        # degrades, never 500s.
+        from services.heartbeat_service import heartbeat_status_bulk
+        hb_map = heartbeat_status_bulk(agent_names)
+        for agent in agents:
+            hb = hb_map.get(agent.name)
+            if hb:
+                agent.heartbeat_alive = hb["heartbeat_alive"]
+                agent.last_heartbeat_age_s = hb["last_heartbeat_age_s"]
+                agent.heartbeat_active_executions = hb["heartbeat_active_executions"]
+                agent.heartbeat_memory_mb = hb["heartbeat_memory_mb"]
+                agent.heartbeat_state = hb["heartbeat_state"]
+
         agents.sort(key=_status_sort_key)
     except Exception:
         logger.exception("Fleet health aggregation failed for %d agents", len(agent_names))
@@ -287,6 +306,11 @@ async def get_agent_health(
     if aggregate_check.get("error_message"):
         issues = aggregate_check["error_message"].split("; ")
 
+    # #526: unified circuit-breaker block (same shape as
+    # GET /api/agents/{name}/circuit-breaker).
+    from services.circuit_breaker_view import build_circuit_breaker_block
+    circuit_breaker = build_circuit_breaker_block(agent_name)
+
     return AgentHealthDetail(
         agent_name=agent_name,
         aggregate_status=aggregate_check.get("status", "unknown"),
@@ -297,7 +321,8 @@ async def get_agent_health(
         issues=issues,
         recent_alerts=[],  # TODO: Fetch from notifications
         uptime_percent_24h=round(uptime, 2) if uptime else None,
-        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None
+        avg_latency_24h_ms=round(avg_latency, 2) if avg_latency else None,
+        circuit_breaker=circuit_breaker,
     )
 
 

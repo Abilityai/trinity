@@ -87,7 +87,7 @@ class ParallelTaskRequest(BaseModel):
     model: Optional[str] = None  # Model override: sonnet, opus, haiku, or full model name
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
-    timeout_seconds: Optional[int] = None  # Execution timeout (None = use agent's config, default 15 min)
+    timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
     max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
@@ -364,6 +364,7 @@ class DeployLocalResponse(BaseModel):
     versioning: Optional[VersioningInfo] = None
     credentials_imported: Optional[Dict[str, str]] = None  # Files found in archive
     credentials_injected: Optional[int] = None  # Count of credentials injected
+    warnings: List[str] = []  # Advisory deploy-time warnings (e.g. MCP credential gaps)
     error: Optional[str] = None
     code: Optional[str] = None  # Error code for machine-readable errors
 
@@ -533,3 +534,112 @@ class FleetExecutionStats(BaseModel):
     total_cost: float
     success_rate: float
     hours: int  # 0 = all-time
+
+
+class CircuitBreakerConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
+
+    Per-agent opt-in for the dispatch breaker. Gated again by the global
+    DISPATCH_BREAKER_ENABLED master switch — both must be on to engage.
+    """
+    enabled: bool
+
+
+# =============================================================================
+# Soft-Delete Admin Recovery (#834 Phase 1c)
+# =============================================================================
+
+class SoftDeletedAgent(BaseModel):
+    """Response item for GET /api/admin/soft-deleted/agents."""
+    agent_name: str
+    owner_id: int
+    created_at: str
+    deleted_at: str
+    # When the retention sweep would hard-purge this row (None when
+    # the retention setting is 0 = disabled).
+    purge_eta: Optional[str]
+
+
+class SoftDeletedSchedule(BaseModel):
+    """Response item for GET /api/admin/soft-deleted/schedules."""
+    id: str
+    agent_name: str
+    name: str
+    cron_expression: str
+    message: str
+    owner_id: int
+    enabled: bool
+    deleted_at: str
+    purge_eta: Optional[str]
+
+
+# =============================================================================
+# Schedule Analytics (#868)
+# =============================================================================
+#
+# Per-schedule distributions over `schedule_executions`. Per-agent rollup
+# and per-chat-session analytics deferred to #18 and a follow-up issue
+# respectively — see #868 issue body "Out of Scope" section for the
+# decision context.
+
+
+class DurationPercentiles(BaseModel):
+    """Duration percentiles in milliseconds. All null when the schedule
+    has fewer than 1 successful execution in the window."""
+    p50: Optional[int] = None
+    p95: Optional[int] = None
+    p99: Optional[int] = None
+
+
+class CostTotals(BaseModel):
+    """Cost totals in USD for the analytics window."""
+    total: float = 0.0
+
+
+class ToolCallEntry(BaseModel):
+    """One row of the top-N tool-call distribution."""
+    name: str
+    total_duration_ms: int
+
+
+class ToolCallSummary(BaseModel):
+    """Tool-call distribution weighted by total wall time per tool.
+
+    Top-N is intentionally weighted by `sum(duration_ms)` rather than
+    raw count — raw count is dominated by `Read` / `Bash` on every
+    agent and has low signal-to-noise. Locked by /autoplan strategy
+    finding #6.
+    """
+    top: List[ToolCallEntry] = []
+    total_calls: int = 0
+
+
+class TimelineEntry(BaseModel):
+    """One UTC-day bucket on the analytics timeline. Zero-filled for
+    days that had no executions (Python-side gap fill) so chart
+    libraries render a continuous x-axis."""
+    date: str
+    success: int
+    failed: int
+    cost: float
+
+
+class ScheduleAnalyticsResponse(BaseModel):
+    """Response envelope for GET /api/agents/{name}/schedules/{schedule_id}/analytics.
+
+    `sampled` reports whether the percentile / tool-call pool was
+    capped (currently 5000 newest success rows). Counts and timeline
+    are always unsampled. UTC day boundaries.
+    """
+    window_hours: int
+    total_executions: int
+    success_count: int
+    failed_count: int
+    cancelled_count: int
+    success_rate: float
+    duration_ms: DurationPercentiles
+    cost: CostTotals
+    tool_calls: ToolCallSummary
+    timeline: List[TimelineEntry]
+    sampled: bool = False
+    sample_size: int = 0

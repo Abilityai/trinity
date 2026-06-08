@@ -17,10 +17,12 @@ import os
 import logging
 import httpx
 
-from models import User
+from models import User, ScheduleAnalyticsResponse
 from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
+
+_ANALYTICS_VALID_WINDOWS = frozenset({24, 168, 720})  # #868
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +110,8 @@ class ScheduleResponse(BaseModel):
     updated_at: datetime
     last_run_at: Optional[datetime]
     next_run_at: Optional[datetime]
-    timeout_seconds: int = 900
+    # #913: null means "inherit from agent_ownership.execution_timeout_seconds".
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None
     model: Optional[str] = None  # Model override (MODEL-001)
     # Validation configuration (VALIDATE-001)
@@ -215,6 +218,35 @@ class ExecutionResponse(BaseModel):
 
 # Schedule CRUD Endpoints
 
+
+def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) -> None:
+    """#929 Approach A: refuse a schedule timeout above the agent cap.
+
+    `agent_ownership.execution_timeout_seconds` is the hard ceiling.
+    Raises HTTPException(400) with a structured `detail` dict so clients
+    can branch on `detail["error"] == "schedule_timeout_exceeds_agent_cap"`.
+
+    Callers must guard with `is not None` — after #913 both
+    `ScheduleCreate.timeout_seconds` and `ScheduleUpdateRequest.timeout_seconds`
+    are `Optional[int]`, and `None > int` raises TypeError in Python 3.
+    """
+    cap = db.get_execution_timeout(agent_name)
+    if requested_seconds > cap:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "schedule_timeout_exceeds_agent_cap",
+                "message": (
+                    f"Schedule timeout {requested_seconds}s exceeds agent "
+                    f"execution_timeout_seconds {cap}s. Raise the agent cap "
+                    f"first via PUT /api/agents/{agent_name}/timeout."
+                ),
+                "agent_cap_seconds": cap,
+                "requested_seconds": requested_seconds,
+            },
+        )
+
+
 @router.get("/{name}/schedules", response_model=List[ScheduleResponse])
 async def list_agent_schedules(name: AuthorizedAgent):
     """List all schedules for an agent."""
@@ -239,6 +271,12 @@ async def create_schedule(
             detail=f"Invalid cron expression: {str(e)}"
         )
 
+    # #929: schedule timeout cannot exceed the agent cap. Validated here so
+    # the operator gets the 400 at config time instead of a SIGKILL at run time.
+    # After #913 the field is Optional — only enforce when the caller set it.
+    if schedule_data.timeout_seconds is not None:
+        _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
+
     schedule = db.create_schedule(name, current_user.username, schedule_data)
     if not schedule:
         raise HTTPException(
@@ -250,6 +288,57 @@ async def create_schedule(
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
     return ScheduleResponse(**schedule.model_dump())
+
+
+@router.get(
+    "/{name}/schedules/{schedule_id}/analytics",
+    response_model=ScheduleAnalyticsResponse,
+)
+async def get_schedule_analytics(
+    name: AuthorizedAgent,
+    schedule_id: str,
+    window_hours: int = 168,
+):
+    """Per-schedule execution analytics (#868).
+
+    Counts, success rate, duration percentiles (p50/p95/p99),
+    cost totals, tool-call distribution (top-5 by total wall time),
+    and a daily timeline. UTC day boundaries.
+
+    Args:
+        window_hours: One of 24, 168 (7d), or 720 (30d). Default 7d.
+
+    Authorisation:
+        - `AuthorizedAgent` validates the caller can access this agent.
+        - The DB layer additionally verifies `schedule_id` belongs to
+          `name` (the path param) — caller cannot read analytics for
+          another agent's schedule by guessing/stealing schedule_ids.
+        - Soft-deleted schedules return 404 (matches `db.get_schedule`).
+
+    Sampling:
+        Counts and timeline use the full unsampled rowset. Percentiles
+        and tool-call top-N are computed over the newest 5,000 success
+        rows in the window — `sampled=true` in the response when the
+        cap was hit. The UI surfaces this as a small badge.
+    """
+    if window_hours not in _ANALYTICS_VALID_WINDOWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "window_hours must be one of "
+                f"{sorted(_ANALYTICS_VALID_WINDOWS)}"
+            ),
+        )
+
+    analytics = db.get_schedule_analytics(schedule_id, window_hours, name)
+    if analytics is None:
+        # Collapse missing / soft-deleted / cross-tenant into one 404
+        # so existence of another agent's schedule can't be probed.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Schedule not found",
+        )
+    return ScheduleAnalyticsResponse(**analytics)
 
 
 @router.get("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)
@@ -293,6 +382,13 @@ async def update_schedule(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid cron expression: {str(e)}"
             )
+
+    # #929: validate timeout against agent cap only when this PUT actually
+    # touches `timeout_seconds`. exclude_unset semantics: a write that
+    # doesn't include the field doesn't get re-checked (existing rows that
+    # predate the validation stay editable).
+    if updates.timeout_seconds is not None:
+        _enforce_timeout_below_agent_cap(name, updates.timeout_seconds)
 
     # Build updates dict — use exclude_unset to distinguish "not provided" from "explicitly set to null"
     update_dict = updates.model_dump(exclude_unset=True)

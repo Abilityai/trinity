@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0  # Need full history for tag detection
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 

@@ -613,6 +613,7 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     1. template.yaml file
     2. name field in template.yaml
     3. resources field in template.yaml
+    4. a non-empty CLAUDE.md (agent instructions)
 
     Args:
         path: Path to the agent directory
@@ -648,11 +649,31 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     if not isinstance(resources, dict):
         return (False, "template.yaml resources must be a dictionary", None)
 
-    # Check for CLAUDE.md (warn but don't fail)
+    # Require a non-empty, UTF-8-readable CLAUDE.md. Without it the agent
+    # deploys with no usable instructions and comes up effectively empty
+    # (#950). Decode strictly and catch UnicodeDecodeError so a binary /
+    # non-UTF-8 CLAUDE.md yields a clean 400 here rather than falling through
+    # to the generic 500 handler in deploy.py.
     claude_md = path / "CLAUDE.md"
+    missing_claude_md = (
+        False,
+        "Missing or empty CLAUDE.md — agent would deploy with no instructions",
+        None,
+    )
     if not claude_md.exists():
-        # This is a warning, not an error - we still allow deployment
-        print(f"Warning: {path} does not contain CLAUDE.md (recommended)")
+        return missing_claude_md
+    try:
+        claude_md_content = claude_md.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return (
+            False,
+            "CLAUDE.md is not valid UTF-8 text — agent would deploy with no usable instructions",
+            None,
+        )
+    except OSError as e:
+        return (False, f"Could not read CLAUDE.md: {e}", None)
+    if claude_md_content.strip() == "":
+        return missing_claude_md
 
     return (True, None, template_data)
 
@@ -677,3 +698,87 @@ def get_name_from_template(path: Path) -> Optional[str]:
             return template_data.get("name") if template_data else None
     except Exception:
         return None
+
+
+# Platform-injected environment variables — credentials/config Trinity sets on
+# the agent container itself at create time, so a template's MCP config that
+# references one of these does NOT need the operator to supply a matching
+# value. Used only to suppress false-positive credential-gap warnings.
+#
+# Keep in sync with crud.py:470-559 (the env_vars dict assembled in
+# create_agent_internal). A static mirror is deliberate (D3): sharing the
+# live allowlist would couple this advisory check to the hot create path.
+_PLATFORM_INJECTED_EXACT = frozenset({
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GITHUB_PAT",
+    "GITHUB_REPO",
+})
+# Prefixes cover the family-namespaced vars: TRINITY_MCP_API_KEY/URL/
+# GIT_BASE_URL, GIT_SYNC_*/SOURCE_*/WORKING_BRANCH, OTEL_*, and
+# CLAUDE_CODE_ENABLE_TELEMETRY.
+_PLATFORM_INJECTED_PREFIXES = ("TRINITY_", "GIT_", "OTEL_", "CLAUDE_CODE_")
+
+
+def _is_platform_injected(var: str) -> bool:
+    """True if Trinity injects `var` into the container at create time."""
+    if var in _PLATFORM_INJECTED_EXACT:
+        return True
+    return any(var.startswith(prefix) for prefix in _PLATFORM_INJECTED_PREFIXES)
+
+
+def _sanitize_for_warning(text: str, max_len: int = 80) -> str:
+    """Make an operator-supplied string safe to echo in a deploy warning.
+
+    An MCP server name is an arbitrary JSON key controlled by whoever authored
+    the template. Strip non-printable characters (ANSI escapes, newlines, C0/C1
+    control bytes) so a crafted name cannot hijack the operator's terminal when
+    the warning is rendered, and bound the length so a hostile name cannot flood
+    the output. (#950 L1)
+    """
+    cleaned = "".join(ch for ch in text if ch.isprintable())
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len] + "..."
+    return cleaned
+
+
+def collect_mcp_credential_warnings(template_dir: Path) -> List[str]:
+    """Advisory warnings for MCP servers with unsatisfied ${VAR} references.
+
+    For each `${VAR}` referenced by an MCP server in `.mcp.json.template`
+    (or `.mcp.json`) that is neither present in the deployed `.env` nor
+    platform-injected, emit a non-fatal warning. This surfaces a missing
+    credential at deploy time rather than as a silently broken MCP server on
+    first use (#950 deferred hardening).
+
+    Args:
+        template_dir: The deployed template directory. The `.env` read here
+            must be the post-merge copy (the operator's `credentials` already
+            folded in) — see deploy.py.
+
+    Returns:
+        A list of human-readable warning strings (empty when nothing is
+        missing or no `.mcp` config exists).
+    """
+    mcp_template = template_dir / ".mcp.json.template"
+    mcp_json = template_dir / ".mcp.json"
+    if mcp_template.exists():
+        mcp_vars = extract_env_vars_from_mcp_json(mcp_template)
+    elif mcp_json.exists():
+        mcp_vars = extract_env_vars_from_mcp_json(mcp_json)
+    else:
+        return []
+
+    provided = set(extract_credentials_from_env_example(template_dir / ".env"))
+
+    warnings: List[str] = []
+    for server_name in sorted(mcp_vars):
+        for var in mcp_vars[server_name]:
+            if var in provided or _is_platform_injected(var):
+                continue
+            warnings.append(
+                f"MCP server '{_sanitize_for_warning(server_name)}' references "
+                f"${{{var}}} but no matching credential was provided"
+            )
+    return warnings

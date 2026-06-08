@@ -42,10 +42,27 @@ if _dot_env_754.exists():
     try:
         from dotenv import dotenv_values as _dotenv_values_754
         _env_vals_754 = _dotenv_values_754(_dot_env_754)
+        # INTERNAL_API_SECRET / SECRET_KEY have no earlier default — setdefault
+        # is fine (the caller's explicit export still wins).
         for _k754 in ("INTERNAL_API_SECRET", "SECRET_KEY"):
             _v754 = _env_vals_754.get(_k754)
             if _v754:
                 _os_589.environ.setdefault(_k754, _v754)
+        # REDIS_BACKEND_PASSWORD was setdefault'd to "test" at line 30 for
+        # backend-config import safety; that placeholder must be OVERRIDDEN
+        # when the real .env value is available, otherwise tests/security/
+        # ACL tests pass garbage to redis-cli. Don't clobber an explicit
+        # caller export (which would have set the var before this module ran).
+        _rbp754 = _env_vals_754.get("REDIS_BACKEND_PASSWORD")
+        if _rbp754 and _os_589.environ.get("REDIS_BACKEND_PASSWORD") in (None, "test"):
+            _os_589.environ["REDIS_BACKEND_PASSWORD"] = _rbp754
+        # TRINITY_TEST_PASSWORD aliases ADMIN_PASSWORD so the api_client
+        # default ("password") doesn't trip the per-account rate limiter
+        # (5 fails / 900s at routers/auth.py:35-46).
+        if "TRINITY_TEST_PASSWORD" not in _os_589.environ:
+            _admin_pw = _env_vals_754.get("ADMIN_PASSWORD")
+            if _admin_pw:
+                _os_589.environ["TRINITY_TEST_PASSWORD"] = _admin_pw
     except ImportError:
         pass  # python-dotenv not installed; env vars must be set manually
 
@@ -183,6 +200,13 @@ def _preload_backend_routers_namespace():
 _preload_backend_models()
 _preload_backend_routers_namespace()
 
+# Pre-load services.agent_client so CircuitState is in sys.modules before
+# test_voice_tools.py installs an incomplete stub (#762 followup).
+try:
+    import services.agent_client  # noqa: F401
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Issue #762: cross-file sys.modules pollution baseline + autouse restore.
 #
@@ -227,8 +251,10 @@ _SYS_MODULES_INVARIANT_KEYS = (
     "database",
     # Services: stubbed by test_validation.py (task_execution_service),
     # test_telegram_webhook_backfill.py (platform_audit_service,
-    # settings_service), etc.
+    # settings_service), test_voice_tools.py (agent_client), etc.
     "services",
+    "services.agent_client",
+    "services.docker_service",
     "services.platform_audit_service",
     "services.settings_service",
     "services.task_execution_service",
@@ -265,7 +291,7 @@ import os
 import pytest
 import uuid
 import time
-from typing import Generator
+from typing import Callable, Generator
 
 
 @pytest.fixture(autouse=True)
@@ -367,6 +393,20 @@ def unauthenticated_client(api_config: ApiConfig) -> Generator[TrinityApiClient,
 def resource_tracker() -> ResourceTracker:
     """Track created resources for cleanup."""
     return ResourceTracker()
+
+
+@pytest.fixture(scope="function")
+def ws_ticket(api_client: TrinityApiClient) -> Callable[[], str]:
+    """Mint a fresh single-use WebSocket ticket (#550).
+
+    Returned callable allows a single test to mint multiple tickets
+    (e.g. replay tests that need a second fresh ticket).
+    """
+    def _mint() -> str:
+        resp = api_client.post("/api/ws/ticket")
+        assert resp.status_code == 200, resp.text
+        return resp.json()["ticket"]
+    return _mint
 
 
 @pytest.fixture(scope="function")

@@ -101,21 +101,36 @@ def test_execute_headless_task_accepts_persist_session_default_false():
 
 
 def test_execute_headless_task_gates_no_session_persistence():
-    """The flag must be added only when persist_session is False — otherwise
-    the JSONL stays empty and turn 2's --resume errors with 'No conversation
-    found' (the spike's central failure mode).
+    """The flag is conditionally added based on ``effective_persist``, which
+    is ``persist_session or (timeout_seconds > threshold)``.
+
+    Background:
+    - Session tab opt-in (#SESSION_TAB): passing ``persist_session=True``
+      keeps the JSONL so turn 2's ``--resume`` can reattach.
+    - Issue #678 Option B: ALSO auto-persist for long-running headless
+      tasks (timeout > 600s) so the stdout-race recovery code can fire.
+
+    Either signal unsets the flag; otherwise the flag is appended so
+    short fan-out tasks stay disk-cheap.
 
     Per #122 module split, the command-building lives in
     ``_setup_headless_command`` inside the same file as
     ``execute_headless_task`` (headless_executor.py). We pin the contract at
-    the file level so the assertion holds whichever helper owns the gate."""
+    the file level so the assertion holds whichever helper owns the gate.
+    """
     src = _read(_CLAUDE_CODE_PY)
 
-    # The append must be conditional on `not persist_session`.
+    # The append must be conditional on `not effective_persist`, where
+    # effective_persist = persist_session or (timeout_seconds > threshold).
     assert re.search(
-        r"if\s+not\s+persist_session\s*:\s*\n\s*cmd\.append\(\s*['\"]--no-session-persistence['\"]",
+        r"effective_persist\s*=\s*persist_session\s+or\s+\(\s*timeout_seconds\s*>\s*_JSONL_PERSIST_THRESHOLD_S\s*\)",
         src,
-    ), "--no-session-persistence must be gated on `if not persist_session:`"
+    ), "effective_persist must combine persist_session and timeout threshold (#678 Option B)"
+
+    assert re.search(
+        r"if\s+not\s+effective_persist\s*:\s*\n\s*cmd\.append\(\s*['\"]--no-session-persistence['\"]",
+        src,
+    ), "--no-session-persistence must be gated on `if not effective_persist:`"
 
     # And there must be no unconditional append left over.
     unconditional = re.findall(r"cmd\.append\(\s*['\"]--no-session-persistence['\"]\)", src)
@@ -127,6 +142,19 @@ def test_execute_headless_task_gates_no_session_persistence():
     # --session-id must still be passed even when persist_session=True so
     # cold Session turns get a unique JSONL namespace.
     assert "--session-id" in src, "--session-id must be passed for cold turns"
+
+
+def test_jsonl_persistence_threshold_is_defined():
+    """#678 Option B: the threshold constant must exist and be a positive int
+    that represents seconds. Pinning it at the contract level so we notice
+    if someone removes the auto-persist path."""
+    src = _read(_CLAUDE_CODE_PY)
+    m = re.search(r"_JSONL_PERSIST_THRESHOLD_S\s*=\s*(\d+)", src)
+    assert m, "_JSONL_PERSIST_THRESHOLD_S constant must be defined"
+    threshold = int(m.group(1))
+    assert threshold > 0
+    # Sanity: should be on the order of minutes, not seconds.
+    assert threshold >= 60, "threshold should be at least 60s (was probably accidentally set tiny)"
 
 
 # ---------------------------------------------------------------------------

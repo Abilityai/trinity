@@ -5,6 +5,25 @@ WORKDIR /app
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
 RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 && rm -rf /var/lib/apt/lists/*
 
+# Build-time provenance (#926). Each arg is forwarded by docker-compose
+# `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.
+# Re-exported as ENV so the running container reads them via os.getenv()
+# and `GET /api/version` can return commit/branch/build-date for the
+# image actually in flight. Defaults to "unknown" so local builds and
+# operators who skip start.sh still get a well-typed response.
+ARG VERSION=unknown
+ARG GIT_COMMIT=unknown
+ARG GIT_COMMIT_SUBJECT=unknown
+ARG GIT_COMMIT_TIMESTAMP=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_DATE=unknown
+ENV VERSION=${VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    GIT_COMMIT_SUBJECT=${GIT_COMMIT_SUBJECT} \
+    GIT_COMMIT_TIMESTAMP=${GIT_COMMIT_TIMESTAMP} \
+    GIT_BRANCH=${GIT_BRANCH} \
+    BUILD_DATE=${BUILD_DATE}
+
 RUN pip install --no-cache-dir \
     fastapi==0.115.6 \
     uvicorn[standard]==0.37.0 \
@@ -37,16 +56,15 @@ RUN pip install --no-cache-dir \
     opentelemetry-instrumentation-httpx==0.50b0 \
     opentelemetry-instrumentation-redis==0.50b0 \
     python-magic==0.4.27 \
-    twilio==9.10.5
+    twilio==9.10.5 \
+    "audioop-lts; python_version >= '3.13'"
 
-# Copy all backend source files
-COPY ../../src/backend/main.py /app/
-COPY ../../src/backend/config.py /app/
-COPY ../../src/backend/models.py /app/
-COPY ../../src/backend/db_models.py /app/
-COPY ../../src/backend/dependencies.py /app/
-COPY ../../src/backend/database.py /app/
-COPY ../../src/backend/logging_config.py /app/
+# Copy all top-level backend modules. Globbed (not enumerated) so a new
+# top-level module can never be silently dropped from the prod image again
+# (#1033: redis_breaker_util.py was added but never added to the explicit
+# COPY list, crash-looping the backend on boot). Subdirectories are copied
+# wholesale below.
+COPY ../../src/backend/*.py /app/
 
 # Copy module directories
 COPY ../../src/backend/routers /app/routers/
@@ -60,10 +78,27 @@ COPY ../../src/backend/canary /app/canary/
 COPY ../../config/process-docs /app/config/process-docs/
 COPY ../../config/process-templates /app/config/process-templates/
 
+# Platform version file — read by /api/version (#958). The dev compose also
+# bind-mounts ./VERSION:/app/VERSION:ro for hot edits, but prod compose
+# doesn't, so without this COPY the version field falls back to "unknown".
+COPY ../../VERSION /app/VERSION
+
 # Ensure all files are readable
 RUN chmod -R 644 /app/*.py && \
     chmod -R 755 /app/routers /app/services /app/adapters /app/utils /app/db /app/canary && \
     find /app/routers /app/services /app/adapters /app/utils /app/db /app/canary -name "*.py" -exec chmod 644 {} \;
+
+# Run as non-root (CSO hardening, issue #874). UID 1000 must match scheduler
+# because both services share /data (SQLite trinity.db). /agent-configs is
+# included because services/agent_service/deploy.py writes templates there;
+# a root-owned mount point would trigger the silent ./config/agent-templates
+# fallback and templates would vanish on restart.
+RUN groupadd --gid 1000 trinity && \
+    useradd --uid 1000 --gid trinity --home-dir /app --shell /bin/bash trinity && \
+    mkdir -p /data /agent-configs && \
+    chown -R trinity:trinity /app /data /agent-configs
+
+USER trinity
 
 EXPOSE 8000
 

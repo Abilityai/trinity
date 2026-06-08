@@ -371,6 +371,7 @@ executions?limit=100              AuthorizedAgent dependency         SELECT (spe
 | POST | `/api/agents/{name}/schedules/{id}/disable` | Disable | schedules.py:218 | AuthorizedAgent |
 | POST | `/api/agents/{name}/schedules/{id}/trigger` | Manual trigger | schedules.py:236 | AuthorizedAgent |
 | GET | `/api/agents/{name}/schedules/{id}/executions` | Execution history | schedules.py:265 | AuthorizedAgent |
+| GET | `/api/agents/{name}/schedules/{id}/analytics` | Per-schedule analytics (#868) — counts, success rate, duration p50/p95/p99, cost total, tool-call top-5 by total duration, daily timeline; `?window_hours=` ∈ {24, 168, 720}, default 168 | schedules.py:255 | AuthorizedAgent |
 | GET | `/api/agents/{name}/executions` | All agent executions (summary) | schedules.py:435 | AuthorizedAgent |
 | GET | `/api/agents/{name}/executions/{id}` | Get specific execution (full) | schedules.py:462 | AuthorizedAgent |
 | GET | `/api/agents/{name}/executions/{id}/log` | Get execution log | schedules.py:309 | AuthorizedAgent |
@@ -994,7 +995,7 @@ await mcp.call("create_agent_schedule", {
   enabled: true,
   timeout_seconds: 1800,                       // 30 min timeout
   allowed_tools: ["Read", "Glob", "Grep", "WebFetch"],  // Read-only + web
-  model: "claude-sonnet-4-20250514"             // Use Sonnet for cost efficiency
+  model: "claude-sonnet-4-6"                    // Use Sonnet for cost efficiency
 });
 ```
 

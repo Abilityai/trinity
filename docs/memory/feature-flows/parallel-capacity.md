@@ -12,6 +12,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-05-17 | #869: `_cleanup_stale_slots_for_agent` now uses per-slot metadata TTL instead of per-agent cutoff; prevents false reclaim when schedule timeout > agent default |
 | 2026-04-13 | BACKLOG-001 (#260): Async `/task` no longer returns 429 when slots are full — requests spill into a persistent SQLite backlog and drain via a new `SlotService.register_on_release` callback. True 429 only when the per-agent `max_backlog_depth` is also exceeded. See [persistent-task-backlog.md](persistent-task-backlog.md). |
 | 2026-03-21 | Issue #98: Chat executions (`/api/chat`) now acquire capacity slots, making SlotService the single source of truth for agent load across all execution types |
 | 2026-03-12 | TIMEOUT-001: Slot TTL now dynamic (agent timeout + 5 min buffer), not fixed 30 min. Aligns with per-agent configurable execution timeout. |
@@ -586,20 +587,21 @@ async def release_slot(self, agent_name, execution_id):
 
 ### 3. Stale Slot Cleanup
 
+**As of #869 (2026-05-17):** Staleness is checked per-slot from stored metadata, not via a single per-agent `ZREMRANGEBYSCORE` cutoff. Each slot's metadata HASH includes the `timeout_seconds` stored at acquire time; the effective TTL for that slot is `stored_timeout + SLOT_TTL_BUFFER`. The per-agent default from `agent_timeouts` is only a fallback when metadata is absent. This prevents false reclaims when a schedule's execution timeout exceeds the agent-level default.
+
 ```python
 # src/backend/services/slot_service.py:223-245
 async def _cleanup_stale_slots_for_agent(self, agent_name):
-    cutoff = time.time() - slot_ttl  # agent timeout + 5 min buffer
-
-    # Get stale entries
-    stale = self.redis.zrangebyscore(slots_key, "-inf", cutoff)
-
-    # Remove from ZSET
-    self.redis.zremrangebyscore(slots_key, "-inf", cutoff)
-
-    # Clean up metadata
-    for execution_id in stale:
-        self.redis.delete(metadata_key)
+    # Iterate all slots in the ZSET; compute each slot's effective TTL
+    # from its stored metadata (timeout_seconds + SLOT_TTL_BUFFER).
+    # Falls back to per-agent default when metadata is missing.
+    for execution_id in self.redis.zrange(slots_key, 0, -1):
+        slot_meta = self.redis.hgetall(metadata_key)
+        stored_timeout = int(slot_meta.get("timeout_seconds", agent_default_timeout))
+        effective_ttl = stored_timeout + SLOT_TTL_BUFFER
+        if started_at + effective_ttl < time.time():
+            self.redis.zrem(slots_key, execution_id)
+            self.redis.delete(metadata_key)
 ```
 
 ## Error Handling

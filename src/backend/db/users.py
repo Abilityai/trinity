@@ -17,7 +17,7 @@ class UserOperations:
 
     # SQL query fragments for reuse
     _USER_COLUMNS = """id, username, password_hash, role, auth0_sub, name, picture, email,
-                       created_at, updated_at, last_login"""
+                       created_at, updated_at, last_login, suspended_at"""
 
     @staticmethod
     def _row_to_user_dict(row) -> Dict:
@@ -33,7 +33,8 @@ class UserOperations:
             "email": row["email"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-            "last_login": row["last_login"]
+            "last_login": row["last_login"],
+            "suspended_at": row["suspended_at"],  # #995 — NULL = active
         }
 
     def _get_user_by_field(self, field: str, value: Any) -> Optional[Dict]:
@@ -218,7 +219,7 @@ class UserOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, username, role, auth0_sub, name, picture, email,
-                       created_at, updated_at, last_login
+                       created_at, updated_at, last_login, suspended_at
                 FROM users ORDER BY created_at DESC
             """)
             return [dict(row) for row in cursor.fetchall()]

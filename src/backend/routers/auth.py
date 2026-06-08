@@ -423,7 +423,7 @@ async def request_email_login_code(request: Request):
 
     # Send email
     email_service = EmailService()
-    success = await email_service.send_verification_code(email, code_data["code"])
+    success = await email_service.send_verification_code(email, code_data["code"], context_label="Trinity login")
 
     return {
         "success": True,

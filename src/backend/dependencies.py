@@ -121,6 +121,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         if user is None:
             raise credentials_exception
 
+        # #995 — deactivation primitive: reject suspended users here, so
+        # setting users.suspended_at invalidates live tokens on the next
+        # request (not only new logins). Edition-agnostic; only the
+        # enterprise user-management knob sets/clears the column.
+        if user.get("suspended_at"):
+            raise credentials_exception
+
         return User(
             id=user["id"],
             username=user["username"],
@@ -140,7 +147,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # Get full user record - try email first, then username
         # Note: user_id from MCP key is the username string, not the database id
         user = db.get_user_by_email(user_email) if user_email else db.get_user_by_username(user_id)
-        if user:
+        if user and not user.get("suspended_at"):  # #995 — suspended users blocked here too
             # For agent-scoped keys, include the agent_name
             agent_name = mcp_key_info.get("agent_name") if mcp_key_info.get("scope") == "agent" else None
             return User(
@@ -196,6 +203,48 @@ def require_role(min_role: str):
             )
         return current_user
     return _require_role
+
+
+def requires_entitlement(feature_id: str):
+    """Dependency factory: require an entitlement for the named enterprise feature.
+
+    Issue #847 — Phase 0 seam. Consults the ``EntitlementService`` (stub
+    today, license-checked in a later phase) to decide whether the
+    request is allowed to use a paid feature.
+
+    Usage:
+        from dependencies import requires_entitlement
+
+        @router.get("/some-enterprise-endpoint")
+        async def handler(_: None = Depends(requires_entitlement("sso"))):
+            ...
+
+    The dependency returns nothing on success. On failure raises HTTP
+    403 with detail naming the missing entitlement so the UI can surface
+    a "license required" message and the operator can correlate with
+    `system_settings`.
+
+    The stub implementation in ``services.entitlement_service`` returns
+    True for every feature_id in the OSS build — the seam exists so that
+    enterprise routers can be wired today without conditionally adding
+    a guard later. When a license check lands, all gated endpoints get
+    real enforcement with zero diff at the call site.
+    """
+    def _requires_entitlement():
+        # Lazy import: keeps `dependencies.py` importable even when the
+        # entitlement module isn't loaded yet (e.g. during partial
+        # module init in tests).
+        from services.entitlement_service import entitlement_service
+        if not entitlement_service.is_entitled(feature_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Enterprise feature '{feature_id}' is not licensed for "
+                    "this instance. Contact your administrator."
+                ),
+            )
+        return None
+    return _requires_entitlement
 
 
 # ============================================================================

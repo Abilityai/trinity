@@ -28,7 +28,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT memory_limit, cpu_limit
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -82,7 +82,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(max_parallel_tasks, 3) as max_parallel_tasks
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -125,8 +125,60 @@ class ResourcesMixin:
             cursor.execute("""
                 SELECT agent_name, COALESCE(max_parallel_tasks, 3) as max_parallel_tasks
                 FROM agent_ownership
+                WHERE deleted_at IS NULL
             """)
             return {row["agent_name"]: row["max_parallel_tasks"] for row in cursor.fetchall()}
+
+    # =========================================================================
+    # Dispatch Circuit Breaker opt-in (RELIABILITY-007, #526)
+    # =========================================================================
+
+    def get_circuit_breaker_enabled(self, agent_name: str) -> bool:
+        """Per-agent dispatch-breaker opt-in flag (default False — opt-in canary).
+
+        Read on the dispatch path alongside ``get_max_parallel_tasks``; the
+        caller gates again on the global ``DISPATCH_BREAKER_ENABLED`` master
+        switch so both must be on for the breaker to engage (D7/D11).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COALESCE(circuit_breaker_enabled, 0) as circuit_breaker_enabled
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
+            """, (agent_name,))
+            row = cursor.fetchone()
+            if row:
+                return bool(row["circuit_breaker_enabled"])
+            return False
+
+    def set_circuit_breaker_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """Enable/disable the per-agent dispatch breaker.
+
+        Returns:
+            True if the row was updated.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_ownership SET circuit_breaker_enabled = ?
+                WHERE agent_name = ? AND deleted_at IS NULL
+            """, (1 if enabled else 0, agent_name))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_all_circuit_breaker_enabled(self) -> Dict[str, bool]:
+        """Bulk opt-in flags for all live agents.
+
+        Powers the slots-dashboard circuit badge without an N+1 SELECT.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT agent_name, COALESCE(circuit_breaker_enabled, 0) as cbe
+                FROM agent_ownership
+                WHERE deleted_at IS NULL
+            """)
+            return {row["agent_name"]: bool(row["cbe"]) for row in cursor.fetchall()}
 
     # =========================================================================
     # Execution Timeout (TIMEOUT-001)
@@ -146,7 +198,7 @@ class ResourcesMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(execution_timeout_seconds, 3600) as execution_timeout_seconds
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -165,6 +217,7 @@ class ResourcesMixin:
             cursor.execute("""
                 SELECT agent_name, COALESCE(execution_timeout_seconds, 3600) as timeout
                 FROM agent_ownership
+                WHERE deleted_at IS NULL
             """)
             return {row["agent_name"]: row["timeout"] for row in cursor.fetchall()}
 
@@ -208,7 +261,7 @@ class ResourcesMixin:
             cursor.execute(
                 """
                 SELECT COALESCE(max_backlog_depth, 50) as max_backlog_depth
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
                 """,
                 (agent_name,),
             )

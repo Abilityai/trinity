@@ -71,15 +71,15 @@ class TestTimeoutGet:
         assert isinstance(data["execution_timeout_seconds"], int)
         assert isinstance(data["execution_timeout_minutes"], int)
 
-    def test_get_timeout_default_is_900(self, api_client: TrinityApiClient, created_agent):
-        """Agents should default to execution_timeout_seconds=900 (15 minutes)."""
+    def test_get_timeout_default_is_3600(self, api_client: TrinityApiClient, created_agent):
+        """Agents should default to execution_timeout_seconds=3600 (60 minutes)."""
         response = api_client.get(f"/api/agents/{created_agent['name']}/timeout")
         skip_if_agent_not_ready(response)
 
         assert_status(response, 200)
         data = response.json()
-        # Default should be 900 seconds (15 minutes) per TIMEOUT-001 requirements
-        assert data["execution_timeout_seconds"] == 900
+        # Default raised from 900s to 3600s in #665 (TIMEOUT-001 update).
+        assert data["execution_timeout_seconds"] == 3600
 
     def test_get_timeout_minutes_calculation(self, api_client: TrinityApiClient, created_agent):
         """execution_timeout_minutes should equal execution_timeout_seconds // 60."""

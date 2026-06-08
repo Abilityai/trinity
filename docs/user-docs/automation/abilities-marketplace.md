@@ -66,7 +66,7 @@ Create new Claude Code agents with domain-specific wizards.
 
 Every wizard-created agent includes `CLAUDE.md`, 2–4 starter skills, `template.yaml`, `dashboard.yaml`, and an onboarding tracker.
 
-### agent-dev — 15 skills
+### agent-dev — 9 skills
 
 Extend and develop existing agents.
 
@@ -75,7 +75,10 @@ Extend and develop existing agents.
 /agent-dev:adjust-playbook    # Modify an existing skill
 /agent-dev:add-memory         # Add a memory system
 /agent-dev:add-backlog        # Add GitHub Issues task management
+/agent-dev:pick-work          # Claim the next issue
+/agent-dev:close-work         # Close the current issue
 /agent-dev:work-loop          # Run an autonomous work loop
+/agent-dev:plan               # Plan multi-session work
 ```
 
 **Memory systems** (via `/agent-dev:add-memory`):
@@ -87,7 +90,7 @@ Extend and develop existing agents.
 | `json-state` | Structured state, counters, config |
 | `workspace` | Multi-session project tracking |
 
-### trinity — 5 skills
+### trinity — 3 skills
 
 Connect, deploy, and sync agents to Trinity.
 
@@ -95,13 +98,12 @@ Connect, deploy, and sync agents to Trinity.
 /trinity:connect     # One-time: authenticate and save MCP config
 /trinity:onboard     # Per-agent: compatibility check + deploy
 /trinity:sync        # Sync local changes to the running remote agent
-/trinity:deploy      # Provision a new Trinity instance + ops agent
 ```
 
 After connecting, Trinity MCP tools are available directly in your session:
 `mcp__trinity__list_agents`, `mcp__trinity__chat_with_agent`, `mcp__trinity__deploy_local_agent`.
 
-### dev-methodology — 24 skills
+### dev-methodology — 15 skills
 
 Documentation-driven development methodology for any codebase.
 
@@ -111,6 +113,8 @@ Documentation-driven development methodology for any codebase.
 /dev-methodology:validate-pr      # Validate PR against methodology
 /dev-methodology:security-analysis # Deep security audit
 /dev-methodology:commit           # Well-formatted commits
+/dev-methodology:refactor-audit   # Review changed code for reuse and quality
+/dev-methodology:generate-user-docs # Generate user-facing docs from source
 ```
 
 ### utilities — 7 skills

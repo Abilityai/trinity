@@ -284,7 +284,7 @@ def generate_credential_files(
     """
 ```
 
-### Trinity-Compatible Validation (`services/template_service.py:309-358`)
+### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:
     """
@@ -294,8 +294,11 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
     1. template.yaml file
     2. name field in template.yaml
     3. resources field in template.yaml
+    4. a non-empty, UTF-8-readable CLAUDE.md (#950 — blocking, was a warning)
     """
 ```
+See [local-agent-deploy.md](local-agent-deploy.md) for the deploy-time behavior
+change and the companion `collect_mcp_credential_warnings()` advisory.
 
 ### get_name_from_template (`services/template_service.py:361-380`)
 ```python

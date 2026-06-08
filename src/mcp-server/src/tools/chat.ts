@@ -6,8 +6,22 @@
  */
 
 import { z } from "zod";
+import { createHash } from "crypto";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
+
+/**
+ * RELIABILITY-006 (#525): derive a deterministic Idempotency-Key for an MCP
+ * tool call. A transport-level retry of the same call (same caller, agent,
+ * mode, model, message) resolves to the same key, so the backend short-circuits
+ * the duplicate instead of dispatching a second execution. Byte-identical
+ * requests within the 24h TTL dedupe — standard idempotency semantics.
+ */
+function deriveMcpIdempotencyKey(parts: (string | undefined)[]): string {
+  const h = createHash("sha256");
+  h.update(parts.map((p) => p ?? "").join(" "));
+  return `mcp:${h.digest("hex")}`;
+}
 
 /**
  * Check if caller has access to target agent
@@ -142,7 +156,15 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         "- `parallel=true`: Parallel task mode. Stateless, no queue, can run N tasks concurrently. " +
         "Best for independent tasks, batch processing, orchestrator delegation.\n" +
         "- `async=true` (with parallel=true): Fire-and-forget mode. Returns immediately with execution_id. " +
-        "Poll GET /api/agents/{name}/executions/{execution_id} for results.",
+        "Poll GET /api/agents/{name}/executions/{execution_id} for results." +
+        "\n\n**#914 Gateway-Timeout Receipt (sync chat mode only):** " +
+        "If the MCP-server's synchronous fetch to the backend takes longer than `MCP_CHAT_TIMEOUT_MS` " +
+        "(default 25s, set under the typical 30-60s MCP gateway ceiling), the call returns " +
+        "`{status: \"queued_timeout\", agent, execution_id, message}` instead of a generic `fetch failed`. " +
+        "The task IS still running on the agent — call `get_execution_result(execution_id)` to poll for the " +
+        "result instead of retrying. Retrying will duplicate-queue and Trinity's concurrent-duplicate guard " +
+        "will kill mid-execution, burning budget. For tasks you know will exceed the gateway timeout, prefer " +
+        "`parallel=true, async=true` from the start.",
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),
         message: z
@@ -163,7 +185,7 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           .string()
           .optional()
           .describe(
-            "Model override for this request (sonnet, opus, haiku). Only applies when parallel=true."
+            "Model override for this request — short alias (sonnet, opus, haiku) or a full ID (e.g., 'claude-opus-4-8', 'claude-sonnet-4-6'). Only applies when parallel=true."
           ),
         allowed_tools: z
           .array(z.string())
@@ -181,8 +203,10 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           .number()
           .optional()
           .describe(
-            "Execution timeout in seconds. If omitted, uses the target agent's " +
-            "configured execution_timeout_seconds (default 900s, max 7200s). " +
+            "DEPRECATED (#1068): per-task timeout override. Prefer the target " +
+            "agent's configured execution_timeout_seconds — this per-call value " +
+            "is now clamped to that cap and will be removed in a future release. " +
+            "If omitted, the agent cap applies (default 900s, max 7200s). " +
             "Only applies when parallel=true."
           ),
         async: z
@@ -274,6 +298,17 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           keyName: authContext.keyName,
         } : undefined;
 
+        // RELIABILITY-006 (#525): deterministic key so a transport retry of this
+        // exact call dedupes at the backend.
+        const idempotencyKey = deriveMcpIdempotencyKey([
+          sourceAgent || authContext?.userId,
+          agent_name,
+          parallel ? "task" : "chat",
+          model,
+          asyncMode ? "async" : "sync",
+          message,
+        ]);
+
         // Use parallel task mode or sequential chat mode based on parameter
         if (parallel) {
           // Parallel task mode - stateless, no queue
@@ -294,13 +329,21 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
               chat_session_id: isSelfTask ? chat_session_id : undefined,
             },
             sourceAgent,
-            mcpKeyInfo
+            mcpKeyInfo,
+            idempotencyKey
           );
           return JSON.stringify(response, null, 2);
         }
 
         // Sequential chat mode - uses queue, maintains context
-        const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo);
+        const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
+
+        // #914: MCP-server gateway timeout — task still running on agent.
+        // Surface the structured receipt so the caller polls rather than retries.
+        if ('status' in response && response.status === 'queued_timeout') {
+          console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
+          return JSON.stringify(response, null, 2);
+        }
 
         // Check if response is a queue status (agent busy)
         if ('queue_status' in response) {
@@ -422,7 +465,7 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         model: z
           .string()
           .optional()
-          .describe("Model override for all subtasks (sonnet, opus, haiku)"),
+          .describe("Model override for all subtasks — short alias (sonnet, opus, haiku) or a full ID (e.g., 'claude-opus-4-8', 'claude-sonnet-4-6')"),
         system_prompt: z
           .string()
           .optional()
@@ -472,6 +515,16 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
 
         console.log(`[Fan-Out] ${sourceAgent || "user"} -> ${agent_name}: ${tasks.length} tasks (concurrency=${max_concurrency || 3})`);
 
+        // RELIABILITY-006 (#525): deterministic key over the whole fan-out so a
+        // transport retry replays the original batch instead of re-dispatching.
+        const idempotencyKey = deriveMcpIdempotencyKey([
+          sourceAgent || authContext?.userId,
+          agent_name,
+          "fan_out",
+          model,
+          JSON.stringify(tasks),
+        ]);
+
         const response = await apiClient.fanOut(
           agent_name,
           tasks,
@@ -483,7 +536,8 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
             allowed_tools,
           },
           sourceAgent,
-          mcpKeyInfo
+          mcpKeyInfo,
+          idempotencyKey
         );
 
         return JSON.stringify(response, null, 2);

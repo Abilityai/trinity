@@ -35,6 +35,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# uv lockfile (repo uses pyproject.toml for pytest only; empty lockfile is noise)
+uv.lock
+
 # Node
 node_modules/
 npm-debug.log*

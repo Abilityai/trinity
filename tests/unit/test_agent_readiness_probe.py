@@ -83,7 +83,8 @@ def wait_for_agent_ready(monkeypatch):
     pkg.__path__ = [os.path.join(_backend, "services", "agent_service")]
     monkeypatch.setitem(sys.modules, "services.agent_service", pkg)
     monkeypatch.setitem(sys.modules, "services.agent_service.read_only",
-                        types.SimpleNamespace(inject_read_only_hooks=None))
+                        types.SimpleNamespace(inject_read_only_hooks=None,
+                                              remove_read_only_hooks=None))
 
     spec = importlib.util.spec_from_file_location(
         "services.agent_service.lifecycle", src_path,

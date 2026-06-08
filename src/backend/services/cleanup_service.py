@@ -33,7 +33,7 @@ CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
 EXECUTION_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 ACTIVITY_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 NO_SESSION_TIMEOUT_SECONDS = 60  # Issue #106: fast-fail executions that never got a Claude session
-WATCHDOG_HTTP_TIMEOUT = 5.0  # Timeout for agent HTTP calls during reconciliation
+WATCHDOG_HTTP_TIMEOUT = 15.0  # Timeout for agent HTTP calls during reconciliation (#869: increased from 5s to handle agents under load)
 WATCHDOG_MIN_AGE_SECONDS = 60  # Don't orphan-recover executions younger than this (dispatch window)
 STARTUP_RECOVERY_GRACE_SECONDS = 15  # #748: skip startup orphan-recovery for rows
                                      # whose started_at is within this window — they
@@ -71,6 +71,25 @@ def set_cleanup_ws_manager(manager):
     """Set the WebSocket manager for watchdog event broadcasting."""
     global _ws_manager
     _ws_manager = manager
+
+
+def _extract_agent_known_ids(payload: Dict) -> set:
+    """Set of execution IDs the agent considers 'known': currently-running
+    plus the recently-completed window (#921).
+
+    Single source of truth for parsing the `/api/executions/running`
+    response so the periodic watchdog (`_reconcile_orphaned_executions`)
+    and the startup recovery (`recover_orphaned_executions`) can't drift
+    out of sync. Defensive against malformed entries and missing fields:
+    older agent images that haven't shipped the buffer return only the
+    `executions` field — the union degrades silently to pre-#921 behaviour.
+    """
+    ids = {
+        eid for ex in (payload.get("executions") or [])
+        if (eid := ex.get("execution_id"))
+    }
+    ids.update(payload.get("recently_completed_ids") or [])
+    return ids
 
 
 def _read_retention_settings() -> tuple[int, int, int]:
@@ -140,6 +159,12 @@ class CleanupReport:
     execution_logs_pruned: int = 0
     execution_rows_pruned: int = 0
     health_checks_pruned: int = 0
+    # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
+    soft_deleted_agents_purged: int = 0
+    # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
+    soft_deleted_schedules_purged: int = 0
+    # RELIABILITY-006 / #525: idempotency keys purged past their 24h TTL
+    idempotency_keys_purged: int = 0
 
     @property
     def total(self) -> int:
@@ -148,7 +173,8 @@ class CleanupReport:
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
-                self.health_checks_pruned)
+                self.health_checks_pruned + self.soft_deleted_agents_purged +
+                self.soft_deleted_schedules_purged + self.idempotency_keys_purged)
 
     def to_dict(self) -> Dict:
         return {
@@ -164,6 +190,9 @@ class CleanupReport:
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
             "health_checks_pruned": self.health_checks_pruned,
+            "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
+            "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
+            "idempotency_keys_purged": self.idempotency_keys_purged,
             "total": self.total,
         }
 
@@ -212,15 +241,52 @@ class CleanupService:
             return await self._run_cleanup_inner()
 
     async def _run_cleanup_inner(self) -> CleanupReport:
-        """Inner cleanup logic, called under lock."""
+        """Inner cleanup logic, called under lock.
+
+        Each sweep is an independent strategy method that owns its own
+        try/except, so one sweep failing never aborts the cycle (#1026). The
+        watchdog runs FIRST (releases resources before stale cleanup marks
+        executions failed) and hands `confirmed_running_ids` (#226) to the slot
+        sweep so it won't falsely fail executions verified alive.
+        """
         report = CleanupReport()
 
-        # 0. Watchdog: reconcile DB vs agent process registries (Issue #129)
-        # Runs FIRST so it can release resources before stale cleanup marks
-        # executions failed without resource cleanup.
-        # Also returns confirmed_running_ids (#226) to prevent slot cleanup
-        # from falsely failing executions the watchdog verified as alive.
-        confirmed_running_ids: set = set()
+        confirmed_running_ids = await self._sweep_watchdog(report)
+        self._sweep_stale_executions(report)
+        self._sweep_no_session_executions(report)
+        self._sweep_orphaned_skipped(report)
+        self._sweep_stale_activities(report)
+        await self._sweep_stale_slots(report, confirmed_running_ids)
+        self._sweep_rate_limit_events()
+        self._sweep_shared_files(report)
+        self._sweep_retention_772(report)
+        self._sweep_soft_deleted_agents(report)
+        self._sweep_soft_deleted_schedules(report)
+        self._sweep_idempotency_keys(report)
+        self._maybe_wal_checkpoint(report)
+
+        self._cycle_count += 1
+
+        self.last_run_at = utc_now_iso()
+        self.last_report = report
+
+        if report.total > 0:
+            logger.info(f"[Cleanup] Cycle complete: {report.to_dict()}")
+
+        return report
+
+    # ------------------------------------------------------------------
+    # Sweep strategies (#1026). Each is self-contained: owns its try/except,
+    # writes its own CleanupReport field(s), and never raises to the caller.
+    # ------------------------------------------------------------------
+
+    async def _sweep_watchdog(self, report: CleanupReport) -> set:
+        """0. Reconcile DB vs agent process registries (Issue #129).
+
+        Returns confirmed_running_ids (#226) so the slot sweep won't fail
+        executions the watchdog verified as alive. Returns an empty set on
+        error so the rest of the cycle proceeds.
+        """
         try:
             orphaned, terminated, confirmed_running_ids = (
                 await self._reconcile_orphaned_executions()
@@ -233,10 +299,13 @@ class CleanupService:
                 logger.info(f"[Watchdog] Recovered {orphaned} orphaned executions")
             if terminated > 0:
                 logger.info(f"[Watchdog] Auto-terminated {terminated} timed-out executions")
+            return confirmed_running_ids
         except Exception as e:
             logger.error(f"[Watchdog] Reconciliation error: {e}")
+            return set()
 
-        # 1. Mark stale executions as failed (safety net for agent-unreachable cases)
+    def _sweep_stale_executions(self, report: CleanupReport) -> None:
+        """1. Mark stale executions failed (agent-unreachable safety net)."""
         try:
             count = db.mark_stale_executions_failed(EXECUTION_STALE_TIMEOUT_MINUTES)
             report.stale_executions = count
@@ -245,7 +314,8 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale executions: {e}")
 
-        # 1b. Fast-fail running executions with no Claude session (Issue #106)
+    def _sweep_no_session_executions(self, report: CleanupReport) -> None:
+        """1b. Fast-fail running executions with no Claude session (Issue #106)."""
         try:
             count = db.mark_no_session_executions_failed(NO_SESSION_TIMEOUT_SECONDS)
             report.no_session_executions = count
@@ -254,7 +324,8 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error marking no-session executions: {e}")
 
-        # 1c. Finalize orphaned skipped executions (Issue #106)
+    def _sweep_orphaned_skipped(self, report: CleanupReport) -> None:
+        """1c. Finalize orphaned skipped executions (Issue #106)."""
         try:
             count = db.finalize_orphaned_skipped_executions()
             report.orphaned_skipped = count
@@ -263,7 +334,8 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error finalizing orphaned skipped executions: {e}")
 
-        # 2. Mark stale activities as failed
+    def _sweep_stale_activities(self, report: CleanupReport) -> None:
+        """2. Mark stale activities failed."""
         try:
             count = db.mark_stale_activities_failed(ACTIVITY_STALE_TIMEOUT_MINUTES)
             report.stale_activities = count
@@ -272,8 +344,13 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale activities: {e}")
 
-        # 3. Cleanup stale Redis slots and fail corresponding execution records
-        #    (#219, #226, #378 — see _process_stale_slot_reclaims docstring).
+    async def _sweep_stale_slots(
+        self, report: CleanupReport, confirmed_running_ids: set
+    ) -> None:
+        """3. Reclaim stale Redis slots + fail their execution records.
+
+        (#219, #226, #378 — see _process_stale_slot_reclaims docstring.)
+        """
         try:
             capacity = get_capacity_manager()
 
@@ -292,21 +369,29 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error cleaning stale slots: {e}")
 
-        # 4. Hourly maintenance: prune rate-limit events older than 24h (#476).
-        # Runs every 12th cycle (60 min at 5-min interval) plus the first
-        # cycle after startup so we don't wait an hour on boot.
-        if self._cycle_count % 12 == 0:
-            try:
-                pruned = db.cleanup_old_rate_limit_events()
-                if pruned > 0:
-                    logger.info(f"[Cleanup] Pruned {pruned} rate-limit events (>24h old)")
-            except Exception as e:
-                logger.error(f"[Cleanup] Error pruning rate-limit events: {e}")
+    def _sweep_rate_limit_events(self) -> None:
+        """4. Hourly maintenance: prune rate-limit events older than 24h (#476).
 
-        # 4b. Purge expired / old-revoked shared files (C4 / FILES-001).
-        # Every cycle — the set is usually small and both DB row + disk
-        # unlink are cheap. Grace period for revoked rows keeps them
-        # queryable for a day post-revoke (incident diagnosis).
+        Runs every 12th cycle (60 min at 5-min interval) plus the first cycle
+        after startup so we don't wait an hour on boot. The gate reads
+        `_cycle_count` before the orchestrator increments it.
+        """
+        if self._cycle_count % 12 != 0:
+            return
+        try:
+            pruned = db.cleanup_old_rate_limit_events()
+            if pruned > 0:
+                logger.info(f"[Cleanup] Pruned {pruned} rate-limit events (>24h old)")
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning rate-limit events: {e}")
+
+    def _sweep_shared_files(self, report: CleanupReport) -> None:
+        """4b. Purge expired / old-revoked shared files (C4 / FILES-001).
+
+        Every cycle — the set is usually small and both DB row + disk unlink
+        are cheap. Grace period for revoked rows keeps them queryable for a day
+        post-revoke (incident diagnosis).
+        """
         try:
             from pathlib import Path
             stored_filenames = db.delete_expired_and_revoked_shared_files(
@@ -331,11 +416,13 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error purging shared files: {e}")
 
-        # 4c. Issue #772: retention pruning for execution_log, execution rows,
-        # and agent_health_checks. All three obey the configurable retention
-        # window from ops settings; "0" disables the corresponding sweep.
-        # Per-cycle budget caps each sweep so the first post-deploy backfill
-        # spans multiple cycles instead of holding the write lock end-to-end.
+    def _sweep_retention_772(self, report: CleanupReport) -> None:
+        """4c. Issue #772: retention pruning for execution_log, execution rows,
+        and agent_health_checks. All three obey the configurable retention
+        window from ops settings; "0" disables the corresponding sweep.
+        Per-cycle budget caps each sweep so the first post-deploy backfill
+        spans multiple cycles instead of holding the write lock end-to-end.
+        """
         try:
             log_days, row_days, hc_days = _read_retention_settings()
         except Exception as e:
@@ -387,28 +474,132 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning health checks: {e}")
 
-        # 4d. Issue #772: after a retention sweep reclaims meaningful space,
-        # truncate the WAL so the OS sees the free pages. Checkpoint is cheap
-        # and safe to run per-cycle when there's work to do; full VACUUM is
-        # gated to a daily off-peak job (see start()).
+    def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
+        """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
+        their retention window. `purge_agent_ownership` runs the #816
+        cascade_delete primitive so every per-agent child row goes with the
+        parent in a single transaction. Bounded by the same 5000-row/cycle cap
+        as the other sweeps so a backlog after a long-disabled retention
+        setting drains gradually.
+        """
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+            raw_sd_days = db.get_setting_value(
+                "agent_soft_delete_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("agent_soft_delete_retention_days", "180"),
+            )
+            try:
+                sd_days = max(int(raw_sd_days), 0)
+            except (TypeError, ValueError):
+                sd_days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading agent retention setting: {e}")
+            sd_days = 0
+
+        if sd_days > 0:
+            try:
+                names = db.find_soft_deleted_agents_past_retention(
+                    retention_days=sd_days,
+                    limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                purged = 0
+                for name in names:
+                    try:
+                        if db.purge_agent_ownership(name):
+                            purged += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"[Cleanup] Failed to purge soft-deleted agent {name}: {e}"
+                        )
+                report.soft_deleted_agents_purged = purged
+                if purged > 0:
+                    logger.info(
+                        f"[Cleanup] Hard-purged {purged} soft-deleted agent(s) "
+                        f"past {sd_days}-day retention (#834)"
+                    )
+            except Exception as e:
+                logger.error(f"[Cleanup] Error pruning soft-deleted agents: {e}")
+
+    def _sweep_soft_deleted_schedules(self, report: CleanupReport) -> None:
+        """4c-ter. Issue #834 Phase 1b: hard-purge soft-deleted schedules past
+        their retention window. Unlike the agent purge, this does not chain
+        into cascade_delete — schedules don't have child rows registered with
+        #816 (schedule_executions are KEEP-policy via subscription_id rollups,
+        and the per-schedule cleanup of executions belongs to #772's separate
+        sweep).
+        """
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+            raw_schedule_days = db.get_setting_value(
+                "schedule_soft_delete_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("schedule_soft_delete_retention_days", "30"),
+            )
+            try:
+                schedule_days = max(int(raw_schedule_days), 0)
+            except (TypeError, ValueError):
+                schedule_days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading schedule retention setting: {e}")
+            schedule_days = 0
+
+        if schedule_days > 0:
+            try:
+                ids = db.find_soft_deleted_schedules_past_retention(
+                    retention_days=schedule_days,
+                    limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                purged = 0
+                for sid in ids:
+                    try:
+                        if db.purge_schedule(sid):
+                            purged += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"[Cleanup] Failed to purge soft-deleted schedule {sid}: {e}"
+                        )
+                report.soft_deleted_schedules_purged = purged
+                if purged > 0:
+                    logger.info(
+                        f"[Cleanup] Hard-purged {purged} soft-deleted schedule(s) "
+                        f"past {schedule_days}-day retention (#834 Phase 1b)"
+                    )
+            except Exception as e:
+                logger.error(f"[Cleanup] Error pruning soft-deleted schedules: {e}")
+
+    def _sweep_idempotency_keys(self, report: CleanupReport) -> None:
+        """4c-quater. RELIABILITY-006 (#525): purge idempotency keys past their
+        24h TTL. Fixed window (not an ops setting) — the contract guarantees
+        dedup for 24h, no longer. Cheap point-delete on the created_at index.
+        """
+        try:
+            purged = db.idempotency_purge_expired(ttl_hours=24)
+            report.idempotency_keys_purged = purged
+            if purged > 0:
+                logger.info(
+                    f"[Cleanup] Purged {purged} idempotency key(s) past 24h TTL (#525)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error purging idempotency keys: {e}")
+
+    def _maybe_wal_checkpoint(self, report: CleanupReport) -> None:
+        """4d. Issue #772: after a retention sweep reclaims meaningful space,
+        truncate the WAL so the OS sees the free pages. Checkpoint is cheap and
+        safe to run per-cycle when there's work to do; full VACUUM is gated to a
+        daily off-peak job (see start()).
+        """
         retention_total = (report.execution_logs_pruned
                            + report.execution_rows_pruned
-                           + report.health_checks_pruned)
+                           + report.health_checks_pruned
+                           + report.soft_deleted_agents_purged
+                           + report.soft_deleted_schedules_purged
+                           + report.idempotency_keys_purged)
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()
             except Exception as e:
                 logger.warning(f"[Cleanup] WAL checkpoint failed: {e}")
-
-        self._cycle_count += 1
-
-        self.last_run_at = utc_now_iso()
-        self.last_report = report
-
-        if report.total > 0:
-            logger.info(f"[Cleanup] Cycle complete: {report.to_dict()}")
-
-        return report
 
     async def _process_stale_slot_reclaims(
         self,
@@ -568,9 +759,17 @@ class CleanupService:
         """Reconcile DB execution state against agent process registries.
 
         For each execution marked 'running' in the DB:
-        1. Check if the agent's process registry still has it
-        2. If not found (orphaned): mark failed, release resources
+        1. Check if the agent's process registry still has it (including
+           the #921 recently-completed window — see `_get_agent_running_ids`)
+        2. If not found: mark failed, release resources
         3. If found but exceeded timeout: terminate, mark failed, release resources
+
+        Issue #921: the race between the agent's `finally: unregister()`
+        and the backend's `update_execution_status(SUCCESS)` is closed at
+        the source — agents include recently-completed IDs in their
+        `/api/executions/running` response. The watchdog therefore needs
+        no two-cycle confirmation: a single observation of "missing from
+        agent + DB still running" is a true orphan.
 
         Returns:
             Tuple of (orphaned_count, auto_terminated_count, confirmed_running_ids)
@@ -631,7 +830,11 @@ class CleanupService:
                                 )
                                 continue
 
-                            # Orphan: execution not found on agent
+                            # Orphan: missing from agent's running + recently-
+                            # completed sets. The agent-side window in
+                            # `process_registry.list_recently_completed_ids`
+                            # already absorbed the success-write race (#921),
+                            # so this is a true orphan.
                             recovery_attempts += 1
                             error_msg = (
                                 "Execution completed on agent but status not reported "
@@ -643,7 +846,7 @@ class CleanupService:
                             if recovered:
                                 orphaned_count += 1
                         else:
-                            # Execution is on agent — check timeout
+                            # Execution is on agent — check timeout.
                             timeout_seconds = ex.get("timeout_seconds") or 900
 
                             if age_seconds <= timeout_seconds:
@@ -708,9 +911,9 @@ class CleanupService:
                 f"http://agent-{agent_name}:8000/api/executions/running"
             )
             if response.status_code == 200:
-                data = response.json()
-                executions = data.get("executions", [])
-                return {eid for ex in executions if (eid := ex.get("execution_id"))}
+                # #921: union of currently-running + recently-completed via
+                # the shared helper — same parsing as `recover_orphaned_executions`.
+                return _extract_agent_known_ids(response.json())
             else:
                 logger.warning(
                     f"[Watchdog] Agent '{agent_name}' returned {response.status_code} "
@@ -893,6 +1096,18 @@ class CleanupService:
 
     async def _cleanup_loop(self):
         """Main cleanup loop."""
+        # One-shot startup hook for #740: any non-terminal agent_loops left
+        # over from a prior process get marked `interrupted`. Loops do not
+        # auto-resume. Runs once on boot, not every cycle.
+        try:
+            interrupted = db.mark_orphan_loops_interrupted()
+            if interrupted > 0:
+                logger.info(
+                    f"[Cleanup] Startup: marked {interrupted} orphan agent_loops as interrupted (#740)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+
         # Run initial cleanup on startup
         try:
             startup_report = await self.run_cleanup()
@@ -1027,14 +1242,15 @@ async def recover_orphaned_executions() -> Dict:
             continue
 
         # Container is up — check agent's process registry
-        registry_ids: set[str] = set()
+        registry_ids: set = set()
         try:
             client = get_agent_client(agent_name)
             resp = await client.get("/api/executions/running", timeout=5.0)
             if resp.status_code == 200:
-                registry_ids = {
-                    e["execution_id"] for e in resp.json().get("executions", [])
-                }
+                # #921: same union as the periodic watchdog — includes
+                # recently-completed IDs so a backend restart that races
+                # an in-flight completion doesn't false-orphan it.
+                registry_ids = _extract_agent_known_ids(resp.json())
         except AgentClientError as e:
             logger.warning(f"[Recovery] Could not reach agent {agent_name} registry: {e}")
 

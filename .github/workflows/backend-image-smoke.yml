@@ -1,0 +1,213 @@
+name: backend-image-smoke
+
+# Prod-image packaging + boot guard for the backend (issue #1033).
+#
+# Why this exists:
+#   #1033 shipped a backend crash-loop — commit 0c671158 added a new
+#   top-level module `src/backend/redis_breaker_util.py` (imported by
+#   services/agent_client.py) but never added it to the enumerated COPY
+#   list in docker/backend/Dockerfile, so it was silently absent from the
+#   baked image: `ModuleNotFoundError: No module named 'redis_breaker_util'`
+#   on startup. No existing CI caught it because:
+#     - container-security.yml boots the *dev* compose via start.sh, which
+#       bind-mounts `./src/backend:/app` — the live source masks any missing
+#       COPY, so a packaging defect is structurally invisible there.
+#     - backend-unit-test.yml runs pytest against source — blind to image
+#       packaging entirely.
+#     - docker-compose.prod.yml does NOT bind-mount src/backend, so the bug
+#       only bit on prod deploys.
+#
+# This job exercises the BAKED PROD IMAGE (no dev bind-mount), so it sees
+# packaging AND lifespan/migration/startup defects. The Dockerfile COPY was
+# changed to a glob in the same PR; this job is the recurrence guard for it.
+#
+# Pattern (path filter, least-priv perms, logs-on-failure) mirrors
+# container-security.yml. It is deliberately NOT folded into that workflow:
+# that one boots the dev stack and cannot see image-packaging bugs.
+#
+# Enforcement: `prod-image-smoke` runs and is visible on every PR that
+# touches the paths below, but it only *blocks* a merge once a repo admin
+# marks it a required status check on `dev` and `main` (Settings → Branches,
+# or a ruleset) — until then a red run is advisory and does not stop a merge.
+# Caveat when making it required: the triggers below are `paths`-filtered, so
+# a PR touching none of those paths never starts this workflow and the check
+# never reports; GitHub then leaves a *required* check pending and blocks the
+# PR indefinitely. Pair the required rule with a path-scoped ruleset (or add
+# a sentinel job that reports success on no-op PRs) so unrelated PRs aren't
+# stuck. The same caveat applies to container-security.yml, which uses this
+# identical path-filter pattern.
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'src/backend/**'
+      - 'docker/backend/Dockerfile'
+      - 'docker-compose.prod.yml'
+      - 'config/vector.yaml'
+      - '.github/workflows/backend-image-smoke.yml'
+  pull_request:
+    paths:
+      - 'src/backend/**'
+      - 'docker/backend/Dockerfile'
+      - 'docker-compose.prod.yml'
+      - 'config/vector.yaml'
+      - '.github/workflows/backend-image-smoke.yml'
+  workflow_dispatch:
+
+# Least-privilege GITHUB_TOKEN: only `contents: read` for actions/checkout.
+# The job runs entirely on the runner (no PR comments / no security-events).
+permissions:
+  contents: read
+
+jobs:
+  prod-image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    # Pin the Compose project name so every `docker compose` invocation below
+    # (build / up / down) shares one namespace AND the built image gets a
+    # deterministic tag: `docker compose build` names it `<project>-backend`.
+    # `docker compose images -q backend` is NOT usable to resolve it — that
+    # lists images for *created containers*, and the module/import checks run
+    # before any `up`, so it would return empty.
+    env:
+      COMPOSE_PROJECT_NAME: trinity-smoke
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate boot secrets (.env)
+        # docker-compose.prod.yml fails to render unless ADMIN_PASSWORD,
+        # REDIS_PASSWORD, and REDIS_BACKEND_PASSWORD are set (they use the
+        # `${VAR:?...}` form). SECRET_KEY/INTERNAL_API_SECRET are not
+        # render-blocking but are set so the backend boots cleanly without
+        # the "generated random key" warning path. None are real secrets —
+        # all are per-run random values used only inside this runner.
+        run: |
+          set -euo pipefail
+          {
+            echo "SECRET_KEY=$(openssl rand -hex 32)"
+            echo "ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+            echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
+            echo "REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)"
+            echo "INTERNAL_API_SECRET=$(openssl rand -hex 24)"
+            # Backend bind-mounts ${TRINITY_DATA_PATH:-./trinity-data}:/data.
+            # Pin it explicitly so the chown step below targets the same dir.
+            echo "TRINITY_DATA_PATH=./trinity-data"
+          } > .env
+
+      - name: Prepare data path ownership (UID 1000)
+        # Backend runs as UID 1000 (non-root, #874) and writes
+        # /data/trinity.db on boot (database.py runs init_database at import).
+        # The bind-mounted host dir must be owned by 1000 or the write fails
+        # and the backend never goes healthy. Mirrors start.sh's
+        # ensure_data_path_ownership for the prod bind-mount.
+        run: |
+          set -euo pipefail
+          mkdir -p ./trinity-data
+          sudo chown -R 1000:1000 ./trinity-data
+
+      - name: Detect docker GID
+        # Backend joins the host docker group via `group_add: ${DOCKER_GID:-999}`
+        # so UID 1000 can reach /var/run/docker.sock. Detect the runner's
+        # docker group GID rather than trusting the 999 default.
+        run: |
+          set -euo pipefail
+          GID="$(getent group docker | cut -d: -f3)"
+          [ -n "$GID" ] && echo "DOCKER_GID=$GID" >> .env || true
+
+      - name: Build prod backend image
+        # Use the prod compose so the build context + args match prod exactly
+        # (no drift from a hand-rolled `docker build`).
+        run: docker compose -f docker-compose.prod.yml build backend
+
+      - name: Assert new top-level module is baked in
+        # The exact module #1033 dropped. The image was tagged
+        # `${COMPOSE_PROJECT_NAME}-backend` by the build step above (prod
+        # compose sets no `image:`, so this build-derived name is the stable
+        # handle for `docker run`).
+        run: |
+          set -euo pipefail
+          IMG="${COMPOSE_PROJECT_NAME}-backend"
+          docker image inspect "$IMG" >/dev/null \
+            || { echo "FAIL: built backend image '$IMG' not found"; exit 1; }
+          echo "backend image: $IMG"
+          docker run --rm "$IMG" ls -l /app/redis_breaker_util.py
+
+      - name: Assert no test/scratch modules leaked into prod image
+        # Inverse guard to the step above. The Dockerfile COPY is now a glob
+        # (`COPY src/backend/*.py`), which fixes #1033's *missing*-module
+        # class but introduces the opposite risk: any stray top-level
+        # `src/backend/*.py` — a test, a conftest, an acceptance script
+        # (exactly what `staging-acceptance.py` was before this PR relocated
+        # it to tests/integration/) — is now silently baked into the prod
+        # image. It won't crash boot, but it ships dead/throwaway code into
+        # production. Fail the build if a known non-prod pattern is present at
+        # /app top level, so such a file is caught here instead of shipped.
+        run: |
+          set -euo pipefail
+          IMG="${COMPOSE_PROJECT_NAME}-backend"
+          STRAY="$(docker run --rm "$IMG" sh -c \
+            'ls /app/test_*.py /app/*_test.py /app/conftest.py /app/*acceptance*.py /app/*-acceptance.py 2>/dev/null || true')"
+          if [ -n "$STRAY" ]; then
+            echo "FAIL: non-prod module(s) baked into the image by the COPY *.py glob:"
+            echo "$STRAY"
+            echo "Move test/scratch files out of src/backend/ top level (e.g. into tests/)."
+            exit 1
+          fi
+          echo "OK: no test/scratch modules at /app top level"
+
+      - name: Import-chain fast check (exact #1033 failed chain)
+        # Crisp one-line signal. Imports the exact chain that crash-looped:
+        # redis_breaker_util → services.agent_client → main. `import main`
+        # runs DB init against the container's own writable /data (this
+        # throwaway `docker run` has no bind-mount, so /data is the
+        # image's UID-1000-owned dir). REDIS_URL must carry credentials or
+        # config.py raises at import; no live Redis is contacted (network
+        # I/O is deferred to the lifespan handler).
+        run: |
+          set -euo pipefail
+          IMG="${COMPOSE_PROJECT_NAME}-backend"
+          docker run --rm \
+            -e REDIS_URL='redis://smoke:smoke@localhost:6379/0' \
+            -e SECRET_KEY='smoke' \
+            "$IMG" \
+            python -c "import redis_breaker_util; import services.agent_client; import main; print('IMPORT OK')"
+
+      - name: Boot prod image and wait for /health
+        # Subsumes the import check (a missing module crash-loops the backend
+        # so /health never comes up) and additionally catches lifespan /
+        # migration / Redis-wiring startup failures. Backend has hard
+        # depends_on for BOTH redis and vector in prod compose, so boot all
+        # three (no cloudflared / scheduler / mcp-server needed for /health).
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.prod.yml up -d redis vector backend
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "backend healthy after ~$((i*2))s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: backend never became healthy within ~120s"; exit 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.prod.yml logs --no-color --tail=200 \
+            backend redis vector > backend-image-smoke-logs.txt || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-image-smoke-failure
+          path: backend-image-smoke-logs.txt
+          retention-days: 14
+
+      - name: Tear down
+        if: always()
+        # Fixed container_names / named networks in prod compose leave residue
+        # otherwise. `-v` drops the redis/agent-configs volumes too.
+        run: docker compose -f docker-compose.prod.yml down -v --remove-orphans || true

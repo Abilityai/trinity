@@ -1,0 +1,44 @@
+# CodeQL static analysis (#850, Option A).
+# Free for public repos. Covers Python (backend, scheduler, agent base
+# server) and JS/TS (Vue frontend + TypeScript MCP server). No Go module
+# in the repo, so no go target. Findings land in the repo Security tab
+# (Code scanning alerts) — Dependabot/CodeQL surface there; the daily
+# issue-creating scanner (Option B) is a separate follow-up.
+name: CodeQL
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+  schedule:
+    # Weekly, Monday 03:27 UTC. Off-the-hour per GitHub scheduling guidance.
+    - cron: "27 3 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          language: ${{ matrix.language }}
+          # Interpreted languages — no compilation step needed.
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

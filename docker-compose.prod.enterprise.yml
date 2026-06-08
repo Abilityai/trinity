@@ -1,0 +1,38 @@
+# Enterprise overlay for production deployments (#847).
+#
+# Layered ON TOP of docker-compose.prod.yml when the deployment includes
+# the closed-source `trinity-enterprise` submodule:
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml \
+#                  build --no-cache backend frontend mcp-server scheduler
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml \
+#                  up -d backend frontend mcp-server scheduler
+#
+# What this does:
+#   * Bind-mounts the host's `src/backend/enterprise/` (populated by
+#     `git submodule update --init --recursive` before compose runs)
+#     into `/app/enterprise/` inside the container.
+#   * Python's import path is `/app` (Dockerfile WORKDIR), so the file
+#     `/app/enterprise/backend/__init__.py` resolves the conditional
+#     `from enterprise.backend import register_enterprise` in main.py.
+#   * Read-only mount — the container must never write into the
+#     submodule tree. Defense-in-depth against accidental modification.
+#
+# Why a bind-mount overlay, not a Dockerfile COPY:
+#   * Keeps the BASE backend image bit-identical to the OSS prod image
+#     so the public image's contents stay auditable.
+#   * `build-without-submodule.yml` CI guards OSS-only boot; that gate
+#     would have to be revisited if the Dockerfile gained an enterprise
+#     COPY (even guarded by an ARG).
+#   * Updating to a new enterprise SHA only requires
+#     `git submodule update --remote && docker compose up -d backend` —
+#     no rebuild.
+#
+# For an air-gapped customer who needs a self-contained tarballed image,
+# we'll add a Dockerfile.enterprise variant + build-arg gate as a
+# follow-up. SaaS dev/staging deployments use this overlay.
+
+services:
+  backend:
+    volumes:
+      - ./src/backend/enterprise:/app/enterprise:ro

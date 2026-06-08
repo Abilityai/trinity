@@ -24,8 +24,13 @@ ENV VITE_API_URL=${VITE_API_URL}
 # Build the application
 RUN npm run build
 
-# Stage 2: Production nginx server
-FROM nginx:alpine
+# Stage 2: Production nginx server (unprivileged variant — CSO hardening, issue #874)
+FROM nginxinc/nginx-unprivileged:alpine
+
+# nginxinc/nginx-unprivileged:alpine ends with `USER nginx` (UID 101).
+# Toggle root for setup, then nginx for runtime — single pair so the
+# subsequent RUN/COPY can write to /etc/nginx and /usr/share/nginx/html.
+USER root
 
 # Remove default nginx config
 RUN rm /etc/nginx/conf.d/default.conf
@@ -37,11 +42,14 @@ COPY --from=builder /app/security-headers.conf /etc/nginx/security-headers.conf
 # Copy built assets from builder stage
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Add curl for healthcheck
+# Add curl for healthcheck (must be root)
 RUN apk add --no-cache curl
 
-# Expose port 80
-EXPOSE 80
+USER nginx
+
+# Unprivileged nginx binds 8080 (≥1024 needs no NET_BIND_SERVICE).
+# Host-side port 80 mapping lives in docker-compose.prod.yml.
+EXPOSE 8080
 
 # Run nginx in foreground
 CMD ["nginx", "-g", "daemon off;"]

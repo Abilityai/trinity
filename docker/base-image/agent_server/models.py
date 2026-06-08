@@ -108,6 +108,7 @@ class ExecutionMetadata(BaseModel):
     error_message: Optional[str] = None  # Human-readable error message from Claude Code
     compact_events: List[CompactEvent] = []  # Auto-compact events observed mid-turn
     recovered_from_jsonl: bool = False  # Stdout race + JSONL fallback fired (response from disk, not stream)
+    model_name: Optional[str] = None  # Actual model id from assistant.message.model (e.g., "claude-sonnet-4-5") — #678
 
 
 # ============================================================================

@@ -27,7 +27,7 @@ from services.settings_service import get_anthropic_api_key, get_github_pat, get
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches
 from .file_sharing import check_public_folder_mount_matches
-from .read_only import inject_read_only_hooks
+from .read_only import inject_read_only_hooks, remove_read_only_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -307,19 +307,20 @@ async def start_agent_internal(agent_name: str) -> dict:
         skills_result = await inject_assigned_skills(agent_name)
         skills_status = skills_result.get("status", "unknown")
 
-    # Inject read-only hooks if enabled
-    read_only_result = {"status": "skipped", "reason": "not_enabled"}
+    # Sync read-only config file on every start so the baked-in guard always
+    # reflects the current DB state — prevents stale enabled:true config from
+    # persisting on the volume after the user disables read-only mode (#887).
+    read_only_result = {"status": "skipped", "reason": "unknown"}
     read_only_data = db.get_read_only_mode(agent_name)
-    if read_only_data.get("enabled"):
-        try:
-            read_only_result = await inject_read_only_hooks(agent_name, read_only_data.get("config"))
-            if read_only_result.get("success"):
-                read_only_result["status"] = "success"
-            else:
-                read_only_result["status"] = "failed"
-        except Exception as e:
-            logger.warning(f"Failed to inject read-only hooks into agent {agent_name}: {e}")
-            read_only_result = {"status": "failed", "error": str(e)}
+    try:
+        if read_only_data.get("enabled"):
+            result = await inject_read_only_hooks(agent_name, read_only_data.get("config"))
+        else:
+            result = await remove_read_only_hooks(agent_name)
+        read_only_result = {"status": "success" if result.get("success") else "failed", **result}
+    except Exception as e:
+        logger.warning(f"Failed to sync read-only config for agent {agent_name}: {e}")
+        read_only_result = {"status": "failed", "error": str(e)}
 
     return {
         "message": f"Agent {agent_name} started",

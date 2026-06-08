@@ -45,6 +45,31 @@ class TestSchedulerDatabase:
         assert all(s.enabled for s in schedules)
         assert "schedule-3" not in [s.id for s in schedules]  # Disabled schedule
 
+    def test_list_all_enabled_excludes_soft_deleted_agent(
+        self, db_with_data: SchedulerDatabase, initialized_db: str
+    ):
+        """#834 Phase 1a gap: soft-deleting the agent (setting
+        agent_ownership.deleted_at) must drop its enabled schedules from
+        the primary firing list — otherwise the scheduler fires them and
+        writes a failure row per attempt until the 180-day purge."""
+        import sqlite3
+
+        # Pre-condition: both enabled schedules visible while agent live.
+        assert len(db_with_data.list_all_enabled_schedules()) == 2
+
+        conn = sqlite3.connect(initialized_db)
+        conn.execute(
+            "UPDATE agent_ownership SET deleted_at = ? WHERE agent_name = ?",
+            (datetime.utcnow().isoformat(), "test-agent"),
+        )
+        conn.commit()
+        conn.close()
+
+        assert db_with_data.list_all_enabled_schedules() == [], (
+            "soft-deleted agent's enabled schedules must not be returned "
+            "by the cron-firing list"
+        )
+
     def test_list_agent_schedules(self, db_with_data: SchedulerDatabase):
         """Test listing schedules for a specific agent."""
         schedules = db_with_data.list_agent_schedules("test-agent")

@@ -5,6 +5,8 @@ Tests for agent workspace file browser.
 Covers REQ-FILES-001 through REQ-FILES-002.
 """
 
+import time
+
 import pytest
 from utils.api_client import TrinityApiClient
 from utils.assertions import (
@@ -14,6 +16,33 @@ from utils.assertions import (
     assert_has_fields,
     assert_tree_structure,
 )
+
+
+def _wait_for_container_ready(
+    api_client: TrinityApiClient, agent_name: str, timeout_s: float = 30.0
+) -> None:
+    """Poll an endpoint that requires the agent container to exist until it
+    responds (i.e., no longer 404 from `get_agent_container() is None`).
+
+    `created_agent` waits for the backend to report `status == "running"`,
+    but the Docker container can momentarily disappear from the backend's
+    SDK view during early startup. The mkdir endpoint surfaces that as
+    404, with no 503 fallback, so the test needs an explicit barrier
+    before exercising the endpoint.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        # /api/agents/{name}/files goes through the same get_agent_container
+        # lookup as mkdir; a 200 (or 503 "agent server not ready") means
+        # the container is visible to the backend.
+        probe = api_client.get(f"/api/agents/{agent_name}/files")
+        if probe.status_code != 404:
+            return
+        time.sleep(0.5)
+    pytest.skip(
+        f"Agent container for {agent_name} did not become visible to the "
+        f"backend within {timeout_s}s"
+    )
 
 
 class TestListFiles:
@@ -546,3 +575,109 @@ class TestShowHiddenFiles:
 
         assert_status(response, 200)
         # Should work the same as show_hidden=false
+
+
+class TestCreateFolder:
+    """FILE-006 / #37: Create folder endpoint tests.
+
+    POST /api/agents/{name}/files/mkdir creates a directory in the
+    agent workspace. Body: {"path": "/home/developer/<dir>"}.
+    """
+
+    def test_create_folder_and_list(
+        self,
+        api_client: TrinityApiClient,
+        created_agent
+    ):
+        """mkdir creates a directory that then appears in the listing."""
+        import uuid
+        name = created_agent['name']
+        _wait_for_container_ready(api_client, name)
+        dir_path = f"/home/developer/mkdir_test_{uuid.uuid4().hex[:8]}"
+
+        response = api_client.post(
+            f"/api/agents/{name}/files/mkdir",
+            json={"path": dir_path},
+        )
+
+        if response.status_code == 503:
+            pytest.skip("Agent server not ready")
+
+        assert_status(response, 200)
+        body = response.json()
+        assert body.get("success") is True
+        assert body.get("type") == "directory"
+
+        # Cleanup
+        api_client.delete(
+            f"/api/agents/{name}/files", params={"path": dir_path}
+        )
+
+    def test_create_folder_duplicate_returns_409(
+        self,
+        api_client: TrinityApiClient,
+        created_agent
+    ):
+        """Creating an already-existing directory returns 409."""
+        import uuid
+        name = created_agent['name']
+        _wait_for_container_ready(api_client, name)
+        dir_path = f"/home/developer/mkdir_dup_{uuid.uuid4().hex[:8]}"
+
+        first = api_client.post(
+            f"/api/agents/{name}/files/mkdir", json={"path": dir_path}
+        )
+        if first.status_code == 503:
+            pytest.skip("Agent server not ready")
+        if first.status_code != 200:
+            pytest.skip("Could not create initial folder")
+
+        second = api_client.post(
+            f"/api/agents/{name}/files/mkdir", json={"path": dir_path}
+        )
+        assert_status(second, 409)
+
+        api_client.delete(
+            f"/api/agents/{name}/files", params={"path": dir_path}
+        )
+
+    def test_create_folder_protected_path_returns_403(
+        self,
+        api_client: TrinityApiClient,
+        created_agent
+    ):
+        """mkdir into a Trinity-managed / protected path is denied."""
+        name = created_agent['name']
+        response = api_client.post(
+            f"/api/agents/{name}/files/mkdir",
+            json={"path": "/home/developer/.trinity/evil"},
+        )
+
+        if response.status_code == 503:
+            pytest.skip("Agent server not ready")
+
+        assert_status(response, 403)
+
+    def test_create_folder_nonexistent_agent_returns_404(
+        self,
+        api_client: TrinityApiClient
+    ):
+        """mkdir for a nonexistent agent returns 404."""
+        response = api_client.post(
+            "/api/agents/nonexistent-agent-xyz/files/mkdir",
+            json={"path": "/home/developer/x"},
+        )
+        assert_status(response, 404)
+
+    def test_create_folder_requires_auth(
+        self,
+        unauthenticated_client: TrinityApiClient,
+        created_agent
+    ):
+        """POST /api/agents/{name}/files/mkdir requires authentication."""
+        response = unauthenticated_client.post(
+            f"/api/agents/{created_agent['name']}/files/mkdir",
+            json={"path": "/home/developer/x"},
+            auth=False
+        )
+        assert_status(response, 401)

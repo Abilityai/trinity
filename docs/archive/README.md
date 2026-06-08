@@ -62,6 +62,14 @@ Superseded architecture documents:
 | ACTIVITY_TRACKING_ARCHITECTURE.md | feature-flows/activity-stream.md |
 | AGENT_CUSTOM_METRICS_SPEC.md | feature-flows/agent-custom-metrics.md |
 
+### plans/ (12 files)
+Completed / superseded implementation & sprint plans:
+
+| File | Status |
+|------|--------|
+| ORCHESTRATION_RELIABILITY_2026-04.md | Sprints A–D′ shipped; destination superseded 2026-06-05 by `docs/planning/TARGET_ARCHITECTURE.md` (pull / work-stealing coordination) |
+| _(11 earlier plans)_ | Completed implementation plans — settings-service, access-control, http-client, github-api extraction, docker-stats, execution-termination, vector-logging, ssh-access, system-agent consolidation, dashboard-permissions, credential-assignment |
+
 ## Finding Current Documentation
 
 - **Requirements**: `docs/memory/requirements.md`

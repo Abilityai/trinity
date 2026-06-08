@@ -1,7 +1,9 @@
 """
 Agent sharing routes for the Trinity backend.
 """
+import asyncio
 import json
+import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,6 +14,53 @@ from database import db, AgentShare, AgentShareRequest
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.proactive_message_service import proactive_message_service
+
+logger = logging.getLogger(__name__)
+
+# #951: Channels we can proactively notify the requester on when their access
+# request is approved. `web` users see the change via the existing
+# `agent_shared` WebSocket dashboard event and don't need a chat callback.
+_NOTIFIABLE_APPROVAL_CHANNELS = {"telegram", "slack", "whatsapp"}
+
+
+def _build_access_grant_text(agent_name: str) -> str:
+    """User-facing notification body when an access request is approved.
+
+    Mirrors the tone of the pending-approval reply emitted by
+    `adapters/message_router.py` ("I'll let you know once the agent owner
+    responds.") so the user recognises this as the promised follow-up.
+    """
+    return (
+        f"✅ Access to {agent_name} approved by the agent owner. "
+        f"You can now message the agent here."
+    )
+
+
+async def _notify_access_request_approval(
+    agent_name: str,
+    recipient_email: str,
+    channel: str,
+) -> None:
+    """Fire-and-forget post-approval notification (#951).
+
+    Failures are caught + audit-logged inside
+    `proactive_message_service.send_access_grant_notification`; this wrapper
+    only ensures an exception escaping the task doesn't show up as an
+    "Task exception was never retrieved" warning in the backend logs.
+    """
+    try:
+        await proactive_message_service.send_access_grant_notification(
+            agent_name=agent_name,
+            recipient_email=recipient_email,
+            channel=channel,  # type: ignore[arg-type]
+            text=_build_access_grant_text(agent_name),
+        )
+    except Exception as e:
+        logger.warning(
+            f"[#951] Background access-grant notification crashed for "
+            f"{recipient_email} on {channel}: {e}"
+        )
 
 router = APIRouter(prefix="/api/agents", tags=["sharing"])
 
@@ -256,6 +305,20 @@ async def decide_access_request_endpoint(
                 "event": "agent_shared",
                 "data": {"name": agent_name, "shared_with": existing["email"]},
             }))
+
+        # #951: notify the requester on their originating channel. Fire-and-
+        # forget — approval must succeed even if the channel transport is
+        # unavailable or the user has since revoked their chat binding. Audit
+        # of delivered/skipped/failed lives in the service method.
+        channel = (existing.get("channel") or "").lower()
+        if channel in _NOTIFIABLE_APPROVAL_CHANNELS:
+            asyncio.create_task(
+                _notify_access_request_approval(
+                    agent_name=agent_name,
+                    recipient_email=existing["email"],
+                    channel=channel,
+                )
+            )
 
     # SEC-001: audit access request decision
     await platform_audit_service.log(

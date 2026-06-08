@@ -41,7 +41,7 @@ The `model_used` field is recorded on every execution for audit and cost trackin
 
 ## Shared Component: ModelSelector
 
-**File**: `src/frontend/src/components/ModelSelector.vue` (172 lines)
+**File**: `src/frontend/src/components/ModelSelector.vue` (189 lines)
 
 A reusable combobox component that provides preset model options with free-text input support.
 
@@ -54,21 +54,25 @@ A reusable combobox component that provides preset model options with free-text 
 | `placeholder` | String | `'Select or type a model...'` | Input placeholder |
 | `compact` | Boolean | `false` | Smaller input styling for inline use |
 
-### Preset Models (lines 84-92)
+### Preset Models
 
-Uses full Anthropic API model IDs with snapshot dates for deterministic version pinning:
+Current-generation models use undated aliases (resolve to the latest snapshot); legacy models use full snapshot-dated IDs. **Synced 2026-06-06 (#1080)** against the [Anthropic models overview](https://platform.claude.com/docs/en/about-claude/models/overview):
 
 ```javascript
 const PRESET_MODELS = [
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Default — latest, most capable' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart' },
-  { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Previous gen flagship' },
-  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Previous gen, fast' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest' },
-  { value: 'claude-opus-4-20250514', label: 'Claude Opus 4', note: 'Legacy' },
-  { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4', note: 'Legacy' }
+  // Current generation
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable (latest)' },
+  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Current' },
+  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Current' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart (current)' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest (current)' },
+  // Legacy (still active)
+  { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Legacy' },
+  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Legacy' },
 ]
 ```
+
+> **Removed models retire safely (#1080).** `claude-opus-4-20250514` and `claude-sonnet-4-20250514` retire **2026-06-15** and are removed from the presets. Removing a model from the picker only removes the *suggestion* — the field is free-text, so a schedule/session pinned to a removed ID stays valid as free-text until Anthropic retires it on the API. After that the next execution fails with a clear error in `schedule_executions.error` (surfaced in the execution history), not silently. To recover, re-point the schedule's Model field (or the session/task model) to a current model. No default resolves to a removed model — the platform default (`claude-sonnet-4-6`), agent-base default (`claude-sonnet-4-6`), and the summarization model (`claude-haiku-4-5-20251001`) are all current.
 
 ### Dropdown Filtering with `isTyping` Flag (lines 98, 107-114, 116-121)
 
@@ -94,7 +98,7 @@ function onInput(event) {
 }
 ```
 
-`isTyping` is reset to `false` on: `selectModel()` (line 124), `handleClickOutside()` (line 160), and `Escape` keydown (line 11).
+`isTyping` is reset to `false` on: `selectModel()` (line 141), `handleClickOutside()` (line 175), and `Escape` keydown (line 11).
 
 ### Features
 - Dropdown with preset models, filtered by text input only when typing
@@ -123,7 +127,7 @@ function onInput(event) {
 **localStorage Persistence** (lines 538-542):
 ```javascript
 const taskModelKey = computed(() => `trinity-task-model-${props.agentName}`)
-const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || 'claude-opus-4-6')
+const selectedModel = ref(localStorage.getItem(`trinity-task-model-${props.agentName}`) || 'claude-sonnet-4-6')
 watch(selectedModel, (val) => {
   localStorage.setItem(taskModelKey.value, val)
 })
@@ -469,15 +473,15 @@ ALTER TABLE schedule_executions ADD COLUMN model_used TEXT;
 
 | Model ID | Label | Notes |
 |-----------|-------|-------|
-| `claude-opus-4-6` | Claude Opus 4.6 | Default — latest, most capable |
-| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart |
-| `claude-opus-4-5-20251101` | Claude Opus 4.5 | Previous gen flagship |
-| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Previous gen, fast |
-| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest, cheapest |
-| `claude-opus-4-20250514` | Claude Opus 4 | Legacy |
-| `claude-sonnet-4-20250514` | Claude Sonnet 4 | Legacy |
+| `claude-opus-4-8` | Claude Opus 4.8 | Most capable (latest), 1M context |
+| `claude-opus-4-7` | Claude Opus 4.7 | Current |
+| `claude-opus-4-6` | Claude Opus 4.6 | Current |
+| `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart (current) |
+| `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest, cheapest (current) |
+| `claude-opus-4-5-20251101` | Claude Opus 4.5 | Legacy (still active) |
+| `claude-sonnet-4-5-20250929` | Claude Sonnet 4.5 | Legacy (still active) |
 
-Previous-generation and legacy models use full Anthropic API IDs with snapshot dates (e.g., `claude-opus-4-5-20251101`) for deterministic version pinning. Current-generation models (`claude-opus-4-6`, `claude-sonnet-4-6`) use short IDs that resolve to the latest snapshot.
+Current-generation models (`claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`) use undated aliases that resolve to the latest snapshot. Legacy models use full snapshot-dated IDs (e.g., `claude-opus-4-5-20251101`) for deterministic version pinning. The two models that retired from the presets on 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) are no longer offered — see the graceful-degradation note under Preset Models above.
 
 Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (`sonnet[1m]`, etc.).
 
@@ -581,6 +585,7 @@ Also accepts model aliases (`sonnet`, `opus`, `haiku`) and 1M context variants (
 
 | Date | Change |
 |------|--------|
+| 2026-06-06 | **#1080 — model list refresh**: Added **Claude Opus 4.8** (`claude-opus-4-8`) as the flagship/latest across `ModelSelector.vue` and the admin platform-default dropdown (`Settings.vue`). Removed the two models retiring 2026-06-15 (`claude-opus-4-20250514`, `claude-sonnet-4-20250514`) from the presets; re-tiered current vs. legacy. Bumped the `TasksPanel.vue` localStorage fallback off legacy `claude-opus-4-5-20251101` → current `claude-sonnet-4-6`. Refreshed MCP `model` param examples (`chat.ts`, `schedules.ts`, `loops.ts`) off the EOL example ID. Backend/agent-server defaults were already current (`claude-sonnet-4-6`, `claude-haiku-4-5-20251001`) — unchanged, no base-image rebuild. Documented graceful degradation: removed presets remain valid free-text until Anthropic's retirement date, then fail with a clear execution error rather than silently. |
 | 2026-03-02 | **MODEL-001 bug fixes**: (1) ModelSelector `PRESET_MODELS` updated to correct Anthropic API IDs with snapshot dates (`claude-opus-4-5-20251101`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`) plus legacy models. (2) Added `isTyping` flag so dropdown filtering only applies during free-text input, not when opening via chevron. (3) Fixed `DatabaseManager.create_task_execution()` proxy missing `model_used` parameter -- was crashing all task submissions with model selection. (4) Default model changed from `claude-opus-4-5` to `claude-opus-4-6` in TasksPanel.vue and SchedulesPanel.vue. |
 | 2026-03-02 | **MODEL-001**: Added model selection for Tasks and Schedules. New ModelSelector.vue component, database migration #22 (`model` on agent_schedules, `model_used` on schedule_executions), full-stack integration through backend, scheduler service, and agent server. |
 | 2026-01-13 | Initial documentation created (terminal model only: CFG-005/CFG-006) |

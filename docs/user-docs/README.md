@@ -1,6 +1,10 @@
 # Trinity User Documentation
 
-> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-04-23.
+> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-05-27.
+
+## What's New
+
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.6.0](whats-new/v0.6.0.md))
 
 ## Guides
 
@@ -72,7 +76,8 @@
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 62 MCP tools, API keys, tool categories
+- [MCP Server](integrations/mcp-server.md) — 74 MCP tools, API keys, tool categories
+- [A2A Agent Card](integrations/a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
 ## CLI
@@ -97,7 +102,6 @@
 - [Voice Chat](advanced/voice-chat.md) — Real-time voice via Gemini Live API
 - [Image Generation](advanced/image-generation.md) — Gemini two-step image pipeline
 - [Agent Avatars](advanced/agent-avatars.md) — AI-generated avatars, emotion variants
-- [Process Engine](advanced/process-engine.md) — BPMN workflows, step types, analytics
 - [Dynamic Dashboards](advanced/dynamic-dashboards.md) — Custom agent dashboards via YAML
 
 ## API Reference

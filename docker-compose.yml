@@ -3,6 +3,17 @@ services:
     build:
       context: .
       dockerfile: docker/backend/Dockerfile
+      # Build-time provenance (#926). scripts/deploy/start.sh exports these
+      # from the local repo (`git rev-parse HEAD` etc.) before compose builds.
+      # Unset = Dockerfile defaults to "unknown" so an out-of-band build still
+      # produces a well-typed /api/version response.
+      args:
+        VERSION: ${VERSION:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SUBJECT: ${GIT_COMMIT_SUBJECT:-unknown}
+        GIT_COMMIT_TIMESTAMP: ${GIT_COMMIT_TIMESTAMP:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
     ports:
       - "8000:8000"
@@ -18,7 +29,18 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
-      - VOICE_MODEL=${VOICE_MODEL:-}  # Gemini Live model override (default: gemini-2.5-flash-native-audio-preview-12-2025)
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must
+      # reach the container or voip_available stays false (read by config.py).
+      - VOIP_ENABLED=${VOIP_ENABLED:-false}
+      - VOIP_MAX_CALL_DURATION=${VOIP_MAX_CALL_DURATION:-600}      # per-call cap (s)
+      - VOIP_DEFAULT_DAILY_CALL_CAP=${VOIP_DEFAULT_DAILY_CALL_CAP:-50}  # per-agent/day spend bound
+      - VOIP_CALL_RATE_LIMIT=${VOIP_CALL_RATE_LIMIT:-5}           # calls per owner+destination window
+      - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
+      - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
+      - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # OpenTelemetry Configuration (Optional)
@@ -32,6 +54,13 @@ services:
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
+      # SMTP transport (EMAIL_PROVIDER=smtp) — read by src/backend/config.py (#771)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      # SendGrid transport (EMAIL_PROVIDER=sendgrid) — read by src/backend/config.py (#771)
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
       # Log Retention & Archival Configuration
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
@@ -59,6 +88,28 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Backend agent-call budget (#904 RC-1). Caps how many concurrent
+      # outbound agent HTTP calls the backend will hold at once, plus
+      # the per-acquire queue wait before returning 503. Default
+      # timeout (3600s) matches the platform max execution_timeout —
+      # any call that would have eventually succeeded pre-#904 still
+      # succeeds; the cap exists to break deadlocks on deep
+      # agent-to-agent chains (chain depth > global cap), not to fail
+      # short-tail calls. Set queue timeout to 0 to disable (wait
+      # forever — accepts deadlock risk for zero false 503s).
+      - BACKEND_AGENT_CALL_LIMIT=${BACKEND_AGENT_CALL_LIMIT:-8}
+      - BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=${BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S:-3600}
+      # Issue #874: uvicorn --reload writes __pycache__/ next to source files
+      # in the ./src/backend bind mount. On Linux dev hosts the host dir is
+      # owned by the developer UID, not container UID 1000, so the writes
+      # fail. macOS Docker Desktop masks the failure; set this for parity.
+      - PYTHONDONTWRITEBYTECODE=1
+      # #847 — force OSS-only mode even when the enterprise submodule
+      # is mounted. With this set, EntitlementService.is_entitled()
+      # returns False for every feature, and the /api/settings/feature-flags
+      # `enterprise_features` list is empty. Default (unset = 0): allow
+      # entitlements based on license (Phase 0 stub: all-entitled).
+      - TRINITY_OSS_ONLY=${TRINITY_OSS_ONLY:-0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
@@ -83,8 +134,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
+    # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
+    # and reaches /var/run/docker.sock via group_add below — not capabilities.
+    # Issue #874: backend runs as UID 1000 (non-root) but still needs to talk
+    # to /var/run/docker.sock. On Linux the socket is group-owned by `docker`
+    # (typically GID 999 on Debian/Ubuntu, ~990 on RHEL family). macOS Docker
+    # Desktop ignores group_add; the default is safe there.
+    group_add:
+      - "${DOCKER_GID:-999}"
     read_only: false
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
@@ -217,6 +274,11 @@ services:
       - MCP_PORT=8080
       - TRINITY_API_URL=http://backend:8000
       - TRINITY_USERNAME=${TRINITY_USERNAME:-admin}
+      # #914: ceiling for the synchronous backend fetch in chat_with_agent
+      # sync mode. On abort, the MCP server queries /executions and returns
+      # a structured `queued_timeout` receipt instead of `fetch failed`.
+      # Default 25000ms sits below the typical 30-60s MCP gateway ceiling.
+      - MCP_CHAT_TIMEOUT_MS=${MCP_CHAT_TIMEOUT_MS:-25000}
       # MCP server authenticates to backend as ADMIN_USERNAME/ADMIN_PASSWORD.
       # Read directly from ADMIN_PASSWORD so devs do not have to set the same
       # secret twice (issue #692).

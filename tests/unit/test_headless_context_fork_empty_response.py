@@ -185,8 +185,15 @@ def test_clean_exit_but_missing_cost_falls_to_empty_result_classifier():
         _finalize_headless_result(ctx)
 
     # #520 owns this case — it raises 502 with a diagnostic detail.
+    # #678: detail is now a structured dict ({"message", "metadata",
+    # "raw_message_count", "parse_failure_count", "recovery_attempted"})
+    # carrying salvage telemetry — read the human-readable text out of
+    # detail["message"]. See tests/unit/test_empty_result_classification.py
+    # for the canonical pattern.
     assert exc_info.value.status_code == 502
-    assert "result message" in exc_info.value.detail.lower() or "stdout" in exc_info.value.detail.lower()
+    assert isinstance(exc_info.value.detail, dict), "#678: detail is a dict"
+    message = exc_info.value.detail["message"]
+    assert "result message" in message.lower() or "stdout" in message.lower()
 
 
 # ---------------------------------------------------------------------------

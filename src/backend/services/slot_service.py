@@ -124,8 +124,9 @@ class SlotService:
         # TIMEOUT-001: Dynamic slot TTL based on agent timeout + buffer
         slot_ttl = timeout_seconds + SLOT_TTL_BUFFER
 
-        # Clean up expired slots first (uses dynamic TTL for this agent)
-        await self._cleanup_stale_slots_for_agent(agent_name, slot_ttl)
+        # Clean up expired slots first — use this execution's timeout as the
+        # default fallback; per-slot metadata TTL takes precedence for each slot.
+        await self._cleanup_stale_slots_for_agent(agent_name, default_slot_ttl=slot_ttl)
 
         # Check current count
         current_count = self.redis.zcard(slots_key)
@@ -278,39 +279,65 @@ class SlotService:
         return result
 
     async def _cleanup_stale_slots_for_agent(
-        self, agent_name: str, slot_ttl: int = None
+        self, agent_name: str, default_slot_ttl: int = None
     ) -> List[str]:
-        """Remove slots older than TTL for a single agent.
+        """Remove slots whose per-slot TTL has elapsed for a single agent.
+
+        Each slot's effective TTL is read from its stored metadata
+        (``timeout_seconds + SLOT_TTL_BUFFER``). Falls back to
+        ``default_slot_ttl`` when metadata is absent (e.g. the HASH key
+        expired after the ZSET entry was written but before cleanup ran).
+
+        This replaces the former ZREMRANGEBYSCORE approach that used a
+        single per-agent cutoff computed from ``agent_ownership.
+        execution_timeout_seconds``. That approach incorrectly reclaimed
+        slots acquired with a per-schedule ``timeout_seconds`` longer than
+        the agent default — killing live executions at ~65 min when the
+        configured limit was 120 min (#869).
 
         Args:
-            agent_name: Name of the agent
-            slot_ttl: Slot TTL in seconds. If None, uses DEFAULT_SLOT_TTL_SECONDS.
+            agent_name: Name of the agent.
+            default_slot_ttl: Fallback TTL (seconds) when slot metadata is
+                absent. Defaults to DEFAULT_SLOT_TTL_SECONDS.
 
         Returns:
             List of execution IDs whose slots were reclaimed.
         """
         slots_key = self._slots_key(agent_name)
-        ttl = slot_ttl if slot_ttl is not None else DEFAULT_SLOT_TTL_SECONDS
-        cutoff = time.time() - ttl
+        fallback_ttl = default_slot_ttl if default_slot_ttl is not None else DEFAULT_SLOT_TTL_SECONDS
+        now = time.time()
 
-        # Get stale entries before removing
-        stale = self.redis.zrangebyscore(slots_key, "-inf", cutoff)
+        slot_entries = self.redis.zrange(slots_key, 0, -1, withscores=True)
+        if not slot_entries:
+            return []
+
+        stale = []
+        for execution_id, score in slot_entries:
+            age = now - float(score)
+            # Read the timeout stored at acquire time so each slot uses its
+            # own deadline, not the agent's current default.
+            metadata_key = self._metadata_key(agent_name, execution_id)
+            stored_timeout = self.redis.hget(metadata_key, "timeout_seconds")
+            if stored_timeout:
+                try:
+                    effective_ttl = int(stored_timeout) + SLOT_TTL_BUFFER
+                except (ValueError, TypeError):
+                    effective_ttl = fallback_ttl
+            else:
+                effective_ttl = fallback_ttl
+
+            if age > effective_ttl:
+                stale.append(execution_id)
 
         if stale:
-            # Remove stale slots
-            self.redis.zremrangebyscore(slots_key, "-inf", cutoff)
-
-            # Clean up metadata
+            self.redis.zrem(slots_key, *stale)
             for execution_id in stale:
-                metadata_key = self._metadata_key(agent_name, execution_id)
-                self.redis.delete(metadata_key)
-
+                self.redis.delete(self._metadata_key(agent_name, execution_id))
             logger.warning(
                 f"[Slots] Cleaned up {len(stale)} stale slots for agent '{agent_name}'"
             )
-            return list(stale)
 
-        return []
+        return stale
 
     async def cleanup_stale_slots(
         self, agent_timeouts: Dict[str, int] = None
@@ -337,13 +364,14 @@ class SlotService:
             cursor, keys = self.redis.scan(cursor, match=pattern, count=100)
             for key in keys:
                 agent_name = key.replace(self.slots_prefix, "")
-                # Use per-agent timeout if available, otherwise fall back to default
+                # Per-slot TTL from metadata takes precedence; this is only the
+                # fallback for slots whose metadata HASH has already expired.
                 if agent_timeouts and agent_name in agent_timeouts:
-                    slot_ttl = agent_timeouts[agent_name] + SLOT_TTL_BUFFER
+                    default_ttl = agent_timeouts[agent_name] + SLOT_TTL_BUFFER
                 else:
-                    slot_ttl = DEFAULT_SLOT_TTL_SECONDS
+                    default_ttl = DEFAULT_SLOT_TTL_SECONDS
                 stale_ids = await self._cleanup_stale_slots_for_agent(
-                    agent_name, slot_ttl
+                    agent_name, default_slot_ttl=default_ttl
                 )
                 if stale_ids:
                     reclaimed[agent_name] = stale_ids

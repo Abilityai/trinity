@@ -11,17 +11,25 @@ import signal
 import subprocess
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Dict, Optional, List, AsyncIterator
 from threading import Lock
 
 from ..utils.subprocess_pgroup import (
-    EXECUTION_TAG_NAME,
-    kill_processes_by_env_tag,
     signal_process_tree as _signal_process_tree,
 )
+from ..utils.orphan_sweep import kill_cgroup_orphans
 
 logger = logging.getLogger(__name__)
+
+# Issue #921: window during which a just-finished execution is still surfaced
+# by `/api/executions/running` to the backend watchdog. Covers the race
+# between this process's `finally: unregister()` and the backend's
+# `task_execution_service.update_execution_status(SUCCESS)` write. Sized
+# above the worst observed in-flight delay in the original incident (~55s)
+# with comfortable headroom for backend slowness.
+RECENTLY_COMPLETED_TTL_SECONDS = 300  # 5 minutes
 
 
 class ProcessRegistry:
@@ -46,6 +54,11 @@ class ProcessRegistry:
         self._log_buffers: Dict[str, List[dict]] = {}
         # Maximum buffer size per execution (prevents memory bloat)
         self._max_buffer_size = 1000
+        # Issue #921: execution_id -> unix timestamp when unregister() ran.
+        # Entries past RECENTLY_COMPLETED_TTL_SECONDS are evicted lazily on
+        # read. Capped indirectly by traffic — at agent's ~10 concurrent
+        # max with 5 min retention this is a few dozen entries at peak.
+        self._recently_completed: Dict[str, float] = {}
 
     def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None):
         """
@@ -86,6 +99,12 @@ class ProcessRegistry:
             # Clean up buffer (keep for a bit for late requests, but this is fine)
             if execution_id in self._log_buffers:
                 del self._log_buffers[execution_id]
+
+            # Issue #921: mark for the recently-completed window so the
+            # backend watchdog doesn't see this as missing during the race
+            # between this `finally: unregister()` and the backend writing
+            # `success` to the schedule_executions row.
+            self._recently_completed[execution_id] = time.time()
 
     def terminate(self, execution_id: str, graceful_timeout: int = 5) -> dict:
         """
@@ -147,23 +166,31 @@ class ProcessRegistry:
 
             returncode = process.returncode
 
-            # Issue #817: env-tag sweep for descendants that escaped the
-            # pgid kill via setsid + FD detachment. Best-effort — never
-            # fail termination on this. Mirrors the post-kill pass added
-            # to terminate_process_group; ProcessRegistry.terminate uses
-            # _signal_process_tree directly (different kill primitive)
-            # so we run the env-tag pass here too.
+            # Issue #817 follow-up: cgroup-walk sweep for descendants
+            # that escaped the pgid kill via setsid, FD detachment, or
+            # env stripping. Best-effort — never fail termination on
+            # this. Issue #912: delegated to active_execution_pids()
+            # which is the single canonical source for this allowlist,
+            # also used by the periodic orphan sweeper and the drain-
+            # time sweep in subprocess_pgroup. Excluding ``execution_id``
+            # so the sweep doesn't try to preserve the process we just
+            # killed.
             try:
-                killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_id)
+                preserve = self.active_execution_pids(
+                    exclude_execution_id=execution_id
+                )
+                killed = kill_cgroup_orphans(extra_pids=preserve)
                 if killed:
                     logger.info(
-                        f"[ProcessRegistry] Killed {killed} env-tagged "
-                        f"orphan(s) for execution {execution_id} after pgid sweep"
+                        f"[ProcessRegistry] Cgroup sweep killed {killed} "
+                        f"orphan(s) after terminating {execution_id} "
+                        f"(preserved {len(preserve)} pid(s) for other "
+                        f"in-flight execution(s))"
                     )
             except Exception:
                 logger.exception(
-                    f"[ProcessRegistry] kill_processes_by_env_tag({execution_id}) "
-                    "raised — continuing termination"
+                    f"[ProcessRegistry] cgroup sweep raised after "
+                    f"terminating {execution_id} — continuing"
                 )
 
             with self._lock:
@@ -199,7 +226,14 @@ class ProcessRegistry:
             }
 
     def list_running(self) -> list:
-        """List all currently running executions."""
+        """List all currently running executions.
+
+        ``pid`` was added to the returned shape (#817 follow-up) so the
+        periodic orphan sweeper can preserve every active claude
+        process and its descendants. Existing callers that only read
+        ``execution_id`` / ``started_at`` / ``metadata`` are
+        unaffected.
+        """
         with self._lock:
             result = []
             for exec_id, entry in self._processes.items():
@@ -207,10 +241,64 @@ class ProcessRegistry:
                 if process.poll() is None:
                     result.append({
                         "execution_id": exec_id,
+                        "pid": process.pid,
                         "started_at": entry["started_at"].isoformat(),
                         "metadata": entry["metadata"]
                     })
             return result
+
+    def active_execution_pids(self, exclude_execution_id: Optional[str] = None) -> List[int]:
+        """Snapshot of pids + captured pgids for currently-running executions.
+
+        Returned for the orphan-sweep allowlist. Issue #912: any caller of
+        :func:`kill_cgroup_orphans` that runs while *other* executions are
+        still in flight must pass these so the sweep doesn't SIGKILL their
+        claude subprocesses. The list intentionally includes both the
+        ``pid`` (resolves descendants via ppid walk in
+        :mod:`orphan_allowlist`) and the captured ``pgid`` from metadata
+        (covers grandchildren spawned with ``setsid`` that escape the ppid
+        chain). Duplicates are fine — the allowlist resolver de-dupes.
+
+        Args:
+            exclude_execution_id: When set, the entry with that id is
+                omitted from the snapshot. Used by ``terminate()`` so the
+                cgroup sweep doesn't try to preserve a process we just
+                killed.
+
+        Returns:
+            A new list (snapshot under the registry lock) of ints. Empty
+            list when no other executions are running.
+        """
+        result: List[int] = []
+        with self._lock:
+            for exec_id, entry in self._processes.items():
+                if exclude_execution_id is not None and exec_id == exclude_execution_id:
+                    continue
+                process = entry["process"]
+                if process.poll() is not None:
+                    continue
+                result.append(process.pid)
+                pgid = (entry.get("metadata") or {}).get("pgid")
+                if isinstance(pgid, int) and pgid > 0:
+                    result.append(pgid)
+        return result
+
+    def list_recently_completed_ids(self) -> List[str]:
+        """Issue #921: IDs of executions that finished within the last
+        RECENTLY_COMPLETED_TTL_SECONDS.
+
+        Surfaced via /api/executions/running so the backend watchdog can
+        treat "agent finished it moments ago" the same as "agent still
+        has it" — no orphan recovery, no false-positive. Expired entries
+        are dropped lazily here; no separate sweeper needed.
+        """
+        cutoff = time.time() - RECENTLY_COMPLETED_TTL_SECONDS
+        with self._lock:
+            # Drop expired entries while we're holding the lock.
+            expired = [eid for eid, ts in self._recently_completed.items() if ts < cutoff]
+            for eid in expired:
+                del self._recently_completed[eid]
+            return list(self._recently_completed.keys())
 
     def cleanup_finished(self) -> int:
         """

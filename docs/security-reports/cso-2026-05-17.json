@@ -1,0 +1,88 @@
+{
+  "version": "2.0.0",
+  "date": "2026-05-17T18:25:51Z",
+  "mode": "daily",
+  "scope": "full",
+  "diff_mode": false,
+  "branch": "AndriiPasternak31/issue-586-plan",
+  "base": "origin/dev",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "code": {
+      "routers": 56,
+      "services": 54,
+      "db_modules": 36,
+      "adapters_and_transports": 12,
+      "mcp_tools": 17,
+      "webhook_receivers": 4,
+      "public_unauthenticated_routes": 8
+    },
+    "infrastructure": {
+      "ci_workflows": 10,
+      "container_configs": 7,
+      "iac_configs": 0,
+      "secret_management": "env vars + Redis transient + AES-256-GCM for persisted channel tokens"
+    }
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 10,
+      "status": "VERIFIED",
+      "persistent": true,
+      "first_seen": "2026-04-05",
+      "phase": 5,
+      "phase_name": "Infrastructure Shadow Surface",
+      "category": "Infrastructure",
+      "fingerprint": "infrastructure-dockerfile-missing-user-directive",
+      "title": "Production Dockerfiles missing USER directive",
+      "files": [
+        "docker/backend/Dockerfile",
+        "docker/scheduler/Dockerfile",
+        "docker/frontend/Dockerfile.prod",
+        "src/mcp-server/Dockerfile"
+      ],
+      "description": "Four production containers run their CMD as root. No user: override in docker-compose.yml or docker-compose.prod.yml. Only docker/base-image/Dockerfile (agent base) drops to USER developer.",
+      "exploit_scenario": "Any RCE in the FastAPI backend would land as root inside the backend container. Backend has /var/run/docker.sock:ro mounted, so an attacker with read access can enumerate every Trinity agent container and read labels. Read-only socket blocks docker exec/run, but escalates the impact of any future write primitive (volume writes, Redis ops via platform network).",
+      "impact": "Defense-in-depth gap. Not a standalone vulnerability — requires a separate RCE — but widens blast radius of any future RCE finding.",
+      "recommendation": "Add a non-root user near the end of each production Dockerfile, e.g. `RUN groupadd --gid 1000 trinity && useradd --uid 1000 --gid trinity --home /app trinity && chown -R trinity:trinity /app` then `USER trinity`. Pattern already exists in docker/base-image/Dockerfile:70-132.",
+      "prior_report": "docs/security-reports/cso-2026-04-05.md:33",
+      "verification": "self-verified"
+    }
+  ],
+  "rejected_candidates": [
+    {
+      "candidate": "ADMIN_PASSWORD echoed in frontend-e2e.yml line 52",
+      "reason": "GitHub Actions auto-masks ${{ secrets.* }} values in logs; default fallback CiTestPassword!1 is a documented public CI placeholder used only on forks lacking org secrets."
+    },
+    {
+      "candidate": "CREDENTIAL_ENCRYPTION_KEY = 64 zeros in schema-parity.yml line 58",
+      "reason": "Documented test-only placeholder for schema-parity test on empty in-memory SQLite DB. Migration path never invokes encrypt(). Hits FP rule: 'test fixtures not imported by non-test code'."
+    }
+  ],
+  "filter_stats": {
+    "candidates_scanned": 3,
+    "false_positives_rejected": 2,
+    "confidence_gate_filtered": 0,
+    "reported": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "tentative": 0
+  },
+  "trend": {
+    "prior_report_date": "2026-04-05",
+    "resolved": 0,
+    "persistent": 1,
+    "new": 0,
+    "direction": "stable"
+  },
+  "protection_files": {
+    "gitleaks_present": false,
+    "secretlint_present": false,
+    "gstack_gitignored": true
+  }
+}

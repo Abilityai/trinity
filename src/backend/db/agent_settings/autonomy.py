@@ -22,7 +22,7 @@ class AutonomyMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(use_platform_api_key, 1) as use_platform_api_key
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -50,7 +50,7 @@ class AutonomyMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(autonomy_enabled, 0) as autonomy_enabled
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -75,5 +75,6 @@ class AutonomyMixin:
             cursor.execute("""
                 SELECT agent_name, COALESCE(autonomy_enabled, 0) as autonomy_enabled
                 FROM agent_ownership
+                WHERE deleted_at IS NULL
             """)
             return {row["agent_name"]: bool(row["autonomy_enabled"]) for row in cursor.fetchall()}

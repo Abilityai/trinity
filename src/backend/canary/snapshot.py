@@ -143,9 +143,27 @@ class AgentSnapshot:
     slot_scores: Dict[str, float] = field(default_factory=dict)
     # SQLite execution_id sets, partitioned by status.
     running_exec_ids: Set[str] = field(default_factory=set)
-    # `started_at` per running id (ISO); used by S-01 grace.
+    # `started_at` per running id (ISO); used by S-01 grace + E-01 / E-05 age.
     running_started_at: Dict[str, str] = field(default_factory=dict)
+    # `claude_session_id` per running id (str or None); used by E-05 to detect
+    # dispatched rows that never acquired a backing session.
+    running_claude_session_ids: Dict[str, Optional[str]] = field(default_factory=dict)
     queued_exec_ids: Set[str] = field(default_factory=set)
+    # `db.get_queued_count(name)` — the production accessor BacklogService
+    # calls on every enqueue/drain. B-01 compares this against
+    # `len(queued_exec_ids)` (independently collected by `_collect_executions`)
+    # so a divergence between the two query paths (e.g. a future cache layer
+    # on the accessor, or a status-filter regression) surfaces as a violation
+    # rather than going silent. `None` means the accessor was unavailable
+    # this cycle (import error in test mode) and B-01 must skip.
+    queued_count_via_service: Optional[int] = None
+    # Per-slot Redis TTL on the companion `agent:slot:{name}:{eid}` HASH.
+    # Value semantics from `redis.ttl()`: positive int = seconds until
+    # expiry; -2 = key does not exist; -1 = key exists with no TTL. S-03
+    # uses this to detect slots whose metadata expired prematurely
+    # (#226 bug class). Empty dict means the per-slot read was skipped
+    # this cycle (Redis unavailable); the check skips silently.
+    slot_ttls: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -166,6 +184,20 @@ class Snapshot:
     # value (success/failed/cancelled/skipped) is preserved so reversal
     # alerts can render the real prior status, not a placeholder.
     terminal_exec_statuses: Dict[str, str] = field(default_factory=dict)
+    # B-02 input: unix timestamp of the most recent successful
+    # `CapacityManager.run_maintenance()` sweep, written to
+    # `canary:drain_tick_at` at the END of the sweep so a mid-sweep crash
+    # leaves the value stale. `None` means the key has never been written
+    # (cold cluster or Redis unavailable) — B-02 treats that as "no
+    # drain has ever run" and skips its time-window arm.
+    drain_tick_at: Optional[float] = None
+    # R-01 input: per-agent zombie process count (`ps -eo stat,comm | grep
+    # ' Z.*claude' | wc -l`). Populated by docker_exec'ing into every
+    # running `trinity.platform=agent` container. Missing agent name in
+    # this map means the exec failed for that container — recorded in
+    # `sources_unavailable` and the R-01 check skips that agent rather
+    # than firing.
+    zombie_counts: Dict[str, int] = field(default_factory=dict)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
 
@@ -181,6 +213,12 @@ def _collect_known_agents() -> List[Dict[str, Any]]:
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Intentionally NOT filtering `deleted_at IS NULL` (#834). The
+        # canary's `known_agents` set drives L-03 (orphan-row detection)
+        # — soft-deleted-pending-purge agents legitimately have child
+        # rows in the live tables until the retention sweep runs.
+        # Treating them as "unknown" would surface those preserved rows
+        # as false-positive orphans.
         cursor.execute(
             """
             SELECT agent_name,
@@ -193,26 +231,140 @@ def _collect_known_agents() -> List[Dict[str, Any]]:
         return [dict(row) for row in cursor.fetchall()]
 
 
-def _collect_executions(agent_name: str) -> Dict[str, Set[str]]:
-    """Per-agent running + queued execution_ids."""
+def _collect_executions(agent_name: str) -> Dict[str, Any]:
+    """Per-agent running + queued execution_ids.
+
+    Adds `claude_session_id` for running rows (E-05) — fetched in the same
+    query so the canary cycle stays O(N agents) and never grows per-row.
+    The column has been on `schedule_executions` since #106; rows predating
+    that migration return NULL and are tolerated by the E-05 grace window.
+    """
     from db.connection import get_db_connection
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # `claude_session_id` may not exist in the minimal test DDLs; guard
+        # with a PRAGMA introspection and select * if absent so the unit
+        # tests don't have to mirror every production column.
+        cursor.execute("PRAGMA table_info(schedule_executions)")
+        cols = {c["name"] for c in cursor.fetchall()}
+        has_session_col = "claude_session_id" in cols
+        select_cols = "id, status, started_at"
+        if has_session_col:
+            select_cols += ", claude_session_id"
         cursor.execute(
-            "SELECT id, status, started_at FROM schedule_executions "
+            f"SELECT {select_cols} FROM schedule_executions "
             "WHERE agent_name = ? AND status IN ('running', 'queued')",
             (agent_name,),
         )
-        out: Dict[str, Any] = {"running": set(), "queued": set(), "started_at": {}}
+        out: Dict[str, Any] = {
+            "running": set(),
+            "queued": set(),
+            "started_at": {},
+            "claude_session_ids": {},
+        }
         for row in cursor.fetchall():
             if row["status"] == "running":
                 out["running"].add(row["id"])
                 if row["started_at"]:
                     out["started_at"][row["id"]] = row["started_at"]
+                out["claude_session_ids"][row["id"]] = (
+                    row["claude_session_id"] if has_session_col else None
+                )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
         return out
+
+
+def _collect_zombie_counts() -> Dict[str, Any]:
+    """Per-running-agent zombie-process count via Docker exec.
+
+    For every running container labeled `trinity.platform=agent`, runs
+    `sh -c "ps -eo stat,comm | grep '^Z.*claude' | wc -l"` and parses
+    the integer result. Used by R-01 to detect unreaped Claude child
+    processes (#407 bug class).
+
+    The shell command pattern matters: `STAT` is the first column from
+    `ps -eo stat,comm`, and a zombie's STAT field is `Z` (sometimes
+    with suffixes like `Z+`). `^Z` anchors at the start of the line —
+    procps-ng on the agent base image emits STAT left-aligned with no
+    leading space for single-letter codes, so the catalog's space-Z
+    pattern misses. Verified live against a real zombie spawned via
+    `os.fork()` + `prctl(PR_SET_NAME, "claude")`.
+
+    Returns a dict with two keys:
+      "counts":     {agent_name: int}   for containers we successfully exec'd.
+      "unavailable": [str, ...]         per-agent failure messages for the
+                                        caller to append to sources_unavailable.
+
+    All-or-nothing failure (e.g. docker_client None) returns
+    {"counts": {}, "unavailable": ["docker: <reason>"]}.
+    """
+    out: Dict[str, Any] = {"counts": {}, "unavailable": []}
+    try:
+        from services.docker_service import docker_client
+    except Exception as exc:
+        out["unavailable"].append(f"docker.import: {exc}")
+        return out
+    if docker_client is None:
+        out["unavailable"].append("docker: client unavailable")
+        return out
+
+    try:
+        containers = docker_client.containers.list(
+            filters={"label": "trinity.platform=agent", "status": "running"},
+        )
+    except Exception as exc:
+        out["unavailable"].append(f"docker.list: {exc}")
+        return out
+
+    # The catalog spec uses ` Z.*claude` (leading-space), but procps-ng on
+    # the agent base image emits STAT left-aligned with NO leading space
+    # for single-letter codes. Anchor at start-of-line instead — same
+    # intent (STAT field begins with Z), works across both formatters.
+    cmd = ["sh", "-c", "ps -eo stat,comm | grep '^Z.*claude' | wc -l"]
+    for container in containers:
+        # Container name is the canonical agent identifier (handles renames
+        # correctly per docker_service.list_all_agents_fast). Strip the
+        # historical `agent-` prefix to align with agent_ownership.agent_name.
+        agent_name = container.name.removeprefix("agent-")
+        try:
+            result = container.exec_run(cmd)
+            raw = result.output
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            count = int((raw or "0").strip().splitlines()[-1])
+            out["counts"][agent_name] = count
+        except Exception as exc:
+            # Per-container failure should not poison the cycle — just
+            # record and skip; R-01 will skip this agent.
+            out["unavailable"].append(f"docker.exec[{agent_name}]: {exc}")
+
+    return out
+
+
+def _collect_queued_count_via_service(agent_name: str) -> Optional[int]:
+    """Call the production `db.get_queued_count` accessor.
+
+    Used by B-01: we compare what this returns against the snapshot's
+    independently-collected `len(queued_exec_ids)` so that any drift
+    between the service-layer accessor and a direct SELECT — a cache
+    layer, a status-filter regression, anything — surfaces as a
+    violation. Returns `None` on import or attribute error so unit
+    tests (which stub `db.connection` but not the full `database`
+    facade) can still build snapshots; the B-01 check then skips that
+    agent rather than firing a false positive.
+    """
+    try:
+        from database import db
+        return int(db.get_queued_count(agent_name))
+    except Exception:  # pragma: no cover - exercised in unit tests via stubbing
+        logger.debug(
+            "canary snapshot: db.get_queued_count unavailable for %s; "
+            "B-01 will skip this agent",
+            agent_name,
+        )
+        return None
 
 
 def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
@@ -325,8 +477,12 @@ def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
 def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any]]:
     """Per-agent Redis slot ZSET membership + scan for orphan slot keys.
 
-    Returns dict with two keys:
+    Returns dict with these keys:
       "by_agent": {agent_name: set(execution_ids)} for known agents
+      "scores":   {agent_name: {execution_id: zset_score}}
+      "slot_ttls": {agent_name: {execution_id: ttl_seconds}} — per-slot
+                   metadata HASH TTLs read for S-03 (one TTL call per slot;
+                   bounded by ZCARD which is ≤ max_parallel_tasks).
       "orphan_slots": {agent_name_in_key: count} for keys matching agents
                       NOT in agent_ownership
     """
@@ -335,16 +491,35 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
     slot_service = get_slot_service()
     redis_client = slot_service.redis
     prefix = slot_service.slots_prefix
+    metadata_prefix = slot_service.metadata_prefix
 
     by_agent: Dict[str, Set[str]] = {}
     scores: Dict[str, Dict[str, float]] = {}
+    slot_ttls: Dict[str, Dict[str, int]] = {}
     orphan_slots: Dict[str, int] = {}
 
     # Per-agent ZRANGE for known agents (with scores for S-01 grace).
+    # Per-slot TTL lookup for S-03 — `redis.ttl()` semantics: positive int
+    # is seconds until expiry; -2 means the key doesn't exist; -1 means
+    # the key exists without a TTL. All three are surfaced verbatim and
+    # interpreted in the S-03 invariant check.
     for name in known_agents:
         with_scores = redis_client.zrange(f"{prefix}{name}", 0, -1, withscores=True)
         by_agent[name] = {m for m, _ in with_scores}
         scores[name] = {m: float(s) for m, s in with_scores}
+        ttl_map: Dict[str, int] = {}
+        for eid, _ in with_scores:
+            # Drain sentinels are intentionally short-lived; skip the TTL
+            # check for them (S-03 only cares about real execution slots).
+            if eid.startswith("drain-"):
+                continue
+            try:
+                ttl_map[eid] = int(redis_client.ttl(f"{metadata_prefix}{name}:{eid}"))
+            except Exception:
+                # Per-slot TTL failure should not poison the whole map; the
+                # missing entry simply means S-03 skips that slot.
+                continue
+        slot_ttls[name] = ttl_map
 
     # SCAN for orphan keys (agent name in the key but not in known set).
     cursor = 0
@@ -360,7 +535,12 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         if cursor == 0:
             break
 
-    return {"by_agent": by_agent, "scores": scores, "orphan_slots": orphan_slots}
+    return {
+        "by_agent": by_agent,
+        "scores": scores,
+        "slot_ttls": slot_ttls,
+        "orphan_slots": orphan_slots,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +569,12 @@ def collect_snapshot() -> Snapshot:
     snap.known_agents = {row["agent_name"] for row in agent_rows}
 
     # Redis slot state (scan once for both per-agent and orphan keys).
-    redis_state: Dict[str, Any] = {"by_agent": {}, "scores": {}, "orphan_slots": {}}
+    redis_state: Dict[str, Any] = {
+        "by_agent": {},
+        "scores": {},
+        "slot_ttls": {},
+        "orphan_slots": {},
+    }
     try:
         redis_state = _collect_redis_slot_state(snap.known_agents)
         snap.orphan_redis_slots = redis_state["orphan_slots"]
@@ -405,7 +590,16 @@ def collect_snapshot() -> Snapshot:
         except Exception as exc:
             logger.exception("canary snapshot: executions read failed for %s", name)
             snap.sources_unavailable.append(f"sqlite.executions[{name}]: {exc}")
-            execs = {"running": set(), "queued": set()}
+            execs = {
+                "running": set(),
+                "queued": set(),
+                "started_at": {},
+                "claude_session_ids": {},
+            }
+
+        # B-01 inputs: production accessor `db.get_queued_count` for cross-
+        # check against the snapshot's own queued id-list count.
+        queued_via_service = _collect_queued_count_via_service(name)
 
         snap.agents.append(
             AgentSnapshot(
@@ -415,9 +609,12 @@ def collect_snapshot() -> Snapshot:
                 execution_timeout_seconds=int(row["execution_timeout_seconds"]),
                 slot_ids=redis_state["by_agent"].get(name, set()),
                 slot_scores=redis_state["scores"].get(name, {}),
+                slot_ttls=redis_state["slot_ttls"].get(name, {}),
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),
+                running_claude_session_ids=execs.get("claude_session_ids", {}),
                 queued_exec_ids=execs["queued"],
+                queued_count_via_service=queued_via_service,
             )
         )
 
@@ -434,5 +631,31 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: terminal executions read failed")
         snap.sources_unavailable.append(f"sqlite.terminal_executions: {exc}")
+
+    # Redis: drain-tick heartbeat for B-02. Reuses the slot_service Redis
+    # client (same one used by `_collect_redis_slot_state` above). On
+    # failure we leave `drain_tick_at` as None — the B-02 check then
+    # cannot prove a drain ran in-window and falls back to its
+    # slots-full arm, which is the correct conservative behavior.
+    try:
+        from services.slot_service import get_slot_service
+        raw = get_slot_service().redis.get("canary:drain_tick_at")
+        if raw is not None:
+            snap.drain_tick_at = float(raw)
+    except Exception as exc:
+        logger.exception("canary snapshot: drain-tick read failed")
+        snap.sources_unavailable.append(f"redis.drain_tick: {exc}")
+
+    # Docker exec: per-agent zombie process count for R-01. New source
+    # type for the canary; treat individual container failures as
+    # per-agent skips (caller appends to sources_unavailable so the
+    # operator can see which agents got skipped this cycle).
+    try:
+        z = _collect_zombie_counts()
+        snap.zombie_counts = z["counts"]
+        snap.sources_unavailable.extend(z["unavailable"])
+    except Exception as exc:
+        logger.exception("canary snapshot: zombie collector raised")
+        snap.sources_unavailable.append(f"docker: {exc}")
 
     return snap

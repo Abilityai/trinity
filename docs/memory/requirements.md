@@ -380,6 +380,103 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Key Features**: SIGINT/SIGKILL flow, queue release, activity tracking
 - **Flow**: `docs/memory/feature-flows/execution-termination.md`
 
+### 10.4.1 Signal-Exit Classification Correctness (#904)
+- **Status**: ✅ Implemented (2026-05-21)
+- **GitHub Issue**: #904
+- **Description**: When a Claude subprocess inside an agent container is killed by an external signal (SIGKILL from cgroup OOM, schedule timeout, operator cancel), the error path must classify it as a signal kill — not as a subscription auth failure. Previously, the chat (`/api/chat`) path on the agent server lacked the `_classify_signal_exit` call that the headless path had (added by #516), so the same OOM kill produced different error strings depending on which entry point dispatched the work. The fallback heuristic in `headless_executor.py` also worded the zero-tokens 503 detail as "(possible authentication issue)", which downstream substring matchers in `services/subscription_auto_switch.py` and `src/scheduler/service.py` treated as a real auth signal — firing a futile SUB-003 auto-switch on every cgroup OOM and burning the 2h skip-list slot for the alternative subscription.
+- **Key Features**:
+  - Chat path (`docker/base-image/agent_server/services/claude_code.py`) now calls `_classify_signal_exit(return_code, metadata)` before the generic `if return_code != 0` block — same contract as the headless path. SIGKILL/SIGTERM/SIGINT exits raise 504 with the explicit "Execution terminated by SIGKILL after N tool calls / M turns" detail.
+  - `headless_executor.py` zero-tokens fallback (the `return_code > 0 and input_tokens == 0 and output_tokens == 0` branch) no longer says "authentication issue" — the new detail is `"Execution failed with no output (exit code N): {stderr}"`. The dedicated "Authentication failure" 503 raised on a confirmed `is_auth_failure_message` match a few lines above remains the only path that surfaces the auth phrasing.
+  - `_diagnose_exit_failure` (line 155, `error_classifier.py`) no longer returns the bare "Subscription token may be expired or revoked. Generate a new one with 'claude setup-token'." string for the OAuth-without-API-key case. The new wording is "Process failed with exit code N and no diagnostic output. Common causes: OOM kill (raise agent memory), schedule timeout (extend timeout_seconds), expired subscription token (`claude setup-token`)." — it lists token expiry as one of several possibilities instead of declaring it the diagnosis.
+- **SUB-003 interaction**: see §20.4 — `is_auth_failure` now skips messages containing signal/OOM/timeout markers so even if a residual wording carries an indicator, an unambiguous SIGKILL won't trigger auto-switch.
+- **Files**:
+  - `docker/base-image/agent_server/services/claude_code.py` — wire `_classify_signal_exit`
+  - `docker/base-image/agent_server/services/headless_executor.py` — reword zero-tokens 503
+  - `docker/base-image/agent_server/services/error_classifier.py` — reword `_diagnose_exit_failure` OAuth-only branch
+  - `src/backend/services/subscription_auto_switch.py` — negative markers in `is_auth_failure`
+  - `src/scheduler/service.py` — same negative markers in `_is_auth_failure`
+
+### 10.4.2 Backend Agent-Call Semaphore (#904 RC-1)
+- **Status**: ✅ Implemented (2026-05-21)
+- **GitHub Issue**: #904 (RC-1 surface)
+- **Description**: Backpressure on outbound agent HTTP calls from
+  `task_execution_service.agent_post_with_retry`. Before this, one
+  misbehaving agent whose `/api/chat` or `/api/task` held for several
+  minutes could leave N parallel coroutines `await`ing on `httpx.post`
+  while each periodically issued **synchronous** `sqlite3` calls
+  (`db/connection.py`). Under enough contention the synchronous
+  writes stalled the event loop long enough that the Docker
+  healthcheck (10s) flipped the backend to `unhealthy` and the
+  dashboard's parallel API fan-out (`/api/agents`,
+  `/api/ops/fleet/health`, `/api/operator-queue?status=pending`,
+  `/api/agents/execution-stats`) appeared frozen to the operator.
+  Restarting the offending agent container was the only workaround.
+- **Key Features**:
+  - **Per-agent semaphore** sized to the agent's
+    `max_parallel_tasks` (default 3, set via
+    `db.get_max_parallel_tasks`). Lazily created the first time a
+    call to that agent reaches the wrapper. Limits how many backend
+    coroutines can be mid-call to a single agent at once — a
+    misbehaving agent can never dominate the backend's available
+    coroutines beyond its own ceiling.
+  - **Global semaphore** capped at
+    `BACKEND_AGENT_CALL_LIMIT` env var (default 8). Bounds the total
+    fan-out across all agents. With a default of 8, the backend
+    always has spare async capacity for dashboard / health requests
+    even when every agent is mid-call.
+  - **Backward-compatible queue wait**: acquires use
+    `asyncio.wait_for(..., timeout=BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S)`
+    with a **default of 3600s** — matches the platform's max
+    `execution_timeout_seconds` (TIMEOUT-001, default 3600s, #665).
+    Pre-#904 the worst-case wall-clock per call was the agent
+    timeout (~610s default); 3600s leaves a generous margin so any
+    call that would have eventually succeeded still does. The cap
+    is NOT a "fail short-tail calls fast" knob — it's a deadlock
+    safety valve (see below). Past the timeout the wrapper raises
+    `BackendAgentCallBudgetExhausted`, translated to HTTP 503 in
+    `execute_task` / `routers/chat.py`. Set
+    `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S=0` to disable entirely (opt-in
+    — accepts deadlock risk for zero false 503s).
+  - **Deadlock safety valve**: agent-to-agent chains
+    (`chat_with_agent` MCP tool, X→Y→Z collaborations) can
+    deadlock when concurrent chain depth exceeds the global
+    semaphore. Each chain holds a slot for its outer caller while
+    waiting on the next hop, which itself wants a slot. With
+    `cap=8` and >8 simultaneous deep chains the system would hang
+    forever without a timeout. The 3600s ceiling surfaces such a
+    deadlock as a 503 within an hour, lets the queue drain, and
+    keeps the system unstuck.
+  - **Fail-closed-but-fair**: when the per-agent or global cap is
+    saturated, the caller waits the configured timeout, then 503s.
+    The agent's task-execution slot
+    (`CapacityManager.admit`) is released on the 503 path so the
+    same `execution_id` can be retried.
+  - **Configurable** via env vars (no DB schema change):
+    - `BACKEND_AGENT_CALL_LIMIT` (int, default 8) — global cap
+    - `BACKEND_AGENT_CALL_QUEUE_TIMEOUT_S` (float, default 3600) —
+      acquire timeout; 0 = wait forever
+- **Observability**:
+  - `[TaskExecService] Acquired agent-call slot for {agent} (agent_inflight=N/M, global_inflight=K/L)`
+    on every successful acquire (debug level for hot path).
+  - `[TaskExecService] Backend call budget exhausted for {agent}
+    after {wait_ms}ms (agent_cap={N}, global_cap={M})` warning on
+    timeout — surfaces in Vector platform.json.
+- **Out of scope (separate follow-ups)**:
+  - **Sync→async DB**: the sqlite3 calls that stall the event loop
+    remain synchronous. The semaphore mitigates the contention by
+    bounding fan-out, but a true fix needs
+    `run_in_executor`-wrapped DB calls. Larger refactor; tracked
+    separately.
+  - **RC-4 cgroup OOM observability**: not addressed in this PR.
+- **Files**:
+  - `src/backend/services/task_execution_service.py` — semaphore
+    primitives + `agent_post_with_retry` integration
+  - `src/backend/services/agent_call_limiter.py` — extracted
+    primitives (kept slim — module-level singletons +
+    `BackendAgentCallBudgetExhausted` exception)
+  - `src/backend/config.py` — env-var read of the two new knobs
+  - `docker-compose.yml` — env-var pass-through for backend service
+
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
 - **Description**: Select which Claude model to use for task execution and scheduled runs
@@ -460,7 +557,39 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Operator queue notification on validation failure
 - **Flow**: `docs/memory/feature-flows/business-validation.md`
 
-### 10.10 Unified Executions Dashboard (EXEC-022)
+### 10.10 Idempotency Keys at Trigger Boundaries (RELIABILITY-006)
+- **Status**: ✅ Implemented (2026-06-02)
+- **Requirement ID**: RELIABILITY-006
+- **GitHub Issue**: #525
+- **Description**: An `Idempotency-Key` contract at every execution-creating trigger boundary. The same key within a 24h window produces exactly one execution; duplicates short-circuit with the original result (`HTTP 200/202 + X-Idempotent-Replay: true`) instead of dispatching a second execution. Closes the producer-boundary dedup gap that the unified funnel made more acute — webhook re-deliveries, MCP client retries, and scheduler→backend network blips no longer create phantom executions.
+- **Key Features**:
+  - New `idempotency_keys` table — `PRIMARY KEY (scope, idempotency_key)` gives the atomic claim; `(execution_id, status, response_snapshot, created_at)` carry the replay payload. Cross-process safe (uvicorn workers + standalone scheduler share one DB file).
+  - Enforcement at each **router boundary** (not solely the service) because sync `/chat` runs an inline path and `/api/webhooks/{token}` creates no execution: `/chat`, `/task` (async+sync, self-task), `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`.
+  - Webhook auto-derives a key from `(token, body_hash)` when none supplied — covers naive senders that retry without idempotency awareness.
+  - Scheduler sends a deterministic `Idempotency-Key: sched:{execution_id}` so a transient backend 5xx + resend resolves to the same key; intentional #271 retries (fresh execution_id) are not suppressed.
+  - MCP `chat_with_agent` / `fan_out` forward a deterministic key over the call args so a transport retry dedupes.
+  - Header is OPTIONAL on chat/task/MCP (absent → no dedup, full back-compat); upfront at-capacity rejections release the claim so the caller can retry; in-flight duplicate → 409.
+  - Audit event `idempotent_replay` on every replay (duplicate-storms observable); 24h TTL purge folded into the cleanup-service retention sweep.
+- **Architectural Invariant**: #18 — every new trigger type must accept an `Idempotency-Key` before merge.
+
+### 10.11 Dispatch Circuit Breaker (RELIABILITY-007)
+- **Status**: ✅ Implemented (2026-05-30); default-OFF opt-in canary
+- **Requirement ID**: RELIABILITY-007
+- **GitHub Issue**: #526
+- **Description**: Per-agent **producer-side** circuit breaker at the dispatch layer. When an agent is *auth-dead* (reachable but answering HTTP 503 → execution `error_code == AUTH`), the breaker fast-fails NEW executions with HTTP 503 instead of poisoning the persistent backlog with doomed tasks, fails the doomed backlog immediately, and self-heals via a half-open probe. Distinct from and namespace-isolated from the transport-reachability breaker (#631) — the two never contaminate each other's counter.
+- **Key Features**:
+  - New `services/dispatch_breaker.py` — consecutive-failure state machine (`closed → open → half-open(probe) → closed`) in Redis `agent:dispatch:{name}` via atomic Lua (threshold 3, base cooldown 30s → 300s exponential backoff, one-probe-at-a-time `SET NX EX` lock); fail-open on Redis down, never raises
+  - **AUTH-only counting** (D10): TIMEOUT / AGENT_ERROR never count, to avoid false trips on long/bad-prompt tasks
+  - **No-enqueue invariant** (D2 + F1): `CapacityManager.acquire(breaker_enabled=…)` raises `CircuitOpen` *before* the overflow branch; a half-open probe is admitted only into a free slot (never enqueued) so the invariant spans the half-open window
+  - Drain-on-trip: `task_execution_service` records outcomes at the terminals and on `→open` backgrounds `db.fail_queued_for_agent` (QUEUED→FAILED) + clear in-memory queue + audit; 60s `run_maintenance` breaker-aware backstop re-fails still-open-breaker backlog if an inline drain is lost (~60s worst case, not 24h)
+  - Shared Redis plumbing extracted to top-level `redis_breaker_util.py` (fail-open client, Lua `ScriptCache`, decode helpers) reused by both breakers
+  - Per-agent `agent_ownership.circuit_breaker_enabled` opt-in column (default OFF) + global `DISPATCH_BREAKER_ENABLED` env master switch — both must be on to engage
+  - Operator API: `GET/PUT /api/agents/{name}/circuit-breaker` (read = authorized, config = owner-only + audit); `reset` (admin) clears BOTH breakers; unified block embedded in `GET /api/agents/{name}` and agent-health detail; `circuit_breakers` field on `/api/agents/slots` (pipelined HGETALL, no SCAN)
+  - Frontend: distinct ⚡ "circuit open" danger badge in `AgentHeader` (detail page) and `AgentNode` (dashboard graph)
+  - Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam
+- **Flow**: `docs/memory/feature-flows/dispatch-circuit-breaker.md`, `docs/memory/feature-flows/capacity-management.md`, `docs/memory/feature-flows/task-execution-service.md`
+
+### 10.12 Unified Executions Dashboard (EXEC-022)
 - **Status**: ✅ Implemented (2026-05-15)
 - **Requirement ID**: EXEC-022
 - **GitHub Issue**: #18
@@ -617,6 +746,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
 
+### 12.8a Richer Agent `/health` Signal (#1020)
+- **Status**: ✅ Implemented (2026-06-02)
+- **GitHub Issue**: #1020
+- **Description**: Promote the agent container's `/health` from `{status}` + ad-hoc diagnostics to a named, contractual signal the platform acts on — an incremental step toward `TARGET_ARCHITECTURE.md` §Agent Runtime.
+- **Key Features**:
+  - New top-level fields: `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure).
+  - Counters tracked in `agent_server/state.py` (`record_task_start`/`record_task_finish`), wired at both execution chokepoints in `agent_server/routers/chat.py`. Thread-safe (concurrent tasks).
+  - `consecutive_failures` is the signal the dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness; both feed the heartbeat push (#307).
+  - Backend `monitoring_service.py` reads `consecutive_failures`/`last_task_at` into `BusinessHealthCheck` (graceful `None` default for pre-#1020 agent images).
+  - `mailbox_depth` intentionally NOT emitted — no agent-side mailbox until the actor model (#945); backend derives queue depth from `CapacityManager`.
+  - Back-compat: existing `/health` keys unchanged; new keys additive.
+
 ### 12.9 Cleanup Service for Stuck Resources
 - **Status**: ✅ Implemented (Updated 2026-03-25, Issue #129)
 - **Requirement ID**: CLEANUP-001
@@ -662,9 +803,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 ## 13. Content & File Management
 
 ### 13.1 Per-Agent File Manager
-- **Status**: ✅ Implemented (Updated 2026-03-03, Issue #51)
+- **Status**: ✅ Implemented (Updated 2026-05-19, Issues #51, #37)
 - **Description**: Full-featured file manager in AgentDetail Files tab with two-panel layout (tree + preview)
-- **Key Features**: Tree view with search, image/video/audio/PDF/text preview, inline text editing, delete with protected path warnings, show hidden files toggle
+- **Key Features**: Tree view with search, image/video/audio/PDF/text preview, inline text editing, create folder (into selected directory or workspace root; nested via `/`), delete with protected path warnings, show hidden files toggle
 - **Components**: Reuses `file-manager/FileTreeNode.vue` and `file-manager/FilePreview.vue`
 - **Flow**: `docs/memory/feature-flows/file-browser.md`
 
@@ -794,8 +935,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Status**: ✅ Implemented (2026-03-19)
 - **Requirement ID**: MEM-001
 - **GitHub Issue**: #147
-- **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call and updated via background summarization every 5 messages.
+- **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call. Memory is updated via background summarization every 5 messages (auto) or explicitly via the `write_user_memory` MCP tool (agent-initiated, #888). The tool resolves the user email server-side from the execution record — agents never handle email addresses directly.
 - **Database Tables**: `public_user_memory`
+- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers only)
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
 ### 15.1a-3 Agent Website Proxy (SITE-001)
@@ -1417,6 +1559,7 @@ All subsections 18.1–18.10 were deleted with the code. Flow docs archived at `
   - `src/backend/routers/subscriptions.py` - Setting endpoints
   - `src/backend/routers/chat.py` - 429 interception hooks
   - `src/frontend/src/views/Settings.vue` - Toggle UI
+- **Negative markers on `is_auth_failure` (#904, 2026-05-21)**: substring match on `AUTH_INDICATORS` now short-circuits to False when the error message also contains an unambiguous signal-kill / OOM / timeout marker (`sigkill`, `sigterm`, `sigint`, `exit code -9`, `exit code 137`, `exit code 143`, `out of memory`, `oom`, `memory cgroup`, `terminated by`, `killed by`). Prevents the SUB-003 trigger from firing on cgroup OOM kills whose detail string happens to contain a word like "token" or "authentication" via downstream wrapping. The same exclusion list lives in `src/scheduler/service.py:_is_auth_failure` to keep the two surfaces from drifting (see §10.4.1).
 
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
@@ -1976,7 +2119,18 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ### 29.8 Voice Workspace (VOICE-008)
 - **Status**: ✅ Implemented (#699)
 - **Description**: Full-page workspace at `/agents/:name/workspace` with split layout — orb + controls left, agent-controlled canvas panel right; gated behind `voice_available` feature flag
-- **Key Features**: 4 in-process panel tools (`show_markdown`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+- **Key Features**: 6 in-process panel tools (`show_markdown`, `show_diagram`, `show_image`, `update_panel`, `append_to_panel`, `clear_panel`); 300ms poll via `GET /voice/{session_id}/panel`; DOMPurify sanitization; 512 KB content cap; `workspace_mode` param on `voice/start`; BETA-badged button in AgentHeader
+
+### 29.9 Voice Workspace Canvas Enrichment (VOICE-009)
+- **Status**: ✅ Implemented (#979)
+- **Description**: Enriches the VOICE-008 canvas with Mermaid diagrams, image display, client-side panel history, and orb/transition polish — endpoint contract unchanged
+- **Key Features**:
+  - `show_diagram(diagram, title?)` → `mermaid` panel type rendered strictly inside the existing opaque-origin `sandbox="allow-scripts"` iframe via a self-contained `mermaid.min.js` IIFE bundle (no runtime chunk fetches); agent diagram text injected as a JS string (`JSON.stringify` + `<`→`<`, no `</script>` breakout) with `securityLevel:'strict'`; invalid syntax renders a contained error + source, not a broken panel
+  - `show_image(src, title?, caption?)` → `image` panel type; web URLs render directly via Vue `:src`, workspace file paths fetched through the authenticated `/files/preview` endpoint as a blob (a bare `<img src>` would 401). Path confinement enforced in-process by `_classify_image_src` (rejects `..`, absolute escapes, the `/home/developer-evil` sibling, `data:`, and non-http schemes — stricter than the agent-server prefix check)
+  - Client-side panel history: ring buffer of the last 40 snapshots with prev/next + dropdown selector; "live" follows the latest, navigating back pins a snapshot until a new update arrives; frontend-only, no backend change; image blob objectURLs revoked on eviction + unmount
+  - Orb polish: asymmetric attack/release smoothing on energy (0.18/0.10), smoothed core size, idle "breathe" floor, larger core (58) and glow swing (32×)
+  - Graceful canvas-update cross-fade + header "updated" flash, honoring `prefers-reduced-motion`
+- **Security**: agent markup/diagrams render only inside the opaque-origin sandboxed iframe; images render via `:src` (no `v-html`); panel tools are backend+frontend only (not on the MCP surface — Invariant #13 N/A)
 
 ### Phase Roadmap
 1. **Phase 1 (MVP)**: Authenticated chat only, basic overlay, transcript on session end, manual voice prompt ✅
@@ -2085,6 +2239,640 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   `docs/testing/orchestration-invariant-catalog.md`). Each adds as a new
   file under `src/backend/canary/invariants/` and a registry entry; the
   service and API surface stay unchanged.
+
+---
+
+## 32. A2A Agent Discoverability (#737)
+
+### 32.1 A2A v1.0 Agent Card Endpoint (#737 — Phase 1)
+- **Status**: 🚧 In Progress (Phase 1)
+- **Implements**: Issue #737
+- **Description**: Each Trinity agent exposes an A2A-protocol Agent
+  Card so external orchestrators (AWS Bedrock, Azure Copilot, Google
+  ADK) can discover its identity, skills, and auth requirements
+  without knowing Trinity's internal API. A2A is Google's open
+  agent-interoperability protocol (https://google.github.io/A2A/).
+- **Endpoint**: `GET /api/agents/{name}/a2a/agent-card` — returns a
+  valid A2A v1.0 card built from the agent's `template.yaml`
+  (`name`, `description`, `version`, `skills[]` mapped from
+  `capabilities[]` with `use_cases[]` as examples) plus declared
+  `securitySchemes.bearerAuth` (Trinity MCP API key) and
+  `capabilities.streaming = true`. Auth-gated by `AuthorizedAgentByName`.
+- **Behavior**: card data fetched from the agent-server's
+  `/api/template/info`; falls back to Docker labels when the agent
+  is stopped or unreachable (never 5xx's). The `url` field points at
+  the public chat endpoint as a working placeholder until the A2A
+  JSON-RPC endpoint ships.
+- **Phase 2 (deferred)**: Redis caching of the card; auth-gated
+  extended card with internal endpoint URLs + full skill schemas;
+  host-root `/.well-known/agent-card.json` proxy convention; MCP
+  `get_agent_card` tool; the A2A JSON-RPC server the card's `url`
+  should ultimately address.
+
+---
+
+## 33. Agent Soft-Delete & Retention Lifecycle (#834)
+
+### 33.1 Agent Soft-Delete + Retention Purge (#834 — Phase 1a)
+- **Implements**: Issue #834 Phase 1a
+- **Description**: `DELETE /api/agents/{name}` no longer hard-deletes the
+  `agent_ownership` row. It marks `agent_ownership.deleted_at = NOW`
+  (NULL = live) and preserves every per-agent child row, so an
+  accidentally-deleted agent's history, schedules, and config remain
+  recoverable until the retention window expires. The container and
+  runtime resources are still torn down on delete — only the database
+  rows are retained.
+- **Retention purge**: the Cleanup Service (`cleanup_service.py`, 5-min
+  loop) hard-purges `agent_ownership` rows whose `deleted_at` is older
+  than `agent_soft_delete_retention_days` (default **180**, `0` =
+  disabled — soft-deleted rows then persist until manually purged).
+  Purge runs the #816 `purge_agent_ownership` → `cascade_delete`
+  primitive so all per-agent child rows are removed in one transaction;
+  `KEEP`-policy tables (`schedule_executions`, `nevermined_payment_log`)
+  survive per their own retention discipline. Bounded by the shared
+  5000-row/cycle cap so a backlog drains gradually.
+- **Name reservation**: `is_agent_name_reserved()` is intentionally
+  unfiltered — it sees soft-deleted rows so a soft-deleted name cannot
+  be reused (and silently clobbered) before purge.
+- **Scheduler gap closed**: `list_all_enabled_schedules()` (backend +
+  the standalone scheduler process) joins `agent_ownership` and filters
+  `deleted_at IS NULL`, so a soft-deleted agent's enabled schedules stop
+  firing immediately rather than generating a `schedule_executions`
+  failure row per cron tick for up to 180 days.
+- **Canary**: soft-deleted agents are intentionally *kept* in the
+  canary snapshot's `known_agents` set (NOT filtered by `deleted_at`) so
+  L-03 (delete-cascade) does not false-positive on the child rows that
+  are legitimately preserved until the retention purge runs.
+- **Setting**: `agent_soft_delete_retention_days` in the ops settings
+  block (default `"180"`, `"0"` disables).
+- **Storage**: `agent_ownership.deleted_at TEXT` + partial index
+  `idx_agent_ownership_deleted_at ON agent_ownership(deleted_at) WHERE
+  deleted_at IS NOT NULL`. Migration
+  `agent_ownership_soft_delete`.
+
+### 33.2 Schedule Soft-Delete (#834 — Phase 1b)
+- **Implements**: Issue #834 Phase 1b (PR #839)
+- **Description**: `DELETE /api/agents/{name}/schedules/{id}` marks
+  `agent_schedules.deleted_at = NOW` instead of hard-deleting. The row
+  and its `schedule_executions` are preserved for the retention window
+  so an accidentally-deleted schedule (and its run history) is
+  recoverable.
+- **Read paths**: every schedule read filters `deleted_at IS NULL` —
+  including the cron-firing `list_all_enabled_schedules()` in **both**
+  the backend (`db/schedules.py`) and the standalone scheduler process
+  (`src/scheduler/database.py`), so a soft-deleted schedule stops firing
+  immediately. That firing query also retains the Phase 1a
+  `agent_ownership` join (`ao.deleted_at IS NULL`), so a schedule is
+  skipped if **either** it or its agent is soft-deleted.
+- **Idempotency**: `delete_schedule()` on an already-soft-deleted row is
+  a no-op success (no double-soft-delete, no error).
+- **Retention purge**: the Cleanup Service hard-purges `agent_schedules`
+  rows past `schedule_soft_delete_retention_days` (default **30** —
+  shorter than the 180-day agent window because schedules are
+  higher-churn; `0` = disabled). `purge_schedule()` refuses to purge a
+  live row and cascades the schedule's `schedule_executions` delete
+  alongside the parent row — consistent with the previous hard-delete
+  behavior and with agent-purge `cascade_delete`. No #816 chain
+  (schedules have no #816-registered child tables). Bounded by the
+  shared 5000-row/cycle cap.
+- **Execution-row ownership**: pre-purge, a soft-deleted schedule's
+  `schedule_executions` are #772's responsibility (its 90-day
+  terminal-row sweep ages them out independently); at purge they are
+  deleted with the row.
+- **Setting**: `schedule_soft_delete_retention_days` in the ops
+  settings block (default `"30"`, `"0"` disables).
+- **Storage**: `agent_schedules.deleted_at TEXT` + partial index
+  `idx_agent_schedules_deleted_at ON agent_schedules(deleted_at) WHERE
+  deleted_at IS NOT NULL`. Migration in `db/migrations.py`.
+
+### 33.3 Admin Recovery Endpoints (#834 — Phase 1c)
+- **Implements**: Issue #834 Phase 1c (PR #840)
+- **Description**: Admin-only surface to list and recover soft-deleted
+  agents/schedules before the retention purge hard-deletes them.
+  Replaces the prior shell-only workaround (manual `UPDATE ... SET
+  deleted_at = NULL`), which required DB access and was unauditable.
+- **Endpoints** (all `require_admin`, all audit-logged):
+  - `GET /api/admin/soft-deleted/agents` — list soft-deleted agents,
+    newest first. Each row carries a computed `purge_eta` (when the
+    retention sweep would hard-purge it; `null` when
+    `agent_soft_delete_retention_days = 0`). `limit` capped at 500.
+  - `POST /api/admin/soft-deleted/agents/{name}/recover` — clear
+    `deleted_at`. 404 if not in the soft-deleted set. **Metadata-only**:
+    the Docker container is *not* recreated (removed at soft-delete);
+    the agent shows `status=stopped` / `needs_container_recreate=true`.
+    Operator brings it back via `POST /api/agents/{name}/start` from the
+    preserved workspace volume. Container recreate-on-recover is #834
+    Phase 2.
+  - `GET /api/admin/soft-deleted/schedules` — list soft-deleted
+    schedules (optionally `?agent_name=`-scoped), with `purge_eta` from
+    `schedule_soft_delete_retention_days`. `limit` capped at 500.
+  - `POST /api/admin/soft-deleted/schedules/{id}/recover` — clear
+    `deleted_at`. 404 if not soft-deleted. The schedule rejoins the
+    scheduler firing list on the next poll if it was enabled.
+- **Recovery semantics**: flips `deleted_at` back to NULL; child rows
+  already survived the soft-delete so the entity is immediately usable
+  via the regular (deleted_at-filtered) read paths.
+- **Audit**: every recovery emits an `agent_lifecycle:recover` /
+  `agent_lifecycle:schedule_recover` platform-audit event.
+- **Models**: `SoftDeletedAgent` / `SoftDeletedSchedule` response
+  models live in `models.py` (Architectural Invariant #14).
+
+---
+
+## 34. Agent-Defined Pipelines (#919)
+
+### 34.1 Standardized Pipeline Introspection Surface (#919)
+- **Status**: 📋 Planned
+- **Implements**: Issue #919
+- **Description**: Trinity-compatible agents that run long-running
+  multi-stage pipelines (perception → incubation → synthesis → publish →
+  measure, or similar shapes) expose their pipeline state to Trinity
+  through two standardized read-only file paths inside the agent
+  container. Trinity stays a fleet orchestrator — it does **not** own
+  the DAG, the execution semantics, or the recovery policy. The agent
+  owns all of that via existing primitives (schedules CRUD, events,
+  operator queue, pre-check hook, `dashboard.yaml`). Trinity's only
+  contribution is making the agent's pipeline state uniformly
+  discoverable.
+- **File convention** (the canonical contract):
+  - `~/.trinity/pipelines/<pipeline_id>.yaml` — pipeline definition
+    (DAG, stages, transitions, preconditions, retry/escalation policy)
+  - `~/.trinity/pipeline-state/<pipeline_id>/<instance_id>.json` —
+    runtime state (current stage, attempt count, health, blockers,
+    open escalations, per-stage metrics)
+- **MCP tools** (thin file-reads via the existing `agent_files`
+  router — no new backend endpoints, no new DB tables, no parsing of
+  pipeline semantics in backend code):
+  - `list_agent_pipelines(agent_name)` — enumerates pipelines from
+    `~/.trinity/pipelines/*.yaml` with health summaries
+  - `get_agent_pipeline_state(agent_name, pipeline_id, instance_id?)`
+    — returns parsed state JSON; 404 (not 500) on missing pipeline
+    or instance
+- **Schemas**: `docs/schemas/agent-pipeline.schema.json` and
+  `docs/schemas/agent-pipeline-state.schema.json` define both files
+  authoritatively and are shipped alongside the
+  Trinity-Compatible Agent Guide.
+- **Operator-queue convention**: when an agent files an escalation
+  related to a pipeline, the queue item's `context` JSON includes
+  `{ pipeline_id, instance_id, stage }` so escalations group by
+  pipeline in the UI. No backend schema change — `operator_queue.context`
+  already accepts free-form JSON.
+- **Heartbeat skill (agent-side, not Trinity)**: the agent runs a
+  single `pipeline-tick` skill on a cron schedule that owns stage
+  advancement, retry, and escalation. The pre-check hook gates the
+  heartbeat so it's near-free when no pipeline needs attention. The
+  heartbeat is shipped by the `agent-dev:add-pipeline` plugin in
+  `abilityai/abilities`, not by Trinity.
+- **Out of scope**: DAG execution engine in backend; cross-agent DAGs
+  (expressed as event chains between independent per-agent pipelines);
+  GUI editor for `pipeline.yaml`; persisting pipeline state in
+  Trinity's database.
+## 35. Enterprise Edition Architecture (#847)
+
+### 34.1 Open-Core Seam — Private Submodule Integration (#847 Phase 0)
+- **Status**: ✅ Implemented (2026-05-21)
+- **GitHub Issue**: #847
+- **Description**: Phase 0 of the enterprise edition split — establishes
+  the seam in the public Trinity backend for loading closed-source
+  compliance modules (SSO, SCIM, SIEM) from a private git submodule
+  at `src/backend/enterprise/` pointing to
+  `Abilityai/trinity-enterprise`. Backend-only private; enterprise
+  Vue components ship in the public OSS bundle and are gated
+  server-side via the `enterprise_features` list. The
+  `EntitlementService` is a registry — empty until
+  `register_enterprise(app)` calls `register_module(feature_id)` for
+  each loaded enterprise module, which only happens when the
+  private submodule is actually mounted. `TRINITY_OSS_ONLY=1` is a
+  hard override for the deny path.
+- **Decision record**: `docs/planning/ENTERPRISE_ARCHITECTURE.md`
+- **Long-form research**: `docs/planning/OSS_ENTERPRISE_SPLIT_RESEARCH.md`
+- **Local-dev guide**: `docs/dev/ENTERPRISE_LOCAL_DEV.md`
+- **Key Features**:
+  - `EntitlementService` (`src/backend/services/entitlement_service.py`)
+    — registry pattern. `register_module(feature_id)` populates a set;
+    `is_entitled()` and `list_entitled_features()` read from it. OSS
+    builds never call `register_module` → empty set → deny everything.
+    `TRINITY_OSS_ONLY=1` is a hard override (denies even when
+    modules ARE registered).
+  - `requires_entitlement(feature_id)` (`src/backend/dependencies.py`)
+    — FastAPI dependency factory mirroring `require_role`. Raises
+    HTTP 403 with the feature_id in the detail string. Lazy-imports
+    the service so tests can swap singletons.
+  - Conditional submodule loader in `src/backend/main.py` —
+    `try: from enterprise.backend import register_enterprise;
+    register_enterprise(app) except ImportError: pass`. OSS-only
+    builds (no submodule) silently no-op with an informational log.
+    The loader calls `entitlement_service.register_module(...)` for
+    each registered feature, which drives feature-flag output.
+  - `/api/settings/feature-flags` extended with
+    `enterprise_features: list[str]` — empty in OSS mode, populated
+    when the private backend submodule is mounted. The OSS frontend
+    reads this to decide what enterprise UI to render.
+  - `.gitmodules` — single submodule at `src/backend/enterprise/`
+    pointing to `Abilityai/trinity-enterprise` via SSH. Backend only.
+  - **Enterprise frontend ships in OSS** at
+    `src/frontend/src/views/enterprise/` — Vue components have no
+    algorithmic IP, the moat is the private backend logic. Same
+    feature-flag pattern as `session_tab_enabled` and
+    `voice_available`. Adding a new enterprise feature = Vue file
+    in OSS + private backend module + `register_module(id)`.
+  - Pinia store `src/frontend/src/stores/enterprise.js` — caches
+    `enterprise_features: list[str]` from `/api/settings/feature-flags`.
+    Exposes `isEntitled(featureId)` + `hasAnyEnterprise` getters.
+  - Static route in `src/frontend/src/router/index.js` for
+    `/enterprise/sso` with `meta.requiresEntitlement: 'sso'`.
+    `beforeEach` guard redirects to `/` when not entitled
+    (defence-in-depth against direct URL visits / bookmarks).
+  - `NavBar.vue` — new `Enterprise` link
+    `v-if="enterpriseStore.isEntitled('sso')"` with a `PRO` badge.
+    Hidden in OSS-only mode and when operator forces
+    `TRINITY_OSS_ONLY=1`.
+  - `docker-compose.yml` env pass-through for `TRINITY_OSS_ONLY`.
+  - CI workflow `.github/workflows/build-without-submodule.yml` —
+    boots the backend with the submodule absent and asserts:
+    `/health` responds, `/api/settings/feature-flags` returns
+    `enterprise_features: []`, `/api/enterprise/sso/providers`
+    returns 404, and the OSS-only log line is emitted. Catches
+    regressions where the conditional import accidentally becomes
+    hard-required.
+- **Private repo (Abilityai/trinity-enterprise) — backend only**:
+  - `backend/__init__.py` — `register_enterprise(app)` mounts
+    routers AND calls `entitlement_service.register_module(id)`
+    per feature.
+  - `backend/sso/router.py` — `/api/enterprise/sso/{providers,login/{id}}`
+    stubs gated by `requires_entitlement("sso")`. `GET /providers`
+    returns the in-process registry (empty by default);
+    `POST /login/{id}` returns 501 "PoC stub" or 404 for unknown id.
+  - `backend/sso/providers.py` — `SSOProvider` ABC (provider_id,
+    display_name, protocol, begin_login) + `StubProvider`.
+  - `pyproject.toml`, `LICENSE` (proprietary), `README.md`.
+- **Out of scope (separate follow-ups)**:
+  - Phase 1: Ed25519-signed license token, verify path, admin
+    License UI, grace + clock-tamper handling.
+  - Phase 2: Extract `audit_log` into the submodule as the first
+    real enterprise module.
+  - Phase 3: Prove the "core-primitive + enterprise-knob" pattern
+    via #834 (recovery API in OSS, license-capped retention in enterprise).
+  - Phase 4: Real SSO/SAML implementation (replaces PoC stubs).
+  - MCP entitlement edge (`GET /api/internal/entitlements` polled by
+    the TypeScript MCP server).
+  - Fixing the repo's license-of-record (currently `NOASSERTION`).
+- **Tunables (env)**:
+  - `TRINITY_OSS_ONLY` (`0`/`1`, default `0`) — force OSS-only mode
+    regardless of submodule presence.
+
+---
+
+## 35. Schedule Timeout Validation (#929)
+
+### 35.1 Agent Cap as Schedule Ceiling (#929)
+- **Status**: ✅ Implemented (#930)
+- **Implements**: Issue #929
+- **Description**: `agent_ownership.execution_timeout_seconds` becomes
+  a hard ceiling for `agent_schedules.timeout_seconds`. The two
+  settings previously coexisted as independent knobs with no
+  enforcement between them — schedules silently won, and the agent
+  cap applied only to the chat/ad-hoc fallback path. That divergence
+  trapped operators who assumed `min(agent, schedule)` semantics from
+  the side-by-side UI. Approach A from #929: validate at write time
+  so the operator's mental model snaps into place — the agent cap is
+  a real ceiling, exceeded values fail fast at config time instead
+  of silently surviving until SIGKILL.
+- **Validation rules**:
+  - `POST /api/agents/{name}/schedules` — 400 if
+    `body.timeout_seconds > agent.execution_timeout_seconds`.
+  - `PUT /api/agents/{name}/schedules/{id}` — 400 if the new
+    `timeout_seconds` would exceed the agent cap.
+  - `PUT /api/agents/{name}/timeout` — 400 if the new agent cap
+    would drop below any non-deleted schedule's `timeout_seconds`
+    (caller must raise the cap before lowering individual schedules,
+    or vice versa).
+- **Error contract**: 400 responses use FastAPI `HTTPException` with
+  a structured detail dict so clients can branch on the cause:
+  ```json
+  {
+    "error": "schedule_timeout_exceeds_agent_cap",
+    "message": "Schedule timeout 7200s exceeds agent execution_timeout_seconds 3600s. Raise the agent cap via PUT /api/agents/{name}/timeout first.",
+    "agent_cap_seconds": 3600,
+    "requested_seconds": 7200
+  }
+  ```
+  and respectively `agent_timeout_below_active_schedules` for the
+  agent-cap-lowering path (carries
+  `max_schedule_timeout_seconds` + the offending schedule list).
+- **DB accessor**:
+  `db.find_active_schedules_exceeding_timeout(agent_name, ceiling)` —
+  returns `[{id, name, timeout_seconds}, …]` for every non-soft-deleted
+  schedule whose `timeout_seconds > ceiling`, ordered DESC. Powers the
+  agent-timeout endpoint's 400 detail payload (operator sees which
+  schedules block the cap-lowering). Schedule endpoints compare
+  directly against `db.get_execution_timeout(agent_name)`.
+- **No retro-validation**: pre-existing rows that violate the
+  invariant (`schedule.timeout_seconds > agent.execution_timeout_seconds`)
+  are left alone — the migration story is "next edit fixes it." The
+  agent-cap-lowering check still sees those rows so the operator can't
+  make the gap *worse*.
+- **Orthogonal SIGKILL error-message fix** (same PR): the agent-side
+  signal-exit classifier in
+  `docker/base-image/agent_server/services/error_classifier.py`
+  emitted `"Likely cause: schedule/agent timeout exceeded, OOM kill,
+  or operator cancel."`. With the cap enforced at write time, the
+  "/agent" disjunction is dead — schedules can never run past the
+  cap. Message simplified to surface the schedule timeout
+  unambiguously.
+- **Out of scope**: exposing `timeout_seconds_effective` /
+  `capped_by` on the schedule response (Approach B from #929 —
+  would be trivially identical to `timeout_seconds` under A and
+  pure clutter); retrofitting the SIGKILL message to know whether
+  OOM vs timeout fired (agent has no signal for that distinction).
+
+---
+
+## 36. Build Info Surface (#926)
+
+### 36.1 Version Chip + Git Commit Detail (#926)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #926
+- **Description**: Operators need an in-app way to confirm which commit
+  is actually deployed. Pre-#926, only the `VERSION` file (semver
+  string) plus an optional `BUILD_DATE` env var were exposed via
+  `GET /api/version`. Operators had to SSH or `docker inspect` to
+  resolve "is my fix deployed?" — a recurring friction point during
+  hotfixes and incident response. This surfaces git commit + branch
+  metadata baked in at backend image build time.
+- **Backend (`GET /api/version`)** — extended payload:
+  ```json
+  {
+    "version": "0.9.0",
+    "platform": "trinity",
+    "components": { … },
+    "runtimes": ["claude-code", "gemini-cli"],
+    "build_date": "2026-05-25T14:00:00Z",
+    "git_commit": "f1ba610fab…full sha…",
+    "git_commit_short": "f1ba610f",
+    "git_commit_subject": "review(#929): drop dead accessor…",
+    "git_commit_timestamp": "2026-05-25T11:45:00+00:00",
+    "git_branch": "dev",
+    "voice_enabled": false
+  }
+  ```
+  All new fields default to `"unknown"` when the build args are
+  absent (local dev / volume-mount workflows). Endpoint stays
+  JWT-authenticated (SEC-180).
+- **Build wiring**:
+  - `docker/backend/Dockerfile` accepts `GIT_COMMIT`,
+    `GIT_COMMIT_SUBJECT`, `GIT_COMMIT_TIMESTAMP`, `GIT_BRANCH`,
+    `BUILD_DATE` as `ARG`s and re-exports each as `ENV` so the
+    runtime reads them via `os.getenv()`.
+  - `docker-compose.yml` `backend.build.args` block forwards the
+    `${GIT_COMMIT}` etc. shell vars from the environment so
+    `docker compose build` picks them up automatically.
+  - `scripts/deploy/start.sh` exports the args from the local repo
+    before the build: `git rev-parse HEAD`, `git rev-parse --abbrev-ref HEAD`,
+    `git log -1 --pretty=%s`, `git log -1 --pretty=%cI`, and
+    `date -u +%Y-%m-%dT%H:%M:%SZ`.
+- **Frontend**:
+  - `NavBar.vue` renders a small muted version chip (e.g. `v0.9.0`).
+    Click opens a modal with the full build-info block.
+  - `Settings.vue` adds a "Build Info" subsection showing version,
+    commit short SHA + full SHA, commit subject + ISO timestamp,
+    branch, build date.
+  - One-shot fetch on app mount via a `useBuildInfo()` composable
+    that caches the response — build metadata never changes at runtime.
+- **Out of scope**: per-component version drift (frontend vs
+  backend), MCP server version surface (the MCP TypeScript
+  package has its own `package.json` version), agent base-image
+  commit metadata. Follow-ups if useful.
+
+---
+
+## 37. MCP Chat Timeout Recovery (#914)
+
+### 37.1 `chat_with_agent` Gateway-Timeout Receipt (#914)
+- **Status**: ✅ Implemented (#933)
+- **Implements**: Issue #914
+- **Description**: `mcp__trinity__chat_with_agent` in default sync
+  mode (`parallel=false`) holds the MCP-gateway → backend → agent HTTP
+  chain open for the entire agent execution. When the agent takes
+  longer than the MCP client's request timeout (~30-60s observed),
+  the tool call returns the generic `fetch failed` — but the request
+  was successfully queued on Trinity and the agent IS running it.
+  Naive retry then queues duplicates that Trinity's
+  concurrent-duplicate guard kills mid-execution, burning compute and
+  agent time. This change is the MCP-client-surface fix for #408 /
+  #428's long-running dispatch family.
+- **Approach**: an MCP-server-side timeout (~25s, under the typical
+  gateway ceiling) aborts the backend `fetch` early. The MCP server
+  then queries `GET /api/agents/{name}/executions` for a recent
+  matching execution row (`triggered_by in {mcp, agent}`,
+  `source_mcp_key_id == this key`, non-terminal status, started
+  within the last ~30s) and returns a **structured receipt** to the
+  caller instead of letting `fetch failed` propagate:
+  ```json
+  {
+    "status": "queued_timeout",
+    "agent": "bdr-agent",
+    "execution_id": "fZv-iXtUXSolY1wzPO7T6w",
+    "message": "MCP gateway timeout — task still running on the agent. Poll get_execution_result(execution_id) instead of retrying."
+  }
+  ```
+- **No-match fallback**: when the lookup turns up nothing (no rows
+  on the agent, or the executions endpoint itself is unreachable),
+  the abort error is rethrown with a clearer hint so the caller
+  knows to check the dashboard before retrying. The receipt is a
+  best-effort heuristic, not an atomic protocol guarantee.
+- **MCP `chat_with_agent` tool description** is updated to
+  document the new `queued_timeout` return shape so the caller's
+  agent / LLM can branch on it correctly.
+- **Configurability**: `MCP_CHAT_TIMEOUT_MS` env var on the MCP
+  server (default 25000) lets operators dial the abort window for
+  unusually slow networks. The 25s default sits comfortably below
+  the 30-60s gateway ceiling observed in the issue.
+- **Out of scope**:
+  - Real push-completion redesign (#408 / #428) — this is the
+    cheap interim until that lands.
+  - Idempotency keys (#914 comment) — needs new backend column
+    + write-path coordination; bigger surface.
+  - Backend-side change to return `execution_id` as a streaming
+    response header on long calls — would obsolete the heuristic
+    lookup but requires a `chat_with_agent` API contract change.
+## 38. Sequential Agent Loops (#740)
+
+### 38.1 `run_agent_loop` MCP Tool + Backend Loop Service (#740 — Phase 1)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #740
+- **Description**: Server-side primitive for sequential bounded
+  repetition of agent tasks. Complements `chat_with_agent` (single
+  turn) and `fan_out` (parallel batch) with a third execution
+  pattern: run a task N times in order, each iteration optionally
+  using the previous response. Caller fires once, gets a `loop_id`,
+  and disconnects — loop state lives in the backend.
+- **Modes**:
+  - **Fixed** (`stop_signal` unset): runs exactly `max_runs` times.
+  - **Until** (`stop_signal` set, recommended sentinel `[[DONE]]`):
+    stops early when any iteration's response contains the signal.
+- **Endpoints**:
+  - `POST /api/agents/{name}/loops` — start a loop. Returns
+    `{loop_id, status: "queued", agent_name, max_runs}` immediately
+    (fire-and-disconnect). Body: `message` (template, supports
+    `{{run}}` 1-indexed and `{{previous_response}}` truncated to the
+    last 2000 chars), `max_runs` (1–100, required), `stop_signal`,
+    `delay_seconds` (between runs, default 0), `timeout_per_run`
+    (defaults to agent's configured `execution_timeout_seconds`),
+    `model`, `allowed_tools`.
+  - `GET /api/loops/{loop_id}` — status + per-run summaries + last
+    full response.
+  - `POST /api/loops/{loop_id}/stop` — graceful stop. Sets
+    `should_stop`; the current iteration finishes, the loop exits.
+    Returns `{status: "stopping" | "already_done"}`.
+- **MCP tools**: `run_agent_loop`, `get_loop_status`, `stop_loop`.
+  Permission rules match `chat_with_agent` (owner/admin/shared or
+  explicit `agent_permissions` for agent-scoped keys).
+- **Execution model**: each iteration goes through the standard
+  `task_execution_service.execute_task()` path → `capacity_manager`
+  admit/slot → execute → release. Each iteration is recorded in
+  `schedule_executions` with `triggered_by="loop"` and `loop_id` set
+  so the dashboard/timeline shows iterations as normal execution
+  rows tagged with their loop. Sequential: iteration N+1 does not
+  start until iteration N's row reaches a terminal status.
+- **Template substitution**: applied before each iteration.
+  `{{run}}` → `"1"`, `"2"`, … `{{previous_response}}` → empty on
+  iteration 1, otherwise the previous iteration's response trimmed
+  to the trailing 2000 chars.
+- **Stop signal check**: substring match (`stop_signal in response`)
+  applied to the full response after each iteration. Recommended
+  sentinel `[[DONE]]` is documentation only — the loop honors any
+  user-supplied string.
+- **Terminal states + stop reasons**:
+  - `completed` / `max_runs_reached` — fixed mode hit `max_runs`,
+    or until mode hit `max_runs` without seeing the signal.
+  - `completed` / `stop_signal_matched` — until mode saw the signal.
+  - `stopped` / `user_stopped` — `POST /loops/{id}/stop` triggered.
+  - `failed` / `error` — an iteration's task execution returned a
+    non-success terminal status; loop aborts at the failed iteration.
+  - `interrupted` / `interrupted` — backend restart while running.
+- **Restart recovery**: the cleanup-service startup hook re-marks
+  any `agent_loops` row in `running` status as `interrupted` with
+  `stop_reason="interrupted"`. Loops do not auto-resume —
+  callers re-issue if needed.
+- **WebSocket events**: `loop_run_completed` per iteration (carries
+  `run_number`, `execution_id`, `cost`, `duration_ms`),
+  `loop_completed` once when the loop exits any terminal state.
+- **Storage**: two new tables in main SQLite DB.
+  - `agent_loops` (id, agent_name, message_template, max_runs,
+    stop_signal, delay_seconds, timeout_per_run, model,
+    allowed_tools JSON, status, runs_completed, stop_reason,
+    last_response, started_by_user_id, started_by_user_email,
+    source_agent_name, source_mcp_key_id, source_mcp_key_name,
+    created_at, started_at, completed_at).
+  - `agent_loop_runs` (id, loop_id, run_number, execution_id,
+    status, response, cost, duration_ms, started_at, completed_at)
+    — one row per iteration; `execution_id` joins back to
+    `schedule_executions`.
+  - `schedule_executions.loop_id TEXT` column added for the
+    timeline-tag join.
+- **Out of scope (Phase 1)**: dedicated dashboard surface for loops
+  (current timeline is sufficient — iterations appear as normal
+  rows; a follow-up PR may add a collapse-group affordance);
+  auto-resume after restart; cross-agent loops (`agent` parameter
+  is `"self"` only for v1, matching `fan_out`).
+
+---
+
+## 39. VoIP Telephony (VOIP-001)
+
+### 39.1 Outbound Phone Calls over Gemini Live (#1056 — Phase 1)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue #1056 (Phase 1 — outbound)
+- **Description**: An agent places an outbound phone call to a user and
+  holds a real-time, interruptible voice conversation powered by the
+  existing Gemini Live voice bridge. A phone call is just a **different
+  transport feeding the same Gemini queues** — `services/gemini_voice.py`
+  is **not modified**. Ships as a regular OSS feature (no entitlement
+  gating), gated behind a feature flag that is **OFF by default**.
+- **Feature flag (default OFF)**: `voip_available` is exposed by
+  `GET /api/settings/feature-flags` as
+  `VOIP_ENABLED and bool(GEMINI_API_KEY)`. `VOIP_ENABLED` defaults to
+  `false` (mirrors `workspace_available` opt-in, #860). All VoIP
+  endpoints 404 when the flag is off. The feature is additionally
+  per-agent-gated: it only functions once a `voip_bindings` row exists.
+- **Transport**: Twilio Programmable Voice + bidirectional Media Streams
+  (`<Connect><Stream>`), delivering raw G.711 μ-law 8kHz audio over a
+  WebSocket directly into the existing Gemini queues. Explicitly **not**
+  Twilio ConversationRelay (does its own STT/TTS for text LLMs) and
+  **not** Pipecat/LiveKit (would re-implement the owned bridge).
+- **Per-agent Twilio-voice credentials**: dedicated `voip_bindings`
+  table (`account_sid`, AES-256-GCM-encrypted `auth_token`, `from_number`,
+  `webhook_secret`, `enabled`, `daily_call_cap`), **separate from
+  `whatsapp_bindings`** (voice and messaging are different Twilio
+  products). Each agent owner brings their own Twilio account — outbound
+  PSTN spend is on the owner's account, not the platform operator's.
+- **Audio conversion** (stdlib `audioop`, all codec work in the adapter):
+  inbound μ-law 8kHz → PCM16 16kHz (`ulaw2lin` → `ratecv(8k→16k)`);
+  outbound PCM16 24kHz → μ-law 8kHz (`ratecv(24k→8k)` direct decimation
+  → `lin2ulaw`), re-chunked to 160-byte/20ms frames, base64 for Twilio
+  JSON. `audioop.ratecv` **state is carried per-direction per-connection**
+  (no per-chunk reset → no boundary clicks). `audioop-lts` is pinned for
+  Python ≥ 3.13 (stdlib `audioop` removed in 3.13).
+- **Interruption**: relies on Gemini Live's native barge-in. The adapter
+  flushes Twilio's buffer via a **`clear`** event + drops its local
+  accumulator when the user speaks while the agent is mid-utterance, so
+  buffered audio does not play over the caller.
+- **Outbound trigger**:
+  - `POST /api/agents/{name}/voip/call` (JWT/MCP, `AuthorizedAgent`) and
+    the MCP tool `call_user`. Body: `{to_number, context?,
+    process_transcript?}`.
+  - The trigger creates a `chat_session` (owner identity), mints a
+    single-use WSS ticket, stages session intent (agent, user, system
+    prompt, chat_session_id, `process_transcript`) in Redis keyed by a
+    high-entropy `call_id`, then calls Twilio
+    `calls.create(to, from_, twiml="<Connect><Stream url='wss://…/api/voip/voice/{call_id}?ticket=…'/></Connect>")`.
+  - **Abuse controls** (Phase 1): rate-limited per `(owner, destination)`
+    via `services/rate_limiter.py`; a durable per-agent **daily call cap**
+    (`voip_call_logs` count); optional `Idempotency-Key` (Invariant #18).
+    A formal opt-in destination allowlist is deferred to Phase 2.
+- **Cross-worker safety**: the trigger does **not** call
+  `connect_and_stream`; it only stages intent in Redis. The WS handler —
+  running on whichever worker Twilio's Media Streams socket actually hits —
+  reads the staged intent, calls `voice_service.create_session(...)` then
+  `connect_and_stream(...)`, so the live Gemini connection lives on the
+  correct worker.
+- **Two-id namespace**: `call_id` (chosen at trigger time; in the WSS URL
+  + Redis intent key + ticket binding) is distinct from the Gemini
+  `VoiceSession.session_id` (`vs_…`, minted at WS-connect inside the
+  unmodified `create_session`). They are never conflated.
+- **WSS auth**: the Media Streams socket (Twilio cannot send a JWT) is
+  gated by a single-use, call-bound ticket via
+  `services/ws_ticket_service.py`. `mint_ticket` gains an optional
+  `ttl_seconds` param (VoIP mints at 180s to cover PSTN dial+ring, vs the
+  30s browser default) and binds the ticket with `scope="voip:{call_id}"`,
+  verified in the handler. Staged intent is consumed exactly once via
+  Redis `GETDEL`.
+- **Transcript persistence**: the call transcript is persisted to
+  `chat_messages` with `source="voice"` via the existing `_save_transcript`
+  path, guarded by a Redis SETNX sentinel so a double-teardown saves
+  exactly once.
+- **Post-call processing (default ON)**: after teardown, the full
+  transcript is dispatched as a single turn to the **main agent** through
+  `task_execution_service.execute_task(triggered_by="voip")` so the agent
+  (with its real skills/memory/MCP) digests the call and takes follow-up
+  actions. Per-call opt-out via `process_transcript=false`; skipped when
+  the transcript is empty (no-answer / instant hangup); once-guarded.
+- **Config**: `VOIP_ENABLED` (default `false`),
+  `VOIP_MAX_CALL_DURATION` (default 600s — VoIP-specific, not the
+  inherited 300s `VOICE_MAX_DURATION`), `VOIP_DEFAULT_DAILY_CALL_CAP`
+  (default 50), `VOIP_TICKET_TTL_SECONDS` (default 180),
+  `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW`.
+- **Three surfaces in sync (Invariant #13)**: backend router
+  (`routers/voip.py`) + MCP tool (`src/mcp-server/src/tools/voip.ts`).
+  No agent-server mirror (the bridge is backend-only).
+- **Out of scope (Phase 1)**: inbound calls ("you call the agent" —
+  Phase 2: Twilio voice webhook + `X-Twilio-Signature` + inbound
+  number→agent resolution on the same table; an `inbound_number` column
+  is shipped up-front so Phase 2 is additive); opt-in destination
+  allowlist (Phase 2); UI config surface, schedule-action trigger, and
+  call cost/duration observability (Phase 3). Real PSTN path is
+  manual-verify (needs a live Twilio voice number).
 
 ---
 

@@ -161,3 +161,38 @@ gh issue create --repo abilityai/trinity --title "Audit Trail System (SEC-001)" 
 | Edit roadmap.md to add item | Run `/roadmap create <title>` |
 | Mark item complete in file | Close issue on GitHub |
 | Check priorities | Run `/roadmap` (shows P0/P1) |
+
+---
+
+## 2026-06-03 — Project board (#6) archived; issues-only SDLC (#1042)
+
+The interim step above ("Create GitHub Project — for visual Kanban/roadmap
+view") was tried and then **retired**. GitHub Project #6 ("Trinity
+Roadmap") was **archived** on 2026-06-03. Prioritization metadata is now
+carried entirely on **labels + native sub-issues** — there is no project
+board. Full rationale and migration plan:
+`docs/planning/PROJECT_BOARD_DEPRECATION_2026-05.md`.
+
+**What changed:**
+
+| Board field (retired) | Replacement |
+|-----------------------|-------------|
+| Theme (single-select) | `theme-*` labels (`theme-reliability`, `theme-ui-ux`, `theme-security`, `theme-channels`, `theme-devex`, `theme-monetization`, `theme-infrastructure`) |
+| Epic (single-select) | Issues labeled `type-epic` + native GitHub **sub-issue** links (automatic rollup) |
+| Complexity (number) | `complexity-low` / `complexity-medium` / `complexity-high` labels |
+| Tier (P1a/P1b/P1c) | **Dropped** — fake precision, ~0% adoption |
+| Rank (number) | **Dropped** — replaced by a written ordering rule |
+
+**Ordering rule** (replaces numeric Rank): P0 first; then P1 with
+`type-bug` before `type-feature` and, within a type, **newest issue number
+first**; then P2/P3. Theme focus (`CLAUDE.md` → "Current Product Focus") is
+a tiebreaker filter, not a sort key.
+
+**Legacy labels removed:** `P1b` (stray Tier label), `status-review` (the
+SDLC dropped the "Review" stage in favor of "In Dev").
+
+Historical Rank/Tier/Epic/Theme values remain readable in the **archived**
+Project #6 (archive preserves data; it was not deleted). Six skills
+(`roadmap`, `groom`, `create-issue`, `metrics`, `read-docs`, `sprint`) and
+`.claude/DEVELOPMENT_WORKFLOW.md` were rewritten to operate on labels +
+sub-issues only.

@@ -113,8 +113,8 @@ The `/api/ops/costs` endpoint returns:
   ],
   "cost_by_model": [
     {
-      "model": "Claude Sonnet 4",
-      "model_id": "claude-sonnet-4-20250514",
+      "model": "Claude Sonnet 4.6",
+      "model_id": "claude-sonnet-4-6",
       "cost": 0.0234,
       "input_tokens": 1523,
       "output_tokens": 892,

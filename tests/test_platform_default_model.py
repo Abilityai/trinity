@@ -141,15 +141,43 @@ class TestFeatureFlagsEndpoint:
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either the code default or a valid admin override
+        # Accept either the code default or a valid admin override. The override
+        # set must stay in lockstep with the options offered in Settings.vue's
+        # platform-default dropdown (#1080 added claude-opus-4-8).
         assert data["platform_default_model"] in (
             "claude-sonnet-4-6",
+            "claude-opus-4-8",
             "claude-opus-4-7",
+            "claude-opus-4-6",
         ), f"Unexpected default: {data['platform_default_model']}"
 
     def test_feature_flags_unauthenticated_returns_401(self):
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", timeout=10)
         assert resp.status_code == 401
+
+    def test_feature_flags_includes_workspace_available(self):
+        """feature-flags must expose workspace_available key (#860)."""
+        headers = get_auth_headers()
+        resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "workspace_available" in data, (
+            "feature-flags response missing 'workspace_available' key"
+        )
+        assert isinstance(data["workspace_available"], bool)
+
+    def test_workspace_available_false_by_default(self):
+        """workspace_available must be False unless WORKSPACE_ENABLED is set (#860)."""
+        headers = get_auth_headers()
+        resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        # In CI/test environments WORKSPACE_ENABLED is not set, so this must be False.
+        # If GEMINI_API_KEY is also absent, voice_available=False makes workspace_available
+        # False regardless — both conditions confirm the default-off behaviour.
+        assert data["workspace_available"] is False, (
+            "workspace_available should default to False unless explicitly enabled"
+        )
 
 
 class TestPlatformDefaultModelSetting:

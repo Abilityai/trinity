@@ -177,18 +177,20 @@ async def set_agent_read_only_status(
 ### Service Layer
 
 #### read_only.py
-`src/backend/services/agent_service/read_only.py` (317 lines)
+`src/backend/services/agent_service/read_only.py` (~253 lines)
 
 **Functions:**
 
-| Function | Lines | Description |
-|----------|-------|-------------|
-| `get_default_config()` | 39-44 | Returns default blocked/allowed patterns |
-| `get_read_only_status_logic()` | 47-69 | GET endpoint handler - returns status and config |
-| `set_read_only_status_logic()` | 72-150 | PUT endpoint handler - validates, saves, injects hooks |
-| `inject_read_only_hooks()` | 153-216 | Writes config + guard script + merges settings |
-| `_merge_hook_settings()` | 219-267 | Merges PreToolUse hook into settings.local.json |
-| `remove_read_only_hooks()` | 270-317 | Removes hook registration from settings |
+| Function | Description |
+|----------|-------------|
+| `get_default_config()` | Returns default blocked/allowed patterns |
+| `get_read_only_status_logic()` | GET endpoint handler - returns status and config |
+| `set_read_only_status_logic()` | PUT endpoint handler - validates, saves, syncs config file |
+| `inject_read_only_hooks()` | Writes `{"enabled": true, ...config}` to `~/.trinity/read-only-config.json` only |
+| `remove_read_only_hooks()` | Writes `{"enabled": false}` to config; calls `_remove_legacy_settings_hook()` |
+| `_remove_legacy_settings_hook()` | Migration helper: strips old `"Write\|Edit\|NotebookEdit"` entry from `settings.local.json` |
+
+**Key invariant**: `inject_read_only_hooks()` writes **one file only** — the config JSON. The guard script lives at `/opt/trinity/hooks/read-only-guard.py` (root-owned in base image) and its hook registration lives in `~/.claude/settings.json` (base image `claude-settings.json`). Neither is touched at runtime.
 
 **Default Blocked Patterns:**
 ```python
@@ -205,30 +207,33 @@ DEFAULT_BLOCKED_PATTERNS = [
 ```python
 DEFAULT_ALLOWED_PATTERNS = [
     "content/*", "output/*", "reports/*", "exports/*",
-    "*.log", "*.txt"
+    "*.log", "*.txt",
+    ".trinity/operator-queue.json"  # agent must be able to write queue items
 ]
 ```
 
 #### lifecycle.py
-`src/backend/services/agent_service/lifecycle.py:243-256`
+`src/backend/services/agent_service/lifecycle.py`
 
-Hooks are injected during agent startup:
+Config is **always synced** on every agent start (both enable and disable paths):
 
 ```python
-# Inject read-only hooks if enabled
-read_only_result = {"status": "skipped", "reason": "not_enabled"}
+# Sync read-only config file on every start so the baked-in guard always
+# reflects the current DB state — prevents stale enabled:true config from
+# persisting on the volume after the user disables read-only mode (#887).
 read_only_data = db.get_read_only_mode(agent_name)
-if read_only_data.get("enabled"):
-    try:
-        read_only_result = await inject_read_only_hooks(agent_name, read_only_data.get("config"))
-        if read_only_result.get("success"):
-            read_only_result["status"] = "success"
-        else:
-            read_only_result["status"] = "failed"
-    except Exception as e:
-        logger.warning(f"Failed to inject read-only hooks into agent {agent_name}: {e}")
-        read_only_result = {"status": "failed", "error": str(e)}
+try:
+    if read_only_data.get("enabled"):
+        result = await inject_read_only_hooks(agent_name, read_only_data.get("config"))
+    else:
+        result = await remove_read_only_hooks(agent_name)
+    read_only_result = {"status": "success" if result.get("success") else "failed", **result}
+except Exception as e:
+    logger.warning(f"Failed to sync read-only config for agent {agent_name}: {e}")
+    read_only_result = {"status": "failed", "error": str(e)}
 ```
+
+**Why always sync**: The agent workspace volume persists across container restarts. If a user disables read-only mode while the agent is stopped and then starts it, the stale `enabled:true` config file would otherwise remain on the volume, keeping the guard active despite the DB saying disabled.
 
 ### Database Operations
 
@@ -310,84 +315,113 @@ def _migrate_agent_ownership_read_only_mode(cursor, conn):
 ### Guard Script
 
 #### read-only-guard.py
-`config/hooks/read-only-guard.py` (124 lines)
+`docker/base-image/hooks/read-only-guard.py` (~80 lines)
 
-PreToolUse hook script that intercepts Write/Edit/NotebookEdit operations.
+PreToolUse hook script baked into the base image at `/opt/trinity/hooks/read-only-guard.py` (root-owned 0555, cannot be overwritten by the agent).
 
-**Protocol:**
-- Input: JSON via stdin with `tool_input.file_path`
+**Protocol (Claude Code hooks):**
+- Input: JSON via stdin with `tool_input`
 - Exit 0: Allow operation
 - Exit 2 + stderr message: Block operation (feedback to Claude)
+- Wrapped by `run_hook(main)` from `lib.py` — **fail-closed**: any uncaught exception exits 2
 
 **Logic Flow:**
-1. Parse JSON input from Claude Code
-2. Extract `file_path` from `tool_input`
-3. Normalize path (strip `/home/developer/`, resolve `../`)
-4. Check allowed patterns first (allowed takes precedence)
-5. Check blocked patterns
-6. Default: allow (anything not blocked is permitted)
+1. Read JSON from stdin via `read_stdin_json()` (lib.py)
+2. Load `~/.trinity/read-only-config.json` — if missing or `enabled: false`, `allow()` immediately
+3. For `MultiEdit`: iterate `tool_input["edits"]`, call `_check_path()` on each entry's `file_path`
+4. For all other tools: check `tool_input.get("file_path")` or `tool_input.get("notebook_path")`
+5. `_check_path()`: allowed patterns first (take precedence), then blocked patterns → `deny()`
+6. Default: `allow()` (anything not blocked)
+
+**Key fix vs pre-#887**: Handles `MultiEdit` (`edits[]` array) which has no top-level `file_path` — the old guard exited 0 for all MultiEdit calls, allowing bulk writes to blocked files.
 
 ```python
 def main():
-    # Read JSON input from stdin (Claude Code hook protocol)
-    try:
-        data = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        sys.exit(0)  # Fail open
+    data = read_stdin_json()
+    tool_input = data.get("tool_input") or {}
+    cfg = _load_read_only_config()
+    if cfg is None:
+        allow()  # disabled
 
-    tool_input = data.get("tool_input", {})
-    file_path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
+    # MultiEdit: edits[] array — no top-level file_path
+    for edit in (tool_input.get("edits") or []):
+        if isinstance(edit, dict):
+            _check_path(edit.get("file_path") or "", cfg)
 
-    if not file_path:
-        sys.exit(0)  # Allow
+    # Single file tools
+    path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+    if path:
+        _check_path(path, cfg)
+    allow()  # default
 
-    config = load_config()
-    blocked = config.get("blocked_patterns", DEFAULT_BLOCKED)
-    allowed = config.get("allowed_patterns", DEFAULT_ALLOWED)
-
-    # Allowed patterns take precedence
-    if matches_any(file_path, allowed):
-        sys.exit(0)  # Allow
-
-    # Check blocked patterns
-    if matches_any(file_path, blocked):
-        print(f"Read-only mode: Cannot modify '{file_path}' (protected path)", file=sys.stderr)
-        sys.exit(2)  # Block
-
-    sys.exit(0)  # Default allow
+if __name__ == "__main__":
+    run_hook(main)  # fail-closed wrapper
 ```
 
 ### Files Written to Agent Container
 
-When read-only mode is enabled, three files are written:
+When read-only mode is enabled, **one file** is written:
 
 | Path | Purpose |
 |------|---------|
-| `~/.trinity/read-only-config.json` | Configuration with blocked/allowed patterns |
-| `~/.trinity/hooks/read-only-guard.py` | Guard script (copied from config/hooks/) |
-| `~/.claude/settings.local.json` | Hook registration merged into existing settings |
+| `~/.trinity/read-only-config.json` | Config with `enabled: true` + blocked/allowed patterns |
+
+When read-only mode is disabled, the same file is overwritten with `{"enabled": false}`.
+
+**The guard script and hook registration are NOT written at runtime** — they are baked into the base image.
 
 ### Hook Registration
 
-The hook is registered in `~/.claude/settings.local.json`:
+The hook is registered in `~/.claude/settings.json` (base image `claude-settings.json`, developer-readable 0644, not overwritten at runtime):
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit",
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit",
         "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /home/developer/.trinity/hooks/read-only-guard.py"
-          }
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/file-guardrail.py"},
+          {"type": "command", "command": "/usr/bin/python3 /opt/trinity/hooks/read-only-guard.py"}
         ]
       }
     ]
   }
 }
 ```
+
+The guard runs on **every** agent regardless of read-only mode status — it exits 0 immediately when `~/.trinity/read-only-config.json` is absent or has `enabled: false`. The config file is the on/off switch.
+
+### Config File Layout
+
+`~/.trinity/read-only-config.json` (written by platform, protected by `path_deny` and `bash_deny`):
+
+```json
+{
+  "enabled": true,
+  "blocked_patterns": ["*.py", "*.js", "CLAUDE.md", "..."],
+  "allowed_patterns": ["content/*", "output/*", "*.log", "..."]
+}
+```
+
+### Guardrail Protections (docker/base-image/hooks/guardrails-baseline.json)
+
+Two protections prevent the agent from disabling read-only mode via the config file:
+
+**`path_deny`** — blocks Write/Edit/NotebookEdit/MultiEdit tools from directly writing the file:
+```json
+"/home/developer/.trinity/read-only-config.json"
+```
+
+**`bash_deny`** — blocks shell redirects/pipes targeting the config file:
+```json
+{
+  "pattern": "(\\.trinity/read-only-config\\.json).*[>|]|[>|].*(\\.trinity/read-only-config\\.json)",
+  "reason": "modifying read-only mode configuration"
+}
+```
+
+Both are enforced by `file-guardrail.py` and `bash-guardrail.py` respectively, which always run independently of read-only mode state (GUARD-001/002).
 
 ---
 
@@ -410,14 +444,12 @@ services/agent_service/read_only.py:set_read_only_status_logic()
         │
         ├─► db.set_read_only_mode() - Save to SQLite
         │
-        └─► If running: inject_read_only_hooks()
-                    │
-                    ├─► Write ~/.trinity/read-only-config.json
-                    ├─► Write ~/.trinity/hooks/read-only-guard.py
-                    └─► Merge into ~/.claude/settings.local.json
+        └─► If running:
+              ├─► enabled: inject_read_only_hooks() → write ~/.trinity/read-only-config.json (1 file)
+              └─► disabled: remove_read_only_hooks() → write {"enabled": false} + cleanup legacy settings
 ```
 
-**On Agent Start:**
+**On Agent Start (always syncs both paths):**
 
 ```
 lifecycle.py:start_agent_internal()
@@ -425,30 +457,36 @@ lifecycle.py:start_agent_internal()
         ▼
 db.get_read_only_mode()
         │
-        ▼
-If enabled: inject_read_only_hooks()
-        │
-        ├─► AgentClient.write_file() x3
-        └─► Return injection result
+        ├─► enabled → inject_read_only_hooks() → write ~/.trinity/read-only-config.json
+        └─► disabled → remove_read_only_hooks() → write {"enabled": false}
+                                                        + _remove_legacy_settings_hook()
 ```
 
 **During Claude Code Operation:**
 
 ```
-Claude Code: Write/Edit/NotebookEdit
+Claude Code: Write/Edit/NotebookEdit/MultiEdit
         │
         ▼
-PreToolUse hook triggered
+PreToolUse hook triggered (registered in ~/.claude/settings.json, always active)
         │
-        ▼
-read-only-guard.py receives JSON input
+        ├─► file-guardrail.py (runs first — blocks path_deny including config file)
         │
-        ▼
-Check file_path against patterns
-        │
-        ├─► Allowed pattern match → Exit 0 (allow)
-        ├─► Blocked pattern match → Exit 2 + stderr (block)
-        └─► No match → Exit 0 (allow)
+        └─► read-only-guard.py
+                │
+                ▼
+        Load ~/.trinity/read-only-config.json
+                │
+                ├─► Missing or enabled:false → Exit 0 (allow)
+                │
+                └─► Enabled:
+                        │
+                        ├─► MultiEdit: check each edits[].file_path
+                        └─► Single file: check file_path / notebook_path
+                                │
+                                ├─► Allowed pattern match → Exit 0 (allow)
+                                ├─► Blocked pattern match → Exit 2 + stderr (block)
+                                └─► No match → Exit 0 (allow)
 ```
 
 ---
@@ -471,9 +509,13 @@ Check file_path against patterns
 
 1. **Owner-only access**: Only the agent owner (checked via `can_user_share_agent`) can modify read-only settings
 2. **System agent protection**: Read-only mode cannot be enabled for the system agent (`trinity-system`)
-3. **Fail-safe design**: Guard script fails open (allows) on JSON parse errors or missing file path
+3. **Fail-closed guard**: Guard script wrapped by `run_hook(main)` from `lib.py` — any uncaught exception exits 2 (deny). Pre-#887, exceptions exited 0 (allow).
 4. **Allowed takes precedence**: Even if a file matches blocked patterns, allowed patterns override
-5. **Normalized paths**: Guard script normalizes paths to prevent `../` bypasses
+5. **Normalized paths**: Guard uses `fnmatch` against the basename and the absolute path; relative paths are resolved before pattern matching
+6. **Guard script tamperproof** (GUARD-001/002): Script lives at `/opt/trinity/hooks/read-only-guard.py` (root-owned 0555). Agent cannot overwrite it via Write tool — path is in `path_deny` (`/opt/trinity/*`).
+7. **Config file protected**: `path_deny` blocks direct writes to `/home/developer/.trinity/read-only-config.json`; `bash_deny` blocks shell redirect/pipe patterns targeting the same file (GUARD-001). Both enforced independently of read-only mode state.
+8. **Hook always registered**: Hook registered in base image `~/.claude/settings.json`. Agent cannot remove it because `~/.claude/settings.json` is in `path_deny` in `guardrails-baseline.json`.
+9. **MultiEdit covered**: Guard iterates `edits[]` array — bulk writes to blocked files are denied. Pre-#887, MultiEdit was a bypass vector because the old guard only checked top-level `file_path`.
 
 ---
 
@@ -526,7 +568,18 @@ Check file_path against patterns
 - At least one agent created and owned by test user
 - Agent running (for immediate hook injection test)
 
-### Test Steps
+### Unit Tests
+
+`tests/unit/test_read_only_guard.py` — 18 tests, all passing.
+
+| Class | Tests |
+|-------|-------|
+| `TestGuardDisabledConfig` | No config file allows; `enabled:false` allows; missing `enabled` field allows |
+| `TestGuardBlockedPaths` | `.py` denied; `.js` denied; `CLAUDE.md` denied; `.claude/*` denied; relative path blocked; `notebook_path` blocked |
+| `TestGuardAllowedPaths` | Allowed pattern overrides blocked; unblocked path allowed; empty path allowed; missing `file_path` key allowed |
+| `TestGuardMultiEdit` | All allowed passes; one blocked edit denied; all blocked denied; empty edits allowed; edit missing `file_path` key skipped |
+
+### Integration Test Steps
 
 1. **Enable via UI**
    - Navigate to agent detail page
@@ -534,33 +587,39 @@ Check file_path against patterns
    - Toggle should turn rose/red with lock icon
    - Notification: "Read-only mode enabled"
 
-2. **Verify Hook Injection (Running Agent)**
+2. **Verify Config Written (Running Agent)**
    - SSH into agent container
-   - Check `~/.trinity/read-only-config.json` exists
-   - Check `~/.trinity/hooks/read-only-guard.py` exists
-   - Check `~/.claude/settings.local.json` has PreToolUse hook
+   - Check `~/.trinity/read-only-config.json` exists with `"enabled": true`
+   - Confirm `~/.trinity/hooks/` does NOT have `read-only-guard.py` (it's in `/opt/trinity/hooks/`)
+   - Confirm `~/.claude/settings.json` has the `read-only-guard.py` hook entry (base image)
 
 3. **Test File Protection**
-   - In agent terminal, try to create a Python file
-   - Claude should receive: "Read-only mode: Cannot modify 'test.py' (protected path)"
+   - In agent terminal, ask agent to create a Python file
+   - Agent should receive: "read-only mode: blocked: …" stderr message
 
-4. **Test Allowed Patterns**
+4. **Test MultiEdit Protection**
+   - Ask agent to make edits across multiple `.py` files in one operation
+   - Should be denied (MultiEdit now covered)
+
+5. **Test Allowed Patterns**
    - In agent terminal, create file in `content/` directory
    - Should succeed (allowed pattern)
 
-5. **Disable via UI**
+6. **Disable via UI**
    - Click ReadOnlyToggle again
    - Should return to gray "Editable" state
+   - `~/.trinity/read-only-config.json` now contains `{"enabled": false}`
    - Notification: "Read-only mode disabled"
 
-6. **Restart Injection**
-   - Enable read-only, stop agent, start agent
-   - Verify hooks are injected on startup
+7. **Restart Sync**
+   - Enable read-only, stop agent, disable while stopped, start agent
+   - Verify `~/.trinity/read-only-config.json` is written with `enabled: false` on start (stale-config fix)
 
 ### Edge Cases
-- Enable on stopped agent: hooks injected on next start
+- Enable on stopped agent: config written on next start
 - System agent: toggle should not appear
 - Non-owner user: toggle should not appear (requires `can_share`)
+- Legacy agent (pre-#887): `_remove_legacy_settings_hook()` strips old `settings.local.json` entry on next disable or start
 
 ---
 
@@ -647,6 +706,7 @@ Finally: readOnlyLoading = null
 
 | Date | Change |
 |------|--------|
+| 2026-05-18 | **#887 — Guard moved to base image**: Guard script baked into base image at `/opt/trinity/hooks/read-only-guard.py` (root-owned 0555). Hook registered permanently in `~/.claude/settings.json` via `claude-settings.json`. `inject_read_only_hooks()` now writes one file only (config JSON). `remove_read_only_hooks()` writes `{"enabled": false}` + migration cleanup via `_remove_legacy_settings_hook()`. `lifecycle.py` always syncs config on every start (fixes stale-config-on-volume bug). Added `MultiEdit` coverage. Added `path_deny` and `bash_deny` protections in `guardrails-baseline.json`. Added 18 unit tests in `tests/unit/test_read_only_guard.py`. |
 | 2026-02-18 17:50 | **Toggle Consistency Fix**: Removed `:show-label="false"` from ReadOnlyToggle in Agents.vue - it now shows labels like the other toggles. All toggles (Running, ReadOnly, Autonomy) now use consistent `size="sm"` across both Agents.vue and AgentHeader.vue. |
 | 2026-02-18 | **Agents Page Integration**: Added ReadOnlyToggle to Agents.vue card tiles (lines 248-255). Shows for owned agents (not system, not shared). Added `agentReadOnlyStates` state (line 378), `readOnlyLoading` (line 377), `fetchAllReadOnlyStates()` (lines 544-563), `handleReadOnlyToggle()` (lines 565-594). Toggle positioned between Running and Autonomy toggles in same row. |
 | 2026-02-17 | Initial documentation (CFG-007) |

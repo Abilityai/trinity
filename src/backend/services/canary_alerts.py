@@ -40,8 +40,15 @@ class CanaryAlerts:
     # the name is what makes the Slack alert immediately interpretable.
     _INVARIANT_NAMES = {
         "S-01": "Slot–row bijection",
+        "S-02": "Slot overbooking",
+        "S-03": "Slot TTL below floor",
+        "E-01": "Stuck running execution",
         "E-02": "Phantom execution reversal",
+        "E-05": "Dispatched execution without session",
         "L-03": "Delete cascades",
+        "B-01": "Queue accessor drift",
+        "B-02": "Stalled backlog drain",
+        "R-01": "Zombie Claude process",
     }
 
     # One-line runbook hint per invariant. Kept short on purpose —
@@ -53,13 +60,52 @@ class CanaryAlerts:
             "Inspect for crashed `slot.release()` calls; `cleanup_service` "
             "should reconcile within one cycle."
         ),
+        "S-02": (
+            "Agent slot count exceeds its `max_parallel_tasks` cap — "
+            "`acquire_slot` was bypassed. Check recent changes to "
+            "`SlotService.acquire_slot` and any direct ZADD into "
+            "`agent:slots:*`."
+        ),
+        "S-03": (
+            "Slot metadata HASH TTL is below `execution_timeout_seconds + 300s` "
+            "(or missing entirely). Catches #226 class — slot metadata "
+            "expires while execution is still running, leaking the slot "
+            "permanently. Check the `expire()` call in `SlotService.acquire_slot`."
+        ),
+        "E-01": (
+            "An execution stayed `running` past `execution_timeout_seconds + 300s` "
+            "buffer. Cleanup watchdog should have fired — inspect "
+            "`cleanup_service` logs and the agent container for a wedged Claude."
+        ),
         "E-02": (
             "An execution went terminal then non-terminal. Look for retry "
             "logic that resurrects completed rows or a status-write race."
         ),
+        "E-05": (
+            "A `running` execution over 60s old has no `claude_session_id`. "
+            "Either agent-server failed to write back (check container logs) "
+            "or `mark_no_session_executions_failed` watchdog stopped firing. "
+            "Same bug class as #106."
+        ),
         "L-03": (
             "An agent was deleted but a referencing row wasn't cascaded. "
             "Check the delete handler for the table(s) listed above."
+        ),
+        "B-01": (
+            "`db.get_queued_count` disagrees with the snapshot's direct queued "
+            "id-list count. Inspect recent changes to `db/schedules.py:get_queued_count` "
+            "for a cache layer or status-filter regression."
+        ),
+        "B-02": (
+            "Agent has queued work, free slots, and the drain heartbeat is stale. "
+            "`CapacityManager.run_maintenance()` either stopped firing or stopped "
+            "writing its `canary:drain_tick_at` heartbeat. Check backend logs "
+            "for `[Capacity] maintenance tick failed`."
+        ),
+        "R-01": (
+            "Agent container has unreaped zombie `claude` processes (#407 class). "
+            "Restart the affected agent to clear; check agent-server's subprocess "
+            "wait() path for the reaped child."
         ),
     }
 
@@ -281,6 +327,111 @@ class CanaryAlerts:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
 
+        if invariant_id == "S-02":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                cap = obs.get("max_parallel_tasks", "?")
+                count = obs.get("slot_count", "?")
+                over = obs.get("overbooked_by", "?")
+                lines.append(
+                    f"  • *{agent}*: slots={count}/{cap} (+{over} over)"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "S-03":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                eid = obs.get("execution_id", "?")
+                ttl = obs.get("redis_ttl_seconds", "?")
+                floor = obs.get("floor_seconds", "?")
+                kind = obs.get("kind", "?")
+                lines.append(
+                    f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); floor={floor}s"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "E-01":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                eid = obs.get("execution_id", "?")
+                age = obs.get("age_seconds", "?")
+                timeout = obs.get("execution_timeout_seconds", "?")
+                buffer = obs.get("slot_ttl_buffer_seconds", "?")
+                lines.append(
+                    f"  • *{agent}* `{eid}`: age={age}s "
+                    f"(timeout={timeout}s + buffer={buffer}s)"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "E-05":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                eid = obs.get("execution_id", "?")
+                age = obs.get("age_seconds", "?")
+                lines.append(
+                    f"  • *{agent}* `{eid}`: age={age}s, no claude_session_id"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "B-01":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                svc = obs.get("service_count", "?")
+                snap = obs.get("snapshot_count", "?")
+                lines.append(
+                    f"  • *{agent}*: db.get_queued_count={svc} "
+                    f"vs snapshot count={snap}"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "B-02":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                q = obs.get("queued_count", "?")
+                free = obs.get("free_slots", "?")
+                age = obs.get("drain_tick_age_seconds")
+                age_str = "never" if age is None else f"{age}s ago"
+                lines.append(
+                    f"  • *{agent}*: queued={q}, free_slots={free}, "
+                    f"last drain tick {age_str}"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "R-01":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = obs.get("agent_name", "?")
+                count = obs.get("zombie_count", "?")
+                lines.append(f"  • *{agent}*: {count} zombie(s)")
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
         return None
 
     @staticmethod
@@ -349,10 +500,38 @@ class CanaryAlerts:
                 f"Slot–row bijection broke on {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
             )
+        if invariant_id == "S-02":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            worst = max(violations, key=lambda v: v.observed_state.get("overbooked_by", 0))
+            return (
+                f"{len(agents)} agent(s) overbooked "
+                f"(worst: +{worst.observed_state.get('overbooked_by', '?')} "
+                f"over cap): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "S-03":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            kinds = sorted({v.observed_state.get("kind", "?") for v in violations})
+            return (
+                f"{len(violations)} slot(s) with TTL below floor "
+                f"({'/'.join(kinds)}) on {len(agents)} agent(s): "
+                f"{', '.join(agents)[:160]}."
+            )
+        if invariant_id == "E-01":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            return (
+                f"{len(violations)} execution(s) stuck in `running` past "
+                f"timeout+buffer across {len(agents)} agent(s)."
+            )
         if invariant_id == "E-02":
             return (
                 f"{len(violations)} execution(s) reverted from terminal "
                 f"to non-terminal status."
+            )
+        if invariant_id == "E-05":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            return (
+                f"{len(violations)} dispatched execution(s) without "
+                f"`claude_session_id` across {len(agents)} agent(s)."
             )
         if invariant_id == "L-03":
             ghosts = sorted(
@@ -361,6 +540,25 @@ class CanaryAlerts:
             return (
                 f"{len(ghosts)} ghost agent(s) referenced by orphan rows: "
                 f"{', '.join(ghosts)[:160]}."
+            )
+        if invariant_id == "B-01":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            return (
+                f"`db.get_queued_count` drifted from direct count on "
+                f"{len(agents)} agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "B-02":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            return (
+                f"{len(agents)} agent(s) have queued work with free slots "
+                f"and a stale drain tick: {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "R-01":
+            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            total = sum(v.observed_state.get("zombie_count", 0) for v in violations)
+            return (
+                f"{total} zombie claude process(es) across {len(agents)} "
+                f"agent(s): {', '.join(agents)[:160]}."
             )
         return f"{invariant_id} fired {len(violations)} violation(s)."
 

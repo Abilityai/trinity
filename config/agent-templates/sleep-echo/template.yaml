@@ -1,0 +1,19 @@
+name: Sleep Echo Agent
+display_name: Sleep Echo
+description: Echo agent that sleeps before responding — used by canary harness to manufacture long-lived running rows for E-05 / S-03 coverage
+version: "1.0.0"
+author: Trinity Platform
+
+resources:
+  cpu: "1"
+  memory: "512m"
+
+mcp_servers: []
+
+credentials: {}
+
+metrics:
+  - name: tasks_completed
+    type: counter
+    label: "Tasks"
+    description: "Total tasks completed"

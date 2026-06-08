@@ -20,6 +20,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,7 +41,11 @@ from .error_classifier import (
     _is_auth_failure_message,
     _is_rate_limit_message,
 )
-from .jsonl_recovery import _extract_compact_events_from_jsonl, _recover_response_from_jsonl
+from .jsonl_recovery import (
+    _extract_compact_events_from_jsonl,
+    _recover_metadata_from_jsonl,
+    _recover_response_from_jsonl,
+)
 from .process_registry import get_process_registry
 from .stream_parser import process_stream_line
 from .subprocess_lifecycle import (
@@ -52,6 +57,134 @@ from .subprocess_lifecycle import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 
 logger = logging.getLogger(__name__)
+
+# Issue #678 (JSONL persistence Option B): headless tasks above this
+# timeout threshold automatically get JSONL persistence enabled so the
+# stdout-race recovery code can fire. Short tasks remain disk-cheap.
+# 600s = 10 min; tunable if disk pressure shows up. Threshold matches
+# the cost/pain inflection: short fan-out is cheap to re-run, long
+# deliverables aren't.
+_JSONL_PERSIST_THRESHOLD_S = 600
+
+# #970: cadence for the bounded subprocess wait, and the no-progress ceiling
+# for a single tool_use that never receives a tool_result. Claude Code has
+# NO per-MCP-tool timeout, so a hung stdio tools/call would otherwise wedge
+# `process.wait` for the full execution budget (the ticket's 2h false-
+# timeout). The stall limit is intentionally generous — "tool running" is
+# not "tool stalled" — so only a genuinely wedged call trips it.
+_WAIT_POLL_S = 2.0
+_STALL_LIMIT_S = 300.0
+
+
+def _open_tool_exceeding(ctx: HeadlessRunContext, limit_s: float) -> Optional[str]:
+    """Name of a tool_use open (no matching tool_result) for > ``limit_s``, else None.
+
+    #970 stall-watchdog signal. Reuses the stream parser's existing
+    bookkeeping — ``tool_start_times`` (set on every tool_use) and the
+    ``execution_log`` tool_result entries that close them. A hung stdio
+    MCP ``tools/call`` never emits a tool_result, so its tool_use stays
+    open: the only externally-visible signal that claude is wedged.
+    """
+    log = list(ctx.execution_log)  # snapshot — reader thread mutates concurrently
+    completed = {e.id for e in log if e.type == "tool_result"}
+    now = datetime.now()
+    for e in log:
+        if e.type == "tool_use" and e.id not in completed:
+            started = ctx.tool_start_times.get(e.id)
+            if started and (now - started).total_seconds() > limit_s:
+                return e.tool
+    return None
+
+
+def _attempt_empty_result_recovery(
+    metadata: ExecutionMetadata,
+    raw_messages: List[Dict],
+    response_parts: List[str],
+    parse_failure_count: int,
+    parse_failure_sample: Optional[str],
+    task_start_iso: Optional[str],
+    session_id_fallback: Optional[str] = None,
+) -> Optional[Tuple[int, Dict]]:
+    """Shared empty-result recovery used by both async and sync execution paths.
+
+    Issue #678: when ``return_code == 0`` but the trailing ``result``
+    line was lost (stdout reader race), this helper:
+
+    1. Classifies the empty result and gives up early if metadata
+       already looks complete (caller proceeds to success path).
+    2. Tries metadata recovery from the on-disk JSONL — back-fills
+       ``cost_usd``, ``duration_ms``, ``num_turns``, ``model_name``,
+       per-call token usage on the metadata in place.
+    3. Tries text recovery from the JSONL when ``response_parts`` is
+       empty. Sets ``recovered_from_jsonl=True`` on success.
+
+    ``session_id_fallback`` is the UUID we passed to ``claude --session-id``
+    (captured in ``HeadlessRunContext.claude_session_uuid``). When the
+    reader race fires before any stdout arrives, ``metadata.session_id``
+    stays unset; recovery would silently no-op without a way to locate
+    the JSONL on disk. The fallback closes that gap.
+
+    Returns:
+      - ``None`` when metadata was already complete OR when text was
+        recovered (caller continues to success path with populated
+        metadata).
+      - ``(502, dict_body)`` when the result is genuinely lost and no
+        text could be recovered. Caller raises HTTPException with this.
+    """
+    empty_result = _classify_empty_result(
+        metadata,
+        raw_message_count=len(raw_messages),
+        raw_messages=raw_messages,
+        parse_failure_count=parse_failure_count,
+        parse_failure_sample=parse_failure_sample,
+    )
+    if empty_result is None:
+        return None
+
+    # Resolve the JSONL filename UUID. metadata.session_id wins (it's the
+    # one Claude actually echoed back); fall back to the UUID we passed
+    # on the command line when the race wedged the reader before init.
+    effective_session_id = metadata.session_id or session_id_fallback or None
+
+    # Step 1: try to back-fill metadata from the JSONL. Mutates in place.
+    _recover_metadata_from_jsonl(
+        effective_session_id,
+        since_iso=task_start_iso,
+        metadata=metadata,
+    )
+
+    # Step 2: text recovery branches.
+    if response_parts:
+        logger.warning(
+            f"[Recovery] Result event lost (stdout pipe race) but "
+            f"response_parts has {sum(len(p) for p in response_parts)} chars "
+            f"of assistant content across {len(response_parts)} blocks — "
+            f"recovering as soft success. raw_messages={len(raw_messages)} "
+            f"cost_recovered={metadata.cost_usd}"
+        )
+        return None
+
+    recovered_text = _recover_response_from_jsonl(effective_session_id)
+    if recovered_text:
+        logger.warning(
+            f"[Recovery] Stdout race lost the response "
+            f"(raw_messages={len(raw_messages)}, no text in stream), but "
+            f"recovered {len(recovered_text)} chars from JSONL "
+            f"(session_id={effective_session_id}) — surfacing as soft success. "
+            f"cost_recovered={metadata.cost_usd}"
+        )
+        response_parts.append(recovered_text)
+        metadata.recovered_from_jsonl = True
+        return None
+
+    # Hard failure: return the structured 502 body. The classifier already
+    # built it with sanitized partial metadata.
+    status_code, body = empty_result
+    # Refresh the metadata snapshot in the body — we may have populated
+    # cost/duration/model_name above via JSONL metadata recovery.
+    # sanitize_dict is idempotent over the recovered fields.
+    body["metadata"] = sanitize_dict(metadata.model_dump())
+    return (status_code, body)
 
 
 @dataclass
@@ -73,6 +206,11 @@ class HeadlessRunContext:
     effective_timeout: int
     images: Optional[List[Dict]]
     prompt: str
+    # #678: UUID we passed to `claude --session-id`. Used as the JSONL
+    # filename fallback when the reader race fires before any stdout
+    # arrives, leaving `metadata.session_id` unset. Empty string when
+    # the run resumed an existing session (we didn't generate a UUID).
+    claude_session_uuid: str = ""
 
     # Run state (populated by _run_headless_subprocess)
     process: Optional[subprocess.Popen] = None
@@ -84,6 +222,7 @@ class HeadlessRunContext:
     auth_abort_event: threading.Event = field(default_factory=threading.Event)
     auth_abort_reason: List[str] = field(default_factory=list)
     permission_mode_validated: bool = False
+    result_seen: threading.Event = field(default_factory=threading.Event)  # #970: claude emitted {"type":"result"}
     stdout_exc: List[BaseException] = field(default_factory=list)
 
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
@@ -154,8 +293,13 @@ def _setup_headless_command(
     cmd = ["claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
 
     # Add --resume if resuming a previous session (EXEC-023)
+    # #678: track the JSONL filename UUID so recovery can fall back to it
+    # when metadata.session_id is unset. For --resume, the JSONL is named
+    # after resume_session_id; for new sessions, we generate the UUID below.
+    claude_session_uuid = ""
     if resume_session_id:
         cmd.extend(["--resume", resume_session_id])
+        claude_session_uuid = resume_session_id
         logger.info(f"[Headless Task] Resuming session: {resume_session_id}")
     else:
         # Session isolation: prevent headless tasks from writing session files
@@ -166,11 +310,29 @@ def _setup_headless_command(
         # Session tab opt-in (persist_session=True): the caller wants the
         # JSONL written so the next turn can --resume it. We still pass a
         # unique --session-id so cold turns don't collide on disk.
-        if not persist_session:
+        #
+        # Issue #678 (JSONL persistence Option B): also auto-persist for
+        # long-running headless tasks (timeout > 10 min) so the JSONL
+        # recovery code can fire when the stdout reader thread wedges.
+        # Short fan-out / utility tasks stay disk-cheap; long deliverable
+        # tasks (the real telemetry-loss pain) get a recovery surface.
+        # The retention sweep in session_cleanup_service.py reaps these
+        # JSONLs after 24h so disk cost stays bounded.
+        effective_persist = persist_session or (timeout_seconds > _JSONL_PERSIST_THRESHOLD_S)
+        if persist_session is False and timeout_seconds > _JSONL_PERSIST_THRESHOLD_S:
+            logger.info(
+                f"event=jsonl_persistence_auto_enabled timeout_seconds={timeout_seconds} "
+                f"threshold={_JSONL_PERSIST_THRESHOLD_S}"
+            )
+        if not effective_persist:
             cmd.append("--no-session-persistence")
         # Claude Code requires --session-id to be a valid UUID.
         # execution_id is a base64url token (not a UUID), so always generate one.
-        cmd.extend(["--session-id", str(uuid.uuid4())])
+        # #678: capture into a variable so JSONL recovery can fall back to
+        # this UUID when the reader race fires before metadata.session_id
+        # is populated by Claude's init message.
+        claude_session_uuid = str(uuid.uuid4())
+        cmd.extend(["--session-id", claude_session_uuid])
 
     # Add MCP config if .mcp.json exists (for agent-to-agent collaboration via Trinity MCP)
     mcp_config_path = Path.home() / ".mcp.json"
@@ -231,6 +393,7 @@ def _setup_headless_command(
         effective_timeout=timeout_seconds,
         images=images,
         prompt=prompt,
+        claude_session_uuid=claude_session_uuid,
     )
 
 
@@ -398,6 +561,13 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                         ctx.tool_start_times,
                         ctx.response_parts,
                     )
+
+                    # #970 early-completion: the result line is the definitive
+                    # end of a `claude --print` turn. Signal it AFTER parsing so
+                    # metadata/response_parts are populated; the wait loop can
+                    # then finalize even if the process lingers in teardown.
+                    if isinstance(raw_msg, dict) and raw_msg.get("type") == "result":
+                        ctx.result_seen.set()
                 except RuntimeError:
                     raise  # Re-raise permission-mode failures
                 except Exception as line_err:  # noqa: BLE001
@@ -450,14 +620,44 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     process.stdin.write(stdin_payload)
     process.stdin.close()
 
-    # Bounded wait on the subprocess itself. If claude hangs, we
-    # never wedge the executor thread for more than effective_timeout.
+    # Bounded, polling wait. Three exits beyond the overall budget (#970):
+    #   (a) early-completion — claude emitted its {"type":"result"} (the turn
+    #       is definitively over) but the process lingers in teardown (e.g. a
+    #       stdio MCP child holding the pipe). Finalize with the captured
+    #       result instead of burning the budget. The result IS success, so
+    #       set return_code=0 — genuine errors were already classified into
+    #       metadata.error_type from the stream and are surfaced in finalize.
+    #   (b) stall watchdog — an open tool_use with no tool_result for
+    #       >_STALL_LIMIT_S. Claude Code has no per-MCP-tool timeout, so a
+    #       hung tools/call would otherwise wedge until the full budget.
+    #   (c) effective_timeout budget — unchanged backstop.
+    deadline = time.monotonic() + ctx.effective_timeout
+    stalled_tool: Optional[str] = None
     try:
-        ctx.return_code = process.wait(timeout=ctx.effective_timeout)
+        while True:
+            try:
+                ctx.return_code = process.wait(timeout=_WAIT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                if ctx.result_seen.is_set():
+                    logger.warning(
+                        f"[Headless Task] Task {ctx.task_session_id} produced a result "
+                        f"but did not exit — finalizing early, terminating teardown"
+                    )
+                    _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+                    ctx.return_code = 0
+                    break
+                stalled_tool = _open_tool_exceeding(ctx, _STALL_LIMIT_S)
+                if stalled_tool or time.monotonic() >= deadline:
+                    raise
     except subprocess.TimeoutExpired:
+        reason = (
+            f"tool '{stalled_tool}' stalled with no result for >{_STALL_LIMIT_S:.0f}s"
+            if stalled_tool
+            else f"timed out after {ctx.effective_timeout}s"
+        )
         logger.error(
-            f"[Headless Task] Task {ctx.task_session_id} timed out after {ctx.effective_timeout}s "
-            f"— killing process group"
+            f"[Headless Task] Task {ctx.task_session_id} {reason} — killing process group"
         )
         _terminate_process_group(process, graceful_timeout=5, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
         _drain_bounded(process, stdout_thread, stderr_thread,
@@ -572,14 +772,25 @@ def _finalize_headless_result(
         # likely an auth failure even if we didn't see the exact pattern.
         # Issue #516: require return_code > 0 — signal exits are handled above and
         # would otherwise produce a false positive here (zero tokens after kill).
+        # #904: do NOT phrase this as an authentication issue. The confirmed-auth
+        # path (`_is_auth_failure_message` branch above) already fired if there
+        # was a real signal; reaching this code means exit > 0 with no
+        # recognized auth indicator AND no signal classification — the cause
+        # is genuinely unknown (OOM surfacing as exit 1, broken pipe from the
+        # orphan killer, real auth, etc.). Naming "authentication" in the
+        # detail caused SUB-003's substring matcher to fire a futile
+        # auto-switch on every OOM and burn the 2h skip-list slot.
         if ctx.return_code > 0 and ctx.metadata.input_tokens == 0 and ctx.metadata.output_tokens == 0:
             logger.warning(
-                f"[Headless Task] Zero tokens processed with exit code {ctx.return_code} — "
-                f"likely auth failure. Stderr: {error_preview[:200]}"
+                f"[Headless Task] Zero tokens processed with exit code {ctx.return_code}. "
+                f"Stderr: {error_preview[:200]}"
             )
             raise HTTPException(
                 status_code=503,
-                detail=f"Execution failed with no output (possible authentication issue): {error_preview[:300]}"
+                detail=(
+                    f"Execution failed with no output (exit code {ctx.return_code}): "
+                    f"{error_preview[:300]}"
+                ),
             )
 
         # Also check if stderr contains a rate limit message
@@ -611,45 +822,24 @@ def _finalize_headless_result(
     # Hard failure path stays as-is for the truly empty case (no
     # assistant text accumulated → nothing to recover).
     #
-    # Issue #640: pass parse_failure_count + sample from the stdout
-    # reader so the diagnostic detail can distinguish wire corruption
-    # from reader-leak when the soft-recovery doesn't fire.
-    empty_result = _classify_empty_result(
-        ctx.metadata,
-        raw_message_count=len(ctx.raw_messages),
+    # Issue #640 / #678: shared recovery pipeline. Tries JSONL metadata
+    # back-fill first (rescues cost/context/model_name even when text
+    # recovery succeeds), then text recovery from response_parts or
+    # JSONL, then raises a structured 502 dict body for the backend to
+    # salvage telemetry from.
+    hard_failure = _attempt_empty_result_recovery(
+        metadata=ctx.metadata,
         raw_messages=ctx.raw_messages,
+        response_parts=ctx.response_parts,
         parse_failure_count=ctx.parse_failure_count,
         parse_failure_sample=ctx.parse_failure_sample,
+        task_start_iso=ctx.task_start_iso,
+        session_id_fallback=ctx.claude_session_uuid or None,
     )
-    if empty_result is not None:
-        if ctx.response_parts:
-            logger.warning(
-                f"[Headless Task] Result event lost (stdout pipe race) but "
-                f"response_parts has {sum(len(p) for p in ctx.response_parts)} chars "
-                f"of assistant content across {len(ctx.response_parts)} blocks — "
-                f"recovering as soft success. raw_messages={len(ctx.raw_messages)}"
-            )
-        else:
-            # Phase 5.1's soft-recovery requires accumulated text from
-            # stdout. When the pipe race fires mid-tool-call, no text
-            # was ever emitted to stdout — but Claude Code's JSONL on
-            # disk usually contains the completed turn. Read it as
-            # the authoritative ground truth before giving up.
-            recovered_text = _recover_response_from_jsonl(ctx.metadata.session_id)
-            if recovered_text:
-                logger.warning(
-                    f"[Headless Task] Stdout race lost the response "
-                    f"(raw_messages={len(ctx.raw_messages)}, no text in stream), but "
-                    f"recovered {len(recovered_text)} chars from JSONL "
-                    f"(session_id={ctx.metadata.session_id}) — "
-                    f"surfacing as soft success."
-                )
-                ctx.response_parts.append(recovered_text)
-                ctx.metadata.recovered_from_jsonl = True
-            else:
-                status_code, detail = empty_result
-                logger.error(f"[Headless Task] {detail}")
-                raise HTTPException(status_code=status_code, detail=detail)
+    if hard_failure is not None:
+        status_code, body = hard_failure
+        logger.error(f"[Headless Task] {body['message']}")
+        raise HTTPException(status_code=status_code, detail=body)
 
     # Build final response text
     response_text = "\n".join(ctx.response_parts) if ctx.response_parts else ""
@@ -853,6 +1043,25 @@ async def execute_headless_task(
 
     except HTTPException:
         raise
+    except (BrokenPipeError, ConnectionResetError) as pipe_err:
+        # Subprocess stdin pipe closed before write completed — typically the
+        # child Claude process exited early (auth abort, permission-mode kill,
+        # or upstream cancellation). NOT a server-side fault; logging at ERROR
+        # spams operators with misleading [Errno 32] noise (#474).
+        #
+        # 502 (not 503): SUB-003 (task_execution_service.py:628) interprets 503
+        # from agent endpoints as auth-class failure and auto-switches the
+        # subscription. 502 ("Bad Gateway to Claude subprocess") is semantically
+        # correct and collision-free with the auto-switch path.
+        logger.info(
+            f"[Headless Task] Subprocess pipe closed before write completed: {pipe_err}. "
+            f"This typically means the child Claude process exited early (auth abort, "
+            f"permission validation kill, or upstream cancellation)."
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Agent subprocess closed before task could complete",
+        )
     except Exception as e:
         logger.error(f"[Headless Task] Execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")

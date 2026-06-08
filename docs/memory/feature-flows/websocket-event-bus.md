@@ -16,7 +16,7 @@ durable event log so:
 
 Issue: [#306](https://github.com/abilityai/trinity/issues/306) — RELIABILITY-003.
 Positioned as the keystone of Tier 2.5 simplification in
-[`docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md`](../../planning/ORCHESTRATION_RELIABILITY_2026-04.md).
+[`docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md`](../../archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md).
 
 ## User Story
 
@@ -36,7 +36,7 @@ collaboration edges after a laptop sleep.
     `event_bus.publish(event, scope=SCOPE_SCOPED)`.
 - **Publisher core**: `src/backend/services/event_bus.py:EventBus.publish`
 - **WebSocket endpoints**:
-  - `GET /ws?token=<jwt>&last-event-id=<stream_id>` — `src/backend/main.py:634+`
+  - `GET /ws?ticket=<opaque>&last-event-id=<stream_id>` — `@app.websocket("/ws")` handler in `src/backend/main.py` (ticket minted via `POST /api/ws/ticket`; see C-002 / #550)
   - `GET /ws/events?token=trinity_mcp_...&last-event-id=<stream_id>` —
     `src/backend/main.py:697+`
 - **Frontend WebSocket clients**:
@@ -169,8 +169,13 @@ _catchup(client_id, slot, last_event_id, catchup_max)
 
 ## Security
 
-- **Authentication**: unchanged. `/ws` requires JWT; `/ws/events` requires
-  `trinity_mcp_*` API key. Consumer tasks inherit connection-level auth.
+- **Authentication**: `/ws` requires a single-use opaque ticket minted via
+  `POST /api/ws/ticket` (C-002 / #550 — see `architecture.md` "WebSocket
+  Security"). The 32-byte ticket has a 30s TTL and is consumed atomically
+  via Redis `GETDEL`; JWT-in-URL was removed to close pentest finding 3.2.1.
+  `/ws/events` still accepts a `trinity_mcp_*` API key via `?token=` (kept
+  for the documented `wscat`/`websocat` surface). Consumer tasks inherit
+  connection-level auth.
 - **Input validation**: `?last-event-id=` is regex-gated
   (`EID_PATTERN = ^\d+-\d+$`) in `validate_last_event_id()` before reaching
   `XRANGE`. Malformed input → `None` → no catchup.

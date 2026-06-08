@@ -94,6 +94,10 @@ class FakeRedis:
         self._zsets: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._hashes: Dict[str, Dict[str, str]] = defaultdict(dict)
         self._strings: Dict[str, str] = {}
+        # Per-key TTL (seconds). Test-controlled: tests inject values via
+        # `set_ttl(key, ttl)` to mimic the three redis.ttl() return cases.
+        # See S-03 invariant for the sentinel values (-2 / -1 / >0).
+        self._ttls: Dict[str, int] = {}
 
     # ZSET ------------------------------------------------------------------
 
@@ -189,6 +193,21 @@ class FakeRedis:
     def hlen(self, key: str) -> int:
         return len(self._hashes.get(key, {}))
 
+    # TTL -------------------------------------------------------------------
+    # Matches redis-py semantics: positive int = seconds remaining,
+    # -2 = key does not exist, -1 = key exists but no TTL.
+    # Tests set values via `set_ttl()`.
+
+    def ttl(self, key: str) -> int:
+        if key in self._ttls:
+            return self._ttls[key]
+        if key in self._hashes or key in self._zsets or key in self._strings:
+            return -1  # exists but no TTL
+        return -2  # missing
+
+    def set_ttl(self, key: str, value: int) -> None:
+        self._ttls[key] = value
+
     def delete(self, key: str) -> int:
         deleted = 0
         if key in self._zsets:
@@ -255,7 +274,8 @@ def canary_db(monkeypatch):
             owner_id TEXT NOT NULL,
             is_system INTEGER DEFAULT 0,
             max_parallel_tasks INTEGER DEFAULT 3,
-            execution_timeout_seconds INTEGER DEFAULT 900
+            execution_timeout_seconds INTEGER DEFAULT 900,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         );
         CREATE TABLE schedule_executions (
             id TEXT PRIMARY KEY,
@@ -379,6 +399,7 @@ def fake_redis(monkeypatch):
 
     class _FakeSlotService:
         slots_prefix = "agent:slots:"
+        metadata_prefix = "agent:slot:"
 
         def __init__(self):
             self.redis = redis_inst
@@ -391,7 +412,67 @@ def fake_redis(monkeypatch):
 
 
 @pytest.fixture
-def reload_canary(canary_db, fake_redis):
+def fake_docker(monkeypatch):
+    """Stub services.docker_service with a controllable container list.
+
+    Phase 3's R-01 snapshot collector reads `docker_client.containers.list`
+    and calls `container.exec_run` per match. Without a stub, the canary
+    snapshot records `docker: client unavailable` in
+    `sources_unavailable` and unrelated tests assert on that being empty.
+    Tests that exercise R-01 manipulate `fake_docker._containers` directly.
+    """
+
+    class _FakeContainer:
+        def __init__(self, name, exec_output="0", exec_raises=None):
+            self.name = name
+            self._exec_output = exec_output
+            self._exec_raises = exec_raises
+
+        def exec_run(self, cmd):
+            if self._exec_raises is not None:
+                raise self._exec_raises
+            # Mimic the docker-py ExecResult shape used by the collector.
+            class _R:
+                pass
+            r = _R()
+            r.exit_code = 0
+            r.output = self._exec_output.encode("utf-8")
+            return r
+
+    class _FakeContainers:
+        def __init__(self):
+            self._items = []
+
+        def list(self, filters=None):
+            return list(self._items)
+
+    class _FakeDockerClient:
+        def __init__(self):
+            self.containers = _FakeContainers()
+
+    client = _FakeDockerClient()
+
+    fake_module = types.ModuleType("services.docker_service")
+    fake_module.docker_client = client
+    # Stubs for the names services/__init__.py re-exports; canary doesn't
+    # call these, but the canary_service tests transitively import
+    # services/__init__.py and would fail with AttributeError otherwise.
+    fake_module.get_agent_container = lambda *a, **kw: None
+    fake_module.get_agent_status_from_container = lambda *a, **kw: None
+    fake_module.list_all_agents = lambda *a, **kw: []
+    fake_module.get_agent_by_name = lambda *a, **kw: None
+    fake_module.get_next_available_port = lambda *a, **kw: 2222
+    monkeypatch.setitem(sys.modules, "services.docker_service", fake_module)
+
+    # Expose the containers list + factory so tests can populate easily.
+    client.add_container = lambda *a, **kw: client.containers._items.append(
+        _FakeContainer(*a, **kw)
+    )
+    return client
+
+
+@pytest.fixture
+def reload_canary(canary_db, fake_redis, fake_docker):
     """Force reimport of canary modules so they bind to the patched modules."""
     for mod in list(sys.modules):
         if mod.startswith("canary") or mod == "db.canary":
@@ -963,10 +1044,26 @@ class TestRunner:
         snap = reload_canary["canary"].collect_snapshot()
         results = reload_canary["canary"].run_invariants(snap)
 
-        assert set(results.keys()) == {"S-01", "E-02", "L-03"}
+        assert set(results.keys()) == {
+            "S-01", "S-02", "S-03",
+            "E-01", "E-02", "E-05",
+            "L-03",
+            "B-01", "B-02",
+            "R-01",
+        }
         assert results["S-01"] == []
+        assert results["S-02"] == []
+        assert results["S-03"] == []
+        assert results["E-01"] == []
         assert results["E-02"] == []
+        assert results["E-05"] == []
         assert len(results["L-03"]) == 1
+        # B-01 is skipped in unit-test mode (no live `database` facade), so
+        # queued_count_via_service is None per agent → no violations.
+        assert results["B-01"] == []
+        # B-02 / R-01 are green on a clean platform.
+        assert results["B-02"] == []
+        assert results["R-01"] == []
 
     def test_run_invariants_subset(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1")
@@ -981,6 +1078,565 @@ class TestRunner:
         results = reload_canary["canary"].run_invariants(snap, ids=["NOPE", "L-03"])
         assert "NOPE" not in results
         assert "L-03" in results
+
+
+# ---------------------------------------------------------------------------
+# S-02 — no overbooking
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantS02:
+    def test_holds_when_slot_count_within_cap(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", max_parallel=3)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1", {"e1": 1.0, "e2": 2.0, "e3": 3.0}
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+    def test_fires_when_slot_count_exceeds_cap(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", max_parallel=2)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1", {"e1": 1.0, "e2": 2.0, "e3": 3.0}
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        violations = s02.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "S-02"
+        assert v.severity == "critical"
+        assert v.observed_state["slot_count"] == 3
+        assert v.observed_state["max_parallel_tasks"] == 2
+        assert v.observed_state["overbooked_by"] == 1
+
+    def test_drain_sentinels_filtered_before_cap_check(
+        self, canary_db, reload_canary
+    ):
+        """Drain sentinels briefly push ZCARD over the cap; not a violation."""
+        _add_agent(canary_db, "a1", max_parallel=2)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1",
+            {"e1": 1.0, "e2": 2.0, "drain-a1-1234567890.5": 3.0},
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+    def test_skipped_when_redis_unavailable(self, canary_db, reload_canary):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            sources_unavailable=["redis: connection refused"],
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=1,
+                    execution_timeout_seconds=900,
+                    slot_ids={"e1", "e2", "e3"},
+                )
+            ],
+        )
+        from canary.invariants import s02_no_overbooking as s02
+        assert s02.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-01 — terminal-state closure
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE01:
+    @staticmethod
+    def _snap(
+        *,
+        snap_time="2026-05-18T12:00:00Z",
+        started_at="2026-05-18T11:00:00Z",
+        timeout=900,
+        running_ids=("e1",),
+    ):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time=snap_time,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=timeout,
+                    running_exec_ids=set(running_ids),
+                    running_started_at={eid: started_at for eid in running_ids},
+                )
+            ],
+        )
+
+    def test_holds_when_running_row_within_window(self):
+        # Started 100s ago, timeout 900s + buffer 300s = 1200s window.
+        snap = self._snap(
+            snap_time="2026-05-18T12:01:40Z",
+            started_at="2026-05-18T12:00:00Z",
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_fires_when_running_row_past_timeout_plus_buffer(self):
+        # Started 1 hour ago, timeout 900s + buffer 300s = 1200s window.
+        # 3600s > 1200s → violation.
+        snap = self._snap(
+            snap_time="2026-05-18T12:00:00Z",
+            started_at="2026-05-18T11:00:00Z",
+            timeout=900,
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "E-01"
+        assert v.severity == "critical"
+        assert v.observed_state["age_seconds"] == 3600
+        assert v.observed_state["execution_timeout_seconds"] == 900
+
+    def test_skips_row_without_started_at(self):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    running_exec_ids={"e1"},
+                    running_started_at={},
+                )
+            ],
+        )
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_skips_row_with_malformed_started_at(self):
+        snap = self._snap(started_at="not-an-iso-timestamp")
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-05 — dispatched rows have session
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE05:
+    @staticmethod
+    def _snap(*, started_at, session_id):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    running_exec_ids={"e1"},
+                    running_started_at={"e1": started_at},
+                    running_claude_session_ids={"e1": session_id},
+                )
+            ],
+        )
+
+    def test_holds_when_session_id_present(self):
+        # Old row but with a session — fine.
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",
+            session_id="abc-session-uuid",
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert e05.check(snap) == []
+
+    def test_holds_when_row_within_grace_and_no_session(self):
+        # 30s old, grace is 60s → still in grace.
+        snap = self._snap(
+            started_at="2026-05-18T11:59:30Z",
+            session_id=None,
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert e05.check(snap) == []
+
+    def test_fires_when_old_row_lacks_session(self):
+        # 1 hour old with no session — fires.
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",
+            session_id=None,
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        violations = e05.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "E-05"
+        assert v.severity == "major"
+        assert v.observed_state["age_seconds"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# B-01 — queue-status coherence
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantB01:
+    @staticmethod
+    def _snap(*, queued_ids, service_count):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_ids),
+                    queued_count_via_service=service_count,
+                )
+            ],
+        )
+
+    def test_holds_when_counts_agree(self):
+        snap = self._snap(queued_ids={"q1", "q2"}, service_count=2)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+    def test_holds_when_both_zero(self):
+        snap = self._snap(queued_ids=set(), service_count=0)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+    def test_fires_when_service_undercounts(self):
+        snap = self._snap(queued_ids={"q1", "q2", "q3"}, service_count=1)
+        from canary.invariants import b01_queue_status_coherence as b01
+        violations = b01.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "B-01"
+        assert v.severity == "critical"
+        assert v.observed_state["service_count"] == 1
+        assert v.observed_state["snapshot_count"] == 3
+
+    def test_fires_when_service_overcounts(self):
+        snap = self._snap(queued_ids={"q1"}, service_count=5)
+        from canary.invariants import b01_queue_status_coherence as b01
+        violations = b01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["service_count"] == 5
+        assert violations[0].observed_state["snapshot_count"] == 1
+
+    def test_skips_when_service_count_none(self):
+        """Snapshot built without the `database` facade reachable."""
+        snap = self._snap(queued_ids={"q1"}, service_count=None)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# S-03 — slot TTL floor
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantS03:
+    # ZSET score must look like a real acquire-time unix epoch, not 1.0
+    # (year 1970), because S-03 reconstructs the slot's initial TTL via
+    # `ttl + (snapshot_time - score)` after #913 made the natural
+    # 1-second TTL decay against the floor a false positive.
+    @staticmethod
+    def _now_score() -> float:
+        import time
+        return time.time()
+
+    def test_holds_when_ttl_above_floor(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", timeout=60)  # floor = 60 + 300 = 360s
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 500)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+    def test_fires_below_floor(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
+        # Slot acquired ~now with EXPIRE=100. Initial TTL = 100 + ~0 age
+        # = 100 < 360 floor — fires.
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 100)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        v = s03.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "S-03"
+        assert v[0].severity == "critical"
+        assert v[0].observed_state["kind"] == "below_floor"
+        assert v[0].observed_state["redis_ttl_seconds"] == 100
+        assert v[0].observed_state["floor_seconds"] == 360
+
+    def test_natural_decay_not_below_floor(self, canary_db, reload_canary):
+        """#913 regression — a slot created with EXPIRE=floor and observed
+        seconds later must not fire just because of natural TTL decay."""
+        import time
+        _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
+        # Slot was created 5s ago with the canonical EXPIRE=floor. Real
+        # TTL now reads `360 - 5 = 355` — below the raw floor — but the
+        # reconstructed initial TTL is 360, exactly at the floor.
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": time.time() - 5})
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 355)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+    def test_fires_when_metadata_missing(self, canary_db, reload_canary):
+        """ZSET points at a slot whose metadata HASH already expired (#226)."""
+        _add_agent(canary_db, "a1", timeout=60)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        # FakeRedis.ttl returns -2 when neither the hash nor the ttl is set.
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        v = s03.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["kind"] == "missing"
+        assert v[0].observed_state["redis_ttl_seconds"] == -2
+
+    def test_fires_when_ttl_unset(self, canary_db, reload_canary):
+        """Metadata HASH exists but no expire was set on it."""
+        _add_agent(canary_db, "a1", timeout=60)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        # Populate the HASH so FakeRedis.ttl returns -1 (exists, no TTL).
+        reload_canary["redis"].hset("agent:slot:a1:e1", "started_at", "x")
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        v = s03.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["kind"] == "no_expiry"
+        assert v[0].observed_state["redis_ttl_seconds"] == -1
+
+    def test_drain_sentinels_skipped(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1", timeout=60)
+        reload_canary["redis"].zadd(
+            "agent:slots:a1", {"drain-a1-12345": self._now_score()}
+        )
+        # Don't set TTL — would normally be "missing"; sentinel must skip.
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+    def test_skipped_when_redis_unavailable(self):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            sources_unavailable=["redis: connection refused"],
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=60,
+                    slot_ids={"e1"},
+                    slot_ttls={"e1": -2},
+                )
+            ],
+        )
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# B-02 — no queued without slots-full
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantB02:
+    @staticmethod
+    def _snap(*, queued_count, slot_count, max_parallel, drain_tick_at, snap_unix):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        from datetime import datetime
+        snap_time = datetime.utcfromtimestamp(snap_unix).isoformat() + "Z"
+        return Snapshot(
+            snapshot_time=snap_time,
+            drain_tick_at=drain_tick_at,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=max_parallel,
+                    execution_timeout_seconds=900,
+                    slot_ids={f"r{i}" for i in range(slot_count)},
+                    queued_exec_ids={f"q{i}" for i in range(queued_count)},
+                )
+            ],
+        )
+
+    def test_holds_when_no_queued(self):
+        import time
+        snap = self._snap(
+            queued_count=0, slot_count=0, max_parallel=3,
+            drain_tick_at=None, snap_unix=time.time(),
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        assert b02.check(snap) == []
+
+    def test_holds_when_slots_full(self):
+        """Queued > 0 is correct when capacity is saturated."""
+        import time
+        snap = self._snap(
+            queued_count=2, slot_count=3, max_parallel=3,
+            drain_tick_at=None, snap_unix=time.time(),
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        assert b02.check(snap) == []
+
+    def test_holds_when_drain_tick_fresh(self):
+        """Free slots + queue, but maintenance fired within 60s — wait."""
+        import time
+        now = time.time()
+        snap = self._snap(
+            queued_count=2, slot_count=1, max_parallel=3,
+            drain_tick_at=now - 30,  # 30s ago, within grace
+            snap_unix=now,
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        assert b02.check(snap) == []
+
+    def test_fires_when_drain_tick_stale(self):
+        """Free slots + queue + drain tick > 60s old → stuck drain."""
+        import time
+        now = time.time()
+        snap = self._snap(
+            queued_count=2, slot_count=1, max_parallel=3,
+            drain_tick_at=now - 600,  # 10min ago
+            snap_unix=now,
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        v = b02.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "B-02"
+        assert v[0].severity == "critical"
+        assert v[0].observed_state["free_slots"] == 2
+        assert v[0].observed_state["drain_tick_age_seconds"] == 600
+
+    def test_fires_when_drain_tick_never(self):
+        """Heartbeat key absent (cold cluster / write failure)."""
+        import time
+        snap = self._snap(
+            queued_count=1, slot_count=0, max_parallel=3,
+            drain_tick_at=None,
+            snap_unix=time.time(),
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        v = b02.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["drain_tick_age_seconds"] is None
+
+    def test_drain_sentinels_dont_count_as_real_slots(self):
+        """Sentinel-held slot doesn't satisfy the slots-full arm."""
+        import time
+        from canary.snapshot import Snapshot, AgentSnapshot
+        from datetime import datetime
+        now = time.time()
+        snap = Snapshot(
+            snapshot_time=datetime.utcfromtimestamp(now).isoformat() + "Z",
+            drain_tick_at=now - 600,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=1,
+                    execution_timeout_seconds=900,
+                    # 1 drain sentinel and 0 real slots; cap is 1; queued exists.
+                    slot_ids={"drain-a1-99"},
+                    queued_exec_ids={"q1"},
+                )
+            ],
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        v = b02.check(snap)
+        assert len(v) == 1, "sentinel must not satisfy slots-full arm"
+
+    def test_skipped_when_redis_unavailable(self):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            sources_unavailable=["redis: down"],
+            drain_tick_at=None,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    slot_ids=set(),
+                    queued_exec_ids={"q1"},
+                )
+            ],
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        assert b02.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# R-01 — no zombie claude processes
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantR01:
+    def test_holds_when_no_zombies(self, canary_db, reload_canary, fake_docker):
+        _add_agent(canary_db, "a1")
+        fake_docker.add_container("agent-a1", exec_output="0")
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import r01_no_zombie_claude as r01
+        assert r01.check(snap) == []
+        assert snap.zombie_counts == {"a1": 0}
+
+    def test_fires_on_zombie_count(self, canary_db, reload_canary, fake_docker):
+        _add_agent(canary_db, "a1")
+        fake_docker.add_container("agent-a1", exec_output="3")
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import r01_no_zombie_claude as r01
+        v = r01.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "R-01"
+        assert v[0].severity == "critical"
+        assert v[0].observed_state["agent_name"] == "a1"
+        assert v[0].observed_state["zombie_count"] == 3
+
+    def test_per_container_exec_failure_does_not_kill_cycle(
+        self, canary_db, reload_canary, fake_docker
+    ):
+        _add_agent(canary_db, "ok")
+        _add_agent(canary_db, "broken")
+        fake_docker.add_container("agent-ok", exec_output="0")
+        fake_docker.add_container("agent-broken", exec_raises=RuntimeError("boom"))
+        snap = reload_canary["canary"].collect_snapshot()
+        # The healthy container is still measured; the broken one is in
+        # sources_unavailable. Neither agent fires R-01.
+        assert snap.zombie_counts == {"ok": 0}
+        assert any("docker.exec[broken]" in s for s in snap.sources_unavailable)
+        from canary.invariants import r01_no_zombie_claude as r01
+        assert r01.check(snap) == []
+
+    def test_silent_when_docker_unavailable(self, canary_db, reload_canary, monkeypatch):
+        """All-or-nothing docker failure — R-01 produces no violations."""
+        # Override the existing docker stub so docker_client is None.
+        fake_module = types.ModuleType("services.docker_service")
+        fake_module.docker_client = None
+        fake_module.get_agent_container = lambda *a, **kw: None
+        fake_module.get_agent_status_from_container = lambda *a, **kw: None
+        fake_module.list_all_agents = lambda *a, **kw: []
+        fake_module.get_agent_by_name = lambda *a, **kw: None
+        fake_module.get_next_available_port = lambda *a, **kw: 2222
+        monkeypatch.setitem(sys.modules, "services.docker_service", fake_module)
+        _add_agent(canary_db, "a1")
+        snap = reload_canary["canary"].collect_snapshot()
+        assert snap.zombie_counts == {}
+        assert any("docker" in s for s in snap.sources_unavailable)
+        from canary.invariants import r01_no_zombie_claude as r01
+        assert r01.check(snap) == []
 
 
 # ---------------------------------------------------------------------------

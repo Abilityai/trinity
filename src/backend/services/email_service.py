@@ -39,21 +39,34 @@ class EmailService:
         self.provider = EMAIL_PROVIDER.lower()
         logger.info(f"Email service initialized with provider: {self.provider}")
 
-    async def send_verification_code(self, to_email: str, code: str) -> bool:
+    async def send_verification_code(
+        self,
+        to_email: str,
+        code: str,
+        agent_name: Optional[str] = None,
+        context_label: Optional[str] = None,
+    ) -> bool:
         """
         Send a verification code to an email address.
 
         Args:
             to_email: Recipient email address
             code: 6-digit verification code
+            agent_name: Optional agent name to include in subject/body
+            context_label: Optional context label (e.g. "Trinity login") when no agent_name
 
         Returns:
             True if email was sent successfully, False otherwise
         """
-        subject = "Your verification code"
-        body = self._get_verification_email_body(code)
+        if agent_name:
+            subject = f'Your Trinity access code for "{agent_name}"'
+        else:
+            subject = f"Your {context_label or 'Trinity'} verification code"
 
-        return await self.send_email(to_email, subject, body)
+        body = self._get_verification_email_body(code, agent_name=agent_name, context_label=context_label)
+        html_body = self._get_verification_email_html(code, agent_name=agent_name, context_label=context_label)
+
+        return await self.send_email(to_email, subject, body, html_body=html_body)
 
     async def send_email(
         self,
@@ -91,14 +104,62 @@ class EmailService:
             logger.error(f"Failed to send email to {to_email}: {e}")
             return False
 
-    def _get_verification_email_body(self, code: str) -> str:
-        """Get the verification email body text."""
-        return f"""Your verification code is: {code}
+    def _get_verification_email_body(
+        self,
+        code: str,
+        agent_name: Optional[str] = None,
+        context_label: Optional[str] = None,
+    ) -> str:
+        """Get the plain-text verification email body."""
+        if agent_name:
+            intro = f'You requested access to {agent_name} on Trinity. Use the code below to verify your identity.'
+        elif context_label:
+            intro = f'You requested to sign in to {context_label}. Use the code below to verify your identity.'
+        else:
+            intro = 'You requested to sign in to Trinity. Use the code below to verify your identity.'
+
+        return f"""{intro}
+
+Your verification code is: {code}
 
 This code expires in 10 minutes.
 
 If you didn't request this code, you can safely ignore this email.
 """
+
+    def _get_verification_email_html(
+        self,
+        code: str,
+        agent_name: Optional[str] = None,
+        context_label: Optional[str] = None,
+    ) -> str:
+        """Get the HTML verification email body."""
+        if agent_name:
+            intro = f'You requested access to <strong>{agent_name}</strong> on Trinity.'
+        elif context_label:
+            intro = f'You requested to sign in to <strong>{context_label}</strong>.'
+        else:
+            intro = 'You requested to sign in to <strong>Trinity</strong>.'
+
+        return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; padding: 32px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 480px; margin: 0 auto;">
+    <tr>
+      <td style="background: #ffffff; border-radius: 8px; padding: 40px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
+        <p style="margin: 0 0 8px 0; font-size: 18px; font-weight: 600; color: #111;">Trinity</p>
+        <p style="margin: 0 0 24px 0; font-size: 15px; color: #555;">{intro} Use the code below to verify your identity.</p>
+        <div style="background: #f0f0f0; border-radius: 6px; padding: 20px; text-align: center; margin-bottom: 24px;">
+          <span style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #111; font-family: 'Courier New', monospace;">{code}</span>
+        </div>
+        <p style="margin: 0 0 16px 0; font-size: 13px; color: #888;">This code expires in 10 minutes.</p>
+        <p style="margin: 0; font-size: 13px; color: #aaa;">If you didn&rsquo;t request this code, you can safely ignore this email.</p>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
 
     def _send_console(self, to_email: str, subject: str, body: str) -> bool:
         """Print email to console (development mode)."""

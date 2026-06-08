@@ -79,6 +79,24 @@
             >
               Settings
             </router-link>
+            <!-- #847 Phase 0 — Enterprise catalogue landing. Visible
+                 iff ANY enterprise feature is entitled
+                 (`hasAnyEnterprise`). The landing lists each enterprise
+                 feature as a card with status; non-entitled and
+                 Coming-soon features render disabled. OSS-only builds
+                 have an empty `enterpriseFeatures` list so this link
+                 is hidden entirely. The store's `featureFlagsLoaded`
+                 guard means the link doesn't flicker on first paint
+                 (loadFeatureFlags fires in onMounted below). -->
+            <router-link
+              v-if="enterpriseStore.hasAnyEnterprise"
+              to="/enterprise"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/enterprise') }"
+            >
+              Enterprise
+              <span class="ml-1 px-1.5 py-0.5 text-[10px] font-bold leading-none rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200">PRO</span>
+            </router-link>
           </div>
         </div>
         <div class="flex items-center space-x-4">
@@ -87,6 +105,19 @@
             <span class="inline-block h-2 w-2 rounded-full mr-1" :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"></span>
             {{ isConnected ? 'Connected' : 'Disconnected' }}
           </span>
+
+          <!-- Build Info Chip (#926) — small muted version label; click opens detail modal -->
+          <button
+            v-if="buildInfo.info.value"
+            @click="showBuildInfoModal = true"
+            class="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono"
+            :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
+          >
+            v{{ buildInfo.info.value.version }}<span
+              v-if="buildInfo.info.value.git_commit_short && buildInfo.info.value.git_commit_short !== 'unknown'"
+              class="ml-1 opacity-70"
+            >· {{ buildInfo.info.value.git_commit_short }}</span>
+          </button>
 
           <!-- Theme Toggle Button -->
           <button
@@ -193,6 +224,67 @@
         </div>
       </div>
     </div>
+
+    <!-- Build Info Modal (#926) — click-out to dismiss -->
+    <div
+      v-if="showBuildInfoModal && buildInfo.info.value"
+      class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+      @click.self="showBuildInfoModal = false"
+    >
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
+        <div class="flex justify-between items-start mb-2">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Build Info</h2>
+          <button
+            @click="showBuildInfoModal = false"
+            class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+            aria-label="Close"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+          Commit, branch, and build date the running platform was built from.
+        </p>
+        <div
+          v-if="buildInfo.isMissing.value"
+          class="mb-4 p-3 rounded bg-gray-50 dark:bg-gray-900 text-xs text-gray-600 dark:text-gray-400"
+        >
+          Build metadata not available — rebuild with
+          <code class="font-mono">scripts/deploy/start.sh</code> to populate.
+        </div>
+        <dl class="space-y-2 text-sm">
+          <div class="flex justify-between">
+            <dt class="text-gray-500 dark:text-gray-400">Version</dt>
+            <dd class="font-mono text-gray-900 dark:text-white">{{ buildInfo.info.value.version }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-gray-500 dark:text-gray-400">Branch</dt>
+            <dd class="font-mono text-gray-900 dark:text-white">{{ buildInfo.info.value.git_branch }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-gray-500 dark:text-gray-400">Commit</dt>
+            <dd class="font-mono text-gray-900 dark:text-white text-right break-all">
+              <span>{{ buildInfo.info.value.git_commit_short }}</span>
+              <div class="text-xs opacity-60">{{ buildInfo.info.value.git_commit }}</div>
+            </dd>
+          </div>
+          <div class="border-t border-gray-200 dark:border-gray-700 pt-2">
+            <dt class="text-gray-500 dark:text-gray-400 mb-1">Commit subject</dt>
+            <dd class="text-gray-900 dark:text-white break-words">{{ buildInfo.info.value.git_commit_subject }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-gray-500 dark:text-gray-400">Commit timestamp</dt>
+            <dd class="font-mono text-gray-900 dark:text-white text-xs">{{ buildInfo.info.value.git_commit_timestamp }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-gray-500 dark:text-gray-400">Build date</dt>
+            <dd class="font-mono text-gray-900 dark:text-white text-xs">{{ buildInfo.info.value.build_date }}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
   </nav>
 </template>
 
@@ -204,7 +296,9 @@ import { useThemeStore } from '../stores/theme'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
+import { useEnterpriseStore } from '../stores/enterprise'
 import { useWebSocket } from '../utils/websocket'
+import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 
 const router = useRouter()
@@ -213,7 +307,14 @@ const themeStore = useThemeStore()
 const notificationsStore = useNotificationsStore()
 const operatorQueueStore = useOperatorQueueStore()
 const executionsStore = useExecutionsStore()
+// #847 Phase 0 — feature-flags load is fired on mount below; the
+// `Enterprise` nav link template is `v-if="enterpriseStore.hasAnyEnterprise"`.
+const enterpriseStore = useEnterpriseStore()
 const { isConnected } = useWebSocket()
+
+// #926: cached fetch of /api/version (singleton across NavBar + Settings)
+const buildInfo = useBuildInfo()
+const showBuildInfoModal = ref(false)
 
 // Check if user is admin (fetch from backend)
 const userRole = ref(null)
@@ -268,6 +369,10 @@ onMounted(async () => {
   // Populate running-count badge on initial load from any page
   executionsStore.fetchStats().catch((e) => console.warn('NavBar fetchStats failed:', e))
 
+  // #926: kick off the cached build-info fetch — failures are non-fatal
+  // (chip is hidden if fetch fails; e.g., unauthenticated brief window).
+  buildInfo.load().catch(() => {})
+
   // Fetch user role from backend
   try {
     const response = await axios.get('/api/users/me', {
@@ -277,6 +382,11 @@ onMounted(async () => {
   } catch (e) {
     console.warn('Failed to fetch user role:', e)
   }
+
+  // #847 Phase 0 — load enterprise entitlements. Fires once per page
+  // load (the store gates on `featureFlagsLoaded`). The Enterprise nav
+  // link is hidden until this resolves.
+  enterpriseStore.loadFeatureFlags()
 })
 
 onUnmounted(() => {

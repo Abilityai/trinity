@@ -32,7 +32,7 @@ class AvatarMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT avatar_identity_prompt, avatar_updated_at
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row and row["avatar_identity_prompt"]:
@@ -68,7 +68,8 @@ class AvatarMixin:
             cursor.execute("""
                 SELECT agent_name
                 FROM agent_ownership
-                WHERE avatar_updated_at IS NULL OR is_default_avatar = 1
+                WHERE (avatar_updated_at IS NULL OR is_default_avatar = 1)
+                  AND deleted_at IS NULL
             """)
             return [{"agent_name": row["agent_name"]} for row in cursor.fetchall()]
 

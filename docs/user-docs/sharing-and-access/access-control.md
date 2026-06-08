@@ -26,6 +26,7 @@ Unified access control across all channels (web, Telegram, Slack). Verified emai
 |---------|----------------------|
 | **Telegram** | User sends `/login your@email.com`, receives 6-digit code, replies `/login 123456` |
 | **Slack** | Automatic — workspace OAuth provides the email |
+| **WhatsApp** | User sends `/login your@email.com`, receives a code, replies to verify |
 | **Web (public links)** | Email verification during public chat session |
 
 ### Access Modes
@@ -43,6 +44,8 @@ When someone requests access:
 3. Click **Deny** to reject.
 
 Approving auto-adds the email to your shared users list.
+
+**The requester is notified automatically.** When you approve a request that came in over Telegram, Slack, or WhatsApp, Trinity sends the requester a message on that same channel confirming they now have access — closing the loop on the "I'll let you know once the owner responds" reply they got when they first messaged. Web users see the change through the dashboard. Denials are silent (the agent's existence is not confirmed to the requester). A delivery failure (e.g. the user blocked the bot) never blocks or rolls back the approval; the outcome is recorded in the audit log.
 
 ## Group Chat Authentication
 

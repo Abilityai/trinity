@@ -72,9 +72,10 @@ def test_webhook_rate_limit_returns_429_after_threshold(api_client: TrinityApiCl
                 f"call {i+1} returned {r.status_code} (expected 202 or 503): {r.text}"
             )
 
-        # The 11th call must be rate-limited. If Redis auth is broken,
-        # _get_redis() returns None and rate limiting silently fails-open;
-        # this assertion catches that regression.
+        # The 11th call must be rate-limited. If Redis auth is broken, the
+        # shared limiter (services/rate_limiter.py, #1023) fails open to its
+        # per-worker in-process fallback; this assertion catches a regression
+        # where rate limiting silently disappears.
         r = httpx.post(url, timeout=5.0)
         assert r.status_code == 429, (
             f"11th call returned {r.status_code} — rate limiter silently disabled? "

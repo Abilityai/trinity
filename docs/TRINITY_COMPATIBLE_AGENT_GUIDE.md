@@ -1449,6 +1449,38 @@ allowed-tools: mcp__trinity__list_agents, mcp__trinity__get_agent
 
 ---
 
+## Stop hook authoring — release inherited stdout
+
+The Trinity platform reads the agent's `{"type":"result"}` JSON from Claude
+Code's stdout pipe. Stop hooks inherit that pipe FD by default. If a hook
+spawns a long-running subprocess that calls `setsid()` (`ssh` from
+`git push` is the canonical case — see [#586](https://github.com/abilityai/trinity/issues/586) /
+[#618](https://github.com/abilityai/trinity/pull/618)), the subprocess can
+hold the pipe open during network I/O even after Claude exits. The
+platform catches this via the `kill_cgroup_orphans()` sweep in
+`drain_reader_threads` (SIGKILLs anything in the container cgroup outside
+the allowlist) so your agent still completes, but the
+slow path adds drain latency and shows up in `[METRIC] drain_outcome` log
+lines with `outcome=natural` or `outcome=force_close`. Defensive hooks
+avoid the slow path by releasing the inherited stdout FD before any
+blocking I/O:
+
+```bash
+#!/bin/bash
+exec 1>/dev/null    # release stdout pipe FD; keep stderr for diagnostics
+set +e
+git push origin HEAD
+```
+
+Closing stdout only (not stderr) preserves error messages from a failing
+`git push`. Non-shell hook runtimes need the equivalent:
+
+- **Python**: `sys.stdout = open(os.devnull, "w")` before spawning.
+- **Node**: `process.stdout.destroy()` (or redirect with `stdio` when
+  spawning child processes).
+
+---
+
 ## Revision History
 
 | Date | Changes |

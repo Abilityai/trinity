@@ -5,6 +5,7 @@ pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
 httpx>=0.28.0
+websockets>=13.0
 python-dotenv>=1.0.1
 docker>=7.1.0
 apscheduler>=3.11.0
@@ -22,6 +23,10 @@ opentelemetry-sdk>=1.29.0
 # floors set in docker/backend/Dockerfile.
 pytz>=2024.1
 redis>=5.2.0
+# fakeredis: dispatch-breaker fail-open unit tests (#526). No Lua/EVALSHA
+# support → those tests exercise the breaker's fail-open path; the Lua state
+# machine itself is covered by tests/integration/test_dispatch_breaker.py.
+fakeredis>=2.20.0
 croniter>=5.0.0
 psutil>=6.1.0
 aiofiles>=24.1.0
@@ -36,3 +41,9 @@ bcrypt>=4.2.0
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
+# CLI package — required for test_cli_admin_login.py and test_cli_profiles.py.
+# Editable so changes to src/cli/ are picked up without reinstall. pip resolves
+# this path against the current working directory (not the requirements file),
+# so `pip install -r tests/requirements-test.txt` must be invoked from the repo
+# root — which is what every CI workflow does.
+-e ./src/cli

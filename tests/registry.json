@@ -1,6 +1,34 @@
 {
   "test_files": [
     {
+      "file": "unit/test_voip_audio.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip", "audio"],
+      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio↔Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
+    },
+    {
+      "file": "unit/test_voip_db.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip", "database"],
+      "description": "voip_bindings CRUD + AuthToken AES-256-GCM encryption, call-log lifecycle, durable daily-cap count, and the _migrate_voip_tables migration (#1056)."
+    },
+    {
+      "file": "unit/test_voip_service.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip"],
+      "description": "VoIP service helpers: E.164 validation, ws(s):// base + TwiML build (XML-escaped), and place_outbound_call abuse-control gates (flag/binding/cap/rate, mocked Twilio) (#1056)."
+    },
+    {
+      "file": "unit/test_1073_voip_media_stream_ticket.py",
+      "feature": "VOIP-001",
+      "added": "2026-06-04",
+      "categories": ["backend", "unit", "voip"],
+      "description": "Regression for #1073: Media Streams WS reads the auth ticket from the start frame's customParameters (<Parameter>), not the query string Twilio drops; accept()-then-authenticate ordering, start-frame parse, scope/intent rejection, and query-string fallback."
+    },
+    {
       "file": "test_agent_rename.py",
       "feature": "RENAME-001",
       "added": "2026-03-01",
@@ -439,18 +467,6 @@
       "description": "Unit tests for the Slack mrkdwn renderer that replaces slackify-markdown 0.2.2 (#293): nested-list indentation preserved (2-3 levels, mixed bullet/ordered), blank line before headings (H1-H6), blockquote `>` prefix on every line (multi-line + softbreak continuation), table conversion to fenced code-block with column alignment, horizontal rule emits visible separator. Plus inline formatting regression coverage (bold, italic, strikethrough, links with/without label, image-as-link, code blocks with language fence stripping), real agent response patterns (status report, code review, blockquoted attribution), edge cases (empty/None/non-string input, HTML-as-literal-text). Pairs with tests/unit/test_slack_rich_text.py (13 tests, retargeted to new renderer)."
     },
     {
-      "file": "test_site_proxy.py",
-      "feature": "SITE-001",
-      "added": "2026-05-03",
-      "categories": [
-        "backend",
-        "api",
-        "public-links",
-        "proxy"
-      ],
-      "description": "Tests for agent website proxy (#633): site link creation, link_type field, URL format, token validation (invalid/wrong-type/disabled), 502 when web server not running, redirect on missing trailing slash."
-    },
-    {
       "file": "unit/test_database_facade_delegation.py",
       "feature": "Issue #647 / WEBHOOK-001 facade gap",
       "added": "2026-05-04",
@@ -476,6 +492,49 @@
         "encryption"
       ],
       "description": "Unit tests for SLACK-001 bot token encryption added to db/slack.py (#453): round-trip via SlackOperations, raw DB value is JSON envelope, plaintext fallback for legacy xoxb-* rows, decrypt-failure returns None, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, _migrate_slack_bot_token_encryption walks both slack_link_connections and slack_workspaces (idempotent, skips encrypted rows, hard-fails without key, no-op on empty/missing tables). 14 tests. Tests for slack_channels.py + telegram + whatsapp encryption are tracked separately in #664."
+    },
+    {
+      "file": "unit/test_telegram_token_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "telegram",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path — Telegram never shipped plaintext."
+    },
+    {
+      "file": "unit/test_whatsapp_token_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "whatsapp",
+        "twilio",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier — pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
+    },
+    {
+      "file": "unit/test_slack_workspaces_encryption.py",
+      "feature": "Issue #664",
+      "added": "2026-05-17",
+      "categories": [
+        "backend",
+        "unit",
+        "slack",
+        "security",
+        "credentials",
+        "encryption"
+      ],
+      "description": "Unit tests for SLACK-002 workspace bot token encryption in db/slack_channels.py (#664): round-trip via SlackChannelOperations.create_workspace + get_workspace_by_team / get_workspace_bot_token / get_all_workspaces (each decrypts), raw DB value is AES-256-GCM JSON envelope (no xoxb- substring), plaintext fallback path at slack_channels.py:47-49 returns legacy xoxb-* tokens unchanged with operator-facing WARNING log, corrupt non-xoxb row returns '' (None normalized at line 98) with ERROR log, wrong-key envelope returns '', re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None for non-xoxb input without key."
     },
     {
       "file": "unit/test_github_pat_fallback.py",
@@ -548,6 +607,17 @@
         "circuit-breaker"
       ],
       "description": "Mirrors the #474 classification rule on the /health probe path and pins the `status_code >= 500 → UNHEALTHY` aggregator branch"
+    },
+    {
+      "file": "unit/test_platform_default_model_regression.py",
+      "feature": "MODEL-DEFAULT-001",
+      "added": "2026-05-13",
+      "categories": [
+        "unit",
+        "regression",
+        "backend",
+        "agent-server"
+      ]
     }
   ]
 }

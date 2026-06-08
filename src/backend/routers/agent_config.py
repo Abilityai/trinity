@@ -510,6 +510,30 @@ async def set_agent_timeout(
             detail="execution_timeout_seconds must be an integer between 60 and 7200 (1 min to 2 hours)"
         )
 
+    # #929 Approach A: the agent cap is the schedule ceiling, so refuse to
+    # lower it below any active schedule's timeout. Caller must either raise
+    # the cap above the affected schedules or shrink those schedules first.
+    blocking_schedules = db.find_active_schedules_exceeding_timeout(
+        agent_name, timeout_seconds
+    )
+    if blocking_schedules:
+        max_blocking = max(s["timeout_seconds"] for s in blocking_schedules)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "agent_timeout_below_active_schedules",
+                "message": (
+                    f"Cannot lower agent timeout to {timeout_seconds}s — "
+                    f"{len(blocking_schedules)} active schedule(s) on '{agent_name}' "
+                    f"have timeout_seconds up to {max_blocking}s. Edit those "
+                    f"schedules first, then retry."
+                ),
+                "requested_seconds": timeout_seconds,
+                "max_schedule_timeout_seconds": max_blocking,
+                "blocking_schedules": blocking_schedules,
+            },
+        )
+
     # Update database
     success = db.set_execution_timeout(agent_name, timeout_seconds)
     if not success:

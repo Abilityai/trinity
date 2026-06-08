@@ -10,7 +10,7 @@ Trinity is an autonomous agent orchestration and infrastructure platform — sov
 
 **Template** -- A GitHub repository or local directory that defines an agent's initial configuration, including CLAUDE.md, template.yaml, .mcp.json.template, and credential declarations.
 
-**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 62 tools for fleet management, credential injection, scheduling, and more.
+**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 74 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
 
 **System Agent** -- An auto-deployed platform orchestrator (`trinity-system`) that manages fleet operations such as health checks, scaling, and coordination.
 
@@ -19,8 +19,6 @@ Trinity is an autonomous agent orchestration and infrastructure platform — sov
 **Execution** -- A single run of a task on an agent. Executions can be triggered manually, by a cron schedule, by another agent, or via the API.
 
 **Public Link** -- A shareable URL that allows unauthenticated users to chat with an agent directly.
-
-**Process Engine** -- A BPMN-inspired workflow orchestration system for multi-agent processes with approval gates and conditional branching.
 
 ## How It Works
 
@@ -43,7 +41,7 @@ All platform operations are available through the REST API and the MCP server.
 |-----------|-----------|------|---------|
 | Frontend | Vue.js 3 + Tailwind CSS | 80 | Web dashboard and chat UI |
 | Backend | FastAPI (Python) | 8000 | REST API, 300+ endpoints across 45+ routers |
-| MCP Server | FastMCP, Streamable HTTP | 8080 | 62 tools for agent-to-agent and agent-to-platform communication |
+| MCP Server | FastMCP, Streamable HTTP | 8080 | 74 tools for agent-to-agent and agent-to-platform communication |
 | Vector | Log aggregation | 8686 | Structured logging from all containers |
 | Redis | Secrets and cache | 6379 | Encrypted credential storage |
 | Docker Engine | Container orchestration | -- | Agent lifecycle management |
@@ -82,17 +80,18 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 - Multi-runtime support: Claude Code, Gemini CLI
 - Credential management with encryption and hot-reload
 - Agent-to-agent collaboration via MCP tool calls
-- Cron-based scheduling with execution history
+- Cron-based scheduling with execution history and per-schedule timeouts
 - Real-time monitoring dashboard with network graph
 - Public chat links for external users
-- Slack integration for agent notifications and commands
-- Process engine for BPMN-style multi-agent workflows
+- Channel adapters: Slack, Telegram, WhatsApp (via Twilio)
+- Outbound file sharing — agents publish files to signed download URLs
+- A2A v1.0 Agent Card discovery for external orchestrators
 - Voice chat via Gemini Live API
 - x402 payment protocol for agent monetization
 
 ## See Also
 
-- [Installation](installation.md) -- Set up Trinity on your machine
-- [Creating Your First Agent](first-agent.md) -- Step-by-step agent creation
+- [Setup](setup.md) -- Set up Trinity on your machine
+- [Quick Start](quick-start.md) -- Create your first agent in 5 minutes
 - [Trinity-Compatible Agent Guide](../../TRINITY_COMPATIBLE_AGENT_GUIDE.md) -- How to make any agent work with Trinity
 - [API Documentation](http://localhost:8000/docs) -- Full interactive API reference

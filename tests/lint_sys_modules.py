@@ -182,8 +182,13 @@ def _check_file(path: Path) -> list[Finding]:
 
 
 def iter_test_files(root: Path) -> Iterable[Path]:
+    # Skip directories that contain third-party / generated code so the
+    # baseline doesn't drift on dep upgrades or machine-local venvs.
+    EXCLUDED_DIR_PARTS = {".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
     for path in sorted(root.rglob("*.py")):
         if path.name in {"lint_sys_modules.py", "test_lint_sys_modules.py"}:
+            continue
+        if EXCLUDED_DIR_PARTS.intersection(path.parts):
             continue
         yield path
 

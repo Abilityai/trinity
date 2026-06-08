@@ -8,6 +8,8 @@ import json
 import logging
 import secrets
 import sqlite3
+import statistics
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 
@@ -20,6 +22,18 @@ from models import TaskExecutionStatus
 from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timestamp
 
 logger = logging.getLogger(__name__)
+
+# Cap on rows fed into percentile compute and tool-call aggregation
+# (#868). Counts and the daily timeline always use the unsampled rowset;
+# only the percentile / tool-call pool is bounded. Test-only override is
+# via `monkeypatch.setattr(db.schedules, "_PERCENTILE_ROWSET_CAP", N)`.
+_PERCENTILE_ROWSET_CAP = 5000
+
+# #73: chunk size for scoped `IN (...)` lookups. SQLite caps host parameters at
+# SQLITE_MAX_VARIABLE_NUMBER (999 before SQLite 3.32). Keep a safe margin below
+# that so a large accessible-agent set can't blow the limit. Read as a module
+# global so tests can monkeypatch it to exercise the multi-chunk path.
+_SQLITE_MAX_IN_VARS = 900
 
 # #378: Error-message marker written by cleanup_service._process_stale_slot_reclaims
 # when Phase 3 fails an execution. Used to scope the residual-race WARNING log
@@ -92,7 +106,9 @@ class ScheduleOperations:
             updated_at=parse_iso_timestamp(row["updated_at"]),
             last_run_at=parse_iso_timestamp(row["last_run_at"]) if row["last_run_at"] else None,
             next_run_at=parse_iso_timestamp(row["next_run_at"]) if row["next_run_at"] else None,
-            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 3600,
+            # #913: NULL ⇒ inherit from agent_ownership.execution_timeout_seconds.
+            # Do NOT fall through to a constant here — that was the bug.
+            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys else None,
             allowed_tools=allowed_tools,
             model=row["model"] if "model" in row_keys else None,
             # Retry configuration (RETRY-001)
@@ -160,6 +176,8 @@ class ScheduleOperations:
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None,
             # Auto-compact observability (Bundle B)
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
+            # Reader-race auto-retry (#678)
+            retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
         )
 
     @staticmethod
@@ -287,49 +305,98 @@ class ScheduleOperations:
                 return None
 
     def get_schedule(self, schedule_id: str) -> Optional[Schedule]:
-        """Get a schedule by ID."""
+        """Get a schedule by ID. Excludes soft-deleted schedules (#834)."""
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM agent_schedules WHERE id = ?", (schedule_id,))
+            cursor.execute(
+                "SELECT * FROM agent_schedules WHERE id = ? AND deleted_at IS NULL",
+                (schedule_id,),
+            )
             row = cursor.fetchone()
             return self._row_to_schedule(row) if row else None
 
     def list_agent_schedules(self, agent_name: str) -> List[Schedule]:
-        """List all schedules for an agent."""
+        """List all schedules for an agent. Excludes soft-deleted (#834)."""
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM agent_schedules WHERE agent_name = ?
+                SELECT * FROM agent_schedules
+                WHERE agent_name = ? AND deleted_at IS NULL
                 ORDER BY created_at DESC
             """, (agent_name,))
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 
-    def list_all_enabled_schedules(self) -> List[Schedule]:
-        """List all enabled schedules (for scheduler initialization)."""
+    def find_active_schedules_exceeding_timeout(
+        self, agent_name: str, ceiling_seconds: int
+    ) -> List[Dict]:
+        """Active schedules whose ``timeout_seconds > ceiling_seconds`` (#929).
+
+        Returns a thin list of ``{id, name, timeout_seconds}`` dicts for
+        the agent-cap-lowering error payload — the caller surfaces them
+        so the operator knows which schedules need editing first.
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM agent_schedules WHERE enabled = 1
-                ORDER BY agent_name, name
+                SELECT id, name, timeout_seconds
+                FROM agent_schedules
+                WHERE agent_name = ?
+                  AND deleted_at IS NULL
+                  AND timeout_seconds > ?
+                ORDER BY timeout_seconds DESC
+            """, (agent_name, ceiling_seconds))
+            return [
+                {"id": row["id"], "name": row["name"], "timeout_seconds": row["timeout_seconds"]}
+                for row in cursor.fetchall()
+            ]
+
+    def list_all_enabled_schedules(self) -> List[Schedule]:
+        """List all enabled schedules (for scheduler initialization).
+
+        Two soft-delete filters apply:
+        - #834 Phase 1a: skip schedules whose *agent* is soft-deleted
+          (`agent_ownership.deleted_at`) — otherwise the scheduler fires
+          every enabled schedule for a soft-deleted agent and writes a
+          `schedule_executions` failure row per tick until purge.
+        - #834 Phase 1b: skip *schedules* that are themselves
+          soft-deleted (`agent_schedules.deleted_at`).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT s.* FROM agent_schedules s
+                JOIN agent_ownership ao ON ao.agent_name = s.agent_name
+                WHERE s.enabled = 1
+                  AND s.deleted_at IS NULL
+                  AND ao.deleted_at IS NULL
+                ORDER BY s.agent_name, s.name
             """)
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 
     def list_all_disabled_schedules(self) -> List[Schedule]:
-        """List all disabled schedules (for resume operations)."""
+        """List all disabled schedules (for resume operations).
+
+        Excludes soft-deleted (#834).
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM agent_schedules WHERE enabled = 0
+                SELECT * FROM agent_schedules
+                WHERE enabled = 0 AND deleted_at IS NULL
                 ORDER BY agent_name, name
             """)
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
 
     def list_all_schedules(self) -> List[Schedule]:
-        """List all schedules across all agents (for system agent overview)."""
+        """List all schedules across all agents (for system agent overview).
+
+        Excludes soft-deleted (#834).
+        """
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT * FROM agent_schedules
+                WHERE deleted_at IS NULL
                 ORDER BY agent_name, name
             """)
             return [self._row_to_schedule(row) for row in cursor.fetchall()]
@@ -420,27 +487,167 @@ class ScheduleOperations:
             return self.get_schedule(schedule_id)
 
     def delete_schedule(self, schedule_id: str, username: str) -> bool:
-        """Delete a schedule and its executions."""
+        """Soft-delete a schedule (Issue #834 Phase 1b).
+
+        Sets `agent_schedules.deleted_at = NOW`. Executions stay intact —
+        they're billing-relevant (subscription_id rollup) and #772's
+        retention sweep ages them out independently.
+
+        The scheduler service filters `deleted_at IS NULL` on its
+        enabled-schedules poll, so soft-deleted schedules stop firing
+        immediately. `cleanup_service.py` hard-purges rows past
+        `schedule_soft_delete_retention_days` (default 30).
+
+        Idempotent: re-deleting an already-soft-deleted schedule still
+        returns True provided the caller has permission.
+        """
+        from utils.helpers import utc_now_iso
+
         user = self._user_ops.get_user_by_username(username)
         if not user:
             return False
 
-        schedule = self.get_schedule(schedule_id)
-        if not schedule:
-            return False
-
-        # Check permission (owner or admin)
-        if user["role"] != "admin" and schedule.owner_id != user["id"]:
-            return False
-
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            # Delete executions first
-            cursor.execute("DELETE FROM schedule_executions WHERE schedule_id = ?", (schedule_id,))
-            # Delete schedule
-            cursor.execute("DELETE FROM agent_schedules WHERE id = ?", (schedule_id,))
+            # Permission check must read the row *including* soft-deleted
+            # ones. `get_schedule()` filters `deleted_at IS NULL` (#834
+            # Phase 1b), so using it here made a retry on an
+            # already-soft-deleted schedule fall through to `return
+            # False` → the router turned that into a misleading 403
+            # "access denied" for the legitimate owner. Read owner_id
+            # directly so re-delete is genuinely idempotent.
+            cursor.execute(
+                "SELECT owner_id, deleted_at FROM agent_schedules WHERE id = ?",
+                (schedule_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            if user["role"] != "admin" and row["owner_id"] != user["id"]:
+                return False
+
+            if row["deleted_at"] is not None:
+                # Already soft-deleted and the caller is authorised —
+                # idempotent success (router → 204).
+                return True
+
+            cursor.execute(
+                "UPDATE agent_schedules SET deleted_at = ? "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (utc_now_iso(), schedule_id),
+            )
             conn.commit()
             return cursor.rowcount > 0
+
+    def purge_schedule(self, schedule_id: str) -> bool:
+        """Hard-delete a soft-deleted schedule (#834 Phase 1b).
+
+        Called by the cleanup_service retention sweep. Refuses to purge
+        a live (non-soft-deleted) row — callers must soft-delete first.
+        Also removes `schedule_executions` rows for the schedule —
+        consistent with the previous hard-delete behavior and with
+        what cascade_delete does at agent purge time.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT deleted_at FROM agent_schedules WHERE id = ?",
+                (schedule_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row["deleted_at"] is None:
+                return False
+
+            cursor.execute(
+                "DELETE FROM schedule_executions WHERE schedule_id = ?",
+                (schedule_id,),
+            )
+            cursor.execute(
+                "DELETE FROM agent_schedules WHERE id = ?",
+                (schedule_id,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def recover_schedule(self, schedule_id: str) -> bool:
+        """Recover a soft-deleted schedule by clearing `deleted_at` (#834).
+
+        Refuses to operate on a row that doesn't exist or is already
+        live (`deleted_at IS NULL`). Returns True on successful
+        recovery. The schedule reappears on the scheduler's
+        firing list on the next poll cycle if it was enabled at the
+        time of soft-delete.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_schedules SET deleted_at = NULL "
+                "WHERE id = ? AND deleted_at IS NOT NULL",
+                (schedule_id,),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                return True
+            return False
+
+    def list_soft_deleted_schedules(
+        self, agent_name: Optional[str] = None, limit: int = 200
+    ) -> list:
+        """List currently-soft-deleted schedules with their `deleted_at`.
+
+        If `agent_name` is given, scopes to that agent's schedules
+        (admin endpoint pattern: GET /api/admin/agents/{name}/schedules/
+        soft-deleted). With `agent_name=None`, returns soft-deleted
+        schedules across the fleet (admin-only).
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            if agent_name is None:
+                cursor.execute(
+                    "SELECT id, agent_name, name, cron_expression, message, "
+                    "       owner_id, enabled, deleted_at "
+                    "FROM agent_schedules "
+                    "WHERE deleted_at IS NOT NULL "
+                    "ORDER BY deleted_at DESC "
+                    "LIMIT ?",
+                    (limit,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, agent_name, name, cron_expression, message, "
+                    "       owner_id, enabled, deleted_at "
+                    "FROM agent_schedules "
+                    "WHERE deleted_at IS NOT NULL AND agent_name = ? "
+                    "ORDER BY deleted_at DESC "
+                    "LIMIT ?",
+                    (agent_name, limit),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def find_soft_deleted_schedules_past_retention(
+        self, retention_days: int, limit: int = 5000
+    ) -> list:
+        """List schedule ids whose `deleted_at` is older than `retention_days`.
+
+        Used by the cleanup sweep to find rows ready for hard-purge.
+        Bounded by `limit`.
+        """
+        from utils.helpers import iso_cutoff
+
+        if retention_days <= 0 or limit <= 0:
+            return []
+
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM agent_schedules "
+                "WHERE deleted_at IS NOT NULL AND deleted_at < ? "
+                "LIMIT ?",
+                (cutoff, limit),
+            )
+            return [row["id"] for row in cursor.fetchall()]
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:
         """Enable or disable a schedule.
@@ -548,7 +755,8 @@ class ScheduleOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM agent_schedules WHERE webhook_token = ?",
+                "SELECT * FROM agent_schedules "
+                "WHERE webhook_token = ? AND deleted_at IS NULL",
                 (token,),
             )
             row = cursor.fetchone()
@@ -585,7 +793,8 @@ class ScheduleOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT webhook_token, webhook_enabled FROM agent_schedules WHERE id = ?",
+                "SELECT webhook_token, webhook_enabled FROM agent_schedules "
+                "WHERE id = ? AND deleted_at IS NULL",
                 (schedule_id,),
             )
             row = cursor.fetchone()
@@ -613,6 +822,7 @@ class ScheduleOperations:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        loop_id: str = None,
         subscription_id: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
@@ -620,7 +830,7 @@ class ScheduleOperations:
         Args:
             agent_name: Target agent name
             message: Task message
-            triggered_by: Trigger type - "manual", "mcp", "agent", "fan_out"
+            triggered_by: Trigger type - "manual", "mcp", "agent", "fan_out", "loop"
             source_user_id: User ID who triggered (for manual/mcp triggers)
             source_user_email: User email (denormalized for queries)
             source_agent_name: Calling agent name (for agent-to-agent)
@@ -628,6 +838,7 @@ class ScheduleOperations:
             source_mcp_key_name: MCP API key name (denormalized)
             model_used: Model used for this execution (MODEL-001)
             fan_out_id: Parent fan-out operation ID (FANOUT-001)
+            loop_id: Parent loop ID (#740) — iterations of a sequential loop
             subscription_id: Subscription active at record time (SUB-004)
         """
         execution_id = self._generate_id()
@@ -640,8 +851,8 @@ class ScheduleOperations:
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     source_user_id, source_user_email, source_agent_name,
                     source_mcp_key_id, source_mcp_key_name, model_used, fan_out_id,
-                    subscription_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    loop_id, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 "__manual__",  # Special marker for manual/API-triggered tasks
@@ -657,6 +868,7 @@ class ScheduleOperations:
                 source_mcp_key_name,
                 model_used,
                 fan_out_id,
+                loop_id,
                 subscription_id,
             ))
             conn.commit()
@@ -676,6 +888,7 @@ class ScheduleOperations:
                 source_mcp_key_name=source_mcp_key_name,
                 model_used=model_used,
                 fan_out_id=fan_out_id,
+                loop_id=loop_id,
                 subscription_id=subscription_id,
             )
 
@@ -942,6 +1155,44 @@ class ScheduleOperations:
             conn.commit()
             return cursor.rowcount
 
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        """Bulk-FAIL all queued executions for an agent (#526, RELIABILITY-007).
+
+        Called when the per-agent dispatch circuit breaker trips: the queued
+        backlog is doomed (the agent is auth-dead), so fail it out immediately
+        instead of letting each row drain into its own failure after the detect
+        window.
+
+        Mirrors ``expire_stale_queued`` (status → FAILED) — intentionally NOT
+        ``cancel_queued_for_agent`` (which sets CANCELLED). The #526 acceptance
+        criteria require these rows close FAILED so they read as failures, not
+        as user cancellations.
+
+        Returns:
+            Count of rows moved from QUEUED to FAILED.
+        """
+        now = utc_now_iso()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE schedule_executions
+                SET status = ?,
+                    completed_at = ?,
+                    error = ?
+                WHERE agent_name = ? AND status = ?
+                """,
+                (
+                    TaskExecutionStatus.FAILED,
+                    now,
+                    reason,
+                    agent_name,
+                    TaskExecutionStatus.QUEUED,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount
+
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         """Mark queued executions older than max_age_hours as FAILED.
 
@@ -1006,6 +1257,7 @@ class ScheduleOperations:
         execution_log: str = None,
         claude_session_id: str = None,
         compact_metadata: str = None,
+        retry_count: Optional[int] = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -1021,6 +1273,9 @@ class ScheduleOperations:
 
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
+            retry_count: #678 — number of in-line auto-retries used to produce
+                this terminal write. None leaves the column unchanged (default
+                0 from migration). 1 means the reader-race retry fired once.
         """
         # Terminal states that a non-success write must not overwrite.
         _TERMINAL = (
@@ -1045,37 +1300,47 @@ class ScheduleOperations:
             completed_at = parse_iso_timestamp(utc_now_iso())
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
+            # #678: optionally update retry_count alongside the terminal write.
+            # COALESCE preserves prior value when caller passes None so other
+            # update paths (cleanup, scheduler) don't accidentally zero it.
+            if retry_count is None:
+                retry_set_sql = ""
+                retry_params: tuple = ()
+            else:
+                retry_set_sql = ", retry_count = ?"
+                retry_params = (int(retry_count),)
+
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a
                 # user-issued cancel (#671). A late "I'm done!" from Claude Code
                 # after the operator pulled the plug must not flip the row to
                 # success — that hides incomplete deliverables and silently
                 # advances the schedule's next_run_at.
-                cursor.execute("""
+                cursor.execute(f"""
                     UPDATE schedule_executions
                     SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
                         context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
-                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?{retry_set_sql}
                     WHERE id = ? AND status != ?
                 """, (
                     status, to_utc_iso(completed_at), duration_ms, response, error,
                     context_used, context_max, cost, tool_calls, execution_log,
-                    claude_session_id, compact_metadata, execution_id,
+                    claude_session_id, compact_metadata, *retry_params, execution_id,
                     TaskExecutionStatus.CANCELLED,
                 ))
             else:
                 # Non-success terminal write: block if already terminal so cleanup
                 # paths cannot overwrite a real completion (RELIABILITY-005).
-                cursor.execute("""
+                cursor.execute(f"""
                     UPDATE schedule_executions
                     SET status = ?, completed_at = ?, duration_ms = ?, response = ?, error = ?,
                         context_used = ?, context_max = ?, cost = ?, tool_calls = ?,
-                        execution_log = ?, claude_session_id = ?, compact_metadata = ?
+                        execution_log = ?, claude_session_id = ?, compact_metadata = ?{retry_set_sql}
                     WHERE id = ? AND status NOT IN (?, ?, ?, ?)
                 """, (
                     status, to_utc_iso(completed_at), duration_ms, response, error,
                     context_used, context_max, cost, tool_calls, execution_log,
-                    claude_session_id, compact_metadata, execution_id, *_TERMINAL,
+                    claude_session_id, compact_metadata, *retry_params, execution_id, *_TERMINAL,
                 ))
 
             conn.commit()
@@ -1308,6 +1573,183 @@ class ScheduleOperations:
 
             return results
 
+    def get_schedule_analytics(
+        self,
+        schedule_id: str,
+        hours: int,
+        agent_name: str,
+    ) -> Optional[Dict]:
+        """Compute per-schedule analytics over a rolling time window.
+
+        Returns the analytics envelope, or `None` when the schedule
+        does not exist, is soft-deleted, or belongs to a different
+        agent than `agent_name`. The router maps `None` → 404, which
+        is the load-bearing tenant-boundary check — `AuthorizedAgent`
+        only validates the URL's agent name, not that the user-supplied
+        `schedule_id` belongs to it.
+
+        Counts and timeline buckets use the unsampled rowset;
+        percentiles and tool-call distribution are computed over the
+        newest `_PERCENTILE_ROWSET_CAP` success rows (`sampled=True`
+        when the cap was hit). Bucketing is UTC — documented in the
+        route's OpenAPI description.
+        """
+        schedule = self.get_schedule(schedule_id)
+        if not schedule or schedule.agent_name != agent_name:
+            return None
+
+        cutoff = iso_cutoff(hours)
+        cap = _PERCENTILE_ROWSET_CAP
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    substr(started_at, 1, 10) AS day,
+                    status,
+                    COUNT(*) AS n,
+                    SUM(COALESCE(cost, 0)) AS cost_sum
+                FROM schedule_executions
+                WHERE schedule_id = ? AND started_at > ?
+                GROUP BY day, status
+                """,
+                (schedule_id, cutoff),
+            )
+            agg_rows = cursor.fetchall()
+
+            # `cap + 1` so we can detect sampling without a separate COUNT.
+            cursor.execute(
+                """
+                SELECT duration_ms, tool_calls
+                FROM schedule_executions
+                WHERE schedule_id = ?
+                  AND started_at > ?
+                  AND status = 'success'
+                  AND duration_ms IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (schedule_id, cutoff, cap + 1),
+            )
+            detail_rows = cursor.fetchall()
+
+        counts: Dict[str, int] = defaultdict(int)
+        cost_by_status: Dict[str, float] = defaultdict(float)
+        for row in agg_rows:
+            counts[row["status"]] += int(row["n"] or 0)
+            cost_by_status[row["status"]] += float(row["cost_sum"] or 0.0)
+
+        total_executions = sum(counts.values())
+        success_count = counts.get(TaskExecutionStatus.SUCCESS, 0)
+        failed_count = counts.get(TaskExecutionStatus.FAILED, 0)
+        cancelled_count = counts.get(TaskExecutionStatus.CANCELLED, 0)
+        success_rate = (
+            round(success_count / total_executions, 4) if total_executions else 0.0
+        )
+        cost_total = round(sum(cost_by_status.values()), 4)
+
+        sampled = len(detail_rows) > cap
+        sample_size = cap if sampled else len(detail_rows)
+        capped_rows = detail_rows[:cap]
+        durations = [int(r["duration_ms"]) for r in capped_rows]
+
+        if len(durations) >= 2:
+            # `inclusive` matches "x% of observations were ≤ this value"
+            # for small N; the default `exclusive` shifts p99 noticeably.
+            cuts = statistics.quantiles(durations, n=100, method="inclusive")
+            p50, p95, p99 = int(cuts[49]), int(cuts[94]), int(cuts[98])
+        elif len(durations) == 1:
+            only = int(durations[0])
+            p50 = p95 = p99 = only
+        else:
+            p50 = p95 = p99 = None
+
+        # Top-5 weighted by total wall time (NOT raw count) — avoids
+        # `Read`/`Bash` dominating because they're frequent but cheap.
+        tool_duration: Dict[str, int] = defaultdict(int)
+        tool_call_total = 0
+        for row in capped_rows:
+            raw = row["tool_calls"]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "get_schedule_analytics: malformed tool_calls JSON "
+                    "skipped (schedule_id=%s): %s",
+                    schedule_id, exc,
+                )
+                continue
+            if not isinstance(parsed, list):
+                continue
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("tool")
+                if not name:
+                    continue
+                tool_call_total += 1
+                dur = entry.get("duration_ms")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    tool_duration[name] += int(dur)
+                # Entries without a usable duration count toward
+                # total_calls but stay out of the top-5 ranking.
+
+        tool_top5 = [
+            {"name": name, "total_duration_ms": dur_total}
+            for name, dur_total in sorted(
+                tool_duration.items(), key=lambda kv: kv[1], reverse=True
+            )[:5]
+        ]
+
+        timeline_by_day: Dict[str, Dict[str, float]] = defaultdict(
+            lambda: {"success": 0, "failed": 0, "cost": 0.0}
+        )
+        for row in agg_rows:
+            day = row["day"]
+            if not day:
+                continue
+            n = int(row["n"] or 0)
+            cost_sum = float(row["cost_sum"] or 0.0)
+            timeline_by_day[day]["cost"] += cost_sum
+            if row["status"] == TaskExecutionStatus.SUCCESS:
+                timeline_by_day[day]["success"] += n
+            elif row["status"] == TaskExecutionStatus.FAILED:
+                timeline_by_day[day]["failed"] += n
+
+        # Gap-fill so the chart x-axis stays continuous for zero-days.
+        now_utc = datetime.now(timezone.utc).date()
+        start_utc = (datetime.now(timezone.utc) - timedelta(hours=hours)).date()
+        timeline: List[Dict] = []
+        day = start_utc
+        while day <= now_utc:
+            iso = day.isoformat()
+            bucket = timeline_by_day.get(iso, {"success": 0, "failed": 0, "cost": 0.0})
+            timeline.append({
+                "date": iso,
+                "success": int(bucket["success"]),
+                "failed": int(bucket["failed"]),
+                "cost": round(float(bucket["cost"]), 4),
+            })
+            day = day + timedelta(days=1)
+
+        return {
+            "window_hours": hours,
+            "total_executions": total_executions,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "cancelled_count": cancelled_count,
+            "success_rate": success_rate,
+            "duration_ms": {"p50": p50, "p95": p95, "p99": p99},
+            "cost": {"total": cost_total},
+            "tool_calls": {"top": tool_top5, "total_calls": tool_call_total},
+            "timeline": timeline,
+            "sampled": sampled,
+            "sample_size": sample_size,
+        }
+
     def get_all_agents_schedule_counts(self) -> Dict[str, Dict[str, int]]:
         """Get schedule counts (total and enabled) for all agents.
 
@@ -1322,6 +1764,7 @@ class ScheduleOperations:
                     COUNT(*) as total,
                     SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled
                 FROM agent_schedules
+                WHERE deleted_at IS NULL
                 GROUP BY agent_name
             """)
 
@@ -1453,6 +1896,42 @@ class ScheduleOperations:
                 (agent_name,),
             ).fetchone()
             return bool(row[0]) if row else False
+
+    def get_all_git_auto_sync_enabled(
+        self, agent_names: Optional[set] = None
+    ) -> Dict[str, bool]:
+        """#73: bulk read of the auto-sync flag in one query, optionally scoped
+        to `agent_names` (mirrors get_all_permission_edges). Removes the N+1 in
+        the /sync-health dashboard endpoint. Agents without a config row are
+        absent from the result (caller defaults to False).
+
+        `None` = whole fleet; an empty set = empty result (an empty scope must
+        NOT fall through to the whole-fleet query, and `IN ()` is invalid SQL).
+
+        Scoped lookups chunk the `IN (...)` list at `_SQLITE_MAX_IN_VARS` so a
+        large accessible-agent set can't exceed SQLite's host-parameter cap.
+        """
+        if agent_names is not None and not agent_names:
+            return {}
+        with get_db_connection() as conn:
+            if agent_names is None:
+                rows = conn.execute(
+                    "SELECT agent_name, auto_sync_enabled FROM agent_git_config"
+                ).fetchall()
+                return {row[0]: bool(row[1]) for row in rows}
+
+            result: Dict[str, bool] = {}
+            names = list(agent_names)
+            for start in range(0, len(names), _SQLITE_MAX_IN_VARS):
+                chunk = names[start:start + _SQLITE_MAX_IN_VARS]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT agent_name, auto_sync_enabled FROM agent_git_config "
+                    f"WHERE agent_name IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                result.update({row[0]: bool(row[1]) for row in rows})
+            return result
 
     def get_freeze_schedules_if_sync_failing(self, agent_name: str) -> bool:
         """#389: read the freeze-schedules flag. False if config missing."""
@@ -1712,7 +2191,7 @@ class ScheduleOperations:
                 cursor.execute(
                     """
                     SELECT id FROM schedule_executions
-                    WHERE status IN ('completed', 'failed', 'terminated')
+                    WHERE status IN ('success', 'failed', 'cancelled', 'skipped')
                       AND completed_at IS NOT NULL
                       AND completed_at < ?
                       AND execution_log IS NOT NULL
@@ -1759,7 +2238,7 @@ class ScheduleOperations:
                 cursor.execute(
                     """
                     SELECT id FROM schedule_executions
-                    WHERE status IN ('completed', 'failed', 'terminated')
+                    WHERE status IN ('success', 'failed', 'cancelled', 'skipped')
                       AND completed_at IS NOT NULL
                       AND completed_at < ?
                     LIMIT ?

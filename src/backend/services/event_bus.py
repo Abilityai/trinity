@@ -25,7 +25,7 @@ Scope discipline (#306)
 This module is the WebSocket delivery layer. Agent-push completion, heartbeat
 push, and capacity consolidation (#307 / #428 / #429) will reuse the same
 stream primitive in later sprints — see
-``docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md``.
+``docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md``.
 """
 from __future__ import annotations
 

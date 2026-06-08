@@ -92,6 +92,7 @@ COPY ./hooks/lib.py /opt/trinity/hooks/lib.py
 COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
+COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
 RUN chmod 0555 /opt/trinity/hooks/*.py && \

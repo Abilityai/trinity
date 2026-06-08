@@ -202,6 +202,177 @@ class PlatformAuditOperations:
             )
             return [self._row_to_dict(row) for row in cursor.fetchall()]
 
+    def get_distinct_event_types(self) -> List[str]:
+        """Return sorted unique event_type values across the audit log.
+
+        Used by the dashboard (#941) to populate filter dropdowns without
+        hardcoding the enum. Indexed column + low cardinality → cheap.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT event_type FROM audit_log "
+                "WHERE event_type IS NOT NULL ORDER BY event_type"
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_distinct_actor_types(self) -> List[str]:
+        """Return sorted unique actor_type values across the audit log.
+
+        Companion to get_distinct_event_types — drives the actor_type
+        dropdown on the audit dashboard.
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT actor_type FROM audit_log "
+                "WHERE actor_type IS NOT NULL ORDER BY actor_type"
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_audit_heatmap(
+        self,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        event_type: Optional[str] = None,
+        actor_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Bucket audit rows into a 7×24 day-of-week × hour-of-day grid.
+
+        SQLite ``strftime('%w', timestamp)`` returns weekday 0..6 with
+        Sunday=0; ``%H`` returns hour 0..23. Both accept the ISO-8601
+        ``YYYY-MM-DDTHH:MM:SSZ`` form used across `audit_log.timestamp`
+        (architectural invariant #16 — timestamps written via
+        ``utc_now_iso()``).
+
+        Returns a sparse cell list — rows with zero counts are omitted to
+        keep the payload small on quiet windows. Frontend lays cells onto
+        the implicit 7×24 grid.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+        if start_time:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if actor_type:
+            conditions.append("actor_type = ?")
+            params.append(actor_type)
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    CAST(strftime('%w', timestamp) AS INTEGER) AS dow,
+                    CAST(strftime('%H', timestamp) AS INTEGER) AS hour,
+                    COUNT(*) AS cnt
+                FROM audit_log
+                WHERE {where_clause}
+                GROUP BY dow, hour
+                """,
+                params,
+            )
+            cells = []
+            total = 0
+            max_count = 0
+            for row in cursor.fetchall():
+                # Defensive — strftime returns NULL for unparseable
+                # timestamps; skip those instead of crashing the dashboard.
+                if row["dow"] is None or row["hour"] is None:
+                    continue
+                count = int(row["cnt"])
+                cells.append(
+                    {
+                        "dow": int(row["dow"]),
+                        "hour": int(row["hour"]),
+                        "count": count,
+                    }
+                )
+                total += count
+                if count > max_count:
+                    max_count = count
+
+            return {
+                "cells": cells,
+                "total": total,
+                "max_count": max_count,
+            }
+
+    def get_audit_calendar(
+        self,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        event_type: Optional[str] = None,
+        actor_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Bucket audit rows into per-day counts (GitHub-style calendar).
+
+        Returns sparse `[{date: 'YYYY-MM-DD', count: N}]` pairs — quiet
+        days are omitted. Frontend lays the pairs onto a date-anchored
+        grid so the layout is canonical-calendar-week regardless of
+        which days appear in the payload.
+
+        SQLite ``strftime('%Y-%m-%d', timestamp)`` accepts the ISO-Z
+        timestamps stored in `audit_log` (invariant #16) and emits UTC
+        date strings — no timezone shift.
+        """
+        conditions: List[str] = []
+        params: List[Any] = []
+        if start_time:
+            conditions.append("timestamp >= ?")
+            params.append(start_time)
+        if end_time:
+            conditions.append("timestamp <= ?")
+            params.append(end_time)
+        if event_type:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if actor_type:
+            conditions.append("actor_type = ?")
+            params.append(actor_type)
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    strftime('%Y-%m-%d', timestamp) AS date,
+                    COUNT(*) AS cnt
+                FROM audit_log
+                WHERE {where_clause}
+                GROUP BY date
+                ORDER BY date
+                """,
+                params,
+            )
+            days = []
+            total = 0
+            max_count = 0
+            for row in cursor.fetchall():
+                # Skip unparseable timestamps (strftime → NULL) instead
+                # of crashing the dashboard for one malformed row.
+                if row["date"] is None:
+                    continue
+                count = int(row["cnt"])
+                days.append({"date": row["date"], "count": count})
+                total += count
+                if count > max_count:
+                    max_count = count
+
+            return {
+                "days": days,
+                "total": total,
+                "max_count": max_count,
+            }
+
     def get_audit_stats(
         self,
         start_time: Optional[str] = None,

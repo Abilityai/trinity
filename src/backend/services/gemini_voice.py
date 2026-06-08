@@ -12,6 +12,7 @@ Architecture:
 import asyncio
 import json
 import logging
+import posixpath
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,7 +34,13 @@ _TOOL_PROMPT_MAX = 2000
 # Max bytes stored in panel_state["content"] to bound memory per session
 _PANEL_CONTENT_MAX = 524_288  # 512 KB
 
-_PANEL_TOOL_NAMES = {"show_markdown", "update_panel", "append_to_panel", "clear_panel"}
+# Agent workspace root inside the container; show_image file paths must resolve under it.
+_WORKSPACE_ROOT = "/home/developer"
+
+_PANEL_TOOL_NAMES = {
+    "show_markdown", "update_panel", "append_to_panel", "clear_panel",
+    "show_diagram", "show_image",
+}
 
 _PANEL_TOOLS = genai_types.Tool(
     function_declarations=[
@@ -84,6 +91,41 @@ _PANEL_TOOLS = genai_types.Tool(
                 properties={},
             ),
         ),
+        genai_types.FunctionDeclaration(
+            name="show_diagram",
+            description=(
+                "Render a Mermaid diagram in the canvas panel — flowcharts, sequence "
+                "diagrams, mindmaps, timelines, state/class/ER diagrams. Pass the raw "
+                "Mermaid source (e.g. 'graph TD; A-->B'). Use this to visualize "
+                "structure, flow, or relationships you're explaining out loud."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "diagram": genai_types.Schema(type=genai_types.Type.STRING, description="Mermaid diagram source code"),
+                    "title": genai_types.Schema(type=genai_types.Type.STRING, description="Optional panel title"),
+                },
+                required=["diagram"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="show_image",
+            description=(
+                "Display an image in the canvas panel. `src` is either a web URL "
+                "(https://...) or a path to a file in your workspace "
+                "(e.g. 'content/chart.png' or '/home/developer/content/chart.png'). "
+                "Use to show a generated chart, screenshot, or diagram asset."
+            ),
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "src": genai_types.Schema(type=genai_types.Type.STRING, description="Web URL or workspace file path"),
+                    "title": genai_types.Schema(type=genai_types.Type.STRING, description="Optional panel title"),
+                    "caption": genai_types.Schema(type=genai_types.Type.STRING, description="Optional caption shown under the image"),
+                },
+                required=["src"],
+            ),
+        ),
     ]
 )
 
@@ -94,20 +136,63 @@ You have a visual canvas panel visible to the user on the right side of the scre
 
 Panel tools:
 - `show_markdown(content, title?)` — Render markdown. Use most often for notes, summaries, action items, analysis.
+- `show_diagram(diagram, title?)` — Render a Mermaid diagram. Use for flowcharts, sequence diagrams, mindmaps, timelines, state/class/ER diagrams — anytime structure or flow is easier shown than spoken.
+- `show_image(src, title?, caption?)` — Display an image by web URL or workspace file path.
 - `update_panel(html, title?)` — Replace panel with HTML for richer layouts.
 - `append_to_panel(html)` — Add to existing panel without clearing.
 - `clear_panel()` — Clear when shifting to a new topic.
 
 Guidelines:
-- The panel is a persistent whiteboard — voice is transient, the panel is the artefact.
-- Use `show_markdown` by default. Reach for `update_panel` only when structure genuinely adds value.
+- The panel is a persistent whiteboard — voice is transient, the panel is the artefact. Each update is kept in history, so the user can scroll back through what you drew.
+- Use `show_markdown` by default. Reach for `show_diagram` when a picture of the structure helps, `update_panel` only when custom layout genuinely adds value.
 - Don't mirror every voice response in the panel — use it when structured content helps.
 - Clear when the topic changes significantly.
 
-Chart.js rule (for `update_panel` HTML):
-- Chart.js 4 is available as `window.Chart` in the workspace (bundled, no CDN needed). NEVER add a `<script src>` tag for it.
-- Use `new Chart(...)` directly. Always give the canvas a fixed height: `<canvas id="c" style="max-height:380px"></canvas>`.
+Mermaid rule (for `show_diagram`):
+- Pass raw Mermaid source only (no ```mermaid fences). Example: `graph TD; Start-->Stop`.
+- Keep diagrams focused; invalid syntax shows a contained error in the panel.
+
+HTML rule (for `update_panel`):
+- Panel HTML is sanitized before display: scripts do NOT execute. Use it for static layout only — tables, headings, lists, styled `<div>`s, inline `style=` attributes, images.
+- Do NOT use `<script>`, `<canvas>` + JS charting, or any JS-driven rendering — it will be stripped and show nothing.
+- For data visualisation, prefer `show_diagram` (Mermaid: fl/pie/quadrant/xychart) or `show_image` (a chart image by URL or workspace path). Reserve `update_panel` for rich static layouts that markdown can't express.
 """
+
+def _classify_image_src(src: str) -> Optional[tuple[str, str]]:
+    """Classify a show_image src as a web URL or a workspace-confined file path.
+
+    Returns (value, kind) where kind is "url" or "path", or None if the src is
+    neither an allowed web URL nor a path that resolves inside the agent
+    workspace. The frontend renders "url" directly and fetches "path" through the
+    authenticated /files/preview endpoint, so this is the only confinement gate
+    on the panel side — and it is stricter than the agent-server's prefix check,
+    rejecting sibling escapes like /home/developer-evil and any '..' traversal.
+    """
+    if not src:
+        return None
+    low = src.lower()
+    if low.startswith("http://") or low.startswith("https://"):
+        return (src, "url")
+    if low.startswith("data:") or "://" in low:
+        # data: URIs (unbounded inline bytes) and other schemes (file:, ftp:, …)
+        # are not allowed.
+        return None
+
+    # Treat as a workspace file path. Accept absolute (/home/developer/...) or
+    # relative (resolved against the workspace root). '~/' is workspace-relative.
+    path = src[2:] if src.startswith("~/") else src
+    # A ':' in the first path segment is a URI scheme (javascript:, mailto:, …),
+    # not a real path segment — reject before resolving.
+    if ":" in path.split("/", 1)[0]:
+        return None
+    if path.startswith("/"):
+        candidate = posixpath.normpath(path)
+    else:
+        candidate = posixpath.normpath(posixpath.join(_WORKSPACE_ROOT, path))
+    if candidate != _WORKSPACE_ROOT and not candidate.startswith(_WORKSPACE_ROOT + "/"):
+        return None
+    return (candidate, "path")
+
 
 # Single tool declaration for all voice sessions
 _RUN_TASK_TOOL = genai_types.Tool(
@@ -118,7 +203,10 @@ _RUN_TASK_TOOL = genai_types.Tool(
                 "Execute a task in the agent's workspace — look something up, "
                 "read a file, search for information, or perform an action. "
                 "Use this when you need live data or agent capabilities to answer accurately. "
-                "Returns a text response from the agent."
+                "Returns a text response from the agent. "
+                "This can take several seconds and you cannot speak while it runs — "
+                "ALWAYS say a brief out-loud filler (e.g. 'let me check that') before "
+                "calling it so the user isn't left in silence."
             ),
             parameters=genai_types.Schema(
                 type=genai_types.Type.OBJECT,
@@ -133,6 +221,24 @@ _RUN_TASK_TOOL = genai_types.Tool(
         )
     ]
 )
+
+
+# Spoken-filler etiquette appended to every voice session's system_instruction
+# (browser + VoIP). `run_task` round-trips to the agent container and can take
+# several seconds, during which Gemini — a *blocking* function call — emits no
+# audio. On a phone call that dead air reads as a dropped line. Instruct the
+# model to verbally acknowledge BEFORE it calls run_task so the caller knows it
+# is still working. Cheap, model-side fix; no SDK change required.
+_TOOL_ETIQUETTE_INSTRUCTION = """
+
+## Looking things up out loud
+When you use the `run_task` tool it can take several seconds to return, and you
+cannot speak while it runs. Before EVERY `run_task` call, first say a short,
+natural filler so the user knows you're working and the line never falls
+silent — for example "let me check that for you", "one moment while I look that
+up", or "give me a second to pull that up". Vary the wording so it sounds
+natural. Never call `run_task` silently.
+"""
 
 
 @dataclass
@@ -153,6 +259,9 @@ class VoiceSession:
     system_prompt: str
     voice_name: str = "Kore"
     workspace_mode: bool = False
+    # Max session length (seconds) before the watchdog auto-ends it. Browser voice
+    # sessions use VOICE_MAX_DURATION; phone calls pass VOIP_MAX_CALL_DURATION.
+    max_duration: int = VOICE_MAX_DURATION
     transcript: list = field(default_factory=list)
     panel_state: dict = field(default_factory=lambda: {
         "type": "empty", "content": "", "title": None, "updated_at": None
@@ -171,9 +280,6 @@ class VoiceSession:
     _on_status: Optional[Callable] = field(default=None, repr=False)
     _on_tool_call: Optional[Callable] = field(default=None, repr=False)    # (name, args) → None
     _on_tool_result: Optional[Callable] = field(default=None, repr=False)  # (name, result) → None
-
-
-_REDIS_SESSION_TTL = VOICE_MAX_DURATION + 60  # grace buffer beyond max session length
 
 
 class GeminiVoiceService:
@@ -211,9 +317,16 @@ class GeminiVoiceService:
         system_prompt: str,
         voice_name: str = "Kore",
         workspace_mode: bool = False,
+        max_duration: Optional[int] = None,
     ) -> VoiceSession:
-        """Create a new voice session (does not connect yet)."""
+        """Create a new voice session (does not connect yet).
+
+        `max_duration` overrides the watchdog's auto-end timeout (seconds). The
+        browser voice path leaves it None (→ VOICE_MAX_DURATION); the phone path
+        passes VOIP_MAX_CALL_DURATION so calls aren't cut at the 5-min voice cap.
+        """
         session_id = f"vs_{secrets.token_urlsafe(16)}"
+        effective_max_duration = max_duration if max_duration is not None else VOICE_MAX_DURATION
         session = VoiceSession(
             session_id=session_id,
             agent_name=agent_name,
@@ -223,6 +336,7 @@ class GeminiVoiceService:
             system_prompt=system_prompt,
             voice_name=voice_name,
             workspace_mode=workspace_mode,
+            max_duration=effective_max_duration,
         )
         self._sessions[session_id] = session
 
@@ -237,10 +351,15 @@ class GeminiVoiceService:
             "voice_name": voice_name,
             "workspace_mode": workspace_mode,
             "system_prompt": system_prompt,
+            "max_duration": effective_max_duration,
         }
         try:
             r = await self._get_redis()
-            await r.setex(f"voice_session:{session_id}", _REDIS_SESSION_TTL, json.dumps(metadata))
+            # TTL spans the session's own max duration (+grace), not the shared
+            # voice cap — otherwise a 10-min phone session's metadata expires at
+            # ~6min and cross-worker validation would fail mid-call.
+            redis_ttl = effective_max_duration + 60
+            await r.setex(f"voice_session:{session_id}", redis_ttl, json.dumps(metadata))
         except Exception as e:
             # Fail loudly: better to 500 at /voice/start than issue a session_id
             # that will intermittently 403 when the WebSocket lands on another worker.
@@ -285,7 +404,7 @@ class GeminiVoiceService:
 
         config = genai_types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=session.system_prompt,
+            system_instruction=session.system_prompt + _TOOL_ETIQUETTE_INSTRUCTION,
             speech_config=genai_types.SpeechConfig(
                 voice_config=genai_types.VoiceConfig(
                     prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -442,6 +561,33 @@ class GeminiVoiceService:
                 "title": args.get("title"),
                 "updated_at": now,
             }
+        elif tool_name == "show_diagram":
+            session.panel_state = {
+                "type": "mermaid",
+                "content": args.get("diagram", ""),
+                "title": args.get("title"),
+                "updated_at": now,
+            }
+        elif tool_name == "show_image":
+            src = str(args.get("src", "")).strip()
+            if not src:
+                return "No image source provided."
+            kind = _classify_image_src(src)
+            if kind is None:
+                # Not a web URL and not a workspace-confined file path — reject.
+                return (
+                    "Image rejected: src must be an https:// URL or a path inside "
+                    "your workspace (/home/developer). Path traversal is not allowed."
+                )
+            value, image_kind = kind
+            session.panel_state = {
+                "type": "image",
+                "content": value,
+                "image_kind": image_kind,   # "url" | "path"
+                "caption": args.get("caption"),
+                "title": args.get("title"),
+                "updated_at": now,
+            }
         elif tool_name == "update_panel":
             session.panel_state = {
                 "type": "html",
@@ -524,7 +670,7 @@ class GeminiVoiceService:
         try:
             client = get_agent_client(agent_name)
             response = await client.task(prompt, timeout=28.0)
-            return response.response or "Task completed with no response."
+            return response.response_text or "Task completed with no response."
         except AgentNotReachableError:
             return f"Agent {agent_name!r} is not currently running."
         except AgentRequestError as e:
@@ -534,10 +680,11 @@ class GeminiVoiceService:
             return f"Execution error: {str(e)[:200]}"
 
     async def _timeout_watchdog(self, session: VoiceSession):
-        """Auto-end session after max duration."""
-        await asyncio.sleep(VOICE_MAX_DURATION)
+        """Auto-end session after its max duration (per-session; phone calls
+        use VOIP_MAX_CALL_DURATION, browser voice uses VOICE_MAX_DURATION)."""
+        await asyncio.sleep(session.max_duration)
         if session._active:
-            logger.info(f"Voice session {session.session_id} hit max duration ({VOICE_MAX_DURATION}s)")
+            logger.info(f"Voice session {session.session_id} hit max duration ({session.max_duration}s)")
             await self.end_session(session.session_id)
 
     async def send_audio(self, session_id: str, audio_data: bytes):
@@ -602,6 +749,7 @@ class GeminiVoiceService:
             system_prompt=meta["system_prompt"],
             voice_name=meta.get("voice_name", "Kore"),
             workspace_mode=meta.get("workspace_mode", False),
+            max_duration=meta.get("max_duration", VOICE_MAX_DURATION),
         )
         self._sessions[session_id] = session
         logger.info(f"Voice session {session_id} reconstructed from Redis on worker")

@@ -18,7 +18,8 @@ from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..state import agent_state
-from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME, kill_processes_by_env_tag
+from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
+from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .runtime_adapter import AgentRuntime
 
@@ -225,20 +226,21 @@ class GeminiRuntime(AgentRuntime):
                 stderr = process.stderr.read()
                 return_code = process.wait()
 
-                # Issue #817: env-tag sweep for Gemini-spawned descendants
-                # that may have escaped via setsid + FD detachment. Best-
-                # effort — never fail the response on this path.
+                # Issue #817 follow-up: cgroup-walk sweep for Gemini-
+                # spawned descendants that escaped via setsid, FD
+                # detachment, or env stripping. Best-effort — never
+                # fail the response on this path.
                 try:
-                    killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_id)
+                    killed = kill_cgroup_orphans()
                     if killed:
                         logger.info(
-                            f"[Gemini] Killed {killed} env-tagged orphan(s) "
-                            f"for execution {execution_id} after Gemini exit"
+                            f"[Gemini] Cgroup sweep killed {killed} orphan(s) "
+                            f"after execution {execution_id} exit"
                         )
                 except Exception:
                     logger.exception(
-                        f"[Gemini] kill_processes_by_env_tag({execution_id}) "
-                        "raised — continuing"
+                        f"[Gemini] cgroup sweep raised after {execution_id} — "
+                        "continuing"
                     )
 
                 return stderr, return_code
@@ -637,13 +639,14 @@ class GeminiRuntime(AgentRuntime):
                         self._process_stream_line(line, execution_log, metadata, tool_start_times, tool_names, response_parts, model)
                 except Exception as e:
                     logger.error(f"[Headless Task {session_id}] Error: {e}")
-                    # Issue #817: even on error, run the env-tag sweep so
-                    # leaked descendants don't survive the failed task.
+                    # Issue #817 follow-up: even on error, run the cgroup
+                    # sweep so leaked descendants don't survive the failed
+                    # task.
                     try:
-                        kill_processes_by_env_tag(EXECUTION_TAG_NAME, session_id)
+                        kill_cgroup_orphans()
                     except Exception:
                         logger.exception(
-                            f"[Headless Task {session_id}] env-tag sweep "
+                            f"[Headless Task {session_id}] cgroup sweep "
                             "raised on error path — continuing"
                         )
                     raise
@@ -651,18 +654,19 @@ class GeminiRuntime(AgentRuntime):
                 stderr = process.stderr.read()
                 return_code = process.wait()
 
-                # Issue #817: env-tag sweep for descendants that may have
-                # escaped via setsid + FD detachment. Best-effort.
+                # Issue #817 follow-up: cgroup sweep catches descendants
+                # that escaped via setsid, FD detachment, or env
+                # stripping. Best-effort.
                 try:
-                    killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, session_id)
+                    killed = kill_cgroup_orphans()
                     if killed:
                         logger.info(
-                            f"[Headless Task {session_id}] Killed {killed} "
-                            f"env-tagged orphan(s) after Gemini exit"
+                            f"[Headless Task {session_id}] Cgroup sweep "
+                            f"killed {killed} orphan(s) after Gemini exit"
                         )
                 except Exception:
                     logger.exception(
-                        f"[Headless Task {session_id}] env-tag sweep raised "
+                        f"[Headless Task {session_id}] cgroup sweep raised "
                         "— continuing"
                     )
 
@@ -721,6 +725,18 @@ class GeminiRuntime(AgentRuntime):
         except TimeoutError as e:
             logger.error(f"[Headless Task] Timeout: {e}")
             raise HTTPException(status_code=504, detail=str(e))
+        except (BrokenPipeError, ConnectionResetError) as pipe_err:
+            # Subprocess stdin pipe closed before write completed — Gemini CLI
+            # child process exited early. Parallel surface to headless_executor.
+            # 502 not 503 to avoid SUB-003 auto-switch collision (#474).
+            logger.info(
+                f"[Headless Task] Subprocess pipe closed before write completed: {pipe_err}. "
+                f"This typically means the child Gemini process exited early."
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Agent subprocess closed before task could complete",
+            )
         except Exception as e:
             logger.error(f"[Headless Task] Execution error: {e}")
             raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")

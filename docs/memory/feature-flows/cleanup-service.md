@@ -1,5 +1,7 @@
 # Feature: Cleanup Service (CLEANUP-001)
 
+> **Updated 2026-05-17 (#869):** `WATCHDOG_HTTP_TIMEOUT` increased from 5.0 → 15.0 seconds to handle agents under load. `SlotService._cleanup_stale_slots_for_agent` now reads each slot's `timeout_seconds` from its per-slot metadata HASH (stored at acquire time) instead of using the agent-level default for all slots. Per-slot TTL = `stored_timeout + SLOT_TTL_BUFFER`; falls back to the per-agent default when metadata is absent.
+
 > **Updated 2026-05-11 (#686):** The interactive `chat_with_agent()` handler in `routers/chat.py` is now a second producer of the `claude_session_id='dispatched'` sentinel (parallel of #279). The no-session sweep's correctness assumption now extends to interactive `/chat` executions too. See the updated [`mark_execution_dispatched`](#mark_execution_dispatched-scheduleoperations) and [Fast-fail no-session executions](#cleanup-cycle-run_cleanup) sections.
 
 > **Updated 2026-04-26 (#428):** Stale-slot reclaim and watchdog release now go through [`CapacityManager`](capacity-management.md) — `capacity.reclaim_stale(agent_timeouts)` replaces `slot_service.cleanup_stale_slots(...)` and `capacity.release_if_matches(agent, exec_id)` replaces the prior pair of `slot_service.release_slot` + `execution_queue.force_release_if_matches`. Recovery (`_recover_execution`) calls `capacity.release(...)`. `ExecutionQueue` is gone; the TOCTOU-safe match check lives on the new facade.
@@ -29,7 +31,7 @@ CLEANUP_INTERVAL_SECONDS = 300        # 5 minutes
 EXECUTION_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 ACTIVITY_STALE_TIMEOUT_MINUTES = 120   # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 NO_SESSION_TIMEOUT_SECONDS = 60       # Issue #106: fast-fail executions without Claude session
-WATCHDOG_HTTP_TIMEOUT = 5.0           # Issue #129: timeout for agent HTTP calls during reconciliation
+WATCHDOG_HTTP_TIMEOUT = 15.0          # Timeout for agent HTTP calls during reconciliation (#869: increased from 5s to handle agents under load)
 ERROR_FETCH_TIMEOUT = 2.0             # Issue #286: timeout for fetching error context from agent
 MAX_ERROR_MESSAGE_LENGTH = 2000       # Issue #286: truncate combined error messages
 ```
@@ -113,7 +115,7 @@ Nine sequential operations plus an hourly maintenance gate, each wrapped in indi
        reclaimed, confirmed_running_ids, report
    )
    ```
-   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys, computes each agent's TTL as `timeout_seconds + 5 min buffer` (or default 20 min if no timeout configured), removes entries older than that TTL, and returns a dict mapping agent names to reclaimed execution IDs. Phase 3 is then implemented by `_process_stale_slot_reclaims()` — see [Phase 3 Slot Reclaim Re-verification](#phase-3-slot-reclaim-re-verification-issue-378) below.
+   Calls `SlotService.cleanup_stale_slots()` with per-agent timeouts (#226). The service scans all `agent:slots:*` keys and checks each slot individually (#869): it reads the slot's `timeout_seconds` from its metadata HASH (key `agent:slot:{name}:{execution_id}`, stored at acquire time), computes `effective_ttl = stored_timeout + SLOT_TTL_BUFFER (5 min)`, and removes the slot if its score (timestamp) is older than that TTL. Falls back to the per-agent default TTL (`execution_timeout_seconds + SLOT_TTL_BUFFER`, or `DEFAULT_SLOT_TTL_SECONDS = 1200` if no agent timeout is configured) when metadata is absent. This fixes premature reclamation of slots acquired with a schedule-level `timeout_seconds` that exceeds the agent-level default (e.g., a 7200s schedule on an agent with the 3600s default was previously reclaimed at ~3900s). Returns a dict mapping agent names to reclaimed execution IDs. Phase 3 is then implemented by `_process_stale_slot_reclaims()` — see [Phase 3 Slot Reclaim Re-verification](#phase-3-slot-reclaim-re-verification-issue-378) below.
 
 6. **Hourly maintenance: prune rate-limit events** (Issue #476)
    ```python
@@ -133,7 +135,7 @@ Nine sequential operations plus an hourly maintenance gate, each wrapped in indi
    if hc_days > 0:
        report.health_checks_pruned = db.cleanup_old_health_records(hc_days, RETENTION_CHUNK_SIZE_PER_CYCLE)
    ```
-   Three independent sweeps, each gated on its own ops-config retention window (`execution_log_retention_days` default 30, `execution_row_retention_days` default 90, `health_check_retention_days` default 7). `0` disables the corresponding sweep. Per-cycle row budget capped at `RETENTION_CHUNK_SIZE_PER_CYCLE = 5000` so the first post-deploy backfill spreads across multiple ticks rather than holding the write lock end-to-end. All cutoffs use `iso_cutoff()` (Architectural Invariant #16). The two execution sweeps share the partial index `idx_executions_completed_terminal ON schedule_executions(completed_at) WHERE status IN ('completed','failed','terminated')`.
+   Three independent sweeps, each gated on its own ops-config retention window (`execution_log_retention_days` default 30, `execution_row_retention_days` default 90, `health_check_retention_days` default 7). `0` disables the corresponding sweep. Per-cycle row budget capped at `RETENTION_CHUNK_SIZE_PER_CYCLE = 5000` so the first post-deploy backfill spreads across multiple ticks rather than holding the write lock end-to-end. All cutoffs use `iso_cutoff()` (Architectural Invariant #16). The two execution sweeps share the partial index `idx_executions_completed_terminal ON schedule_executions(completed_at) WHERE status IN ('success','failed','cancelled','skipped')` (fix: #862 — original #772 used wrong values 'completed'/'terminated' that never matched real rows).
 
 8. **WAL checkpoint after reclaim** (Issue #772)
    ```python
@@ -433,15 +435,13 @@ WHERE id = ?
 
 **Logic**:
 1. Scans all keys matching `agent:slots:*` pattern via `SCAN`
-2. For each agent, calls `_cleanup_stale_slots_for_agent()` which returns the reclaimed execution IDs
-3. Removes ZSET entries with score (timestamp) older than TTL:
-   ```
-   ZREMRANGEBYSCORE agent:slots:{name} -inf {cutoff_timestamp}
-   ```
-4. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
-5. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
+2. For each agent, calls `_cleanup_stale_slots_for_agent()` which iterates all slots via `ZRANGE withscores=True` and returns the reclaimed execution IDs
+3. For each slot, reads `timeout_seconds` from its metadata HASH at `agent:slot:{name}:{execution_id}` (stored at acquire time), computes `effective_ttl = stored_timeout + SLOT_TTL_BUFFER`. Falls back to `default_slot_ttl` (per-agent: `execution_timeout_seconds + SLOT_TTL_BUFFER`, or `DEFAULT_SLOT_TTL_SECONDS = 1200` if unconfigured) when metadata is absent (#869)
+4. Removes stale entries individually (slot is expired if `score < now - effective_ttl`) via `ZREM`
+5. Deletes corresponding metadata keys: `agent:slot:{name}:{execution_id}`
+6. Returns the execution IDs so the caller (cleanup service) can fail corresponding DB records
 
-**TTL** (#226): Per-agent, computed as `execution_timeout_seconds + SLOT_TTL_BUFFER (5 min)`. Falls back to `DEFAULT_SLOT_TTL_SECONDS = 1200` (20 minutes) if no agent timeout is configured. This prevents premature slot reclamation for agents with long-running tasks (e.g., 60-120 min timeouts).
+**TTL** (#226, #869): Per-slot, computed from the `timeout_seconds` stored in the slot's metadata HASH at acquire time — this captures the schedule-level timeout actually used (e.g., 7200s), not just the agent-level default (e.g., 3600s). Falls back to the per-agent default (`execution_timeout_seconds + SLOT_TTL_BUFFER`, or `DEFAULT_SLOT_TTL_SECONDS = 1200` if no agent timeout configured) when metadata is absent. Fixes premature reclamation of slots with schedule-level timeouts exceeding the agent-level default.
 
 ## Side Effects
 - **Logging**: Each cleanup cycle logs results at INFO level when resources are cleaned

@@ -42,11 +42,15 @@ from subprocess_pgroup import (  # noqa: E402
     EXECUTION_TAG_NAME,
     capture_pgid,
     drain_reader_threads,
-    kill_processes_by_env_tag,
     safe_close_pipes,
     signal_process_tree,
     terminate_process_group,
 )
+# kill_processes_by_env_tag (#827), _kill_orphan_pipe_writers (#618/#728),
+# and _set_idle_priority (#808) were removed in the #817 follow-up that
+# replaced them all with the cgroup-walk in :mod:`orphan_sweep`. Tests for
+# those functions are deleted below; cgroup-walk has its own dedicated test
+# module (tests/unit/test_orphan_sweep.py).
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +397,243 @@ sys.exit(0)
             except Exception:
                 pass
 
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="_kill_orphan_pipe_writers uses /proc (Linux only)",
+    )
+    def test_setsid_escapee_drained_via_orphan_killer_preserves_result_line(self):
+        """Regression for #586: Stop hook → ``git push`` → ``ssh`` calls
+        ``setsid()``, escaping claude's process group and holding the stdout
+        pipe write-end during network I/O.
+
+        Pathology: terminate_process_group(claude_pgid) leaves the setsid'd
+        grandchild alive (different session), so the reader's readline() never
+        sees EOF. Without ``_kill_orphan_pipe_writers`` firing inside
+        ``drain_reader_threads``, the natural-drain wait times out and the
+        force-close fallback discards the kernel pipe buffer — losing the
+        final ``{"type":"result"}`` JSON line and recording the execution as a
+        502 "no result message" failure.
+
+        This is a sibling of ``test_buffered_data_preserved_after_grandchild_kill``
+        (#531) — same shape, except the grandchild calls ``os.setsid()`` so it
+        escapes the pgid kill. Together they pin the full production path:
+        natural-drain ordering, the 10s scan-timeout cap (#650), the async
+        wrapper (#657), and the result-line preservation contract (#531).
+
+        Non-redundant with ``TestKillOrphanPipeWriters.test_kills_orphan_in_different_session``:
+        that test calls ``_kill_orphan_pipe_writers`` directly and skips the
+        drain wrapper entirely; only this test exercises the full
+        ``drain_reader_threads`` production path with the setsid escape +
+        data-preservation assertion.
+        """
+        # Parent writes the result sentinel, forks a grandchild that calls
+        # setsid() (new session — survives terminate_process_group(pgid)) and
+        # holds stdout open, then exits immediately.
+        script = r"""
+import os, sys, time
+sys.stdout.write("RESULT_LINE\n")
+sys.stdout.flush()
+pid = os.fork()
+if pid == 0:
+    os.setsid()              # the #586 escape — new session/pgid
+    time.sleep(5)            # holds stdout write-end while parent exits
+    os._exit(0)
+sys.exit(0)
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        assert pgid is not None
+        captured: list[str] = []
+        reader_ready = threading.Event()
+
+        def reader():
+            reader_ready.set()
+            assert proc.stdout is not None
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if not line:
+                        break
+                    captured.append(line.strip())
+            except (ValueError, OSError):
+                pass  # pipe force-closed — acceptable on the fallback path
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        reader_ready.wait(timeout=2)
+
+        # Parent exits; setsid'd grandchild stays alive holding the pipe.
+        proc.wait(timeout=5)
+        time.sleep(0.1)
+        assert t.is_alive(), (
+            "reader should still be blocked — setsid'd grandchild holds pipe open"
+        )
+
+        try:
+            # grace=0 forces the stuck-reader path immediately; post_kill_grace
+            # gives the natural-drain window after the orphan-killer fires.
+            asyncio.run(drain_reader_threads(
+                proc, t,
+                grace=0,
+                post_kill_grace=5,
+                pgid=pgid,
+            ))
+            assert not t.is_alive(), (
+                "reader thread should have exited after drain — "
+                "_kill_orphan_pipe_writers must catch the setsid escapee"
+            )
+            assert "RESULT_LINE" in captured, (
+                f"sentinel lost — captured={captured!r}. "
+                "setsid escapee survived: drain hit the force-close fallback "
+                "and discarded the pre-fork buffered result line."
+            )
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+
+    def test_emits_metric_on_natural_drain(self, monkeypatch, caplog):
+        """[METRIC] drain_outcome must fire on the natural-drain branch.
+
+        Operators query the log for ``outcome=natural`` to track how often
+        the orphan-killer rescued an execution from the force-close path.
+        Reader thread is constructed to exit briefly after the slow path
+        engages, simulating EOF arriving after kill phase.
+        """
+        import logging
+        import subprocess_pgroup as spg
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        assert pgid is not None
+
+        # The reader appears stuck during the initial grace window, then
+        # exits cleanly. drain_reader_threads sees it alive after grace
+        # (slow path entry), kills the pgid, runs the orphan scan, and
+        # finds the reader has finished during the natural-drain join.
+        reader_exit_allowed = threading.Event()
+
+        def reader():
+            reader_exit_allowed.wait(timeout=10)
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+        # No-op orphan killer — keeps the test fast on Linux (no /proc walk)
+        # and bypasses the macOS-incompatible code path so the test runs on
+        # both platforms.
+        # No-op the cgroup sweep — macOS lacks the /sys/fs/cgroup layout, and
+        # we don't want real orphan-killing in a unit test. Replaces the
+        # pre-#817 monkeypatch of _kill_orphan_pipe_writers.
+        monkeypatch.setattr(spg, "kill_cgroup_orphans", lambda: 0)
+
+        try:
+            with caplog.at_level(logging.INFO, logger="subprocess_pgroup"):
+                # Release the reader once the slow path is committed but
+                # before the natural-drain join completes.
+                def release_soon():
+                    time.sleep(0.5)
+                    reader_exit_allowed.set()
+
+                threading.Thread(target=release_soon, daemon=True).start()
+
+                asyncio.run(drain_reader_threads(
+                    proc, t, grace=0, post_kill_grace=5, pgid=pgid,
+                ))
+
+            assert not t.is_alive(), "reader should have exited via natural drain"
+
+            metric_lines = [
+                r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("[METRIC] drain_outcome")
+            ]
+            assert metric_lines, "natural-drain path must emit drain_outcome metric"
+            msg = metric_lines[0]
+            assert "outcome=natural" in msg, msg
+            assert "stuck_initial=1" in msg, msg
+            assert "drain_elapsed_ms=" in msg, msg
+            assert "orphan_kill_count=0" in msg, msg
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+
+    def test_emits_metric_on_force_close_path(self, monkeypatch, caplog):
+        """[METRIC] drain_outcome must fire on the force-close branch.
+
+        This is the bug-class regression site (Issue #586). Operators alert
+        on a non-zero rate of ``outcome=force_close`` / ``outcome=leaked``
+        emissions; without an assertion here, a future refactor of
+        drain_reader_threads would silently break the metric and the next
+        regression of this class would arrive unmetricked.
+        """
+        import logging
+        import subprocess_pgroup as spg
+
+        # Stub orphan killer to do nothing — reader stays blocked through
+        # the natural-drain window so force-close fires.
+        # No-op the cgroup sweep — macOS lacks the /sys/fs/cgroup layout, and
+        # we don't want real orphan-killing in a unit test. Replaces the
+        # pre-#817 monkeypatch of _kill_orphan_pipe_writers.
+        monkeypatch.setattr(spg, "kill_cgroup_orphans", lambda: 0)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        assert pgid is not None
+
+        # Reader is parked in a long sleep — neither natural drain nor
+        # safe_close_pipes unblocks it, so it leaks after force-close.
+        # Either ``outcome=force_close`` (reader exited on close) or
+        # ``outcome=leaked`` (reader survived) is an acceptable signal.
+        def slow_processor():
+            time.sleep(120)
+
+        t = threading.Thread(target=slow_processor, daemon=True)
+        t.start()
+
+        try:
+            with caplog.at_level(logging.INFO, logger="subprocess_pgroup"):
+                asyncio.run(drain_reader_threads(
+                    proc, t, grace=0, post_kill_grace=2, pgid=pgid,
+                ))
+
+            metric_lines = [
+                r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("[METRIC] drain_outcome")
+            ]
+            assert metric_lines, "force-close path must emit drain_outcome metric"
+            msg = metric_lines[0]
+            assert "outcome=force_close" in msg or "outcome=leaked" in msg, msg
+            assert "stuck_initial=1" in msg, msg
+            assert "drain_elapsed_ms=" in msg, msg
+            assert "orphan_kill_count=0" in msg, msg
+            if "outcome=leaked" in msg:
+                assert "leaked_count=" in msg, msg
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+
 
 @pytest.mark.unit
 class TestSafeClosePipes:
@@ -486,581 +727,3 @@ class TestSignalProcessTree:
         import signal as _sig
         # Must not raise.
         signal_process_tree(proc, _sig.SIGTERM)
-
-
-@pytest.mark.unit
-class TestDrainOrphanKillerTimeout:
-    """Issue #649: drain_reader_threads must complete in bounded time even when
-    _kill_orphan_pipe_writers is slow (e.g. blocked on a D-state /proc entry)."""
-
-    def test_drain_bounded_when_orphan_killer_blocks(self, monkeypatch):
-        """Monkeypatch the orphan killer to simulate a blocked /proc scan.
-
-        Without the fix the drain would block for the orphan killer's full
-        sleep duration (100s).  With it, the 10-second daemon-thread cap
-        ensures drain_reader_threads returns in < 20 seconds regardless.
-
-        The reader thread simulates "stuck in processing" (a time.sleep) rather
-        than blocked on I/O, so safe_close_pipes completes without contending
-        on the BufferedReader lock — the scenario that exercises the orphan-
-        killer timeout specifically.
-        """
-        import subprocess_pgroup as spg
-
-        orphan_killer_started = threading.Event()
-
-        def _slow_orphan_killer(fd: int, our_pgid, _scan_deadline=None) -> int:
-            orphan_killer_started.set()
-            time.sleep(100)  # simulate /proc scan blocked on D-state process
-            return 0
-
-        monkeypatch.setattr(spg, "_kill_orphan_pipe_writers", _slow_orphan_killer)
-
-        # Process with a stdout pipe (needed so safe_close_pipes has a FD to close
-        # and the orphan-killer branch runs).
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        pgid = capture_pgid(proc)
-        assert pgid is not None
-
-        # Reader that simulates being stuck in long CPU/processing work (not I/O
-        # blocked on the pipe), so safe_close_pipes does not contend on the
-        # BufferedReader lock and can complete without waiting.
-        def slow_processor():
-            time.sleep(120)
-
-        t = threading.Thread(target=slow_processor, daemon=True)
-        t.start()
-
-        try:
-            start = time.monotonic()
-            # grace=0 → immediately enters the stuck-reader path.
-            asyncio.run(drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=pgid))
-            elapsed = time.monotonic() - start
-
-            # Orphan killer must have been called.
-            assert orphan_killer_started.is_set(), "_kill_orphan_pipe_writers was not called"
-
-            # Drain must complete within: 10s orphan timeout + 1s join + 2s join + 3s slack.
-            assert elapsed < 20.0, (
-                f"drain took {elapsed:.2f}s — orphan killer 10s cap not enforced"
-            )
-            # Thread is leaked (still sleeping) — that is the expected wedge outcome.
-            # The important assertion is that drain_reader_threads itself returned.
-        finally:
-            try:
-                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
-            except Exception:
-                pass
-
-
-@pytest.mark.unit
-@pytest.mark.skipif(sys.platform != "linux", reason="_kill_orphan_pipe_writers uses /proc (Linux only)")
-class TestKillOrphanPipeWriters:
-    """_kill_orphan_pipe_writers() handles Issue #618: npx MCP servers in a
-    different process group hold the stdout pipe open after terminate_process_group.
-
-    npm calls setsid() when it spawns node, placing the MCP server in a new
-    session/pgid that is outside claude's pgid.  terminate_process_group kills
-    claude's pgid but the npm → node chain survives, keeping the pipe write FD
-    open so our reader thread blocks indefinitely.
-
-    These tests require the Linux /proc filesystem and are skipped on other platforms.
-    The production fix runs inside Debian-based Docker containers where /proc is always
-    available.
-    """
-
-    # Script that simulates "claude" spawning an npx MCP server:
-    # parent forks a grandchild that calls setsid() (new session/pgid) and
-    # holds stdout open, then parent exits immediately.
-    _NPX_SIM_SCRIPT = r"""
-import os, sys, time
-pid = os.fork()
-if pid == 0:
-    os.setsid()           # new session — survives terminate_process_group
-    time.sleep(30)        # keeps stdout write FD open
-    os._exit(0)
-# parent ("claude") exits without waiting
-sys.exit(0)
-"""
-
-    def test_kills_orphan_in_different_session(self):
-        """Grandchild in a new session is detected and killed via /proc scan."""
-        proc = subprocess.Popen(
-            [sys.executable, "-u", "-c", self._NPX_SIM_SCRIPT],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        claude_pgid = capture_pgid(proc)
-        assert claude_pgid is not None
-
-        try:
-            proc.wait(timeout=5)  # parent exits; grandchild in new session still alive
-
-            # Start a reader — it will block because grandchild holds stdout open.
-            reader_unblocked = threading.Event()
-
-            def read_stdout():
-                assert proc.stdout is not None
-                try:
-                    for line in iter(proc.stdout.readline, ''):
-                        if not line:
-                            break
-                except (ValueError, OSError):
-                    pass
-                reader_unblocked.set()
-
-            t = threading.Thread(target=read_stdout, daemon=True)
-            t.start()
-            time.sleep(0.15)
-            assert t.is_alive(), "Reader should be blocked — grandchild holds pipe open"
-
-            # Kill claude's pgid — grandchild in new session survives.
-            terminate_process_group(proc, graceful_timeout=1, pgid=claude_pgid)
-            time.sleep(0.1)
-            assert t.is_alive(), "Reader still blocked — grandchild in new session survived"
-
-            # The orphan killer should catch the grandchild.
-            assert proc.stdout is not None
-            killed = subprocess_pgroup._kill_orphan_pipe_writers(
-                proc.stdout.fileno(), claude_pgid
-            )
-            assert killed >= 1, f"Expected ≥1 orphan killed, got {killed}"
-
-            # Reader gets EOF, exits promptly.
-            reader_unblocked.wait(timeout=3)
-            assert not t.is_alive(), "Reader still alive after orphan killed"
-        finally:
-            try:
-                terminate_process_group(proc, graceful_timeout=1, pgid=claude_pgid)
-            except Exception:
-                pass
-
-    def test_kills_orphan_even_when_stat_raises_dstate_simulation(self, monkeypatch):
-        """Regression for Issue #728: orphan must be killed even when os.stat()
-        raises OSError, simulating a D-state process where stat() blocks indefinitely.
-
-        The old implementation used os.stat() to follow /proc/pid/fd/N symlinks
-        and read the pipe inode — a syscall that blocks on D-state processes.
-        The new implementation uses os.readlink() which reads the symlink text
-        "pipe:[inode]" from proc metadata without acquiring any inode lock.
-
-        This test patches os.stat to always raise, then verifies the orphan is
-        still identified and killed via the readlink path.
-        """
-        import subprocess_pgroup as spg
-
-        proc = subprocess.Popen(
-            [sys.executable, "-u", "-c", self._NPX_SIM_SCRIPT],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        claude_pgid = capture_pgid(proc)
-        assert claude_pgid is not None
-
-        try:
-            proc.wait(timeout=5)  # parent exits; orphan (new session) still alive
-
-            reader_unblocked = threading.Event()
-
-            def read_stdout():
-                assert proc.stdout is not None
-                try:
-                    for line in iter(proc.stdout.readline, ""):
-                        if not line:
-                            break
-                except (ValueError, OSError):
-                    pass
-                reader_unblocked.set()
-
-            t = threading.Thread(target=read_stdout, daemon=True)
-            t.start()
-            time.sleep(0.15)
-            assert t.is_alive(), "Reader should be blocked — orphan holds pipe open"
-
-            # Simulate D-state: os.stat always raises OSError.  The old stat-based
-            # implementation would have silently skipped every FD and killed nothing.
-            # The new readlink-based implementation must still find and kill the orphan.
-            def _stat_raises(*args, **kwargs):
-                raise OSError(5, "D-state simulation")
-
-            monkeypatch.setattr(os, "stat", _stat_raises)
-
-            assert proc.stdout is not None
-            killed = spg._kill_orphan_pipe_writers(proc.stdout.fileno(), claude_pgid)
-            assert killed >= 1, (
-                f"Expected ≥1 orphan killed even with os.stat broken, got {killed}. "
-                "The readlink-based scan must not depend on os.stat (Issue #728)."
-            )
-
-            reader_unblocked.wait(timeout=3)
-            assert not t.is_alive(), "Reader still alive after orphan killed"
-        finally:
-            try:
-                terminate_process_group(proc, graceful_timeout=1, pgid=claude_pgid)
-            except Exception:
-                pass
-
-    def test_does_not_kill_own_reader(self):
-        """Our own process holds the read end — must NOT be killed."""
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        pgid = capture_pgid(proc)
-        try:
-            assert proc.stdout is not None
-            killed = subprocess_pgroup._kill_orphan_pipe_writers(
-                proc.stdout.fileno(), pgid
-            )
-            # The child holds the write end — it IS in pgid so should be skipped.
-            # Our own process holds the read end (O_RDONLY) — must not be killed.
-            assert killed == 0, f"Should have killed 0 processes, killed {killed}"
-            assert os.getpid() != 0  # sanity: we are still alive
-        finally:
-            terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
-
-    def test_drain_reader_threads_kills_npx_orphan_end_to_end(self):
-        """Integration: drain_reader_threads resolves the Issue #618 scenario.
-
-        A process in a new session (simulating an npx MCP server) holds the
-        stdout write end open after terminate_process_group kills claude's pgid.
-        drain_reader_threads must kill the orphan and let the reader exit without
-        reaching the force-close path, preserving buffered data.
-        """
-        # Parent writes a result line, forks a grandchild with setsid(), exits.
-        script = r"""
-import os, sys, time
-sys.stdout.write("RESULT_LINE\n")
-sys.stdout.flush()
-pid = os.fork()
-if pid == 0:
-    os.setsid()       # new session — survives terminate_process_group
-    time.sleep(30)    # keeps stdout write FD open
-    os._exit(0)
-sys.exit(0)
-"""
-        proc = subprocess.Popen(
-            [sys.executable, "-u", "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        claude_pgid = capture_pgid(proc)
-        assert claude_pgid is not None
-
-        captured: list[str] = []
-        reader_ready = threading.Event()
-
-        def read_stdout():
-            reader_ready.set()
-            assert proc.stdout is not None
-            try:
-                for line in iter(proc.stdout.readline, ''):
-                    if not line:
-                        break
-                    captured.append(line.strip())
-            except (ValueError, OSError):
-                pass
-
-        t = threading.Thread(target=read_stdout, daemon=True)
-        t.start()
-        reader_ready.wait(timeout=2)
-
-        try:
-            proc.wait(timeout=5)  # parent exits; grandchild (new session) still alive
-            time.sleep(0.1)
-            assert t.is_alive(), "Reader should be blocked before drain"
-
-            # grace=0 → immediately triggers the stuck-reader path.
-            start = time.monotonic()
-            asyncio.run(drain_reader_threads(proc, t, grace=0, post_kill_grace=5, pgid=claude_pgid))
-            elapsed = time.monotonic() - start
-
-            assert elapsed < 7.0, f"drain took {elapsed:.2f}s — too slow"
-            assert not t.is_alive(), "Reader still alive after drain"
-            assert "RESULT_LINE" in captured, (
-                f"Buffered result lost — captured={captured!r}. "
-                "Orphan killer may have triggered force-close before drain."
-            )
-        finally:
-            try:
-                terminate_process_group(proc, graceful_timeout=1, pgid=claude_pgid)
-            except Exception:
-                pass
-
-    def test_scan_deadline_stops_scan_early(self):
-        """Issue #808: _scan_deadline halts /proc iteration after budget expires.
-
-        We pass a deadline that is already in the past (monotonic() - 1) so
-        the scan must abort on the very first PID it encounters, returning 0
-        killed instead of scanning all of /proc.  This verifies that the
-        deadline check is evaluated per-iteration, not just at the start.
-        """
-        import subprocess_pgroup as spg
-
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        pgid = capture_pgid(proc)
-        assert pgid is not None
-
-        try:
-            assert proc.stdout is not None
-            # Deadline already expired — the scan should bail out immediately.
-            expired_deadline = time.monotonic() - 1.0
-            start = time.monotonic()
-            killed = spg._kill_orphan_pipe_writers(
-                proc.stdout.fileno(), pgid, _scan_deadline=expired_deadline
-            )
-            elapsed = time.monotonic() - start
-
-            # With an already-expired deadline the scan must abort quickly.
-            assert elapsed < 1.0, (
-                f"scan with expired deadline took {elapsed:.2f}s — deadline check not per-iteration"
-            )
-            # Our own process holds the read end and the child is in pgid, so
-            # killed==0 is the correct answer regardless of the deadline path.
-            assert killed == 0
-        finally:
-            terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
-
-
-@pytest.mark.unit
-class TestSetIdlePriority:
-    """Issue #808: _set_idle_priority() must not raise on any supported platform."""
-
-    def test_does_not_raise(self):
-        """Call from the current thread — must complete without raising on
-        Linux (SCHED_IDLE or nice) and macOS (nice fallback)."""
-        import subprocess_pgroup as spg
-        # Must not raise regardless of platform or privilege level.
-        spg._set_idle_priority()
-
-    def test_idempotent(self):
-        """Calling twice in the same thread is safe."""
-        import subprocess_pgroup as spg
-        spg._set_idle_priority()
-        spg._set_idle_priority()
-
-
-# ---------------------------------------------------------------------------
-# Issue #817 — env-tag sweep: kill_processes_by_env_tag
-# ---------------------------------------------------------------------------
-#
-# Spawns a long-sleep child with TRINITY_EXECUTION_ID set in its env, then
-# verifies the sweep can identify and SIGKILL it (or correctly skip it). All
-# tests are Linux-only because the implementation reads /proc/<pid>/environ
-# which does not exist on macOS.
-
-import uuid as _uuid
-
-
-def _spawn_tagged_sleep(tag_value: str | None = None) -> subprocess.Popen:
-    """Spawn `sleep 60` with TRINITY_EXECUTION_ID=tag_value in its env.
-    If tag_value is None, no tag is injected (control case)."""
-    env = dict(os.environ)
-    if tag_value is not None:
-        env[EXECUTION_TAG_NAME] = tag_value
-    return subprocess.Popen(
-        ["sleep", "60"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _wait_for_exit(proc: subprocess.Popen, timeout: float = 3.0) -> int | None:
-    """Poll until the process exits or timeout. Returns return code or None."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        rc = proc.poll()
-        if rc is not None:
-            return rc
-        time.sleep(0.05)
-    return None
-
-
-@pytest.mark.unit
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="kill_processes_by_env_tag uses /proc/<pid>/environ (Linux only)",
-)
-class TestKillProcessesByEnvTag:
-    """Issue #817: env-tag sweep catches descendants that escape both
-    pgid- and FD-based cleanup."""
-
-    def test_kills_process_with_matching_tag(self):
-        """A process whose env contains the tag is SIGKILLed and the
-        return value reflects the kill."""
-        tag_value = f"test-{_uuid.uuid4().hex[:8]}"
-        proc = _spawn_tagged_sleep(tag_value)
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, tag_value)
-            assert killed == 1, f"expected 1 killed, got {killed}"
-            rc = _wait_for_exit(proc)
-            assert rc is not None, "tagged process did not exit after sweep"
-            # SIGKILL exit: -9 from Popen
-            assert rc == -9, f"expected SIGKILL (-9), got {rc}"
-        finally:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-
-    def test_does_not_kill_process_with_different_tag(self):
-        """A process whose env contains a *different* tag is left alive."""
-        our_tag = f"target-{_uuid.uuid4().hex[:8]}"
-        other_tag = f"other-{_uuid.uuid4().hex[:8]}"
-        proc = _spawn_tagged_sleep(other_tag)
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, our_tag)
-            assert killed == 0, (
-                f"expected 0 killed (different tag), got {killed}"
-            )
-            assert proc.poll() is None, "non-matching process was killed"
-        finally:
-            proc.kill()
-            proc.wait(timeout=2)
-
-    def test_does_not_kill_process_without_tag(self):
-        """A process with no tag at all is invisible to the sweep."""
-        our_tag = f"target-{_uuid.uuid4().hex[:8]}"
-        proc = _spawn_tagged_sleep(tag_value=None)
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, our_tag)
-            assert killed == 0
-            assert proc.poll() is None
-        finally:
-            proc.kill()
-            proc.wait(timeout=2)
-
-    def test_does_not_kill_calling_pid(self):
-        """The caller's own PID is always excluded — even if its env
-        carries the tag (guards against killing agent-server itself)."""
-        tag_value = f"self-{_uuid.uuid4().hex[:8]}"
-        # Inject the tag into our own env so we'd "match" without the guard
-        os.environ[EXECUTION_TAG_NAME] = tag_value
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, tag_value)
-            # Our PID must be skipped — we should still be alive after
-            # this line. If the kill went through, the process would be
-            # gone before this assertion ran.
-            assert killed == 0, (
-                f"sweep killed {killed} including possibly self — "
-                f"calling-PID exclusion broken"
-            )
-        finally:
-            os.environ.pop(EXECUTION_TAG_NAME, None)
-
-    def test_exclude_pids_param(self):
-        """Caller can pass additional PIDs to exclude from the sweep."""
-        tag_value = f"excl-{_uuid.uuid4().hex[:8]}"
-        keeper = _spawn_tagged_sleep(tag_value)
-        victim = _spawn_tagged_sleep(tag_value)
-        try:
-            killed = kill_processes_by_env_tag(
-                EXECUTION_TAG_NAME, tag_value, exclude_pids=[keeper.pid],
-            )
-            assert killed == 1, (
-                f"expected 1 killed (victim) with keeper excluded, got {killed}"
-            )
-            rc = _wait_for_exit(victim)
-            assert rc == -9, "victim should be SIGKILLed"
-            assert keeper.poll() is None, "keeper was not in exclude_pids"
-        finally:
-            for p in (keeper, victim):
-                try:
-                    p.kill()
-                except OSError:
-                    pass
-
-    def test_exact_match_not_substring_prefix(self):
-        """Tag value 'abc' must not match 'abcdef' (NUL-separated split).
-        Guards against false positives on similarly-named env vars."""
-        proc = _spawn_tagged_sleep("abcdef")
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, "abc")
-            assert killed == 0, (
-                f"sweep matched substring 'abc' against env value 'abcdef' — "
-                f"expected exact match"
-            )
-            assert proc.poll() is None
-        finally:
-            proc.kill()
-            proc.wait(timeout=2)
-
-    def test_exact_match_not_different_var_name(self):
-        """A different env var with the same value must not match.
-        Guards against the tag value appearing in some other variable."""
-        # Spawn a sleep with a different env var carrying our value
-        env = dict(os.environ)
-        env["UNRELATED_VAR"] = "shared-value"
-        # Strip our tag if it happens to be in our env
-        env.pop(EXECUTION_TAG_NAME, None)
-        proc = subprocess.Popen(
-            ["sleep", "60"], env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            killed = kill_processes_by_env_tag(
-                EXECUTION_TAG_NAME, "shared-value",
-            )
-            assert killed == 0, (
-                f"sweep killed process with different env var name — "
-                f"matching is not name-scoped"
-            )
-            assert proc.poll() is None
-        finally:
-            proc.kill()
-            proc.wait(timeout=2)
-
-    def test_returns_count_of_killed(self):
-        """Count returned == number of distinct tagged processes killed."""
-        tag_value = f"multi-{_uuid.uuid4().hex[:8]}"
-        procs = [_spawn_tagged_sleep(tag_value) for _ in range(3)]
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, tag_value)
-            assert killed == 3, (
-                f"expected 3 killed for 3 tagged procs, got {killed}"
-            )
-            for p in procs:
-                rc = _wait_for_exit(p)
-                assert rc == -9
-        finally:
-            for p in procs:
-                try:
-                    p.kill()
-                except OSError:
-                    pass
-
-    def test_returns_zero_when_proc_unavailable(self, monkeypatch):
-        """If /proc cannot be listed (e.g., not Linux), return 0 cleanly
-        without raising — allows the helper to be a no-op safety net on
-        environments that don't have /proc."""
-        def _raise(*_a, **_kw):
-            raise OSError("simulated /proc unavailable")
-        monkeypatch.setattr(os, "listdir", _raise)
-        # Must not raise; must return 0
-        killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, "any-value")
-        assert killed == 0

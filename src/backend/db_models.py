@@ -113,7 +113,10 @@ class ScheduleCreate(BaseModel):
     enabled: bool = True
     timezone: str = "UTC"
     description: Optional[str] = None
-    timeout_seconds: int = 900  # Default 15 minutes
+    # #913: None means "use the agent's `execution_timeout_seconds`". Storing
+    # NULL is what makes per-agent timeout actually effective for scheduled
+    # runs — the old default of 900 silently masked PUT /api/agents/{name}/timeout.
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001)
@@ -143,7 +146,8 @@ class Schedule(BaseModel):
     updated_at: datetime
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
-    timeout_seconds: int = 900  # Default 15 minutes
+    # #913: NULL = inherit from agent_ownership.execution_timeout_seconds.
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001). 0 = disabled (default, #476), 1-5 opt-in.
@@ -191,6 +195,8 @@ class ScheduleExecution(BaseModel):
     model_used: Optional[str] = None           # Model used for this execution
     # Fan-out linkage (FANOUT-001)
     fan_out_id: Optional[str] = None           # Parent fan-out operation ID
+    # Loop linkage (#740)
+    loop_id: Optional[str] = None              # Parent agent_loops.id for sequential-loop iterations
     # Subscription usage tracking (SUB-004)
     subscription_id: Optional[str] = None      # Subscription active at record time
     # Persistent backlog (BACKLOG-001)
@@ -207,6 +213,9 @@ class ScheduleExecution(BaseModel):
     validates_execution_id: Optional[str] = None   # FK to execution being validated (for validation records)
     # Auto-compact observability (Bundle B)
     compact_metadata: Optional[str] = None       # JSON list of compact events fired during this turn
+    # Reader-race auto-retry (#678): how many times this execution was retried in-line
+    # by the backend HTTPError handler. 0 = never retried; 1 = retried once (cap).
+    retry_count: int = 0
 
 
 # =========================================================================
@@ -329,6 +338,31 @@ class AgentSessionMessage(BaseModel):
     compact_metadata: Optional[str] = None   # JSON list of compact events fired during this turn
 
 
+class SessionMessageInsert(BaseModel):
+    """Request object for inserting an agent-session message (#1027).
+
+    Replaces the 16-positional-arg signature of
+    ``SessionOperations.add_session_message`` so call sites name every field and
+    can't transpose positional args. The 6 identity/content fields are required;
+    the rest are per-turn observability/compaction metadata with safe defaults.
+    """
+    session_id: str
+    agent_name: str
+    user_id: int
+    user_email: str
+    role: str  # "user" or "assistant"
+    content: str
+    cost: Optional[float] = None
+    context_used: Optional[int] = None
+    context_max: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    tool_calls: Optional[str] = None  # JSON array
+    execution_time_ms: Optional[int] = None
+    claude_session_id: Optional[str] = None
+    compact_metadata: Optional[str] = None  # JSON list of compact events
+    compact_event_count: int = 0
+
+
 # =========================================================================
 # Agent Permission Models (Phase 9.10: Agent-to-Agent Permissions)
 # =========================================================================
@@ -416,7 +450,7 @@ class PublicLinkCreate(BaseModel):
     """
     name: Optional[str] = None  # Friendly name for the link
     expires_at: Optional[str] = None  # ISO timestamp for expiration
-    link_type: str = "chat"  # 'chat' or 'site' (SITE-001)
+    link_type: str = "chat"  # currently only 'chat' is supported
 
 
 class PublicLinkUpdate(BaseModel):
@@ -436,7 +470,7 @@ class PublicLink(BaseModel):
     expires_at: Optional[datetime] = None
     enabled: bool = True
     name: Optional[str] = None
-    link_type: str = "chat"  # 'chat' or 'site' (SITE-001)
+    link_type: str = "chat"
 
 
 class PublicLinkWithUrl(PublicLink):
@@ -839,6 +873,11 @@ class BusinessHealthCheck(BaseModel):
     stuck_execution_count: int = 0
     recent_error_rate: float = 0.0  # 0.0 - 1.0
     credential_status: Optional[str] = None  # null, "ok", "missing" (SUB-001/MON-001)
+    # #1020: richer /health signal. None when the agent image predates #1020
+    # (older agents omit these keys). `consecutive_failures` is the signal the
+    # dispatch circuit breaker (#526) consumes; `last_task_at` powers liveness.
+    consecutive_failures: Optional[int] = None
+    last_task_at: Optional[str] = None
     checked_at: str
 
 
@@ -854,6 +893,9 @@ class AgentHealthDetail(BaseModel):
     recent_alerts: List[dict] = []
     uptime_percent_24h: Optional[float] = None
     avg_latency_24h_ms: Optional[float] = None
+    # #526: unified breaker block — {dispatch:{...}, transport:{...}, open: bool,
+    # config:{enabled}}. Same shape as GET /api/agents/{name}/circuit-breaker.
+    circuit_breaker: Optional[dict] = None
 
 
 class AgentHealthSummary(BaseModel):
@@ -865,6 +907,15 @@ class AgentHealthSummary(BaseModel):
     runtime_available: Optional[bool] = None
     last_check_at: Optional[str] = None
     issues: List[str] = []
+    # RELIABILITY-004 / #307: heartbeat liveness layer (additive — all default
+    # None so old payloads and old-image agents stay non-breaking).
+    # heartbeat_state ∈ {"alive","stale","unsupported"}; heartbeat_alive is
+    # None for `unsupported` (an agent that never beat — never marked dead).
+    heartbeat_alive: Optional[bool] = None
+    last_heartbeat_age_s: Optional[float] = None
+    heartbeat_active_executions: Optional[int] = None
+    heartbeat_memory_mb: Optional[float] = None
+    heartbeat_state: Optional[str] = None
 
 
 class FleetHealthSummary(BaseModel):
@@ -1057,6 +1108,10 @@ class BulkSlotState(BaseModel):
     """Response model for bulk slot state query (Dashboard)."""
     agents: dict  # {agent_name: {"max": N, "active": M}}
     timestamp: str
+    # #526: per-agent dispatch-breaker state, ONLY for agents whose breaker is
+    # non-closed (open). Empty when the global breaker is off or all closed.
+    # {agent_name: {"state","failure_count","retry_after_seconds"}}
+    circuit_breakers: dict = {}
 
 
 # =========================================================================

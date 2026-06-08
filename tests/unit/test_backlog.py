@@ -122,7 +122,8 @@ def tmp_db(tmp_path, monkeypatch):
             owner_id INTEGER,
             max_parallel_tasks INTEGER DEFAULT 3,
             execution_timeout_seconds INTEGER DEFAULT 900,
-            max_backlog_depth INTEGER DEFAULT 50
+            max_backlog_depth INTEGER DEFAULT 50,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
         """
     )

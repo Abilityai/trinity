@@ -55,7 +55,8 @@ def tmp_db_conn(tmp_path, monkeypatch):
             agent_name TEXT UNIQUE NOT NULL,
             owner_id INTEGER NOT NULL,
             created_at TEXT NOT NULL,
-            file_sharing_enabled INTEGER DEFAULT 0
+            file_sharing_enabled INTEGER DEFAULT 0,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
         """
     )

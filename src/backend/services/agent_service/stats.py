@@ -5,7 +5,9 @@ Handles fetching context window and container stats.
 """
 import asyncio
 import logging
+import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 import httpx
@@ -31,6 +33,118 @@ def invalidate_context_stats_cache():
     """Invalidate the context stats cache (call on agent start/stop)."""
     _context_stats_cache["data"] = None
     _context_stats_cache["timestamp"] = 0
+
+
+# ---------------------------------------------------------------------------
+# #73: per-agent container-stats cache + single-flight coalescing.
+#
+# `container.stats(stream=False)` costs ~1-2s of Docker double-sampling and is
+# funnelled through a 4-worker thread pool. N agents x multiple tabs/users
+# polling /stats every 10s was the dominant backend CPU sink. We mirror the
+# PERF-269 context-stats cache, but PER-AGENT and with single-flight so
+# concurrent requests for the same agent share one Docker call instead of N.
+#
+# TTL default is 12s (above the frontend's 10s /stats poll so a lone viewer's
+# repeat polls also hit cache). HONEST FRESHNESS TRADE (F3): with a fixed 10s
+# poll and 12s TTL, fresh Docker samples land ~every 20s and the gauge shows a
+# duplicate sparkline point on alternating ticks — an accepted cosmetic cost on
+# an already-coarse CPU/mem gauge. No single TTL gives both a smooth 10s chart
+# and full per-tab dedup for a fixed-interval poller; the steady-state
+# Docker-load cut is the goal.
+#
+# This cache is in-process and PER-WORKER (matching the context-stats cache):
+# explicit lifecycle invalidation clears only the handling worker's cache, so
+# the TTL is the staleness bound for transitions it can't see (crashes,
+# external docker ops, the sibling uvicorn worker). Errors (404/400/500) are
+# never cached, so a failing agent never gets pinned for the TTL.
+# ---------------------------------------------------------------------------
+_AGENT_STATS_DEFAULT_TTL = 12  # seconds (PERF-1)
+_AGENT_STATS_TTL_MAX = 300  # clamp ceiling — 5 min is already absurdly stale
+
+
+def _parse_agent_stats_ttl(raw: str | None) -> int:
+    """Defensively parse AGENT_STATS_CACHE_TTL_SECONDS (F9).
+
+    A bad env value must NEVER crash backend startup. Returns the default on
+    any parse failure, clamps to [0, _AGENT_STATS_TTL_MAX], and treats 0 as
+    "cache disabled" (debugging aid — every call recomputes).
+    """
+    if raw is None:
+        return _AGENT_STATS_DEFAULT_TTL
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid AGENT_STATS_CACHE_TTL_SECONDS=%r; using default %ss",
+            raw, _AGENT_STATS_DEFAULT_TTL,
+        )
+        return _AGENT_STATS_DEFAULT_TTL
+    if value < 0:
+        return 0  # negative is meaningless → treat as disabled
+    return min(value, _AGENT_STATS_TTL_MAX)
+
+
+# Parsed once at import (env-overridable, defensively parsed). Read through the
+# module global in get_agent_stats_logic so tests can monkeypatch it.
+_AGENT_STATS_TTL = _parse_agent_stats_ttl(os.getenv("AGENT_STATS_CACHE_TTL_SECONDS"))
+
+@dataclass
+class _AgentStatsEntry:
+    """Consolidated per-agent stats-cache slot (#73).
+
+    One entry per agent name, held in `_agent_stats`. The fields have
+    deliberately different lifecycles, which is why a single entry — rather
+    than three parallel dicts — is the clearer invariant:
+
+    - ``data`` / ``timestamp``: the cached payload + its monotonic stamp.
+      Invalidation clears ``data`` (marks the slot stale); the single-flight
+      leader repopulates it.
+    - ``lock``: the per-agent single-flight lock. Created with the entry and
+      REUSED across invalidations so concurrent callers keep coalescing onto
+      one Docker call even immediately after an invalidation.
+    - ``gen``: a monotonic generation counter (F4). Invalidation bumps it; a
+      leader writes its result only if ``gen`` is unchanged across its Docker
+      call, discarding a write that an invalidation raced past. ``gen`` must
+      never be reset — see the NOTE on `_agent_stats`.
+    """
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    gen: int = 0
+    data: dict | None = None
+    timestamp: float = 0.0
+
+
+# {agent_name: _AgentStatsEntry} — consolidated cache + single-flight lock +
+# generation counter (#73).
+#
+# NOTE on growth: an entry is created the first time an agent's stats are
+# requested and is NEVER removed. Invalidation marks the slot stale
+# (``data = None``) and bumps ``gen`` but keeps the entry, because popping it
+# would let a leader that captured the default ``gen == 0`` match a post-pop
+# default and repopulate a just-deleted agent's cache — reintroducing the F4
+# race. Retention is therefore bounded by the number of DISTINCT agent names
+# seen over the process lifetime (it grows under create/delete/rename churn,
+# not just live fleet size); each entry is one Lock plus a couple of ints, so
+# the cost is negligible.
+_agent_stats: dict = {}
+
+
+def invalidate_agent_stats_cache(agent_name: str) -> None:
+    """#73: mark an agent's cached stats stale and bump its generation (F4) so
+    any in-flight single-flight leader's later write is discarded. Call on
+    agent start/stop/delete (parallel to invalidate_context_stats_cache).
+
+    Keeps the entry rather than removing it: the ``gen`` counter must survive
+    (popping reintroduces the gen=0 F4 race), and reusing the existing lock
+    keeps concurrent callers coalesced across the invalidation. No-op when the
+    agent has no entry — nothing is cached and no leader is in flight, so there
+    is nothing to discard.
+    """
+    entry = _agent_stats.get(agent_name)
+    if entry is None:
+        return
+    entry.data = None
+    entry.timestamp = 0.0
+    entry.gen += 1
 
 
 async def _fetch_single_agent_context(agent: dict, client: httpx.AsyncClient) -> dict:
@@ -168,13 +282,13 @@ async def get_agents_context_stats_logic(
     return {"agents": all_stats}
 
 
-async def get_agent_stats_logic(
-    agent_name: str,
-    current_user: User
-) -> dict:
-    """
-    Get live container stats (CPU, memory, network) for an agent.
-    """
+async def _compute_agent_stats(agent_name: str) -> dict:
+    """Do the actual (expensive) Docker work for one agent's live stats.
+
+    Preserves the original error semantics: 404 when the container is missing,
+    400 when it is not running, 500 on any stats/compute failure. Callers must
+    NOT cache the result on a raised error (a transient stop/404 must not get
+    pinned for the TTL)."""
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -228,5 +342,52 @@ async def get_agent_stats_logic(
             "uptime_seconds": uptime_seconds,
             "status": container.status
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+async def get_agent_stats_logic(
+    agent_name: str,
+    current_user: User
+) -> dict:
+    """
+    Get live container stats (CPU, memory, network) for an agent.
+
+    #73: serves repeat/concurrent requests for the same agent from a short
+    TTL cache and collapses concurrent same-agent misses into ONE Docker call
+    via per-agent single-flight. Payload shape is byte-for-byte identical to
+    the pre-cache version (the frontend useAgentStats store consumes it as-is).
+    """
+    ttl = _AGENT_STATS_TTL
+
+    # Cache disabled (TTL=0, debugging): always recompute, never store (no
+    # entry is created, so the disable path leaves _agent_stats untouched).
+    if ttl <= 0:
+        return await _compute_agent_stats(agent_name)
+
+    # Fast path: a fresh slot short-circuits all Docker work.
+    entry = _agent_stats.get(agent_name)
+    if entry is not None and entry.data is not None and (time.monotonic() - entry.timestamp) < ttl:
+        return entry.data
+
+    # Miss path: single-flight on the per-agent lock so concurrent same-agent
+    # requests share one Docker call. setdefault has no await, so it is atomic
+    # w.r.t. other coroutines — all same-agent callers get the same entry/lock.
+    entry = _agent_stats.setdefault(agent_name, _AgentStatsEntry())
+    async with entry.lock:
+        # Double-checked locking: a request that waited on the lock finds the
+        # slot the leader just populated and returns it without a Docker call.
+        if entry.data is not None and (time.monotonic() - entry.timestamp) < ttl:
+            return entry.data
+
+        # Capture the generation BEFORE the Docker call (F4). If an
+        # invalidation bumps it while we await, we discard this (now stale)
+        # result instead of repopulating the slot.
+        gen = entry.gen
+        data = await _compute_agent_stats(agent_name)  # raises → not cached
+        if entry.gen == gen:
+            entry.data = data
+            entry.timestamp = time.monotonic()
+        return data

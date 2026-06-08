@@ -34,19 +34,27 @@ class MetadataMixin:
             cursor = conn.cursor()
 
             if is_admin:
-                # Admin sees all agents
-                cursor.execute("SELECT agent_name FROM agent_ownership")
+                # Admin sees all live agents. Soft-deleted agents (#834)
+                # are excluded — admins recover via the dedicated admin
+                # endpoint, not via the user-facing accessible list.
+                cursor.execute(
+                    "SELECT agent_name FROM agent_ownership WHERE deleted_at IS NULL"
+                )
                 return [row["agent_name"] for row in cursor.fetchall()]
 
-            # Get owned + shared agents
+            # Get owned + shared agents. agent_sharing rows for a
+            # soft-deleted agent are filtered out via the join to
+            # agent_ownership; without it, a shared-with user would see
+            # the deleted agent's name in their accessible list.
             cursor.execute("""
                 SELECT DISTINCT agent_name FROM (
                     SELECT ao.agent_name FROM agent_ownership ao
                     JOIN users u ON ao.owner_id = u.id
-                    WHERE LOWER(u.email) = LOWER(?)
+                    WHERE LOWER(u.email) = LOWER(?) AND ao.deleted_at IS NULL
                     UNION
-                    SELECT agent_name FROM agent_sharing
-                    WHERE LOWER(shared_with_email) = LOWER(?)
+                    SELECT s.agent_name FROM agent_sharing s
+                    JOIN agent_ownership ao2 ON ao2.agent_name = s.agent_name
+                    WHERE LOWER(s.shared_with_email) = LOWER(?) AND ao2.deleted_at IS NULL
                 )
             """, (user_email, user_email))
             return [row["agent_name"] for row in cursor.fetchall()]
@@ -88,12 +96,22 @@ class MetadataMixin:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             try:
-                # Check if old agent exists
-                cursor.execute("SELECT 1 FROM agent_ownership WHERE agent_name = ?", (old_name,))
+                # Check if old agent exists AND is live (not soft-deleted).
+                # Renaming a soft-deleted agent is meaningless; the row
+                # is on its way out.
+                cursor.execute(
+                    "SELECT 1 FROM agent_ownership "
+                    "WHERE agent_name = ? AND deleted_at IS NULL",
+                    (old_name,),
+                )
                 if not cursor.fetchone():
                     return False
 
-                # Check if new name is already taken
+                # Check if new name is already taken. Intentionally does
+                # NOT filter `deleted_at IS NULL` — soft-deleted rows
+                # still reserve the name during the retention window
+                # (#834 acceptance criterion: "Agent name remains
+                # reserved for the retention period").
                 cursor.execute("SELECT 1 FROM agent_ownership WHERE agent_name = ?", (new_name,))
                 if cursor.fetchone():
                     return False
@@ -287,6 +305,7 @@ class MetadataMixin:
                 LEFT JOIN agent_git_config gc ON gc.agent_name = ao.agent_name
                 LEFT JOIN agent_sharing s ON s.agent_name = ao.agent_name
                     AND LOWER(s.shared_with_email) = LOWER(?)
+                WHERE ao.deleted_at IS NULL  -- #834: exclude soft-deleted agents
             """, (user_email or '',))
 
             result = {}

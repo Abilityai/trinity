@@ -31,7 +31,7 @@ class AccessPolicyMixin:
                        COALESCE(open_access, 0) AS open_access,
                        COALESCE(group_auth_mode, 'none') AS group_auth_mode
                 FROM agent_ownership
-                WHERE agent_name = ?
+                WHERE agent_name = ? AND deleted_at IS NULL
                 """,
                 (agent_name,),
             )

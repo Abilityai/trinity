@@ -173,7 +173,7 @@ export function createScheduleTools(
         model: z
           .string()
           .optional()
-          .describe("Model override for this schedule's executions (e.g., 'claude-sonnet-4-20250514'). If omitted, uses agent default."),
+          .describe("Model override for this schedule's executions (e.g., 'claude-sonnet-4-6' or 'claude-opus-4-8'). If omitted, uses agent default."),
         max_retries: z
           .number()
           .int()

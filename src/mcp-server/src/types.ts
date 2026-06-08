@@ -196,7 +196,10 @@ export interface ScheduleExecution {
   message: string;
   response?: string;
   error?: string;
-  triggered_by: "schedule" | "manual" | "mcp" | "retry";
+  // Backend `routers/chat.py` also emits "agent" (agent-to-agent), "chat"
+  // (web UI), "task" (parallel task), "fan_out", etc. Widen to string so
+  // the TS surface tolerates the full set without lagging behind the backend.
+  triggered_by: string;
   context_used?: number;
   context_max?: number;
   cost?: number;
@@ -206,6 +209,10 @@ export interface ScheduleExecution {
   claude_session_id?: string;
   source_agent_name?: string;
   source_user_email?: string;
+  // AUDIT-001: MCP key origin tracking — used by #914 chat-timeout
+  // recovery to scope the executions lookup to the calling key.
+  source_mcp_key_id?: string;
+  source_mcp_key_name?: string;
   // RETRY-001: Retry tracking
   attempt_number?: number;
   retry_of_execution_id?: string;

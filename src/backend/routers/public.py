@@ -32,8 +32,10 @@ from routers.auth import check_login_rate_limit, record_login_attempt, get_redis
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
-from services.platform_prompt_service import format_user_memory_block
-from services.settings_service import get_anthropic_api_key
+from services.platform_prompt_service import (
+    format_user_memory_block,
+    summarize_user_memory_background,
+)
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 
 
@@ -340,7 +342,8 @@ async def request_verification_code(
     # Send email
     email_sent = await email_service.send_verification_code(
         verification.email,
-        verification_data["code"]
+        verification_data["code"],
+        agent_name=link["agent_name"],
     )
 
     if not email_sent:
@@ -559,12 +562,14 @@ async def public_chat(
         ip_address=client_ip
     )
 
-    # MEM-001: Fetch per-user memory for email-verified sessions and inject into system prompt
+    # MEM-001 (#895): Fetch per-user memory for email-verified sessions and inject
+    # into the system prompt. The record carries two independently-written sections
+    # (agent_notes + conversation_summary); format_user_memory_block renders both
+    # when present and returns None when both are empty.
     memory_system_prompt = None
     if identifier_type == "email" and verified_email:
         user_memory = db.get_or_create_public_user_memory(agent_name, verified_email)
-        if user_memory.get("memory_text"):
-            memory_system_prompt = format_user_memory_block(user_memory["memory_text"])
+        memory_system_prompt = format_user_memory_block(user_memory)
 
     # EXEC-024: Execute via TaskExecutionService (unified execution path)
     # Public executions now get full tracking: execution records, activity stream,
@@ -649,7 +654,7 @@ async def public_chat(
     if identifier_type == "email" and verified_email:
         new_count = db.increment_public_user_memory_count(agent_name, verified_email)
         if new_count % 5 == 0:
-            asyncio.create_task(_summarize_user_memory(
+            asyncio.create_task(summarize_user_memory_background(
                 agent_name=agent_name,
                 user_email=verified_email,
                 session_id=chat_session.id,
@@ -946,7 +951,7 @@ async def _execute_public_chat_background(
             if identifier_type == "email" and verified_email:
                 new_count = db.increment_public_user_memory_count(agent_name, verified_email)
                 if new_count % 5 == 0:
-                    asyncio.create_task(_summarize_user_memory(
+                    asyncio.create_task(summarize_user_memory_background(
                         agent_name=agent_name,
                         user_email=verified_email,
                         session_id=chat_session_id,
@@ -955,82 +960,6 @@ async def _execute_public_chat_background(
             logger.error(f"[PublicChatAsync] Task failed for {agent_name}: {result.error}")
     except Exception as e:
         logger.error(f"[PublicChatAsync] Background execution error for {agent_name}: {e}")
-
-
-_SUMMARIZATION_MODEL = "claude-haiku-4-5-20251001"
-
-_SUMMARIZATION_PROMPT = """\
-You are a memory system. Given this conversation, extract a concise bullet list of facts \
-about the user that would be useful to remember for future conversations.
-Be specific: name, preferences, goals, context. Max 300 words.
-
-Existing memory:
-{existing_memory}
-
-New conversation:
-{conversation}
-
-Output the updated memory text only (bullet points, no headers)."""
-
-
-async def _summarize_user_memory(agent_name: str, user_email: str, session_id: str) -> None:
-    """
-    Background task: summarize recent conversation and update user memory.
-
-    Fire-and-forget — failures are logged but never surfaced to the user.
-    """
-    try:
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            logger.warning("[MemSummarize] No ANTHROPIC_API_KEY configured, skipping summarization")
-            return
-
-        # Get current memory and last 20 messages
-        memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
-        existing_memory = memory_record.get("memory_text", "")
-
-        messages = db.get_recent_public_chat_messages(session_id, limit=20)
-        if not messages:
-            return
-
-        conversation_lines = []
-        for msg in messages:
-            role_label = "User" if msg.role == "user" else "Assistant"
-            conversation_lines.append(f"{role_label}: {msg.content}")
-        conversation_text = "\n".join(conversation_lines)
-
-        prompt = _SUMMARIZATION_PROMPT.format(
-            existing_memory=existing_memory or "(none yet)",
-            conversation=conversation_text,
-        )
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": _SUMMARIZATION_MODEL,
-                    "max_tokens": 512,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-
-        if response.status_code != 200:
-            logger.error(f"[MemSummarize] Anthropic API error {response.status_code}: {response.text[:200]}")
-            return
-
-        data = response.json()
-        new_memory = data.get("content", [{}])[0].get("text", "").strip()
-        if new_memory:
-            db.update_public_user_memory(agent_name, user_email, new_memory)
-            logger.info(f"[MemSummarize] Updated memory for {user_email} on {agent_name} ({len(new_memory)} chars)")
-
-    except Exception as e:
-        logger.error(f"[MemSummarize] Failed to summarize memory for {user_email} on {agent_name}: {e}")
 
 
 @router.get("/executions/{token}/{execution_id}/stream")

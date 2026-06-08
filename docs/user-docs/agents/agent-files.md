@@ -9,9 +9,10 @@ Two-panel file manager in the Agent Detail Files tab for browsing, previewing, a
 3. The right panel shows a preview of the selected file.
 4. Supported previews: images, video, audio, PDF, and text files.
 5. Click the edit button on any text file to modify and save it inline.
-6. Delete files directly from the file manager. Protected path warnings appear for critical files.
-7. Toggle **Show hidden files** to reveal dotfiles (`.env`, `.claude/`, etc.).
-8. The agent workspace root is `/home/developer/`.
+6. Click **New folder** on any directory to create a subfolder in place (workspace-confined; edit-protected paths are rejected).
+7. Delete files directly from the file manager. Protected path warnings appear for critical files.
+8. Toggle **Show hidden files** to reveal dotfiles (`.env`, `.claude/`, etc.).
+9. The agent workspace root is `/home/developer/`.
 
 ### Content Folder Convention
 
@@ -68,6 +69,7 @@ If the agent has `require_email` enabled, download links enforce session verific
 |----------|--------|-------------|
 | `/api/agents/{name}/files` | GET | List workspace files (tree structure) |
 | `/api/agents/{name}/files/download` | GET | Download file content (100 MB limit) |
+| `/api/agents/{name}/files/mkdir` | POST | Create a directory in the workspace |
 | `/api/agents/{name}/file-sharing` | GET | File sharing status and quota |
 | `/api/agents/{name}/file-sharing` | PUT | Enable or disable file sharing (owner/admin) |
 | `/api/agents/{name}/shared-files` | POST | Mint a download URL for a file in `/home/developer/public/` |

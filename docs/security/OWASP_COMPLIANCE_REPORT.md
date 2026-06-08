@@ -44,7 +44,7 @@ This report evaluates the Trinity Agent Orchestration Platform against the OWASP
 | A01-3 | Audit logs endpoint only checks admin role, no RBAC | Low | Open | `main.py:268` |
 
 ### Remediation Details
-- **A01-1**: WebSocket now accepts JWT token via query parameter (`/ws?token=<jwt>`) or first message. Authentication status tracked per connection.
+- **A01-1**: WebSocket authenticates via single-use opaque tickets (C-002 / #550). Clients mint a 32-byte ticket by calling `POST /api/ws/ticket` (JWT in `Authorization` header), then connect to `/ws?ticket=<opaque>`. The ticket has a 30s TTL and is consumed atomically via Redis `GETDEL`. JWT-in-URL was removed to close the April 2026 pentest finding 3.2.1 (JWT leakage via URL into logs, browser history, and upstream proxies).
 
 ---
 

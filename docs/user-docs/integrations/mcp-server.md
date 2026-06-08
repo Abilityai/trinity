@@ -1,13 +1,13 @@
 # MCP Server
 
-Trinity's MCP server exposes 62 tools for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication.
+Trinity's MCP server exposes 74 tools for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication.
 
 ## Concepts
 
-- **Model Context Protocol (MCP)** -- An open standard for tool-based AI integrations. Trinity implements an MCP server that exposes agent management as callable tools.
-- **FastMCP** -- The server framework used, with Streamable HTTP transport on port 8080.
-- **API Keys** -- Authentication mechanism for MCP access. Keys are generated in the API Keys page and sent via `Authorization: Bearer` header.
-- **Agent-Scoped Keys** -- API keys that restrict access to a specific agent, limiting which tools and data the key holder can reach.
+- **Model Context Protocol (MCP)** — An open standard for tool-based AI integrations. Trinity implements an MCP server that exposes agent management as callable tools.
+- **FastMCP** — The server framework used, with Streamable HTTP transport on port 8080.
+- **API Keys** — Authentication mechanism for MCP access. Keys are generated in the API Keys page and sent via `Authorization: Bearer` header.
+- **Agent-Scoped Keys** — API keys that restrict access to a specific agent, limiting which tools and data the key holder can reach.
 
 ## How It Works
 
@@ -42,8 +42,8 @@ Add Trinity as an MCP server in your Claude Code configuration:
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` | 17 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync |
-| `chat.ts` | 3 | Chat, history, logs |
+| `agents.ts` | 19 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT |
+| `chat.ts` | 3 | Chat (gateway-timeout safe), history, logs |
 | `schedules.ts` | 8 | Schedule CRUD and execution history |
 | `executions.ts` | 3 | Execution queries, async polling, activity monitoring |
 | `skills.ts` | 7 | Skill management and assignment |
@@ -52,9 +52,23 @@ Add Trinity as an MCP server in your Claude Code configuration:
 | `subscriptions.ts` | 6 | Subscription management |
 | `monitoring.ts` | 3 | Fleet health |
 | `nevermined.ts` | 4 | Payment configuration |
-| `notifications.ts` | 1 | Agent notifications |
-| `events.ts` | 4 | Event pub/sub |
+| `notifications.ts` | 1 | Agent-to-platform notifications |
+| `events.ts` | 4 | Agent event pub/sub |
 | `docs.ts` | 1 | Agent documentation |
+| `channels.ts` | 2 | Channel group discovery + proactive group messaging |
+| `messages.ts` | 1 | Proactive user messaging by verified email |
+| `files.ts` | 1 | `share_file` — publish file to a signed download URL |
+| `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
+
+### Key Tools Worth Knowing
+
+| Tool | Why it exists |
+|------|---------------|
+| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe**: if the sync call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", execution_id, message}` so the caller polls instead of duplicate-queueing the request. |
+| `share_file` | The agent drops a file into `/home/developer/public/` and calls this tool to mint a signed, expiring download URL (universal — works for web, Slack, Telegram, WhatsApp, email). |
+| `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
+| `send_message` | Proactive message to a specific user by verified email. Rate-limited and audit-logged. |
+| `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. |
 
 ## For Agents
 
@@ -77,8 +91,10 @@ Add Trinity as an MCP server in your Claude Code configuration:
 - API keys are invalidated when the backend restarts.
 - Agent-scoped keys cannot access tools outside their assigned agent.
 - MCP clients must be manually reconnected after a backend restart.
+- `chat_with_agent` sync mode caps at `MCP_CHAT_TIMEOUT_MS` (default 25s). Long-running calls beyond that switch to poll-mode via the returned `execution_id`.
 
 ## See Also
 
 - [Nevermined Payments](nevermined-payments.md)
 - [Slack Integration](slack-integration.md)
+- [A2A Agent Card](a2a-protocol.md) — A2A v1.0 discovery for external orchestrators

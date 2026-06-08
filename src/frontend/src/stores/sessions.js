@@ -40,6 +40,7 @@ export const useSessionsStore = defineStore('sessions', {
     featureFlagsLoaded: false,
     sessionTabEnabled: false,
     voiceAvailable: false,
+    workspaceAvailable: false,
   }),
 
   getters: {
@@ -67,9 +68,11 @@ export const useSessionsStore = defineStore('sessions', {
         })
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
         this.voiceAvailable = !!r.data?.voice_available
+        this.workspaceAvailable = !!r.data?.workspace_available
       } catch {
         this.sessionTabEnabled = false
         this.voiceAvailable = false
+        this.workspaceAvailable = false
       } finally {
         this.featureFlagsLoaded = true
       }

@@ -33,7 +33,8 @@ class SecurityMixin:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT full_capabilities FROM agent_ownership WHERE agent_name = ?
+                SELECT full_capabilities FROM agent_ownership
+                WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row and row[0] is not None:
@@ -76,7 +77,8 @@ class SecurityMixin:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(read_only_mode, 0) as read_only_mode, read_only_config
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership
+                WHERE agent_name = ? AND deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
             if row:
@@ -124,7 +126,8 @@ class SecurityMixin:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT guardrails_config FROM agent_ownership WHERE agent_name = ?",
+                "SELECT guardrails_config FROM agent_ownership "
+                "WHERE agent_name = ? AND deleted_at IS NULL",
                 (agent_name,),
             )
             row = cursor.fetchone()

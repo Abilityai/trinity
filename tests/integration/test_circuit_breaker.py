@@ -44,18 +44,26 @@ def _load_env_password() -> str:
     """Pull REDIS_BACKEND_PASSWORD out of the repo .env."""
     env_path = _REPO / ".env"
     if not env_path.exists():
-        pytest.skip(".env missing — cannot derive Redis credentials")
+        pytest.skip(".env missing — cannot derive Redis credentials", allow_module_level=True)
     for line in env_path.read_text().splitlines():
         if line.startswith("REDIS_BACKEND_PASSWORD="):
             return line.split("=", 1)[1].strip()
-    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env")
+    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env", allow_module_level=True)
 
 
 # Point config.py at the local stack BEFORE importing agent_client.
-_PASSWORD = _load_env_password()
-os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
+# Honor a pre-set REDIS_URL (sibling-stack workflows / CI on alternate
+# ports). Default: derive from .env + localhost:6379 for the standard
+# `./scripts/deploy/start.sh` dev stack.
+if "REDIS_URL" not in os.environ:
+    _PASSWORD = _load_env_password()
+    os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
+# REDIS_PASSWORD / REDIS_BACKEND_PASSWORD aren't read by config.py (which
+# only consumes REDIS_URL), but a few test paths still reach for them.
+# Setdefault keeps the contract backward-compatible without overwriting
+# values supplied by the caller's environment.
 os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", _PASSWORD)
+os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
 
 
 # Import via importlib to avoid pulling in the full services/__init__.py
@@ -111,6 +119,20 @@ def _ensure_redis_client_cached():
     agent_client._reset_circuit_redis_client()
     yield
     agent_client._reset_circuit_redis_client()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_after_test():
+    """Override the parent conftest's `cleanup_after_test` autouse fixture.
+
+    The parent fixture pulls in `api_client`, which authenticates against
+    `http://localhost:8000/token` — a dependency these tests don't actually
+    need (they exercise the Redis-backed circuit primitives in-process).
+    Without this override, running `pytest tests/integration/test_circuit_breaker.py`
+    fails with 401 when the dev backend isn't reachable on 8000, even
+    though the tests would otherwise pass cleanly against just Redis.
+    """
+    yield
 
 
 # ── State machine ────────────────────────────────────────────────────────────
@@ -224,14 +246,163 @@ class TestDormantState:
         assert last == "dormant", f"never transitioned to dormant; last={last}"
         assert cs.state == "dormant"
 
-    def test_dormant_denies_all_requests(self, agent_name):
+    def test_dormant_denies_within_cooldown(self, agent_name):
+        """While inside the dormant cooldown window, all requests are denied.
+
+        #921: dormant no longer means "never probe again" — it means probe
+        on a long cooldown. But within that window, no requests slip through.
+        """
         agent_client.force_circuit_dormant(agent_name, reason="test")
         cs = agent_client.CircuitState(agent_name)
         assert cs.state == "dormant"
         assert cs.allow_request() is False
-        # Repeated calls stay dormant — no half-open attempts.
         for _ in range(5):
             assert cs.allow_request() is False
+
+    def test_dormant_transition_emits_operator_queue_alert(self, agent_name, monkeypatch):
+        """#921: closed/open → dormant transition fires a
+        circuit_breaker_dormant entry in the Operating Room queue so
+        operators see the silently-failing agent without grepping logs.
+
+        Stubs the lazy `database` import inside `_emit_dormant_alert` with
+        an in-memory fake so we can drive the transition against the real
+        Redis CB without needing the live backend SQLite.
+        """
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        # Faster transition into dormant.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
+
+        fake_db = MagicMock()
+        fake_module = types.ModuleType("database")
+        fake_module.db = fake_db
+        monkeypatch.setitem(sys.modules, "database", fake_module)
+        # utils.helpers is normally available; we don't need to stub it,
+        # but if running on a stripped sys.path we provide a shim.
+        if "utils.helpers" not in sys.modules:
+            shim = types.ModuleType("utils.helpers")
+            shim.utc_now_iso = lambda: "2026-05-23T00:00:00Z"
+            monkeypatch.setitem(sys.modules, "utils.helpers", shim)
+
+        cs = agent_client.CircuitState(agent_name)
+        last = None
+        for _ in range(
+            agent_client.CIRCUIT_FAILURE_THRESHOLD
+            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            + 2
+        ):
+            last = cs.record_failure()
+            if last == "dormant":
+                break
+        assert last == "dormant"
+
+        # Alert fired exactly once on the transition.
+        assert fake_db.create_operator_queue_item.call_count == 1
+        called_agent, item = fake_db.create_operator_queue_item.call_args.args
+        assert called_agent == agent_name
+        # Type is the generic 'alert' so the existing Operating Room UI
+        # renders an Acknowledge control. The narrower CB-specific marker
+        # is in context.alert_type for callers that need to filter.
+        assert item["type"] == "alert"
+        assert item["context"]["alert_type"] == "circuit_breaker_dormant"
+        assert item["priority"] == "high"
+        assert item["status"] == "pending"
+        assert item["agent_name"] == agent_name
+        assert "DORMANT" in item["title"]
+        assert item["context"]["transition"] == "dormant"
+        assert (
+            item["context"]["dormant_cooldown_seconds"]
+            == agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS
+        )
+
+        # Subsequent failures stay dormant (prior==new) — no transition,
+        # no second alert. Verifies the once-per-entry guarantee.
+        for _ in range(3):
+            cs.record_failure()
+        assert fake_db.create_operator_queue_item.call_count == 1
+
+    def test_dormant_probes_after_cooldown(self, agent_name, monkeypatch):
+        """#921: once the dormant cooldown elapses, exactly one probe is
+        admitted per worker race. Restores baseline recovery behaviour
+        without requiring manual intervention."""
+        # Tiny cooldown so the test elapses it without sleeping for an hour.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.05)
+        # Drive the breaker into dormant via failures (not the force-helper)
+        # so next_probe_at is set by the failure Lua path with the new
+        # CIRCUIT_DORMANT_COOLDOWN_SECONDS.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.01)
+        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.01)
+
+        cs = agent_client.CircuitState(agent_name)
+        last = None
+        for _ in range(
+            agent_client.CIRCUIT_FAILURE_THRESHOLD
+            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            + 2
+        ):
+            last = cs.record_failure()
+            if last == "dormant":
+                break
+        assert last == "dormant"
+        # Immediately after entering dormant, the cooldown has not elapsed.
+        assert cs.allow_request() is False
+        time.sleep(0.1)
+        # Cooldown elapsed — exactly one probe goes through.
+        assert cs.allow_request() is True
+        # The probe-lock is held, so a second request right after is denied.
+        assert cs.allow_request() is False
+
+    def test_dormant_probe_failure_rearms_full_dormant_cooldown(
+        self, agent_name, redis_client, monkeypatch
+    ):
+        """#921: when a dormant probe fails, next_probe_at must be rearmed to
+        the full DORMANT_COOLDOWN — NOT the open-state exponential backoff.
+
+        Locks in the cadence the fix promises: one probe per ~1h while
+        dormant, regardless of how many times the agent stays unreachable.
+        Without this guarantee a dormant CB could churn through fast
+        retries via the open-state backoff curve, defeating the purpose."""
+        # Wide gap between the two cooldown families so the assertion can
+        # distinguish them: dormant=0.5s, open exp cap=0.001s.
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_COOLDOWN_SECONDS", 0.5)
+        monkeypatch.setattr(agent_client, "CIRCUIT_DORMANT_AFTER_OPEN_PROBES", 4)
+        monkeypatch.setattr(agent_client, "CIRCUIT_BASE_COOLDOWN_SECONDS", 0.001)
+        monkeypatch.setattr(agent_client, "CIRCUIT_MAX_COOLDOWN_SECONDS", 0.001)
+
+        cs = agent_client.CircuitState(agent_name)
+        # Drive into dormant.
+        for _ in range(
+            agent_client.CIRCUIT_FAILURE_THRESHOLD
+            + agent_client.CIRCUIT_DORMANT_AFTER_OPEN_PROBES
+            + 2
+        ):
+            if cs.record_failure() == "dormant":
+                break
+        assert cs.state == "dormant"
+
+        # Wait past the cooldown, take the probe, then simulate it failing.
+        time.sleep(0.6)
+        assert cs.allow_request() is True  # probe admitted
+        cs.record_failure()                # probe failed → record_failure on dormant
+
+        # next_probe_at should be ~0.5s in the future (DORMANT_COOLDOWN),
+        # not ~0.001s (open-state max). Use the redis_client fixture to
+        # read the raw value; the hash field is a unix timestamp.
+        key = f"agent:circuit:{agent_name}"
+        next_probe_at = float(redis_client.hget(key, "next_probe_at"))
+        gap = next_probe_at - time.time()
+        assert agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS - 0.1 <= gap <= agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS + 0.1, (
+            f"expected gap ~{agent_client.CIRCUIT_DORMANT_COOLDOWN_SECONDS}s "
+            f"(dormant cooldown), got {gap:.3f}s — open-state backoff would "
+            f"have yielded ~{agent_client.CIRCUIT_MAX_COOLDOWN_SECONDS}s"
+        )
+        # Still dormant, no state slide back to open.
+        assert cs.state == "dormant"
 
 
 # ── Probe-lock cross-worker semantics ────────────────────────────────────────
@@ -486,14 +657,19 @@ class TestFailureClassification:
         """Case 5: raw BrokenPipeError surfaced un-wrapped.
 
         Some transports (and MockTransport) can surface OSError subclasses
-        directly. The plan intentionally does NOT add a raw OSError catch
-        (would mask local resource bugs) — so the exception propagates
-        uncaught from _request, but more importantly, no record_failure().
+        directly. The #474 follow-up DID add a raw OSError catch — for
+        drop-grace coordination (stamp + pool eviction) — but it raises
+        AgentConnectionDroppedError, a subclass of AgentNotReachableError,
+        rather than letting the raw exception propagate. The primary
+        assertion of this test — no record_failure() — is unchanged: the
+        AgentConnectionDroppedError path explicitly skips the circuit
+        counter. Asserting the subclass also pins the typed-error contract
+        so `except AgentNotReachableError` blocks still pick it up.
         """
         def handler(_req):
             raise BrokenPipeError("epipe")
 
-        with pytest.raises(BrokenPipeError):
+        with pytest.raises(agent_client.AgentConnectionDroppedError):
             self._drive(agent_name, handler)
 
         cs = agent_client.CircuitState(agent_name)
@@ -501,11 +677,15 @@ class TestFailureClassification:
         assert cs.state == "closed"
 
     def test_raw_connection_reset_does_not_record(self, agent_name):
-        """Case 6: raw ConnectionResetError — sibling of #5."""
+        """Case 6: raw ConnectionResetError — sibling of #5.
+
+        Same reclassification as case 5: caught at the drop handler,
+        raised as AgentConnectionDroppedError, no record_failure().
+        """
         def handler(_req):
             raise ConnectionResetError("reset by peer")
 
-        with pytest.raises(ConnectionResetError):
+        with pytest.raises(agent_client.AgentConnectionDroppedError):
             self._drive(agent_name, handler)
 
         cs = agent_client.CircuitState(agent_name)
@@ -712,3 +892,91 @@ class TestFailureClassification:
             self._drive(agent_name, handler)
 
         assert invoked == [], "probe-lock should still be held; transport not hit"
+
+
+# ── Concurrent transport drops keep circuit closed (#474) ────────────────────
+
+class TestConcurrentTransportDrops:
+    """Real-Redis regression for #474.
+
+    When N concurrent requests against the same agent all see a transport
+    drop (BrokenPipeError / httpx.ReadError / httpx.RemoteProtocolError),
+    none of them must trip the circuit. Verifies via CircuitState.to_dict()
+    (handles missing-hash case gracefully — the dict shows `state=closed`
+    even when no Redis hash exists for the agent yet) that:
+      - state stays 'closed'
+      - failure_count is zero
+      - no `Circuit OPENED` log line was emitted
+      - the pooled httpx client was evicted (no broken keepalive socket left)
+    """
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            lambda: BrokenPipeError(32, "Broken pipe"),
+            lambda: __import__("httpx").ReadError("read"),
+            lambda: __import__("httpx").RemoteProtocolError(
+                "Server disconnected without sending a response."
+            ),
+        ],
+        ids=["BrokenPipeError", "httpx.ReadError", "httpx.RemoteProtocolError"],
+    )
+    def test_concurrent_broken_pipe_events_keep_circuit_closed(
+        self, agent_name, exc_factory, caplog, monkeypatch
+    ):
+        import asyncio
+        import logging
+
+        # AgentClient builds a CircuitState in __init__ — we let the real
+        # Redis-backed CircuitState be constructed (so the cleanup fixture
+        # wipes its keys) and just observe state after the burst.
+        client = agent_client.AgentClient(agent_name)
+        base_url = client.base_url
+
+        # Pre-warm the pool so we can install a raising .request method on
+        # the pooled client object.
+        pooled = agent_client._get_http_client(base_url)
+
+        async def _raise(*_a, **_kw):
+            raise exc_factory()
+
+        monkeypatch.setattr(pooled, "request", _raise)
+
+        async def _burst():
+            # 10 concurrent calls all hitting the patched pooled client.
+            results = await asyncio.gather(
+                *[client._request("GET", "/health") for _ in range(10)],
+                return_exceptions=True,
+            )
+            return results
+
+        with caplog.at_level(logging.WARNING, logger=agent_client.logger.name):
+            results = asyncio.run(_burst())
+
+        # Every call should have raised AgentConnectionDroppedError (not
+        # AgentNotReachableError → ConnectError → record_failure).
+        assert all(
+            isinstance(r, agent_client.AgentConnectionDroppedError)
+            for r in results
+        ), f"unexpected exception types: {[type(r).__name__ for r in results]}"
+
+        # Circuit must remain closed via to_dict() — the API that handles
+        # missing-hash gracefully (Phase 3 Eng finding #8).
+        state = agent_client.CircuitState(agent_name).to_dict()
+        assert state["state"] == "closed", f"state was {state}"
+        assert state.get("failure_count", 0) == 0, f"failure_count was {state}"
+
+        # No transition log fired.
+        opened_logs = [
+            r for r in caplog.records
+            if "Circuit OPENED" in r.getMessage() and agent_name in r.getMessage()
+        ]
+        assert opened_logs == [], (
+            f"unexpected OPENED log: {[r.getMessage() for r in opened_logs]}"
+        )
+
+        # Pool must be evicted — concurrency guard ensures the first worker
+        # to land in the except block wins the pop; siblings see empty pool.
+        assert base_url not in agent_client._client_pool, (
+            "pooled client should be evicted after a transport drop"
+        )

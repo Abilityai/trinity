@@ -67,7 +67,6 @@ from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
 from routers.public import router as public_router
 from routers.files import router as files_router  # FILES-001 — outbound file downloads
-from routers.site import router as site_router  # SITE-001 — agent website proxy
 from routers.setup import router as setup_router, get_setup_token as get_setup_setup_token
 from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
@@ -90,10 +89,19 @@ from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
 from routers.operator_queue import router as operator_queue_router, set_websocket_manager as set_operator_queue_ws_manager
 from routers.voice import router as voice_router
+from routers.voip import public_router as voip_public_router, auth_router as voip_auth_router
 from routers.event_subscriptions import router as event_subscriptions_router, set_websocket_manager as set_event_subs_ws_manager, set_filtered_websocket_manager as set_event_subs_filtered_ws_manager
 from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
+from routers.a2a import router as a2a_router  # #737 A2A Agent Cards
+from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
+from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
+from routers.loops import (
+    agent_router as loops_agent_router,
+    loop_router as loops_loop_router,
+)  # Sequential agent loops (#740)
+from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
 
@@ -235,6 +243,7 @@ set_operator_queue_ws_manager(manager)
 set_opqueue_sync_ws_manager(manager)
 set_event_subs_ws_manager(manager)
 set_event_subs_filtered_ws_manager(filtered_manager)
+set_loop_ws_manager(manager)  # #740
 
 # NOTE: Trinity platform instructions are now injected at runtime via
 # --append-system-prompt on every chat/task request (Issue #136).
@@ -464,6 +473,22 @@ async def lifespan(app: FastAPI):
         print("CapacityManager initialised; maintenance loop running (60s)")
     except Exception as e:
         print(f"Error wiring CapacityManager: {e}")
+
+    # RELIABILITY-004 / #307: agent heartbeat watch loop — 5s cadence,
+    # staggered +10s. Actively downgrades an agent to a soft `degraded` health
+    # state after 3 consecutive missed heartbeats (additive to the 30s
+    # monitoring loop, which stays authoritative). Self-survives Redis/Docker
+    # blips; old-image agents that never heartbeat resolve to `unsupported`
+    # and are ignored.
+    async def _start_heartbeat_watch_delayed():
+        await asyncio.sleep(10)
+        try:
+            from services.heartbeat_service import schedule_heartbeat_watch
+            schedule_heartbeat_watch()
+            print("Heartbeat watch loop started (staggered +10s, 5s cadence)")
+        except Exception as e:
+            print(f"Error starting heartbeat watch loop: {e}")
+    asyncio.create_task(_start_heartbeat_watch_delayed())
 
     # Recover orphaned regular task executions (Issue #128).
     # #748: flip the warming-up gate open in a finally block so the
@@ -817,7 +842,6 @@ app.include_router(ops_router)
 app.include_router(public_links_router)
 app.include_router(public_router)
 app.include_router(files_router)  # FILES-001: /api/files/{id} — token-gated downloads
-app.include_router(site_router)   # SITE-001: /site/{token}/{path} — agent website proxy
 app.include_router(setup_router)
 app.include_router(telemetry_router)
 app.include_router(logs_router)
@@ -830,6 +854,7 @@ app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(messages_router)  # Proactive Messaging (#321)
+app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
 app.include_router(slack_public_router)  # Slack Integration Public (SLACK-001)
@@ -844,11 +869,63 @@ app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
 app.include_router(voice_router)  # Voice Chat (VOICE-001)
+app.include_router(voip_public_router)  # VoIP Telephony Media Streams WS (VOIP-001)
+app.include_router(voip_auth_router)  # VoIP Telephony binding + trigger (VOIP-001)
 app.include_router(event_subscriptions_router)  # Agent Event Subscriptions (EVT-001)
 app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
+app.include_router(a2a_router)  # A2A Agent Cards (#737)
+app.include_router(admin_recovery_router)  # Soft-delete admin recovery (#834 Phase 1c)
+app.include_router(loops_agent_router)  # Sequential agent loops (#740)
+app.include_router(loops_loop_router)  # Sequential agent loops (#740)
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
 app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
+
+
+# #847 Phase 0 — Enterprise modules (closed-source companion submodule
+# at `src/backend/enterprise/`, repo `Abilityai/trinity-enterprise`).
+# The submodule is OPTIONAL: customers running the public repo without
+# enterprise access clone without it, and the ImportError below silently
+# no-ops. When mounted, `register_enterprise(app)` installs the SSO /
+# SCIM / SIEM routers under `/api/enterprise/*`. The function is
+# idempotent (guards on `app.state.enterprise_registered`). Entitlement
+# gating happens per-endpoint via `requires_entitlement(feature_id)`
+# from `dependencies.py` — endpoints are mounted unconditionally and
+# the gate decides whether to serve them. This keeps the wiring
+# deterministic regardless of license state.
+#
+# Import path is `enterprise.backend.register_enterprise`: the private
+# repo is restructured into `backend/` and `frontend/` subdirs so the
+# same repo can be dual-mounted (`src/backend/enterprise/` for Python,
+# `src/frontend/src/enterprise/` for Vite). See
+# `docs/planning/ENTERPRISE_ARCHITECTURE.md` for rationale.
+try:
+    from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
+    register_enterprise(app)
+    # `print(..., flush=True)`: this import block runs at module init,
+    # which is BEFORE `lifespan` calls `setup_logging()`. The default
+    # Python logger drops INFO-level records, so `logger.info` here
+    # would be silently swallowed. Print to stdout instead — docker
+    # logs captures it for ops + the CI workflow greps for it.
+    print("Trinity Enterprise modules registered", flush=True)
+except ImportError:
+    print(
+        "Trinity Enterprise submodule not present — OSS-only build "
+        "(this is normal; enterprise modules are an optional private submodule)",
+        flush=True,
+    )
+except Exception as e:
+    # A BUG in enterprise registration (schema init, migration, router
+    # mount, pusher start) must NOT take down the core platform. Degrade
+    # to OSS-only and surface loudly instead of crashing boot. Any modules
+    # that registered before the failure stay active; the rest are absent
+    # (their entitlement simply won't appear in feature-flags). (#995/#997)
+    import traceback
+    print(
+        f"Trinity Enterprise registration FAILED — continuing OSS-only: {e!r}",
+        flush=True,
+    )
+    traceback.print_exc()
 
 
 # WebSocket endpoint
@@ -1020,23 +1097,37 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now()}
 
 
-# Version endpoint
-@app.get("/api/version")
-async def get_version(current_user: User = Depends(get_current_user)):
-    """Get Trinity platform version information. Requires authentication (SEC-180)."""
+def _build_version_payload(voice_enabled: bool) -> dict:
+    """Pure dict-builder for the `/api/version` payload (#926-testable).
+
+    Extracted from the FastAPI handler so the env-var → response mapping
+    can be tested without pulling main.py's full router graph through
+    importlib (opentelemetry, slack_sdk, twilio, …).
+    """
     import os
     from pathlib import Path
 
-    # Read version from VERSION file (check multiple locations)
-    version = "unknown"
-    version_paths = [
-        Path("/app/VERSION"),  # In container (mounted)
-        Path(__file__).parent.parent.parent / "VERSION",  # Development
-    ]
-    for version_file in version_paths:
-        if version_file.exists():
-            version = version_file.read_text().strip()
-            break
+    # Version resolution order (#993):
+    #   1. VERSION env var — build-stamped from git (e.g. "0.9.0+g4c640b6e"),
+    #      wired through docker-compose backend.build.args + start.sh.
+    #   2. VERSION file — curated semver, mounted in dev / copied in image.
+    #   3. "unknown" — neither present.
+    # Env-first means dev (bind-mount) and prod (build-arg) agree for the
+    # same commit instead of diverging on the file-mount being absent.
+    version = os.getenv("VERSION") or None
+    if not version:
+        version_paths = [
+            Path("/app/VERSION"),  # In container (mounted)
+            Path(__file__).parent.parent.parent / "VERSION",  # Development
+        ]
+        for version_file in version_paths:
+            if version_file.exists():
+                version = version_file.read_text().strip()
+                break
+    version = version or "unknown"
+
+    git_commit = os.getenv("GIT_COMMIT", "unknown")
+    git_commit_short = git_commit[:8] if git_commit != "unknown" else "unknown"
 
     return {
         "version": version,
@@ -1048,8 +1139,27 @@ async def get_version(current_user: User = Depends(get_current_user)):
         },
         "runtimes": ["claude-code", "gemini-cli"],
         "build_date": os.getenv("BUILD_DATE", "unknown"),
-        "voice_enabled": VOICE_ENABLED and bool(GEMINI_API_KEY),
+        "git_commit": git_commit,
+        "git_commit_short": git_commit_short,
+        "git_commit_subject": os.getenv("GIT_COMMIT_SUBJECT", "unknown"),
+        "git_commit_timestamp": os.getenv("GIT_COMMIT_TIMESTAMP", "unknown"),
+        "git_branch": os.getenv("GIT_BRANCH", "unknown"),
+        "voice_enabled": voice_enabled,
     }
+
+
+# Version endpoint
+@app.get("/api/version")
+async def get_version(current_user: User = Depends(get_current_user)):
+    """Get Trinity platform version information. Requires authentication (SEC-180).
+
+    Build-time provenance fields (#926) — `git_commit`, `git_commit_short`,
+    `git_commit_subject`, `git_commit_timestamp`, `git_branch`, `build_date` —
+    come from Dockerfile ARG/ENV wired through docker-compose
+    `backend.build.args` and `scripts/deploy/start.sh`. Default to "unknown"
+    when the build args are absent (local dev / volume-mount workflows).
+    """
+    return _build_version_payload(VOICE_ENABLED and bool(GEMINI_API_KEY))
 
 
 # User info endpoint

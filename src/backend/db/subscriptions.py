@@ -151,7 +151,7 @@ class SubscriptionOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.*, u.email as owner_email,
-                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                 FROM subscription_credentials s
                 JOIN users u ON s.owner_id = u.id
                 WHERE s.id = ?
@@ -176,7 +176,7 @@ class SubscriptionOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.*, u.email as owner_email,
-                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                 FROM subscription_credentials s
                 JOIN users u ON s.owner_id = u.id
                 WHERE s.name = ?
@@ -249,7 +249,7 @@ class SubscriptionOperations:
             if owner_id:
                 cursor.execute("""
                     SELECT s.*, u.email as owner_email,
-                        (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                        (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                     FROM subscription_credentials s
                     JOIN users u ON s.owner_id = u.id
                     WHERE s.owner_id = ?
@@ -258,7 +258,7 @@ class SubscriptionOperations:
             else:
                 cursor.execute("""
                     SELECT s.*, u.email as owner_email,
-                        (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                        (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                     FROM subscription_credentials s
                     JOIN users u ON s.owner_id = u.id
                     ORDER BY s.name
@@ -284,7 +284,7 @@ class SubscriptionOperations:
 
             for sub in subscriptions:
                 cursor.execute(
-                    "SELECT agent_name FROM agent_ownership WHERE subscription_id = ?",
+                    "SELECT agent_name FROM agent_ownership WHERE subscription_id = ? AND deleted_at IS NULL",
                     (sub.id,)
                 )
                 agents = [row["agent_name"] for row in cursor.fetchall()]
@@ -418,11 +418,11 @@ class SubscriptionOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.*, u.email as owner_email,
-                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                 FROM subscription_credentials s
                 JOIN users u ON s.owner_id = u.id
                 JOIN agent_ownership ao ON ao.subscription_id = s.id
-                WHERE ao.agent_name = ?
+                WHERE ao.agent_name = ? AND ao.deleted_at IS NULL
             """, (agent_name,))
             row = cursor.fetchone()
 
@@ -443,7 +443,7 @@ class SubscriptionOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT agent_name FROM agent_ownership WHERE subscription_id = ?",
+                "SELECT agent_name FROM agent_ownership WHERE subscription_id = ? AND deleted_at IS NULL",
                 (subscription_id,)
             )
             return [row["agent_name"] for row in cursor.fetchall()]
@@ -461,7 +461,7 @@ class SubscriptionOperations:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT subscription_id FROM agent_ownership WHERE agent_name = ?",
+                "SELECT subscription_id FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL",
                 (agent_name,)
             )
             row = cursor.fetchone()
@@ -554,7 +554,7 @@ class SubscriptionOperations:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.*, u.email as owner_email,
-                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                 FROM subscription_credentials s
                 JOIN users u ON s.owner_id = u.id
                 ORDER BY agent_count ASC, s.name ASC
@@ -592,7 +592,7 @@ class SubscriptionOperations:
             # Get all subscriptions except current, ordered by agent count (ascending)
             cursor.execute("""
                 SELECT s.*, u.email as owner_email,
-                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id) as agent_count
+                    (SELECT COUNT(*) FROM agent_ownership WHERE subscription_id = s.id AND deleted_at IS NULL) as agent_count
                 FROM subscription_credentials s
                 JOIN users u ON s.owner_id = u.id
                 WHERE s.id != ?
@@ -672,7 +672,7 @@ class SubscriptionOperations:
 
             # Currently-assigned agents (live assignment, not historical)
             cursor.execute(
-                "SELECT agent_name FROM agent_ownership WHERE subscription_id = ?",
+                "SELECT agent_name FROM agent_ownership WHERE subscription_id = ? AND deleted_at IS NULL",
                 (subscription_id,)
             )
             agents = [row["agent_name"] for row in cursor.fetchall()]

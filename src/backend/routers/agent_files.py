@@ -23,6 +23,7 @@ from services.agent_service import (
     delete_agent_file_logic,
     preview_agent_file_logic,
     update_agent_file_logic,
+    create_agent_folder_logic,
     get_agent_metrics_logic,
     get_file_sharing_status_logic,
     set_file_sharing_status_logic,
@@ -230,6 +231,26 @@ async def update_agent_file_endpoint(
         body: Request body with content
     """
     return await update_agent_file_logic(agent_name, path, body.content, current_user, request)
+
+
+class CreateFolderRequest(BaseModel):
+    """Request body for folder creation."""
+    path: str
+
+
+@router.post("/{agent_name}/files/mkdir")
+async def create_agent_folder_endpoint(
+    agent_name: str,
+    request: Request,
+    body: CreateFolderRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new directory in the agent's workspace (#37).
+
+    Args:
+        body: Request body with the directory path to create
+    """
+    return await create_agent_folder_logic(agent_name, body.path, current_user, request)
 
 
 # ============================================================================

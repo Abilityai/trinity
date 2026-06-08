@@ -67,24 +67,24 @@
           <ModelSelector v-model="selectedModel" compact placeholder="Default model" />
         </div>
 
-        <!-- Reset memory button (Phase 3.4) — only when an active session exists -->
+        <!-- Clear working memory button (Phase 3.4, #685) — only when an active session exists -->
         <div v-if="currentSessionId" class="flex flex-col items-end">
           <button
             @click="confirmReset"
             :disabled="loading"
             class="inline-flex items-center px-3 py-1.5 text-sm font-medium text-state-autonomous-600 dark:text-state-autonomous-400 hover:text-state-autonomous-700 dark:hover:text-state-autonomous-300 hover:bg-state-autonomous-50 dark:hover:bg-state-autonomous-900/30 rounded-lg transition-colors"
-            title="Clear working memory (keeps message history)"
+            title="Clear Claude's working memory for this session — use if it's stuck or repeating itself. Your chat history is kept; this is not the same as + New Session."
           >
             <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            Reset memory
+            Clear working memory
           </button>
           <p
             v-if="showCompactHint"
             class="text-xs italic text-gray-500 dark:text-gray-400 mt-1 max-w-xs text-right"
           >
-            Compacted {{ currentSession.compact_count }} times — consider starting fresh for sharper responses.
+            Compacted {{ currentSession.compact_count }} times — consider a + New Session for sharper responses.
           </p>
         </div>
 
@@ -197,11 +197,15 @@
       @click.self="showResetModal = false"
     >
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Reset session memory?</h3>
-        <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          The agent will forget the working state of this session — but the message history
-          stays visible. Useful when you want to start a clean line of thought. Your next
-          message becomes a cold turn under a new Claude session.
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Clear Claude's working memory?</h3>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
+          Claude forgets the working state of this session, but your message history
+          stays visible. Use this if it's stuck or going in circles — your next message
+          starts a fresh line of thought in the same session.
+        </p>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Different from <span class="font-medium">+ New Session</span>, which starts a
+          brand-new conversation. This keeps the current session and its history.
         </p>
         <div class="flex justify-end space-x-2">
           <button
@@ -214,7 +218,7 @@
             @click="performReset"
             class="px-4 py-2 text-sm font-medium text-white bg-state-autonomous-600 hover:bg-state-autonomous-700 rounded-lg"
           >
-            Reset memory
+            Clear working memory
           </button>
         </div>
       </div>
@@ -424,7 +428,7 @@ async function performReset() {
     // the now-reset session. Store-side cleanup is idempotent.
     sessionsStore.clearSessionTurnState(sid)
   } catch (e) {
-    localError.value = e.response?.data?.detail || 'Failed to reset memory'
+    localError.value = e.response?.data?.detail || 'Failed to clear working memory'
   }
 }
 

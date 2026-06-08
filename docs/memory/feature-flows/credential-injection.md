@@ -457,7 +457,7 @@ async def decrypt_and_inject(request: InternalDecryptInjectRequest):
 | Agent not running | 400 | "Agent is not running" |
 | No encrypted file | 404 | "No .credentials.enc file found" |
 | Decryption failed | 400 | "Failed to decrypt credentials" |
-| Agent unreachable | 503 | "Failed to connect to agent" |
+| Agent unreachable | 503 | "Failed to connect to agent" — applied symmetrically across `inject_credentials`, `import_credentials` (#35d4e78), and `export_credentials` (#35d4e78). Triggered when the agent container is running but its internal FastAPI server isn't bound to port 8000 yet (`httpx.ConnectError` / `TimeoutException` / `ReadError`). Mirrors the pattern in `routers/agent_files.py:82`. |
 
 ---
 
@@ -505,6 +505,7 @@ import_credentials("my-agent")
 
 | Date | Changes |
 |------|---------|
+| 2026-05-17 | **503 mapping on `import_credentials` / `export_credentials`** (commit 35d4e78e): both endpoints previously surfaced transient agent-server connectivity failures as 500. Now catch `httpx.RequestError` and map to 503 with a warning log, matching the pre-existing pattern in `inject_credentials` and `routers/agent_files.py`. `CredentialsFileNotFoundError(ValueError)` is unaffected — when the agent server is reachable but `.credentials.enc` is missing, the 400 path still fires. |
 | 2026-02-16 | **Security Fix (Credential Sanitization Cache Refresh)**: After credential injection, the agent-side credential sanitizer cache is now refreshed via `refresh_credential_values()` (routers/credentials.py:96, 298). This ensures newly injected credentials are immediately added to the sanitization pattern list, preventing them from appearing in subsequent execution logs. See `docker/base-image/agent_server/utils/credential_sanitizer.py`. |
 | 2026-02-15 | **Claude Max subscription support**: Added documentation about OAuth session authentication as an alternative to API key injection. When "Authenticate in Terminal" is enabled, user can log in via `/login` in web terminal. The OAuth session stored in `~/.claude.json` is then used for all Claude Code executions (including headless), eliminating the need for `ANTHROPIC_API_KEY`. |
 | 2026-02-05 | **Bug fix**: Removed orphaned credential injection loop in `crud.py:312-332` that referenced undefined `agent_credentials` variable. Added comment explaining that credentials are injected post-creation per CRED-002 design. |

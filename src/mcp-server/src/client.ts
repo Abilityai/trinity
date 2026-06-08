@@ -35,6 +35,46 @@ function debugLog(...args: any[]) {
   }
 }
 
+/**
+ * #914 pure matcher for the chat-timeout recovery lookup. Extracted from
+ * `TrinityClient.findRecentMcpExecution` so a unit test can drive it
+ * without spinning up a real backend.
+ *
+ * Selects the newest execution row that:
+ *   - is in a non-terminal status (`pending`, `queued`, `running`)
+ *   - was triggered via MCP (`triggered_by === "mcp"` or `"agent"`)
+ *   - carries the calling key's `source_mcp_key_id` when one was supplied
+ *     (rows with no key id pass — older backends or pre-AUDIT-001 rows)
+ *   - started within the last `windowMs` (default 30s, covers the typical
+ *     MCP gateway abort + a small clock-skew buffer)
+ *
+ * Returns `undefined` when nothing matches; caller falls back to a
+ * clearer error message instead of returning a wrong execution_id.
+ */
+export function pickRecentMcpExecution(
+  executions: ScheduleExecution[],
+  opts: { mcpKeyId?: string; now?: number; windowMs?: number } = {},
+): ScheduleExecution | undefined {
+  const now = opts.now ?? Date.now();
+  const windowMs = opts.windowMs ?? 30_000;
+  const cutoffMs = now - windowMs;
+  const nonTerminal = new Set(["pending", "queued", "running"]);
+  const matches = executions.filter((e) => {
+    if (!nonTerminal.has(e.status)) return false;
+    if (e.triggered_by !== "mcp" && e.triggered_by !== "agent") return false;
+    if (opts.mcpKeyId && e.source_mcp_key_id && e.source_mcp_key_id !== opts.mcpKeyId) {
+      return false;
+    }
+    const started = Date.parse(e.started_at);
+    if (Number.isNaN(started) || started < cutoffMs) return false;
+    return true;
+  });
+  // Newest first — backend returns DESC by started_at, but sort defensively
+  // in case the contract drifts.
+  matches.sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+  return matches[0];
+}
+
 export class TrinityClient {
   private baseUrl: string;
   private token?: string;
@@ -441,14 +481,25 @@ export class TrinityClient {
     name: string,
     message: string,
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
-  ): Promise<ChatResponse | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }> {
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
+  ): Promise<
+    | ChatResponse
+    | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
+    | { status: "queued_timeout"; agent: string; execution_id: string; message: string }
+  > {
     // Prepare headers
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key so an SDK-level retry of
+    // the same tool call dedupes instead of dispatching a second execution.
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -463,11 +514,61 @@ export class TrinityClient {
       headers["X-MCP-Key-Name"] = mcpKeyInfo.keyName;
     }
 
-    const response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ message }),
-    });
+    // #914: bound the synchronous backend fetch with an MCP-server-side
+    // timeout. The MCP client (e.g. Claude Code) imposes its own 30-60s
+    // gateway timeout on this JSON-RPC call, and `fetch failed` propagation
+    // is what drives naive callers into duplicate-queue retries. Aborting
+    // before the gateway gives us a chance to look up the queued
+    // execution_id and return a structured receipt instead.
+    // `||` (not `??`) so a set-but-empty value coalesces to the default —
+    // the TS twin of the #1076 os.getenv shadow bug. `'' ?? 25000` is `''`
+    // and `Number('')` is 0, which would abort every sync chat instantly.
+    // Compose injects `${MCP_CHAT_TIMEOUT_MS:-25000}` (non-empty) today, so
+    // this is defense-in-depth against a future empty injection / `-e VAR=`.
+    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const startTime = Date.now();
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ message }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // Abort or transport-level network failure. Distinguish abort vs.
+      // other errors so the recovery path only fires when WE gave up,
+      // not when the backend rejected the connection upfront.
+      const isAbort = (err as Error)?.name === "AbortError";
+      const isNetwork = (err as Error)?.name === "TypeError";
+      if (isAbort || isNetwork) {
+        const reason = isAbort ? "client abort" : "network error";
+        debugLog(`[chat] ${reason} after ${Date.now() - startTime}ms on '${name}'; attempting execution-id lookup (#914)`);
+        const receipt = await this.findRecentMcpExecution(name, mcpKeyInfo?.keyId);
+        if (receipt) {
+          return {
+            status: "queued_timeout",
+            agent: name,
+            execution_id: receipt.id,
+            message:
+              `MCP-server timeout (${timeoutMs}ms) on chat_with_agent — task is still running on '${name}'. ` +
+              `Poll get_execution_result(execution_id="${receipt.id}") instead of retrying; retry will duplicate-queue and Trinity's concurrent-duplicate guard will kill mid-execution (#914).`,
+          };
+        }
+        // No match found — rethrow with a hint so the caller knows to
+        // check the dashboard before retrying.
+        throw new Error(
+          `MCP-server timeout on chat_with_agent (${timeoutMs}ms) and no recent execution found on '${name}'. ` +
+          `Check list_recent_executions(agent_name="${name}") on the dashboard before retrying to avoid duplicate-queue (#914).`
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     // Handle 429 Too Many Requests (agent queue full)
     if (response.status === 429) {
@@ -492,6 +593,31 @@ export class TrinityClient {
     }
 
     return (await response.json()) as ChatResponse;
+  }
+
+  /**
+   * #914 recovery lookup. After the chat() fetch aborts, query the
+   * agent's recent executions and pick the newest non-terminal row that
+   * (a) was triggered through MCP, (b) carries the calling key's id if
+   * one was supplied, and (c) started within the last ~30s. The caller
+   * uses this to return a structured `queued_timeout` receipt instead of
+   * propagating `fetch failed`.
+   *
+   * Best-effort: any failure (executions endpoint unreachable, no rows,
+   * no match) returns `undefined` and the caller falls back to a clearer
+   * error message.
+   */
+  private async findRecentMcpExecution(
+    agentName: string,
+    mcpKeyId?: string,
+  ): Promise<ScheduleExecution | undefined> {
+    try {
+      const recent = await this.getAgentExecutions(agentName, 10);
+      return pickRecentMcpExecution(recent, { mcpKeyId, now: Date.now() });
+    } catch (err) {
+      debugLog(`[chat] findRecentMcpExecution failed for '${agentName}': ${(err as Error)?.message}`);
+      return undefined;
+    }
   }
 
   /**
@@ -522,7 +648,8 @@ export class TrinityClient {
       chat_session_id?: string;
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<ChatResponse | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }> {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -530,6 +657,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -631,7 +763,8 @@ export class TrinityClient {
       allowed_tools?: string[];
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<{
     fan_out_id: string;
     status: string;
@@ -655,6 +788,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
@@ -1071,6 +1209,61 @@ export class TrinityClient {
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/messages`,
+      data
+    );
+  }
+
+  // ============================================================================
+  // VoIP Telephony (VOIP-001, #1056)
+  // ============================================================================
+
+  /**
+   * Place an outbound phone call from the agent to a user. Server-side gated
+   * (VoIP enabled + voice binding) and rate-limited.
+   */
+  async placeVoipCall(
+    agentName: string,
+    data: {
+      to_number: string;
+      context?: string;
+      process_transcript?: boolean;
+    }
+  ): Promise<{
+    call_id: string;
+    status: string;
+    to_number: string;
+    twilio_call_sid?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/voip/call`,
+      data
+    );
+  }
+
+  // ============================================================================
+  // Per-User Memory Write (MEM-001, #888)
+  // ============================================================================
+
+  /**
+   * Write the per-user memory blob for the user currently being served.
+   * The user email is resolved server-side from the execution record —
+   * the caller only supplies the execution_id and the memory text.
+   */
+  async writeUserMemory(
+    agentName: string,
+    data: {
+      execution_id: string;
+      memory_text: string;
+    }
+  ): Promise<{
+    success: boolean;
+    agent_name: string;
+    user_email: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/user-memory`,
       data
     );
   }
@@ -1525,6 +1718,50 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/telegram/groups/${encodeURIComponent(chatId)}/messages`,
       { message }
+    );
+  }
+
+  // ============================================================================
+  // Sequential Agent Loops (#740)
+  // ============================================================================
+
+  async startAgentLoop(
+    agentName: string,
+    data: {
+      message: string;
+      max_runs: number;
+      stop_signal?: string;
+      delay_seconds?: number;
+      timeout_per_run?: number;
+      model?: string;
+      allowed_tools?: string[];
+    }
+  ): Promise<{
+    loop_id: string;
+    status: string;
+    agent_name: string;
+    max_runs: number;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/loops`,
+      data
+    );
+  }
+
+  async getLoopStatus(loopId: string): Promise<unknown> {
+    return this.request(
+      "GET",
+      `/api/loops/${encodeURIComponent(loopId)}`
+    );
+  }
+
+  async stopAgentLoop(
+    loopId: string
+  ): Promise<{ loop_id: string; status: string }> {
+    return this.request(
+      "POST",
+      `/api/loops/${encodeURIComponent(loopId)}/stop`
     );
   }
 }

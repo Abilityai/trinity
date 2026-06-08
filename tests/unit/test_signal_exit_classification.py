@@ -153,3 +153,54 @@ def test_other_high_exit_codes_are_not_classified_as_signals(return_code):
     Other ≥128 exit codes pass through to normal error handling — apps
     sometimes use ≥128 as application-defined error codes."""
     assert _classify_signal_exit(return_code, ExecutionMetadata()) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #906: the chat path in claude_code.py was missing the
+# _classify_signal_exit call that was added to headless_executor.py for
+# Issue #516. Both call sites must consult the signal classifier BEFORE
+# falling through to _diagnose_exit_failure — otherwise a SIGKILL at
+# 0 turns is misclassified as "Subscription token may be expired".
+#
+# This is a structural / source-level invariant test. If the call ordering
+# is restructured in either file, this test fires and forces a deliberate
+# re-evaluation of the auth-fallback ordering guarantee.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "claude_code.py",       # chat path /api/chat — added by Issue #906
+        "headless_executor.py", # headless path /api/task — added by Issue #516
+    ],
+)
+def test_signal_exit_classified_before_diagnose_failure(filename):
+    """In both error-path call sites, _classify_signal_exit(...) must appear
+    before _diagnose_exit_failure(...) so signal kills aren't mis-routed
+    through the auth-fallback heuristic. (Issues #516 and #906.)
+
+    The check is purely structural — it looks for the function-call
+    patterns (``name(``) which only match call sites, not imports
+    (imports use trailing commas in the parenthesised block).
+    """
+    path = _AGENT_SERVER_DIR / "services" / filename
+    src = path.read_text()
+
+    signal_call = src.find("_classify_signal_exit(")
+    diagnose_call = src.find("_diagnose_exit_failure(")
+
+    assert signal_call != -1, (
+        f"{filename}: _classify_signal_exit is not called — "
+        f"signal-exit classification is missing (Issue #516 / #906)."
+    )
+    assert diagnose_call != -1, (
+        f"{filename}: _diagnose_exit_failure is not called — "
+        f"unexpected; the error path should still fall through to it "
+        f"for non-signal exits."
+    )
+    assert signal_call < diagnose_call, (
+        f"{filename}: _classify_signal_exit must be called before "
+        f"_diagnose_exit_failure. Reversed ordering would let the "
+        f"auth-fallback heuristic misclassify SIGKILL/SIGTERM/SIGINT "
+        f"as expired-token errors (Issue #906)."
+    )

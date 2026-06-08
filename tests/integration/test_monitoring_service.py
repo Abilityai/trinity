@@ -293,8 +293,15 @@ class TestCheckNetworkHealthClassification:
         assert result.status_code is None
         assert self._read_failures(agent_name) == 1
 
-    def test_read_timeout_does_not_record(self, agent_name, monkeypatch):
-        """Case 5: ReadTimeout → reachable=False, 0 circuit delta."""
+    def test_read_timeout_records_failure(self, agent_name, monkeypatch):
+        """Case 5: ReadTimeout on /health → reachable=False, +1 circuit failure.
+
+        /health is supposed to be a small, fast endpoint. A read timeout
+        here is a liveness signal (event-loop wedged / GIL stuck), so the
+        /health-specific TimeoutException handler in monitoring_service
+        DOES record_failure() even though the same exception is circuit-
+        neutral in AgentClient._request().
+        """
 
         def handler(_req):
             raise httpx.ReadTimeout("slow")
@@ -302,11 +309,16 @@ class TestCheckNetworkHealthClassification:
         _patch_httpx(monkeypatch, handler)
         result = asyncio.run(monitoring_service.check_network_health(agent_name))
         assert result.reachable is False
-        assert self._read_failures(agent_name) == 0
-        assert self._read_state(agent_name) == "closed"
+        assert self._read_failures(agent_name) == 1
 
-    def test_read_error_does_not_record(self, agent_name, monkeypatch):
-        """Case 6: ReadError → reachable=False, 0 circuit delta."""
+    def test_read_error_records_failure(self, agent_name, monkeypatch):
+        """Case 6: ReadError on /health → reachable=False, +1 circuit failure.
+
+        Partial-write/mid-read drop on /health is a liveness signal
+        (agent crashed mid-write — OOM, segfault, event-loop wedge), so
+        the /health-specific handler in monitoring_service does
+        record_failure().
+        """
 
         def handler(_req):
             raise httpx.ReadError("mid-read socket loss")
@@ -314,12 +326,14 @@ class TestCheckNetworkHealthClassification:
         _patch_httpx(monkeypatch, handler)
         result = asyncio.run(monitoring_service.check_network_health(agent_name))
         assert result.reachable is False
-        assert self._read_failures(agent_name) == 0
+        assert self._read_failures(agent_name) == 1
 
-    def test_pool_timeout_does_not_record(self, agent_name, monkeypatch):
-        """Case 7: PoolTimeout → reachable=False, 0 circuit delta.
+    def test_pool_timeout_records_failure(self, agent_name, monkeypatch):
+        """Case 7: PoolTimeout on /health → reachable=False, +1 circuit failure.
 
-        Pool exhaustion is a client-side resource issue.
+        PoolTimeout subclasses httpx.TimeoutException, so it falls into the
+        /health-specific timeout handler that treats any timeout as a
+        liveness signal and records_failure().
         """
 
         def handler(_req):
@@ -328,7 +342,7 @@ class TestCheckNetworkHealthClassification:
         _patch_httpx(monkeypatch, handler)
         result = asyncio.run(monitoring_service.check_network_health(agent_name))
         assert result.reachable is False
-        assert self._read_failures(agent_name) == 0
+        assert self._read_failures(agent_name) == 1
 
     def test_unrelated_exception_does_not_record(self, agent_name, monkeypatch):
         """Case 8: unrelated RuntimeError → log+swallow, 0 circuit delta.

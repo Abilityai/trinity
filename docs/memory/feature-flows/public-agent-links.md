@@ -140,7 +140,7 @@ Public User -> GET /api/public/link/{token}
 
 Public User -> POST /api/public/verify/request
             -> Backend generates 6-digit code
-            -> Email service sends code
+            -> Email service sends code (subject/body now include agent name — #890)
             -> Return {expires_in_seconds: 600}
 
 Public User -> POST /api/public/verify/confirm
@@ -463,10 +463,10 @@ PUBLIC_CHAT_URL=
 
 | File | Description |
 |------|-------------|
-| `src/backend/db/public_links.py` | Database operations class (includes MEM-001 memory methods at lines 439-522) |
-| `src/backend/db/schema.py` | Table definitions including `public_user_memory` (lines 360-371) and index (line 694) |
+| `src/backend/db/public_links.py` | Database operations class (includes MEM-001 memory methods + #895 split-storage helpers `_parse_memory_blob`/`_encode_memory_blob` and `update_user_memory_agent_notes`/`update_user_memory_conversation_summary`) |
+| `src/backend/db/schema.py` | Table definitions including `public_user_memory` and lookup index — DDL unchanged by #895; `memory_text` now holds JSON |
 | `src/backend/db/migrations.py` | Migration #28 `_migrate_public_user_memory_table`; `_migrate_public_link_require_email_unified` (2026-04-13) — ORs legacy per-link `require_email=1` into `agent_ownership.require_email=1` |
-| `src/backend/services/platform_prompt_service.py` | `format_user_memory_block()` helper (line 97) |
+| `src/backend/services/platform_prompt_service.py` | `format_user_memory_block(dict)` helper + `summarize_user_memory_background()` (extracted from `routers/public.py` in #895; called by both web and channel paths) |
 | `src/backend/routers/public_links.py` | Owner CRUD endpoints; `_build_public_url()` / `_build_external_url()` now accept `link_type` and emit `/site/{token}/` for site links |
 | `src/backend/routers/public_links.py:30-39` | URL builders: `_build_public_url(token, link_type)`, `_build_external_url(token, link_type)` |
 | `src/backend/routers/public_links.py:42-61` | `_link_to_response()` - converts DB dict to API model |
@@ -1489,109 +1489,15 @@ const scrollToBottom = () => {
 
 ## Agent Website Proxy (SITE-001 / Issue #633)
 
-**Status**: Implemented (2026-05-03)
+**Status**: RETIRED — removed in #865 (2026-05-17)
 
-A public link with `type='site'` reverse-proxies HTTP requests to a web server running inside the agent container on port 3000. This allows agents to serve a full website or web app through a Trinity-managed public URL, with the same token-based access control used by chat links.
-
-### Architecture
-
-```
-Browser → nginx /site/{token}/{path}
-        → backend:8000/site/{token}/{path}
-        → routers/site.py: validate token (type=site, enabled, not expired)
-        → rate limit: Redis per-IP + per-token
-        → httpx.AsyncClient.stream() → http://agent-{name}:3000/{path}
-        → StreamingResponse back to browser
-```
-
-### Entry Points
-
-- **UI**: `src/frontend/src/components/PublicLinksPanel.vue` — "Website" option in link type selector in create modal; "Website" badge rendered on site link rows
-- **nginx**: `src/frontend/nginx.conf` — `location /site/` proxy block routes requests to backend
-- **Redirect**: `GET /site/{token}` → 301 to `/site/{token}/` (trailing-slash normalisation)
-- **Proxy**: `GET /site/{token}/{path:path}` — main streaming handler
-
-### Backend Layer
-
-#### Endpoints (`src/backend/routers/site.py`)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/site/{token}` | 301 redirect to `/site/{token}/` |
-| GET | `/site/{token}/{path:path}` | Validate, rate-limit, proxy to agent port 3000, stream response |
-
-#### Request Handling
-
-1. Look up `agent_public_links` row by `token` — must have `type='site'`, `enabled=1`, and not be past `expires_at`.
-2. Rate-limit check: Redis counters for per-IP and per-token request rates (429 on breach).
-3. SSRF guard: `agent_name` validated against `^[a-z0-9][a-z0-9\-]*$` before URL construction.
-4. Strip sensitive inbound headers: `Authorization`, `Cookie`, `X-Internal-Secret`.
-5. Open `httpx.AsyncClient.stream()` to `http://agent-{agent_name}:3000/{path}` forwarding method, path, query string, and sanitised headers.
-6. Strip hop-by-hop and security-overriding response headers: `Content-Security-Policy`, `X-Frame-Options`, `Server`, `X-Powered-By`, plus standard hop-by-hop headers.
-7. Return `StreamingResponse` with upstream status code and cleaned response headers.
-8. Log `site_link_visit` audit event (`AuditEventType.SITE_ACCESS`).
-
-#### Error Responses
-
-| Condition | Status | Notes |
-|-----------|--------|-------|
-| Token missing / wrong type / disabled | 401 | Constant-time `INVALID_LINK_MESSAGE` to prevent token enumeration |
-| Token expired | 410 | Separate path from disabled to give user actionable feedback |
-| Rate limit exceeded (IP or token) | 429 | |
-| Agent web server unreachable (`ConnectError`, `TimeoutException`) | 502 | Agent not running or port 3000 not open |
-| WebSocket upgrade | Not supported | httpx does not support the `Upgrade` header; proxying WebSocket connections from agent web servers is out of scope |
-
-### Database Changes
-
-#### `agent_public_links` schema
-
-A `type TEXT NOT NULL DEFAULT 'chat'` column was added by migration `public_links_type` in `src/backend/db/migrations.py`. All existing rows default to `'chat'`. Valid values: `'chat'`, `'site'`.
-
-Relevant DB-layer changes in `src/backend/db/public_links.py`:
-- `create_public_link()` accepts a `link_type` parameter passed through from the router.
-- All `SELECT` queries include the `type` column at position 8 in `_row_to_link()`.
-
-#### Pydantic Models (`src/backend/db_models.py`)
-
-| Field | Model | Description |
-|-------|-------|-------------|
-| `link_type: str = "chat"` | `PublicLinkCreate` | Accepted values: `"chat"`, `"site"` |
-| `link_type: str` | `PublicLink` | Persisted type of the link |
-| `link_type: str` | `PublicLinkWithUrl` | Surfaced to UI for badge rendering |
-
-### URL Format
-
-| Link Type | Internal URL | External URL (if `PUBLIC_CHAT_URL` set) |
-|-----------|-------------|----------------------------------------|
-| `chat` | `{FRONTEND_URL}/chat/{token}` | `{PUBLIC_CHAT_URL}/chat/{token}` |
-| `site` | `{FRONTEND_URL}/site/{token}/` | `{PUBLIC_CHAT_URL}/site/{token}/` |
-
-The trailing slash on site URLs is intentional: it ensures relative asset paths in the agent's HTML are resolved correctly under the `/site/{token}/` prefix.
-
-### Security Notes
-
-- **SSRF mitigation**: Agent name is validated against `^[a-z0-9][a-z0-9\-]*$` before interpolation into the upstream URL. Requests never escape the internal Docker network.
-- **Header stripping (inbound)**: `Authorization`, `Cookie`, `X-Internal-Secret` are removed before forwarding to prevent credential leakage into the agent web process.
-- **Header stripping (outbound)**: `Content-Security-Policy`, `X-Frame-Options`, `Server`, `X-Powered-By`, and all hop-by-hop headers are stripped from the upstream response so the agent web server cannot override Trinity-level security policies or expose internal server details.
-- **Token enumeration**: All invalid/disabled/wrong-type tokens return the same `INVALID_LINK_MESSAGE` constant with the same 401 status. Expired tokens return 410.
-- **WebSocket not supported**: The `Upgrade` / `Connection: Upgrade` flow is not proxied (httpx limitation). Document this limitation for template authors.
-- **Audit trail**: Every proxied request logs a `site_access` audit event via `PlatformAuditService`.
-
-### Audit Events
-
-| Event Type | Action | Trigger |
-|------------|--------|---------|
-| `site_access` | `site_link_visit` | Each proxied request through a site link |
-
-### Frontend Changes
-
-**`PublicLinksPanel.vue`**:
-- Create modal now shows a "Link Type" selector with two options: "Chat" (default) and "Website".
-- Existing link rows render a "Website" badge (distinct styling from the chat link display) when `link.link_type === 'site'`.
-- The selected `link_type` is passed in the `POST /api/agents/{name}/public-links` payload as `link_type`.
-
-**`src/frontend/nginx.conf`**:
-- A `location /site/` block proxies requests matching `/site/` to the backend, mirroring the existing `/api/` and `/chat/` proxy rules. This ensures the Vite dev server and production nginx both route site link traffic to the backend.
+> **Design decision (2026-05-17):** The port-3000 reverse-proxy approach was retired after design review. Three problems: (1) agents must manage a live web server process — fragile, no standardization; (2) arbitrary HTML/JS served from the same origin as the Trinity frontend creates XSS risk; (3) `file_sharing_enabled` permission gate was not enforced.
+>
+> The replacement design uses `dashboard.yaml` — Trinity owns the renderer, agents push structured data, no arbitrary HTML reaches the browser. See companion issue for SITE-002.
+>
+> **What was removed**: `src/backend/routers/site.py`, `SITE_PORT` constant, router mount in `main.py`, `location /site/` nginx block, "Website" link-type option in `PublicLinksPanel.vue`.
+>
+> **What was kept for SITE-002 reuse**: `agent_public_links.type` DB column and schema, `AuditEventType.SITE_ACCESS`, Docker volume infrastructure (`agent-{name}-public`, `/home/developer/public/`), `file_sharing_enabled` flag on `agent_ownership`, rate-limiting helpers pattern, token validation pattern.
 
 ### Related Flows
 
@@ -1778,119 +1684,176 @@ let streamReader = null                    // SSE reader reference
 
 ## Per-User Persistent Memory (MEM-001)
 
-**Status**: Implemented (2026-03-19)
-**Issue**: #147
+**Status**: Implemented 2026-03-19 (#147). Split storage + channel injection: 2026-05-18 (#895).
+**Issues**: #147 (initial), #888 (`write_user_memory` MCP tool), #895 (split storage + channel injection)
 
 When a public link requires email verification, the agent accumulates a persistent memory of facts about each verified user. This memory is injected into the system prompt on every request so the agent can personalize responses across sessions.
 
 Anonymous (unverified) sessions are unaffected — no memory is read or written.
 
-### New Database Table: `public_user_memory`
+**#895 — Split storage**: The `memory_text` column now holds a JSON object with two named sections so the agent-deliberate writer (`write_user_memory` MCP tool, #888) and the every-5-message background summarizer can update independent sections without clobbering each other.
 
-`src/backend/db/schema.py` (lines 360-371) — Added table and unique index.
+**#895 — Channel injection**: Slack / Telegram / WhatsApp DMs now inject memory the same way the web path does, gated on `verified_email and not is_group`. Group chats are excluded because `verified_email` there is the *unlocker's* email (set once per group), so injecting their memory into replies addressed to other group members would leak PII across users.
+
+### Storage Shape (#895)
+
+The `public_user_memory.memory_text` TEXT column holds a JSON object:
+
+```json
+{
+  "agent_notes": "<written only by the write_user_memory MCP tool>",
+  "conversation_summary": "<written only by the background summarizer>"
+}
+```
+
+- The schema is unchanged — no migration. The column still has type `TEXT NOT NULL DEFAULT ''`.
+- **Legacy plaintext rows** (written before #895) are transparently surfaced as `conversation_summary` on read via `db/public_links._parse_memory_blob`. The next section-targeted write upgrades the row to JSON shape in place.
+- Malformed JSON (anything that isn't a JSON object) is also treated as plaintext → `conversation_summary`.
+
+### Database Table: `public_user_memory`
+
+`src/backend/db/schema.py` — table and unique index (DDL unchanged by #895).
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | TEXT PK | Unique record ID |
 | agent_name | TEXT | Target agent |
 | user_email | TEXT | Verified user email (stored lowercase) |
-| memory_text | TEXT | Plain-text bullet summary of user facts (default `''`) |
+| memory_text | TEXT | JSON `{agent_notes, conversation_summary}` since #895 (default `''`) |
 | message_count | INTEGER | Cumulative messages sent by this user |
 | created_at | TEXT | ISO timestamp of first message |
 | updated_at | TEXT | ISO timestamp of last write |
 
-UNIQUE constraint on `(agent_name, user_email)` — one memory blob per user per agent, shared across all sessions and public link tokens.
+UNIQUE constraint on `(agent_name, user_email)` — one memory blob per user per agent, shared across web and channel sessions.
 
-Index: `idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)` (`src/backend/db/schema.py` line 694).
+Index: `idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)`.
 
-Migration: `src/backend/db/migrations.py` — migration #28 `_migrate_public_user_memory_table`.
+Migration: `src/backend/db/migrations.py` — migration #28 `_migrate_public_user_memory_table` (#147; no new migration for #895).
 
-### Database Operations
+### Database Operations (#895)
 
-New methods on `PublicLinkOperations` (`src/backend/db/public_links.py` lines 439-522):
+Methods on `PublicLinkOperations` (`src/backend/db/public_links.py`):
 
-| Method | Line | Description |
-|--------|------|-------------|
-| `get_or_create_user_memory(agent_name, user_email)` | 439 | Fetch existing record or `INSERT` a blank row; returns the row dict |
-| `increment_message_count(agent_name, user_email)` | 479 | Atomic `UPDATE message_count + 1`; returns the new count |
-| `update_user_memory(agent_name, user_email, memory_text)` | 504 | Overwrites `memory_text` and sets `updated_at`; returns `True` if row found |
+| Method | Description |
+|--------|-------------|
+| `get_or_create_user_memory(agent_name, user_email)` | Fetch existing record or `INSERT` a blank row; returns the parsed dict with `agent_notes` and `conversation_summary` keys (plus id/agent_name/user_email/message_count/created_at/updated_at). |
+| `increment_message_count(agent_name, user_email)` | Atomic `UPDATE message_count + 1`; returns the new count. |
+| `update_user_memory_agent_notes(agent_name, user_email, agent_notes)` | Section write: read-modify-write that replaces only the `agent_notes` key. Used by the `write_user_memory` MCP tool (#888). |
+| `update_user_memory_conversation_summary(agent_name, user_email, summary)` | Section write: replaces only `conversation_summary`. Used by `summarize_user_memory_background`. |
+
+Module-level helpers in the same file:
+- `_parse_memory_blob(text)` — handles JSON, legacy plaintext, malformed input. Returns `{agent_notes, conversation_summary}` dict.
+- `_encode_memory_blob(agent_notes, conversation_summary)` — JSON-encodes for storage with `ensure_ascii=False`.
 
 Delegation methods on `db` in `src/backend/database.py`:
 - `get_or_create_public_user_memory(agent_name, user_email)` → `PublicLinkOperations.get_or_create_user_memory()`
 - `increment_public_user_memory_count(agent_name, user_email)` → `PublicLinkOperations.increment_message_count()`
-- `update_public_user_memory(agent_name, user_email, memory_text)` → `PublicLinkOperations.update_user_memory()`
+- `update_public_user_memory_agent_notes(agent_name, user_email, agent_notes)` → `PublicLinkOperations.update_user_memory_agent_notes()` (#895)
+- `update_public_user_memory_conversation_summary(agent_name, user_email, summary)` → `PublicLinkOperations.update_user_memory_conversation_summary()` (#895)
 
-### Request Flow (Memory Injection)
+### Read Flow (Memory Injection)
 
-Occurs inside `POST /api/public/chat/{token}` (`src/backend/routers/public.py` lines 316-321) after the email session is validated and the context prompt is built, before `execute_task()` is called:
+Both the **web** path and the **channel-adapter** path follow the same pattern:
 
 ```
-1. db.get_or_create_public_user_memory(agent_name, verified_email)
-2. If memory_text is non-empty:
-     memory_system_prompt = format_user_memory_block(memory_text)
-   Else:
-     memory_system_prompt = None
-3. execute_task(..., system_prompt=memory_system_prompt)   # both sync and async paths
+1. record = db.get_or_create_public_user_memory(agent_name, verified_email)
+2. memory_system_prompt = format_user_memory_block(record)
+3. execute_task(..., system_prompt=memory_system_prompt)
 ```
 
-`memory_system_prompt` is passed as the `system_prompt` kwarg to both the sync `execute_task()` call (line 368) and the async background task via `_execute_public_chat_background()` (line 350).
-
-Memory block format produced by `format_user_memory_block()` (`src/backend/services/platform_prompt_service.py` line 97-104):
+`format_user_memory_block(memory_record)` (`src/backend/services/platform_prompt_service.py`) accepts the parsed dict and emits a multi-section markdown block — or returns `None` when both sections are empty so callers can skip the `--append-system-prompt` injection entirely.
 
 ```
 ## What you know about this user
 
-{memory_text}
+### Agent notes
+
+{agent_notes}
+
+### Conversation summary
+
+{conversation_summary}
 
 ---
 ```
 
-### Memory Update Flow (Background Summarization)
+Either section is omitted when empty. Agent notes render first (higher signal than the auto-summary).
 
-After execution completes, both the **sync path** (`public.py` lines 401-408) and the **async background task** (`_execute_public_chat_background`, lines 696-704) run the same counter/summarization logic — but only when `identifier_type == "email"`:
+**Web path** — `routers/public.py` (sync + async background paths):
+
+| Path | Gate |
+|------|------|
+| `public_chat()` (sync) | `identifier_type == "email" and verified_email` |
+| `_execute_public_chat_background()` (async) | same |
+
+**Channel-adapter path** — `adapters/message_router.py:_handle_message_inner` (#895):
+
+| Path | Gate |
+|------|------|
+| All channels (Slack DM, Telegram DM, WhatsApp DM) | `verified_email and not is_group` |
+| Group chats (any channel) | excluded — see PII rationale above |
+
+The channel-side fetch is wrapped in try/except with a warning log; a memory-fetch failure never breaks the channel response.
+
+### Write Flow (Background Summarization)
+
+After execution completes, the count is incremented and the summarizer fires every 5 messages — same logic on web and channel paths:
 
 ```
 1. new_count = db.increment_public_user_memory_count(agent_name, verified_email)
 2. If new_count % 5 == 0:
-     asyncio.create_task(_summarize_user_memory(
+     asyncio.create_task(summarize_user_memory_background(
          agent_name=agent_name,
          user_email=verified_email,
-         session_id=chat_session.id,
+         session_id=session_id,
      ))
 ```
 
-`_summarize_user_memory(agent_name, user_email, session_id)` is fire-and-forget (`src/backend/routers/public.py` lines 727-784):
+`summarize_user_memory_background(agent_name, user_email, session_id)` lives in `services/platform_prompt_service.py` (extracted from `routers/public.py` in #895). It is fire-and-forget:
 
 1. Reads `ANTHROPIC_API_KEY` via `get_anthropic_api_key()`; skips silently if absent.
-2. Calls `db.get_or_create_public_user_memory()` to retrieve the current `memory_text`.
+2. Calls `db.get_or_create_public_user_memory()` and reads the current `conversation_summary` (not `agent_notes` — the summarizer must not see deliberate writes).
 3. Calls `db.get_recent_public_chat_messages(session_id, limit=20)` for the last 20 messages.
 4. Formats `_SUMMARIZATION_PROMPT` with `existing_memory` and `conversation` fields.
 5. POSTs to `https://api.anthropic.com/v1/messages` using model `claude-haiku-4-5-20251001`, `max_tokens=512`, 30-second timeout.
-6. On success, writes the returned text to `db.update_public_user_memory()`.
-7. All failures are logged (`[MemSummarize]` prefix) and never surfaced to the user or caller.
+6. On success, writes the returned text to `db.update_public_user_memory_conversation_summary()` — touches only the summary section.
+7. All failures are logged (`[MemSummarize]` prefix) and never surfaced to the user.
 
-Summarization is triggered every 5th message per `(agent_name, user_email)` pair — not per session or per link token.
+Summarization is triggered every 5th message per `(agent_name, user_email)` pair — not per session, per link token, or per channel.
+
+### Channel-Side Hook (#895)
+
+Wired into the same step in `_handle_message_inner` (`src/backend/adapters/message_router.py`):
+- Memory fetch: between source-email resolution and `execute_task` call, gated on `verified_email and not is_group`.
+- Increment + summarizer trigger: after `db.add_public_chat_message(session_id, "assistant", ...)`, same gate, also wrapped in try/except.
 
 ### Scope
 
 | Session type | Memory read | Memory written |
 |---|---|---|
-| Email-verified | Yes (if non-empty) | Yes (every 5th message) |
-| Anonymous (no email) | No | No |
+| Email-verified web | Yes (if non-empty) | Yes (every 5th message) |
+| Email-verified Slack/Telegram/WhatsApp DM | Yes — added in #895 | Yes — added in #895 |
+| Group chat (any channel) | No — PII guard | No |
+| Anonymous (no verified email, any channel) | No | No |
+
+### Known Limitations
+
+- **Race window in section writes (#895)**: `update_user_memory_*` does a read-modify-write inside a single connection. Two writers (e.g., write_user_memory + summarizer firing within ~10ms) can interleave and one write may be lost. The window is much smaller than the pre-#895 deterministic clobber but not zero. A follow-up using atomic SQLite JSON1 `json_set` would close it.
+- **Summarizer cost ceiling**: no per-(agent, user) cooldown — applies to every 5th message. Pre-existing concern.
+- **Memory-text safety filter**: the system-prompt block is rendered raw, leaving a prompt-injection surface from agent-curated content. Pre-existing concern.
 
 ### Files
 
 | File | Description |
 |------|-------------|
-| `src/backend/db/schema.py:360-371` | `public_user_memory` table definition |
-| `src/backend/db/schema.py:693-694` | `idx_public_user_memory_lookup` index |
-| `src/backend/db/migrations.py` | Migration #28 `_migrate_public_user_memory_table` |
-| `src/backend/db/public_links.py:439-522` | `PublicLinkOperations` memory methods |
-| `src/backend/routers/public.py:316-321` | Memory injection in `public_chat()` |
-| `src/backend/routers/public.py:401-408` | Counter + summarization trigger (sync path) |
-| `src/backend/routers/public.py:696-704` | Counter + summarization trigger (async path) |
-| `src/backend/routers/public.py:711-784` | `_summarize_user_memory()` background function |
-| `src/backend/services/platform_prompt_service.py:97-104` | `format_user_memory_block()` helper |
+| `src/backend/db/schema.py` | `public_user_memory` table + lookup index (unchanged by #895) |
+| `src/backend/db/migrations.py` | Migration #28 `_migrate_public_user_memory_table` (#147) |
+| `src/backend/db/public_links.py` | `_parse_memory_blob`, `_encode_memory_blob`, `PublicLinkOperations` memory methods (#895 split storage) |
+| `src/backend/database.py` | `db` facade — `get_or_create_public_user_memory`, `increment_public_user_memory_count`, `update_public_user_memory_agent_notes`, `update_public_user_memory_conversation_summary` |
+| `src/backend/services/platform_prompt_service.py` | `format_user_memory_block(dict)`, `summarize_user_memory_background()` (extracted in #895) |
+| `src/backend/routers/public.py` | Memory injection + counter + summarizer trigger on the web path (sync + async background) |
+| `src/backend/routers/public_memory.py` | `POST /api/agents/{name}/user-memory` (calls `update_public_user_memory_agent_notes` since #895) |
+| `src/backend/adapters/message_router.py` | Memory injection + counter + summarizer trigger on the channel-adapter path (#895) |
 
 ---
 
@@ -2072,6 +2035,8 @@ const viewingHistorySession = ref(null)   // non-null = read-only history mode
 
 | Date | Changes |
 |------|---------|
+| 2026-05-18 | **#895 MEM-001 split storage + channel injection**: `public_user_memory.memory_text` now holds JSON `{agent_notes, conversation_summary}`; the agent-deliberate `write_user_memory` tool (#888) and the every-5-message background summarizer each update their own section so they cannot clobber each other. Legacy plaintext rows surface as `conversation_summary` transparently. Channel adapters (Slack/Telegram/WhatsApp) now mirror the web injection — memory is read, formatted, and passed as `system_prompt=` to `execute_task`, gated on `verified_email and not is_group` (group mode excluded to prevent PII leak from the unlocker's memory). Counter + summarizer trigger added to the channel path on the same gate. Summarizer extracted to `services/platform_prompt_service.summarize_user_memory_background` so web and channel share it. `format_user_memory_block(dict)` rewritten to render both sections; returns `None` when both are empty so callers skip injection. No schema migration. |
+| 2026-05-18 | **#890**: `request_verification_code()` now passes `agent_name` to `email_service.send_verification_code()` so the verification email subject and body name the agent. |
 | 2026-04-29 | **#587 Chat History for Logged-In Users**: Two new JWT-authenticated endpoints (`GET /api/public/sessions/{token}`, `GET /api/public/sessions/{token}/{session_id}`) in `public.py`. New `ChatHistoryDropdown.vue` component. `PublicChat.vue` gains `viewingHistorySession` ref, `handleHistorySessionSelected()`, `exitHistoryView()`, amber read-only banner, and hidden `ChatInput` while in history mode. No new DB tables — reuses `chat_sessions`/`chat_messages`. |
 | 2026-04-27 | **fix #539 Context duplication**: `build_public_chat_context()` was called AFTER `add_public_chat_message(role="user")`, causing the current user message to appear twice in every agent prompt (once in "Previous conversation:", once in "Current message:"). Fixed by swapping the call order — context built first from prior history, user message stored after. Added 6 unit tests in `tests/unit/test_public_chat_context.py`. Updated PUB-005 data flow and backend implementation step ordering to reflect correct call order. |
 | 2026-02-19 | **CHAT-001 Shared Components Refactor**: PublicChat.vue now uses shared components from `components/chat/` (ChatMessages, ChatInput, ChatBubble, ChatLoadingIndicator). Shared with new ChatPanel.vue authenticated chat. Updated method line numbers, added Shared Chat Components section. File now 611 lines. |

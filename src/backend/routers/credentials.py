@@ -329,7 +329,22 @@ async def export_credentials(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except httpx.RequestError as e:
+        # Same transient-connectivity mapping as `inject_credentials` —
+        # the agent container is up but its FastAPI server is not yet
+        # reachable. Surfaces 503 instead of 500.
+        logger.warning(
+            f"Credential export for agent {agent_name} could not reach "
+            f"agent server: {e}"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to agent: {str(e)}"
+        )
     except Exception as e:
+        logger.exception(
+            f"Credential export for agent {agent_name} failed unexpectedly"
+        )
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
@@ -384,7 +399,25 @@ async def import_credentials(
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except httpx.RequestError as e:
+        # Agent container is up but its internal FastAPI server is not yet
+        # reachable (startup race, connect refused, read timeout, etc.).
+        # Mirrors the 503 mapping already used by `inject_credentials` and
+        # `routers/agent_files.py` so the credentials surface stays
+        # consistent — these are transient infrastructure failures, not
+        # programmer errors that warrant a 500.
+        logger.warning(
+            f"Credential import for agent {agent_name} could not reach "
+            f"agent server: {e}"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to agent: {str(e)}"
+        )
     except Exception as e:
+        logger.exception(
+            f"Credential import for agent {agent_name} failed unexpectedly"
+        )
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 

@@ -28,6 +28,8 @@ from .routers import (
 from .state import agent_state
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
 from .auto_sync import schedule_auto_sync_if_enabled
+from .heartbeat import schedule_heartbeat
+from .services.orphan_sweeper import schedule_orphan_sweeper
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +65,16 @@ app.include_router(snapshot_router)  # Snapshot/restore primitives (#384, S3)
 
 # #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
 schedule_auto_sync_if_enabled(app)
+
+# RELIABILITY-004 / #307: liveness heartbeat loop. Gated on TRINITY_BACKEND_URL
+# + TRINITY_MCP_API_KEY both present, so old-image agents simply never beat.
+schedule_heartbeat(app)
+
+# #817 follow-up: periodic cgroup orphan sweep. Catches orphans that
+# escape the per-task cleanup path — specifically Eugene's production
+# scenario where Trinity-side CB termination skips drain_reader_threads
+# and subsequent tasks fast-fail before reaching the agent.
+schedule_orphan_sweeper(app)
 
 
 def run_server():

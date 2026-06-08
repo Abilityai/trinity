@@ -1,21 +1,30 @@
-// Regression test for #677 — API Keys page Copy buttons must reach the
-// clipboard. Prior to the fix, the buttons called `navigator.clipboard.writeText`
-// with no fallback and swallowed every rejection silently.
+// Regression test for #677 / #859 — MCP Keys Copy buttons must reach
+// the clipboard. #677: the buttons called `navigator.clipboard.writeText`
+// with no fallback and swallowed every rejection silently. #859: after
+// PR #700 moved the component views/ApiKeys.vue →
+// components/settings/McpKeysTab.vue, the `copyToClipboard` import was
+// dropped, so both buttons threw `ReferenceError` and failed silently.
 //
 // This test creates a fresh API key, clicks both copy actions in the
 // "Your MCP API Key is Ready!" modal, and reads the clipboard back to
-// verify the content actually landed.
+// verify the content actually landed. Tagged @smoke so CI runs it on
+// the canonical route (#859 acceptance criterion).
 
 import { test, expect } from '@playwright/test'
 
-test.describe('@interactive api-keys copy buttons (#677)', () => {
+// Canonical MCP Keys route since #302/#700 (the legacy /api-keys path
+// 301-redirects here). Hitting it directly keeps the smoke gate from
+// depending on the redirect.
+const MCP_KEYS_ROUTE = '/settings?tab=mcp-keys'
+
+test.describe('@smoke api-keys copy buttons (#677, #859)', () => {
   test.beforeEach(async ({ context }) => {
     // Headless browsers gate clipboard read by default — opt in for the test.
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   })
 
   test('Copy Config button writes MCP JSON to clipboard', async ({ page }) => {
-    await page.goto('/api-keys')
+    await page.goto(MCP_KEYS_ROUTE)
 
     await page.getByRole('button', { name: /create api key/i }).first().click()
 
@@ -45,7 +54,7 @@ test.describe('@interactive api-keys copy buttons (#677)', () => {
   })
 
   test('Copy key icon button writes raw key to clipboard', async ({ page }) => {
-    await page.goto('/api-keys')
+    await page.goto(MCP_KEYS_ROUTE)
 
     await page.getByRole('button', { name: /create api key/i }).first().click()
 
@@ -69,17 +78,27 @@ test.describe('@interactive api-keys copy buttons (#677)', () => {
 })
 
 async function cleanupKey(page, keyName) {
-  // The list refreshes after the modal closes — find the row by name and delete.
-  const row = page.locator('li', { has: page.getByText(keyName, { exact: true }) }).first()
-  if (await row.count() === 0) return
-
-  // Revoke first if still active, then delete. Both buttons trigger a confirm dialog.
-  const revokeBtn = row.getByRole('button', { name: /revoke/i })
-  if (await revokeBtn.isVisible().catch(() => false)) {
-    await revokeBtn.click()
-    await page.getByRole('button', { name: /^confirm$/i }).click().catch(() => {})
-    await page.waitForTimeout(200)
+  // Cleanup via the backend API rather than clicking through the UI. The
+  // test under test is clipboard behavior; cleanup is housekeeping. The
+  // old UI-walk (revoke modal → confirm → delete modal → confirm) ran
+  // ~6 sequential clicks and routinely blew the per-test 30s budget on
+  // slow CI runners, leaving the test red even though the assertions
+  // had already passed.
+  //
+  // DELETE /api/mcp/keys/{id} hard-deletes the row regardless of
+  // active/revoked state (no need for the revoke → delete sequence the
+  // UI enforces). JWT lives in localStorage['token'] (`stores/auth.js`).
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  if (!token) return
+  const headers = { Authorization: `Bearer ${token}` }
+  const list = await page.request
+    .get('/api/mcp/keys', { headers })
+    .then((r) => (r.ok() ? r.json() : []))
+    .catch(() => [])
+  const match = Array.isArray(list) ? list.find((k) => k.name === keyName) : null
+  if (match) {
+    await page.request
+      .delete(`/api/mcp/keys/${match.id}`, { headers })
+      .catch(() => {})
   }
-  await row.getByRole('button', { name: /delete/i }).click()
-  await page.getByRole('button', { name: /^confirm$/i }).click().catch(() => {})
 }

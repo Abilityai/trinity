@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -38,12 +38,33 @@ jobs:
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
+      - name: Generate CI admin password
+        # I-01 fix (cso-diff-2026-05-17): replace the previous hardcoded
+        # `CiTestPassword!1` fallback with a per-run random value so the
+        # repo never publishes a default admin credential, even one only
+        # reachable from the runner sandbox. Honours an explicit
+        # E2E_ADMIN_PASSWORD secret override when set. The literal `Aa1!`
+        # suffix guarantees OWASP ASVS 2.1 complexity classes on the
+        # random branch (upper / lower / digit / special) — `tr -d`
+        # strips base64 chars that would break form-encoded curl bodies
+        # later.
+        env:
+          OVERRIDE: ${{ secrets.E2E_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE:-}" ]; then
+            PASS="$OVERRIDE"
+          else
+            PASS="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          fi
+          echo "::add-mask::$PASS"
+          echo "ADMIN_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
       - name: Start Trinity stack
         working-directory: ${{ github.workspace }}
         env:
-          # Fallback password meets OWASP ASVS 2.1 complexity (upper/lower/digit/special)
-          # so the backend creates the admin user without warnings.
-          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'CiTestPassword!1' }}
+          # ADMIN_PASSWORD is inherited from GITHUB_ENV (see the
+          # "Generate CI admin password" step above).
           ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY || 'placeholder' }}
         run: |
           # Generate the minimum .env needed to boot. Real secrets are not
@@ -64,6 +85,11 @@ jobs:
           done
           echo "backend never became healthy"; exit 1
 
+      # Issue #874 regression guards (`verify-non-root`,
+      # `verify-prod-frontend-uid`) moved to .github/workflows/container-security.yml
+      # so they run unconditionally on infrastructure PRs (this workflow
+      # is `ui`-label gated and would otherwise skip them on backend PRs).
+
       - name: Skip first-time setup wizard
         working-directory: ${{ github.workspace }}
         run: |
@@ -75,7 +101,8 @@ jobs:
 
       - name: Run Playwright smoke tests
         env:
-          ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD || 'CiTestPassword!1' }}
+          # ADMIN_PASSWORD is inherited from GITHUB_ENV (see the "Generate
+          # CI admin password" step).
           E2E_BASE_URL: http://localhost
         # Only @smoke-tagged specs run in CI. @visual / @interactive specs
         # are local-only until their flake/baseline story is sorted (#596).
@@ -89,7 +116,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: src/frontend/e2e/playwright-report/
@@ -97,7 +124,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-failure-artifacts
           path: |

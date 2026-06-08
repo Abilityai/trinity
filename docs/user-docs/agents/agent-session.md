@@ -9,6 +9,15 @@ The Session tab in Agent Detail is a `--resume`-default chat surface that lives 
 - **Auto-compact** -- Built-in Claude Code behaviour. When the underlying conversation reaches ~85% of the model's context window, Claude Code summarizes ~170k tokens of history into a ~10k summary mid-turn. Working memory survives in compressed form.
 - **Reset memory** -- Clear the cached Claude session UUID. The visible message log stays; the agent starts the next turn cold.
 
+### Reset memory vs. New Session
+
+Both buttons sit in the Session toolbar. They look similar; they aren't:
+
+| Action | Visible message log | Claude working memory | Cost tracking | When to use |
+|--------|--------------------|----------------------|---------------|-------------|
+| **Reset memory** | Kept | Cleared (next turn is cold) | Continues on the same session | You want a fresh line of thought but want to keep the conversation transcript with the agent |
+| **+ New Session** | New (empty) | New (cold) | New (zero) | You're starting a different conversation entirely — different topic, different cost bucket |
+
 ## When to use Session vs Chat
 
 | Use Session for... | Use Chat for... |

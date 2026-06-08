@@ -98,6 +98,53 @@ Claude Code has a hardcoded 60-second timeout for all MCP HTTP tool calls. This 
 
 ---
 
+### 🟢 Stop Hooks That Spawn Network Processes Can Hold the Agent Stdout Pipe Open
+
+**Status**: Mitigated platform-side by the orphan-killer (#620); operator-side defense-in-depth recommended
+**Priority**: LOW (mitigated)
+**Affects**: Any agent whose Stop hook spawns processes that may call `setsid()` — notably `git push` spawning `ssh`
+
+**Symptoms:**
+- Agent execution logs show: `Reader thread(s) still busy after process exit ... killing process group`
+- Followed by: `force-closing pipes; some buffered data may be lost`
+- Then: `Execution completed without a result message` (502)
+- Pattern repeats on every execution for the affected agent
+
+**Cause:**
+The hook's grandchild (e.g. `ssh` spawned by `git push`) calls `setsid()` and escapes claude's process group. `terminate_process_group(claude_pgid)` doesn't reach it, so it keeps the stdout pipe write-end open during network I/O. The reader's `readline()` never sees EOF, the drain times out, and the force-close fallback discards the final `{"type":"result"}` JSON.
+
+**Platform fix:**
+`_kill_orphan_pipe_writers` (`docker/base-image/agent_server/utils/subprocess_pgroup.py`) enumerates `/proc/*/fd` for processes outside our pgid holding the same pipe inode and SIGKILLs them. Shipped via #620. Agents only inherit the fix after `./scripts/deploy/build-base-image.sh` and container recreation — older base images won't have it.
+
+**Operator-side defense-in-depth (bash/sh hooks):**
+Redirect inherited fds to a **log file** (not `/dev/null` — failures must stay debuggable) **before any command that could spawn or duplicate a file descriptor**:
+
+```bash
+#!/bin/bash
+# MUST come before any command that spawns a child or duplicates fd 1/2 —
+# including `set -x`, `exec 3>&1`, command substitutions, background jobs.
+# `set +e` only affects exit-code propagation; this line is about fd inheritance.
+mkdir -p ~/.trinity/logs
+exec >> ~/.trinity/logs/stop-hook.log 2>&1
+set +e
+echo "=== Stop hook fired at $(date -Iseconds) ==="
+git push origin HEAD
+```
+
+Log to a file instead of `/dev/null`: a hook that silently swallows `git push` failures is its own outage class — branches stop syncing with no operator-visible signal.
+
+**Other shells / languages:**
+- **Python hooks**: pass `stdout=open(log_path, 'a'), stderr=subprocess.STDOUT` to every `subprocess.Popen`/`subprocess.run` that calls external processes.
+- **Node hooks**: pass `{ stdio: ['ignore', logFd, logFd] }` to `child_process.spawn`.
+- **fish**: the `exec` redirect form differs — use `set -gx`-based redirection or wrap external calls in `... &>> log_path`.
+
+**Related Files:**
+- `docker/base-image/agent_server/utils/subprocess_pgroup.py` — platform fix: `_kill_orphan_pipe_writers`
+- `docker/base-image/agent_server/services/headless_executor.py` — drain + result recovery
+- Resolved by: #620 (closes #618); regression-tested via `tests/unit/test_subprocess_pgroup.py::TestDrainReaderThreads::test_setsid_escapee_drained_via_orphan_killer_preserves_result_line` (#586).
+
+---
+
 ## Resolved Issues
 
 _No resolved issues yet_

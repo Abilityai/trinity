@@ -10,28 +10,16 @@ Use raw Docker only for one-off debugging or when the ops agent itself is unavai
 
 ## Getting It
 
-### Option A: Via the trinity plugin (recommended)
-
-If you have the abilities plugin installed, one command provisions a fresh Trinity instance and wires up the ops agent:
-
-```bash
-/trinity:deploy
-```
-
-The wizard asks where to deploy (Hetzner, GCP, AWS, DigitalOcean, or localhost), provisions the server, installs Docker and Trinity, and drops you into an ops agent already connected to your instance.
-
-### Option B: Manual setup
-
-Clone the repository and configure your `.env`:
+Clone the public ops repo and configure your `.env`:
 
 ```bash
 git clone https://github.com/abilityai/trinity-ops-public
 cd trinity-ops-public
 cp .env.example .env
-# Edit .env with your instance's connection details
+# Edit .env with your instance's connection details (see Configuration below)
 ```
 
-Then open the directory in Claude Code.
+Then open the directory in Claude Code. The repo ships with its own `.claude/skills/` so all the ops commands shown below work out of the box.
 
 ## Configuration
 
@@ -156,7 +144,7 @@ Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, any Linux VM, localh
 - [Upgrading Trinity](upgrading.md)
 - [Backup and Restore](backup-and-restore.md)
 - [Monitoring](monitoring.md)
-- [Abilities Marketplace](../../automation/abilities-marketplace.md) — Install the trinity plugin to get `/trinity:deploy`
+- [Abilities Marketplace](../../automation/abilities-marketplace.md) — `trinity` plugin (`connect`, `onboard`, `sync`) for managing agents on the deployed instance
 
 **External references:**
 - [abilityai/trinity-ops-public](https://github.com/abilityai/trinity-ops-public) — Source, changelog, contributing guide

@@ -132,6 +132,13 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
                 metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
                 metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
 
+            # #678: capture the actual model from the latest assistant message.
+            # Useful when the trailing result line is lost and we need to record
+            # what model ran on the failure row.
+            model_id = message.get("model")
+            if isinstance(model_id, str) and model_id:
+                metadata.model_name = model_id
+
             for content_block in message_content:
                 if not isinstance(content_block, dict):
                     continue  # stream-json content arrays can contain plain strings
@@ -354,6 +361,12 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 metadata.output_tokens = usage.get("output_tokens", 0)
                 metadata.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
                 metadata.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+            # #678: capture actual model id from the latest assistant message
+            # so the metadata survives the reader-race even when the trailing
+            # result line is lost.
+            model_id = message.get("model")
+            if isinstance(model_id, str) and model_id:
+                metadata.model_name = model_id
 
         # Log message structure for debugging activity tracking issues
         if message_content:

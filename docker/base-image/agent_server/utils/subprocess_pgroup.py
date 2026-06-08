@@ -7,10 +7,14 @@ inherited pipe write-ends stay open and our readline() blocks forever, even
 though ``claude`` is already a ``<defunct>`` zombie. Result: agent-server
 wedges at ~83% CPU and stops serving HTTP.
 
-Fix: launch claude with ``start_new_session=True`` so it becomes its own
-process-group leader, and kill the entire group on shutdown. That reaps
-hook grandchildren too, which closes the inherited pipe FDs and lets our
-reader threads unwind naturally.
+Cleanup is a two-step pipeline:
+
+  1. Graceful pgid SIGTERM/SIGKILL of the direct claude process so its
+     stream-json output flushes cleanly. (#407)
+  2. Cgroup orphan sweep — kill anything in the container cgroup that
+     isn't on the allowlist. Replaces the prior three-pass sequence
+     (pgid + pipe-writer #618/#728 + env-tag #827) with one inescapable
+     mechanism (#817 follow-up). See :mod:`orphan_sweep`.
 
 Important: the caller must capture the pgid **right after** ``Popen()``
 (via ``capture_pgid``) and pass it to every helper that operates on the
@@ -18,9 +22,6 @@ group. Once ``process.wait()`` / ``process.poll()`` reaps the parent, the
 pid is gone and ``os.getpgid(pid)`` raises — but the process group itself
 lives on in the kernel as long as it has any member (the grandchildren we
 need to kill).
-
-This module is kept free of package-relative imports so it can be
-unit-tested without loading the rest of ``agent_server``.
 """
 from __future__ import annotations
 
@@ -28,29 +29,34 @@ import asyncio
 import logging
 import os
 import signal
-import stat as _stat
 import subprocess
 import threading
 import time
-from typing import Iterable, Optional
+from typing import Optional
+
+# The unit tests in tests/unit/test_subprocess_pgroup.py import this
+# module flat (sys.path.insert(0, utils/) + import subprocess_pgroup),
+# without loading the agent_server package. A package-relative import
+# would fail there at collection time. Try the relative form first
+# (production path inside agent_server) and fall back to the flat name
+# (tests + any future standalone reuse).
+try:
+    from .orphan_sweep import kill_cgroup_orphans
+except ImportError:  # pragma: no cover - exercised by unit tests
+    from orphan_sweep import kill_cgroup_orphans  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
 
-# Issue #817: env tag we inject into every Claude Popen so the cleanup path
-# can identify subprocess descendants that escape both terminate_process_group
-# (different pgid via setsid) AND _kill_orphan_pipe_writers (no shared pipe
-# FDs). Env vars are inherited at every fork/exec/setsid and survive
-# double-fork daemonization, so the tag is the most reliable "we own this"
-# signal we can plant without privileged operations.
+# Informational env tag set on every Claude Popen (#817). The cleanup
+# path used to look for this tag in /proc/<pid>/environ as its third
+# pass. That pass was subsumed by the cgroup-walk sweep
+# (:mod:`orphan_sweep`) because a process can scrub its env (via
+# ``env -i`` / ``sudo`` / re-exec) and escape detection — but it
+# cannot leave its container cgroup. The tag is retained because it
+# is still useful for log identity and for operators correlating
+# /proc/<pid>/environ dumps to execution_ids during incident response.
 EXECUTION_TAG_NAME = "TRINITY_EXECUTION_ID"
-
-
-# Cap log lines from the env-tag killer for the same reason
-# _ORPHAN_LOG_DETAIL_CAP exists: a runaway MCP fan-out can leave dozens of
-# orphans and we don't want one cleanup to flood the logs. Beyond this many
-# distinct PIDs killed in a single call, we emit one count-only summary line.
-_ENV_TAG_LOG_DETAIL_CAP = 10
 
 
 def capture_pgid(process: subprocess.Popen) -> Optional[int]:
@@ -88,93 +94,6 @@ def _signal_group_or_process(
         pass
 
 
-def kill_processes_by_env_tag(
-    tag_name: str,
-    tag_value: str,
-    *,
-    exclude_pids: Optional[Iterable[int]] = None,
-    sig: int = signal.SIGKILL,
-) -> int:
-    """SIGKILL every process whose ``/proc/<pid>/environ`` contains
-    ``tag_name=tag_value``.
-
-    Issue #817: catches subprocess descendants that escape both existing
-    cleanup passes:
-      - ``terminate_process_group`` (caught by killpg) — escaped by setsid
-      - ``_kill_orphan_pipe_writers`` (caught by FD identity) — escaped by
-        redirecting stdin/stdout/stderr to /dev/null
-
-    Env tags are inherited at every fork/exec/setsid AND survive double-fork
-    daemonization (parent dies, child reparented to PID 1, env intact), so
-    a process that drops the tag has either explicitly ``unsetenv()``'d it
-    or been exec'd through an env-scrubbing wrapper (sudo, ssh, env -i).
-    None of those sit in Claude Code's typical descendant set.
-
-    Permissions: ``/proc/<pid>/environ`` is readable only when the calling
-    UID matches the target's UID. Inside an agent container all processes
-    run as developer:1000, so we can read every other process's environ.
-
-    Always excludes the calling PID. Caller can pass additional PIDs to
-    skip via ``exclude_pids``.
-
-    Returns the number of processes signaled (whether or not they actually
-    died — the kernel will reap them asynchronously).
-    """
-    needle = f"{tag_name}={tag_value}".encode()
-    excluded = set(exclude_pids or ())
-    excluded.add(os.getpid())
-
-    try:
-        proc_entries = os.listdir("/proc")
-    except OSError:
-        return 0
-
-    killed = 0
-    for pid_str in proc_entries:
-        if not pid_str.isdigit():
-            continue
-        pid = int(pid_str)
-        if pid in excluded:
-            continue
-        try:
-            with open(f"/proc/{pid}/environ", "rb") as f:
-                env_blob = f.read()
-        except OSError:
-            # ESRCH (process gone), EACCES (different uid), ENOENT (race)
-            continue
-        # /proc/<pid>/environ is NUL-separated; split for exact-match so
-        # a tag value of "abc" doesn't false-positive on
-        # "TRINITY_EXECUTION_ID_OTHER=abc".
-        if needle not in env_blob.split(b"\x00"):
-            continue
-        if killed < _ENV_TAG_LOG_DETAIL_CAP:
-            cmdline = _read_proc_cmdline(pid)
-            ppid = _read_proc_field(pid, "PPid") or "?"
-            try:
-                pgid_str = str(os.getpgid(pid))
-            except OSError:
-                pgid_str = "?"
-            logger.info(
-                "[Subprocess] Env-tagged orphan SIGKILL: "
-                "pid=%s ppid=%s pgid=%s tag=%s=%s cmd=%s",
-                pid, ppid, pgid_str, tag_name, tag_value, cmdline,
-            )
-        try:
-            os.kill(pid, sig)
-            killed += 1
-        except OSError:
-            pass
-
-    if killed > _ENV_TAG_LOG_DETAIL_CAP:
-        logger.info(
-            "[Subprocess] Env-tagged orphan SIGKILL: %s additional pid(s) "
-            "killed (detail logging capped at %s)",
-            killed - _ENV_TAG_LOG_DETAIL_CAP, _ENV_TAG_LOG_DETAIL_CAP,
-        )
-
-    return killed
-
-
 def terminate_process_group(
     process: subprocess.Popen,
     graceful_timeout: int = 5,
@@ -194,18 +113,18 @@ def terminate_process_group(
     signaling the single (already-reaped) pid and grandchildren are
     left running.
 
-    Issue #817: when ``execution_tag`` is provided, runs a final cleanup
-    pass via ``kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_tag)``
-    after the killpg sequence. This catches descendants that escaped the
-    pgid-based kill via ``setsid()`` AND escaped the FD-based orphan-pipe
-    sweep via FD redirection — the gap that produces the runaway-CPU
-    scenario in the ticket. Callers that spawn Claude with the matching
-    env var (``TRINITY_EXECUTION_ID=<execution_tag>``) should pass it
-    here; callers that don't can omit and get the legacy behavior.
+    The ``execution_tag`` argument is accepted for backward
+    compatibility but no longer affects behavior. The final orphan
+    sweep (#817) is now the cgroup-walk in :mod:`orphan_sweep`, which
+    runs from :func:`drain_reader_threads` regardless of tag. Callers
+    that spawn Claude with ``TRINITY_EXECUTION_ID`` still set the env
+    var for log identity, but cleanup no longer depends on it.
 
     Safe to call on already-exited processes and safe to call multiple
     times.
     """
+    del execution_tag  # retained for API compat; see docstring
+
     if pgid is None:
         pgid = capture_pgid(process)
 
@@ -231,24 +150,13 @@ def terminate_process_group(
                 "[Subprocess] pid=%s did not exit after SIGKILL", process.pid
             )
 
-    # Issue #817: env-tag sweep for setsid'd, FD-detached orphans that
-    # escaped both prior passes. Best-effort — never fail termination on
-    # this path's exceptions.
-    if execution_tag:
-        try:
-            killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_tag)
-            if killed:
-                logger.info(
-                    "[Subprocess] Killed %s env-tagged orphan(s) for "
-                    "execution=%s after pgid sweep",
-                    killed, execution_tag,
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "[Subprocess] kill_processes_by_env_tag(%s) raised — "
-                "continuing termination",
-                execution_tag,
-            )
+    # The post-kill orphan sweep used to run here as an env-tag pass.
+    # That mechanism is now the cgroup-walk in
+    # :func:`drain_reader_threads`, which always runs in the executor's
+    # try/finally and catches descendants regardless of how they
+    # escaped (setsid, FD detachment, env stripping). Running the sweep
+    # again here would be wasted work — the executor will call
+    # drain_reader_threads next.
 
 
 def safe_close_pipes(process: subprocess.Popen) -> None:
@@ -268,211 +176,6 @@ def safe_close_pipes(process: subprocess.Popen) -> None:
             pass
 
 
-def _read_proc_field(pid: int, field: str) -> Optional[str]:
-    """Read a single field from /proc/{pid}/status. Returns None on any error.
-
-    Used by the orphan-killer to capture identity for diagnostics before
-    SIGKILL erases /proc/{pid}.
-    """
-    try:
-        with open(f"/proc/{pid}/status") as f:
-            for line in f:
-                if line.startswith(f"{field}:"):
-                    parts = line.split(None, 1)
-                    return parts[1].strip() if len(parts) == 2 else ""
-    except OSError:
-        return None
-    return None
-
-
-def _read_proc_cmdline(pid: int, max_len: int = 200) -> str:
-    """Read /proc/{pid}/cmdline as a printable, length-capped string.
-
-    Argv NULs become spaces; missing/permission-denied returns ``"?"``. The
-    length cap protects log lines when an orphan was launched with a huge
-    argv (some npx wrappers expand to a long absolute path). Captured by the
-    orphan-killer before SIGKILL — after the kill, /proc/{pid} is gone.
-    """
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            raw = f.read()
-    except OSError:
-        return "?"
-    if not raw:
-        return "?"
-    text = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
-    if len(text) > max_len:
-        text = text[: max_len - 1] + "…"
-    return text
-
-
-# Cap log volume from the orphan-killer. Beyond this many distinct orphan
-# pids per drain, we log a count-only summary line instead of one line per
-# pid — protects the log from flooding when a runaway MCP fan-out leaves
-# dozens of stragglers, while still surfacing the typical 1–3 pid case
-# with full identity. (#640 follow-up to #618.)
-_ORPHAN_LOG_DETAIL_CAP = 10
-
-# Hard wall-clock budget for the /proc scan inside the orphan-killer daemon
-# thread.  Must be shorter than the asyncio.wait_for(…, timeout=11) ceiling
-# that gates us in drain_reader_threads so we abandon scanning before the
-# event-loop timeout fires.  8 seconds leaves a 3-second margin. (#808)
-_ORPHAN_SCAN_WALL_SECONDS = 8
-
-
-def _set_idle_priority() -> None:
-    """Lower the calling thread to the lowest possible scheduling priority.
-
-    On Linux this uses SCHED_IDLE (the scheduler's background tier) which
-    only runs when no other runnable thread wants the CPU.  This prevents
-    the orphan-killer daemon thread from starving the uvicorn event loop on
-    single-CPU containers — health probes that arrive while the scan is
-    looping can still be served. (#808)
-
-    Falls back to nice(19) on non-Linux POSIX systems (e.g. macOS in CI).
-    No-op on platforms that support neither — the scan proceeds at normal
-    priority in that case, which is acceptable because the SCHED_IDLE path
-    is only critical on the 1-CPU production containers.
-    """
-    try:
-        if hasattr(os, "sched_setscheduler") and hasattr(os, "SCHED_IDLE"):
-            # SCHED_IDLE is a Linux extension; POSIX does not guarantee it.
-            os.sched_setscheduler(
-                0,  # 0 = calling thread
-                os.SCHED_IDLE,  # type: ignore[attr-defined]
-                os.sched_param(0),  # type: ignore[attr-defined]  # priority ignored for SCHED_IDLE
-            )
-            return
-    except OSError:
-        pass
-    try:
-        os.nice(19)
-    except (OSError, AttributeError):
-        pass
-
-
-def _kill_orphan_pipe_writers(
-    pipe_read_fd: int,
-    our_pgid: Optional[int],
-    _scan_deadline: Optional[float] = None,
-) -> int:
-    """Kill any process outside *our_pgid* that holds the same pipe's write end open.
-
-    Issue #618: npx-based MCP servers (spawned by npm which calls setsid())
-    start in their own process group, survive ``terminate_process_group``, and
-    keep the pipe write FD open indefinitely so the kernel never delivers EOF
-    to our reader thread.
-
-    We identify the target pipe by its inode using ``os.readlink()`` on
-    ``/proc/{pid}/fd/{N}``.  On Linux the kernel stores the symlink target as
-    the string ``"pipe:[inode]"`` in the proc pseudo-filesystem's symlink
-    metadata — reading it with ``readlink()`` does NOT follow the symlink and
-    does NOT require any inode lock, making it safe to call even when a
-    process is in uninterruptible sleep (D-state).  The previously-used
-    ``os.stat()`` followed the symlink and acquired the pipe inode lock, which
-    blocked indefinitely on D-state processes (Issue #728).
-
-    We skip our own PID (we hold the read end) and any process already in
-    ``our_pgid`` (already killed by the caller).  All remaining holders of the
-    target pipe inode are orphan writers; we SIGKILL them.
-
-    Diagnostic logging (#640): captures cmdline / ppid / pgid for each orphan
-    *before* SIGKILL and emits one INFO line per pid (capped at
-    ``_ORPHAN_LOG_DETAIL_CAP`` lines, then a count-only summary) so operators
-    can identify the leaking package next time this fires in production.
-
-    Only meaningful on Linux (requires ``/proc`` filesystem).
-
-    Returns the number of processes that were sent SIGKILL.
-    """
-    try:
-        target_ino = os.fstat(pipe_read_fd).st_ino
-    except OSError:
-        return 0
-
-    our_pid = os.getpid()
-    killed = 0
-    target_link = f"pipe:[{target_ino}]"
-
-    try:
-        proc_entries = os.listdir("/proc")
-    except OSError:
-        return 0
-
-    for pid_str in proc_entries:
-        # Per-iteration deadline check so the scan bails quickly once the
-        # wall-clock budget is exhausted — avoids holding CPU past the
-        # asyncio.wait_for timeout when D-state processes delay individual
-        # readlink() calls. (#808)
-        if _scan_deadline is not None and time.monotonic() >= _scan_deadline:
-            logger.warning(
-                "[Subprocess] _kill_orphan_pipe_writers: scan deadline reached "
-                "after %d killed — aborting /proc iteration",
-                killed,
-            )
-            break
-
-        if not pid_str.isdigit():
-            continue
-        pid = int(pid_str)
-
-        # Skip ourselves — we hold the read end.
-        if pid == our_pid:
-            continue
-
-        # Skip processes already inside the killed process group.
-        if our_pgid is not None:
-            try:
-                if os.getpgid(pid) == our_pgid:
-                    continue
-            except OSError:
-                continue
-
-        fd_dir = f"/proc/{pid}/fd"
-        try:
-            fd_names = os.listdir(fd_dir)
-        except OSError:
-            continue
-
-        for fd_name in fd_names:
-            # readlink() reads the symlink text "pipe:[inode]" from the proc
-            # pseudo-filesystem WITHOUT following the symlink — no inode lock
-            # is acquired, so this is safe on D-state processes (Issue #728).
-            try:
-                link = os.readlink(f"{fd_dir}/{fd_name}")
-            except OSError:
-                continue
-            if link != target_link:
-                continue
-            # Matching pipe inode — any non-self, non-pgid holder is an
-            # orphan writer (we hold only the read end; the pgid holders were
-            # already killed by the caller).
-            if killed < _ORPHAN_LOG_DETAIL_CAP:
-                cmdline = _read_proc_cmdline(pid)
-                ppid = _read_proc_field(pid, "PPid") or "?"
-                try:
-                    pgid_str = str(os.getpgid(pid))
-                except OSError:
-                    pgid_str = "?"
-                logger.info(
-                    "[Subprocess] Orphan pipe-writer SIGKILL: "
-                    "pid=%s ppid=%s pgid=%s cmd=%s",
-                    pid, ppid, pgid_str, cmdline,
-                )
-            os.kill(pid, signal.SIGKILL)
-            killed += 1
-            break  # no need to inspect other FDs of this pid
-
-    if killed > _ORPHAN_LOG_DETAIL_CAP:
-        logger.info(
-            "[Subprocess] Orphan pipe-writer SIGKILL: %s additional pid(s) "
-            "killed (detail logging capped at %s)",
-            killed - _ORPHAN_LOG_DETAIL_CAP, _ORPHAN_LOG_DETAIL_CAP,
-        )
-
-    return killed
-
-
 async def drain_reader_threads(
     process: subprocess.Popen,
     *threads: Optional[threading.Thread],
@@ -481,213 +184,213 @@ async def drain_reader_threads(
     pgid: Optional[int] = None,
     execution_tag: Optional[str] = None,
 ) -> None:
-    """Join subprocess reader threads with a bounded timeout.
+    """Join subprocess reader threads with a bounded timeout, then sweep
+    the cgroup for any orphans left behind.
 
-    If any thread is still alive after ``grace`` seconds, a surviving
-    process-group member is holding a pipe write end open. Kill the group
-    (via ``pgid`` if provided, else looked up), then wait up to
-    ``post_kill_grace`` seconds for the reader to drain naturally before
-    force-closing pipes as a last resort.
+    If a reader is still alive after ``grace`` seconds, a surviving
+    process-group member is holding a pipe write end open. Kill the
+    group (via ``pgid`` if provided, else looked up), then wait up to
+    ``post_kill_grace`` seconds for natural drain before force-closing
+    pipes as a last resort.
 
-    Ordering matters: once all writers (claude + hook grandchildren) are
-    dead the kernel will EOF the read end as soon as the buffered bytes are
-    consumed. If we close our read FD first the reader raises
-    ``ValueError: I/O operation on closed file`` and the kernel buffer —
-    including the final ``{"type":"result"}`` JSON line — is discarded
-    silently. Waiting for natural drain preserves that data. (#531)
+    Ordering matters: once all writers (claude + hook grandchildren)
+    are dead the kernel will EOF the read end as soon as buffered
+    bytes are consumed. If we close our read FD first the reader
+    raises ``ValueError: I/O operation on closed file`` and the
+    kernel buffer — including the final ``{"type":"result"}`` JSON
+    line — is discarded silently. Waiting for natural drain preserves
+    that data. (#531)
 
     Callers that have already reaped the parent via ``process.wait()``
-    must pass ``pgid`` — after reaping, the pid is gone and we'd
+    must pass ``pgid`` — after reaping the pid is gone and we'd
     otherwise lose the ability to signal grandchildren.
 
-    Issue #817: when ``execution_tag`` is provided, runs a final env-tag
-    sweep regardless of whether reader threads were stuck. This catches
-    setsid'd, FD-detached descendants on the *successful*-completion path
-    too — claude can spawn a leaking grandchild and then exit cleanly,
-    leaving the reader threads to EOF naturally; without this pass the
-    orphan would survive until the next task.
+    Issue #817 follow-up: the function unconditionally calls
+    :func:`kill_cgroup_orphans` in a try/finally at the end. This
+    runs on every exit path (no-stuck, drained-naturally,
+    force-closed) and catches descendants regardless of how they
+    tried to escape — setsid, FD detachment, env stripping. Replaces
+    the prior pipe-writer sweep (#618, #728, #808) and env-tag sweep
+    (#827); both are subsumed by cgroup membership being the
+    inescapable boundary.
 
-    This function is ``async`` so every ``t.join()`` runs off the event-loop
-    thread via ``asyncio.to_thread``.  ``asyncio.wait_for`` enforces the
-    deadline at the event-loop level, preventing the asyncio event loop from
-    blocking even when orphan subprocesses consume all available CPUs and
-    starve ordinary OS-level thread timeouts.  Sync callers (e.g. executor
-    thread functions) must wrap this with ``asyncio.run(drain_reader_threads(…))``.
-    Issue #657.
+    The ``execution_tag`` parameter is informational; the cgroup
+    sweep does not depend on it (kept for API stability).
+
+    This function is ``async`` so every ``t.join()`` runs off the
+    event-loop thread via ``asyncio.to_thread``. ``asyncio.wait_for``
+    enforces the deadline at the event-loop level, preventing the
+    asyncio loop from blocking even when orphan subprocesses consume
+    all available CPUs and starve ordinary OS-level thread timeouts.
+    Sync callers (executor thread functions) must wrap this with
+    ``asyncio.run(drain_reader_threads(…))``. (#657)
     """
+    del execution_tag  # informational only — see docstring
+
     try:
-        await _drain_reader_threads_inner(
-            process, *threads,
-            grace=grace, post_kill_grace=post_kill_grace, pgid=pgid,
-        )
-    finally:
-        # Issue #817: env-tag sweep ALWAYS runs at end of drain regardless
-        # of which exit path we took (no-stuck, drained-naturally, or
-        # force-closed). Catches descendants spawned via setsid + FD
-        # detachment, on both timeout AND successful-completion paths.
-        if execution_tag:
+        alive_threads = [t for t in threads if t is not None]
+
+        # Initial grace-period joins — each runs in a worker thread so
+        # the event loop enforces the deadline even under CPU pressure.
+        for t in alive_threads:
             try:
-                killed = kill_processes_by_env_tag(EXECUTION_TAG_NAME, execution_tag)
-                if killed:
-                    logger.info(
-                        "[Subprocess] Killed %s env-tagged orphan(s) for "
-                        "execution=%s after drain",
-                        killed, execution_tag,
-                    )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "[Subprocess] kill_processes_by_env_tag(%s) raised in "
-                    "drain_reader_threads — continuing",
-                    execution_tag,
-                )
+                await asyncio.wait_for(asyncio.to_thread(t.join, grace), timeout=grace + 1)
+            except asyncio.TimeoutError:
+                pass
 
+        stuck = [t for t in alive_threads if t.is_alive()]
+        if not stuck:
+            return
 
-async def _drain_reader_threads_inner(
-    process: subprocess.Popen,
-    *threads: Optional[threading.Thread],
-    grace: int = 5,
-    post_kill_grace: int = 30,
-    pgid: Optional[int] = None,
-) -> None:
-    """Pre-#817 body of drain_reader_threads. Extracted so the env-tag
-    sweep can wrap it via try/finally without touching every existing
-    early-return path."""
-    alive_threads = [t for t in threads if t is not None]
+        drain_start = time.monotonic()
+        logger.warning(
+            "[Subprocess] Reader thread(s) still busy after process exit "
+            "(pid=%s, stuck_count=%s) — killing process group, then waiting "
+            "%ss for natural drain",
+            process.pid, len(stuck), post_kill_grace,
+        )
+        terminate_process_group(process, graceful_timeout=1, pgid=pgid)
 
-    # Initial grace-period joins — each runs in a worker thread so the event
-    # loop enforces the deadline even under CPU pressure from orphan processes.
-    for t in alive_threads:
-        try:
-            await asyncio.wait_for(asyncio.to_thread(t.join, grace), timeout=grace + 1)
-        except asyncio.TimeoutError:
-            pass
+        # The cgroup sweep at the bottom of this function will SIGKILL
+        # any pipe-holder that survived the pgid kill (npx MCP servers
+        # in their own session, etc.), which closes their FDs and lets
+        # the reader EOF naturally. The previous explicit
+        # pipe-writer-by-fd-inode scan (#618/#728) is no longer
+        # necessary — killing on cgroup membership is strictly more
+        # general and avoids the D-state ``os.stat`` deadlock.
 
-    stuck = [t for t in alive_threads if t.is_alive()]
-    if not stuck:
-        return
+        # #586 metric: capture initial stuck count for the per-branch
+        # [METRIC] drain_outcome emissions below. orphan_kill_count is
+        # vestigial in the cgroup-sweep era (#817) — the explicit
+        # pipe-writer killer is gone; kill_cgroup_orphans() runs in
+        # finally and logs its own count. Field is held at 0 for
+        # operator-tooling stability.
+        stuck_initial = len(stuck)
 
-    drain_start = time.monotonic()
-    logger.warning(
-        "[Subprocess] Reader thread(s) still busy after process exit "
-        "(pid=%s, stuck_count=%s) — killing process group, then waiting "
-        "%ss for natural drain",
-        process.pid, len(stuck), post_kill_grace,
-    )
-    terminate_process_group(process, graceful_timeout=1, pgid=pgid)
-
-    # Issue #618: kill any processes outside our pgid that still hold the
-    # stdout pipe's write end open.  The primary culprit is npm → node MCP
-    # server chains: npm calls setsid() when it spawns node, placing it in a
-    # new process group that survives terminate_process_group(claude_pgid).
-    # The orphan keeps the write FD open so the kernel never delivers EOF to
-    # our reader.  Killing it releases all its FDs (stdout AND stderr write
-    # ends), unblocking both reader threads simultaneously.
-    #
-    # Issue #649 / #657: the /proc scan runs in a daemon thread.  We wait on
-    # a threading.Event (via asyncio.to_thread) rather than joining the thread
-    # directly — event.wait(10) always returns within 10 seconds, so
-    # asyncio.run()'s shutdown_default_executor() never blocks on a slow scan.
-    if process.stdout is not None and not process.stdout.closed:
-        try:
-            stdout_fd = process.stdout.fileno()
-        except Exception:
-            stdout_fd = None
-        if stdout_fd is not None:
-            _orphan_result: list[int] = [0]
-            _orphan_done = threading.Event()
-
-            def _run_orphan_killer() -> None:
-                # Yield CPU to higher-priority threads (uvicorn event loop,
-                # reader threads) so the scan cannot starve health probes on
-                # single-CPU containers. (#808)
-                _set_idle_priority()
-                scan_deadline = time.monotonic() + _ORPHAN_SCAN_WALL_SECONDS
-                try:
-                    _orphan_result[0] = _kill_orphan_pipe_writers(
-                        stdout_fd, pgid, _scan_deadline=scan_deadline
-                    )
-                except Exception:
-                    pass  # best-effort; never fail the drain path
-                finally:
-                    _orphan_done.set()
-
-            threading.Thread(target=_run_orphan_killer, daemon=True).start()
-
-            # asyncio.to_thread(event.wait, 10) runs event.wait(10) in the
-            # executor; it always returns within 10s so asyncio.run()
-            # shutdown_default_executor() exits promptly even when the
-            # daemon thread is still scanning /proc.
+        # Natural-drain joins — run off the event loop so the deadline
+        # is enforced even if a CPU-heavy orphan starves the reader.
+        elapsed = time.monotonic() - drain_start
+        join_timeout = max(1.0, post_kill_grace - elapsed)
+        for t in stuck:
             try:
                 await asyncio.wait_for(
-                    asyncio.to_thread(_orphan_done.wait, 10), timeout=11
+                    asyncio.to_thread(t.join, join_timeout),
+                    timeout=join_timeout + 1,
                 )
             except asyncio.TimeoutError:
                 pass
 
-            if not _orphan_done.is_set():
-                logger.warning(
-                    "[Subprocess] _kill_orphan_pipe_writers still running after "
-                    "10s (pid=%s) — /proc scan may be blocked on a D-state process",
-                    process.pid,
-                )
-            elif _orphan_result[0]:
-                logger.info(
-                    "[Subprocess] Killed %s orphan stdout pipe-writer(s) "
-                    "outside pgid=%s (pid=%s) — likely npx MCP server(s)",
-                    _orphan_result[0], pgid, process.pid,
-                )
-
-    # All writers are now dead (or we timed out trying to kill them).
-    # Use wall-clock accounting: subtract time already spent so the caller's
-    # post_kill_grace budget is measured from when the warning fired, not from
-    # after the orphan scan.  If the orphan scan itself consumed more than
-    # post_kill_grace, clamp to 1 second so we still attempt a natural drain.
-    elapsed = time.monotonic() - drain_start
-    join_timeout = max(1.0, post_kill_grace - elapsed)
-
-    # Natural-drain joins — run off the event loop so asyncio.wait_for enforces
-    # the deadline even when the reader thread is blocked by a CPU-heavy orphan.
-    for t in stuck:
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(t.join, join_timeout), timeout=join_timeout + 1
+        still_stuck = [t for t in stuck if t.is_alive()]
+        if not still_stuck:
+            logger.info(
+                "[Subprocess] Reader thread(s) drained naturally after "
+                "grandchild termination (pid=%s, elapsed=%.1fs)",
+                process.pid, time.monotonic() - drain_start,
             )
-        except asyncio.TimeoutError:
-            pass
+            # #586 Site B — natural drain after kill phase.
+            logger.info(
+                "[METRIC] drain_outcome pid=%s pgid=%s orphan_kill_count=%s "
+                "outcome=%s drain_elapsed_ms=%s stuck_initial=%s",
+                process.pid, pgid, 0, "natural",
+                int((time.monotonic() - drain_start) * 1000),
+                stuck_initial,
+            )
+            return
 
-    still_stuck = [t for t in stuck if t.is_alive()]
-    if not still_stuck:
-        logger.info(
-            "[Subprocess] Reader thread(s) drained naturally after "
-            "grandchild termination (pid=%s, elapsed=%.1fs)",
-            process.pid, time.monotonic() - drain_start,
-        )
-        return
-
-    # Genuine wedge — reader did not return even after grandchildren died
-    # and the kernel should have EOF'd. Force-close and accept data loss.
-    elapsed = time.monotonic() - drain_start
-    logger.error(
-        "[Subprocess] Reader thread(s) still stuck after %.1fs post-kill "
-        "grace — force-closing pipes; some buffered data may be lost "
-        "(pid=%s, stuck_count=%s)",
-        elapsed, process.pid, len(still_stuck),
-    )
-    safe_close_pipes(process)
-
-    for t in still_stuck:
-        try:
-            await asyncio.wait_for(asyncio.to_thread(t.join, 2), timeout=3)
-        except asyncio.TimeoutError:
-            pass
-
-    leaked = [t for t in still_stuck if t.is_alive()]
-    if leaked:
+        # Genuine wedge — readers did not return even after grandchildren
+        # died and the kernel should have EOF'd. Force-close and accept
+        # data loss.
+        elapsed = time.monotonic() - drain_start
         logger.error(
-            "[Subprocess] %s reader thread(s) leaked for pid=%s after "
-            "force-close; continuing anyway",
-            len(leaked), process.pid,
+            "[Subprocess] Reader thread(s) still stuck after %.1fs post-kill "
+            "grace — force-closing pipes; some buffered data may be lost "
+            "(pid=%s, stuck_count=%s)",
+            elapsed, process.pid, len(still_stuck),
         )
+        safe_close_pipes(process)
+
+        for t in still_stuck:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(t.join, 2), timeout=3)
+            except asyncio.TimeoutError:
+                pass
+
+        leaked = [t for t in still_stuck if t.is_alive()]
+        if leaked:
+            logger.error(
+                "[Subprocess] %s reader thread(s) leaked for pid=%s after "
+                "force-close; continuing anyway",
+                len(leaked), process.pid,
+            )
+
+        # #586 Site C — force-close path. Bug-class regression site:
+        # operators alert on a non-zero rate of these emissions.
+        # leaked_count appended only when daemon reader threads
+        # survived the force-close pipe-close.
+        if leaked:
+            logger.info(
+                "[METRIC] drain_outcome pid=%s pgid=%s orphan_kill_count=%s "
+                "outcome=%s drain_elapsed_ms=%s stuck_initial=%s leaked_count=%s",
+                process.pid, pgid, 0, "leaked",
+                int((time.monotonic() - drain_start) * 1000),
+                stuck_initial,
+                len(leaked),
+            )
+        else:
+            logger.info(
+                "[METRIC] drain_outcome pid=%s pgid=%s orphan_kill_count=%s "
+                "outcome=%s drain_elapsed_ms=%s stuck_initial=%s",
+                process.pid, pgid, 0, "force_close",
+                int((time.monotonic() - drain_start) * 1000),
+                stuck_initial,
+            )
+    finally:
+        # Issue #817 follow-up: cgroup-walk runs on every exit path.
+        # Best-effort — never fail the drain on sweep exceptions.
+        # Issue #912: forward all *other* in-flight executions' pids/pgids
+        # as the allowlist so the sweep doesn't SIGKILL a legitimate
+        # concurrent claude subprocess running another task in the same
+        # cgroup. The pre-#912 bare call was the bug — it left only the
+        # sweep's own pid + parents on the allowlist, so any concurrent
+        # task's claude got killed whenever a sibling task drained.
+        # The draining process itself has already exited at this point
+        # so it doesn't need to be in the allowlist.
+        try:
+            extra_pids = _active_execution_pids_for_drain()
+            killed = kill_cgroup_orphans(extra_pids=extra_pids)
+            if killed:
+                logger.info(
+                    "[Subprocess] Cgroup sweep killed %d orphan(s) after drain "
+                    "(preserved %d pid(s) for other in-flight execution(s))",
+                    killed, len(extra_pids),
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[Subprocess] cgroup sweep raised in drain_reader_threads — "
+                "continuing"
+            )
+
+
+def _active_execution_pids_for_drain() -> list[int]:
+    """Lazy registry read for the #912 drain-time allowlist.
+
+    Lives in ``utils`` and lazy-imports ``services.process_registry`` to
+    avoid pulling FastAPI into the import graph of this low-level helper.
+    Returns an empty list on any failure path — the allowlist is best-
+    effort; a registry hiccup at drain time must never crash the drain.
+    """
+    try:
+        from ..services.process_registry import get_process_registry  # lazy
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        return get_process_registry().active_execution_pids()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[Subprocess] active_execution_pids() raised during drain sweep — "
+            "continuing with empty allowlist"
+        )
+        return []
 
 
 def signal_process_tree(

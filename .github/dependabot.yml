@@ -54,3 +54,23 @@ updates:
         update-types:
           - patch
           - minor
+
+  # Docker base images (#850): flag CVEs in FROM lines — the Python/Node
+  # agent base, backend, frontend (incl. Dockerfile.prod), nginx, scheduler.
+  # Dependabot scans every Dockerfile under each listed directory. Grouped
+  # so a single review covers a base-image bump across services.
+  - package-ecosystem: docker
+    directories:
+      - /docker/base-image
+      - /docker/backend
+      - /docker/frontend
+      - /docker/scheduler
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"

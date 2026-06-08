@@ -52,6 +52,12 @@ def test_both_cost_and_duration_none_returns_502():
 
     assert result is not None
     status_code, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert status_code == 502
     # Diagnostic context surfaces what was captured before the result line
     # was lost — operators can correlate with agent-server logs.
@@ -72,6 +78,12 @@ def test_metadata_with_no_turns_renders_zero():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "3 tool calls" in detail
     assert "0 turns" in detail
 
@@ -86,6 +98,12 @@ def test_zero_tool_count_renders_explicitly():
 
     assert result is not None
     status_code, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert status_code == 502
     assert "0 tool calls" in detail
     assert "raw_messages=0" in detail
@@ -183,6 +201,12 @@ def test_raw_messages_fallback_derives_num_turns():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "5 tool calls" in detail  # from metadata (accumulated during parsing)
     assert "3 turns" in detail       # 3 assistant messages counted from raw_messages
 
@@ -201,6 +225,12 @@ def test_raw_messages_fallback_not_used_when_num_turns_present():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "7 tool calls" in detail   # uses metadata tool_count
     assert "10 turns" in detail       # uses metadata num_turns (not raw count 3)
 
@@ -213,6 +243,12 @@ def test_raw_messages_empty_falls_back_to_zero():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "0 tool calls" in detail
     assert "0 turns" in detail
 
@@ -225,6 +261,12 @@ def test_raw_messages_none_falls_back_to_zero():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "0 tool calls" in detail
 
 
@@ -260,6 +302,12 @@ def test_parse_failure_count_surfaces_in_detail():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "parse_failures=3" in detail
 
 
@@ -280,6 +328,12 @@ def test_parse_failure_sample_appended_when_present():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "First malformed stdout line:" in detail
     assert "tool_use_id" in detail
 
@@ -300,6 +354,12 @@ def test_parse_failure_sample_omitted_when_count_is_zero():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "parse_failures=0" in detail
     assert "should-not-appear" not in detail
     assert "First malformed stdout line:" not in detail
@@ -325,6 +385,12 @@ def test_raw_messages_type_summary_in_detail():
 
     assert result is not None
     _, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert "types=" in detail
     assert "assistant=5" in detail
     assert "user=2" in detail
@@ -341,5 +407,11 @@ def test_default_parse_failure_args_preserve_legacy_callers():
 
     assert result is not None
     status_code, detail = result
+
+    assert isinstance(detail, dict), '#678: _classify_empty_result returns dict body'
+
+    body = detail
+
+    detail = body['message']
     assert status_code == 502
     assert "parse_failures=0" in detail

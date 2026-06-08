@@ -81,7 +81,8 @@ def tmp_db(tmp_path, monkeypatch):
         CREATE TABLE agent_ownership (
             agent_name TEXT PRIMARY KEY,
             owner_id INTEGER,
-            subscription_id TEXT
+            subscription_id TEXT,
+            deleted_at TEXT  -- #834: read paths filter `WHERE deleted_at IS NULL`
         )
         """
     )

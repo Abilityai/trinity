@@ -38,7 +38,9 @@ Fleet-wide monitoring is available at `GET /api/monitoring/fleet-health`. Health
 
 ### Resource Allocation
 
-Configure per-agent memory and CPU limits in the Config tab. Execution timeout is configurable per agent (range: 60--7200 seconds, default: 900 seconds / 15 minutes).
+Configure per-agent memory and CPU limits in the Config tab. Execution timeout is configurable per agent (range: 60--7200 seconds, default: 3600 seconds / 60 minutes).
+
+The agent's timeout is the ceiling for any of its schedules — setting it below an active schedule's `timeout_seconds` is rejected with `400 error=agent_timeout_below_active_schedules`.
 
 - **API:** `GET /api/agents/{name}/timeout` and `PUT /api/agents/{name}/timeout`
 

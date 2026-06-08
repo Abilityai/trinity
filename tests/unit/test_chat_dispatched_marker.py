@@ -297,17 +297,20 @@ class TestChatRouterSource:
 
     @pytest.fixture(scope="class")
     def chat_func(self):
-        """Parse routers/chat.py and return the chat_with_agent function node."""
+        """Parse routers/chat.py and return the function carrying the
+        dispatch/execute/finalize logic. After #1026 slice 3 this body lives in
+        `_run_chat_and_finalize` (extracted from `chat_with_agent`); the #686 /
+        #96 invariants are asserted against it."""
         chat_src = _BACKEND / "routers" / "chat.py"
         assert chat_src.exists(), f"routers/chat.py missing at {chat_src}"
         tree = ast.parse(chat_src.read_text(), filename=str(chat_src))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.AsyncFunctionDef)
-                and node.name == "chat_with_agent"
+                and node.name == "_run_chat_and_finalize"
             ):
                 return node
-        pytest.fail("chat_with_agent function not found in routers/chat.py")
+        pytest.fail("_run_chat_and_finalize function not found in routers/chat.py")
 
     def _walk_calls_with_line(self, node):
         """Yield (lineno, attr_name, arg_repr) for every call expression

@@ -7,6 +7,7 @@ Handles:
 - Usage tracking
 """
 
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -18,6 +19,43 @@ from utils.helpers import utc_now_iso
 def _utcnow() -> datetime:
     """Return timezone-aware UTC now."""
     return datetime.now(timezone.utc)
+
+
+def _parse_memory_blob(memory_text: Optional[str]) -> dict:
+    """Parse the JSON blob stored in public_user_memory.memory_text (#895).
+
+    Storage shape is a JSON object with two named keys so that the
+    agent-deliberate writer (write_user_memory MCP tool) and the
+    5-message conversation summarizer can update independent sections
+    without clobbering each other.
+
+    Legacy plaintext rows (written before the split) are treated as
+    `conversation_summary` — that is what the original summarizer wrote.
+    Malformed JSON is also treated as plaintext.
+    """
+    if not memory_text:
+        return {"agent_notes": "", "conversation_summary": ""}
+    try:
+        data = json.loads(memory_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {"agent_notes": "", "conversation_summary": memory_text}
+    if not isinstance(data, dict):
+        return {"agent_notes": "", "conversation_summary": memory_text}
+    return {
+        "agent_notes": str(data.get("agent_notes") or ""),
+        "conversation_summary": str(data.get("conversation_summary") or ""),
+    }
+
+
+def _encode_memory_blob(agent_notes: str, conversation_summary: str) -> str:
+    """Encode the two-section memory representation as JSON for storage."""
+    return json.dumps(
+        {
+            "agent_notes": agent_notes or "",
+            "conversation_summary": conversation_summary or "",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _parse_aware(dt_str: str) -> datetime:
@@ -500,8 +538,12 @@ class PublicLinkOperations:
     def get_or_create_user_memory(self, agent_name: str, user_email: str) -> dict:
         """Get or create a memory record for (agent_name, user_email).
 
-        Returns the memory dict with keys: id, agent_name, user_email,
-        memory_text, message_count, created_at, updated_at.
+        Returns a dict with keys: id, agent_name, user_email, agent_notes,
+        conversation_summary, message_count, created_at, updated_at.
+
+        The two memory sections are parsed from the JSON blob stored in
+        ``memory_text`` (#895). Legacy plaintext rows surface as
+        ``conversation_summary`` (see :func:`_parse_memory_blob`).
         """
         email = user_email.lower()
         now = utc_now_iso()
@@ -516,10 +558,13 @@ class PublicLinkOperations:
             row = cursor.fetchone()
 
             if row:
+                parsed = _parse_memory_blob(row[3])
                 return {
                     "id": row[0], "agent_name": row[1], "user_email": row[2],
-                    "memory_text": row[3], "message_count": row[4],
-                    "created_at": row[5], "updated_at": row[6]
+                    "agent_notes": parsed["agent_notes"],
+                    "conversation_summary": parsed["conversation_summary"],
+                    "message_count": row[4],
+                    "created_at": row[5], "updated_at": row[6],
                 }
 
             # Create new record
@@ -533,8 +578,9 @@ class PublicLinkOperations:
 
         return {
             "id": memory_id, "agent_name": agent_name, "user_email": email,
-            "memory_text": "", "message_count": 0,
-            "created_at": now, "updated_at": now
+            "agent_notes": "", "conversation_summary": "",
+            "message_count": 0,
+            "created_at": now, "updated_at": now,
         }
 
     def increment_message_count(self, agent_name: str, user_email: str) -> int:
@@ -562,25 +608,78 @@ class PublicLinkOperations:
 
         return row[0] if row else 0
 
-    def update_user_memory(self, agent_name: str, user_email: str, memory_text: str) -> bool:
-        """Update memory_text for (agent_name, user_email).
+    def _update_user_memory_section(
+        self,
+        agent_name: str,
+        user_email: str,
+        *,
+        agent_notes: Optional[str] = None,
+        conversation_summary: Optional[str] = None,
+    ) -> bool:
+        """Update one named section of the memory blob without touching the other (#895).
 
-        Returns True if the record was found and updated.
+        The row is created on demand so callers don't need to seed it. Read +
+        write happen on the same connection to keep the parse-merge-write
+        sequence inside SQLite's connection-level serialization.
         """
+        if agent_notes is None and conversation_summary is None:
+            return False
+
         email = user_email.lower()
         now = utc_now_iso()
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
+                SELECT memory_text FROM public_user_memory
+                WHERE agent_name = ? AND user_email = ?
+            """, (agent_name, email))
+            row = cursor.fetchone()
+
+            if row is None:
+                memory_id = secrets.token_urlsafe(16)
+                cursor.execute("""
+                    INSERT INTO public_user_memory
+                    (id, agent_name, user_email, memory_text, message_count, created_at, updated_at)
+                    VALUES (?, ?, ?, '', 0, ?, ?)
+                """, (memory_id, agent_name, email, now, now))
+                current = {"agent_notes": "", "conversation_summary": ""}
+            else:
+                current = _parse_memory_blob(row[0])
+
+            if agent_notes is not None:
+                current["agent_notes"] = agent_notes
+            if conversation_summary is not None:
+                current["conversation_summary"] = conversation_summary
+
+            new_blob = _encode_memory_blob(
+                current["agent_notes"], current["conversation_summary"]
+            )
+
+            cursor.execute("""
                 UPDATE public_user_memory
                 SET memory_text = ?, updated_at = ?
                 WHERE agent_name = ? AND user_email = ?
-            """, (memory_text, now, agent_name, email))
-            updated = cursor.rowcount > 0
+            """, (new_blob, now, agent_name, email))
             conn.commit()
 
-        return updated
+        return True
+
+    def update_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str
+    ) -> bool:
+        """Update only the agent_notes section (written by the write_user_memory MCP tool)."""
+        return self._update_user_memory_section(
+            agent_name, user_email, agent_notes=agent_notes or ""
+        )
+
+    def update_user_memory_conversation_summary(
+        self, agent_name: str, user_email: str, conversation_summary: str
+    ) -> bool:
+        """Update only the conversation_summary section (written by the background summarizer)."""
+        return self._update_user_memory_section(
+            agent_name, user_email, conversation_summary=conversation_summary or ""
+        )
 
     # =========================================================================
     # Helpers

@@ -92,6 +92,15 @@
             ]">
               {{ agent.status }}
             </span>
+            <!-- #526: dispatch circuit breaker open badge (distinct danger styling) -->
+            <span
+              v-if="agent.circuit_breaker_state === 'open'"
+              data-testid="circuit-open-badge"
+              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300"
+              title="Dispatch circuit breaker OPEN — agent unhealthy; new tasks fast-fail until it recovers"
+            >
+              ⚡ circuit open
+            </span>
             <!-- Runtime badge (Claude/Gemini) -->
             <RuntimeBadge :runtime="agent.runtime" />
             <!-- System agent badge -->
@@ -149,7 +158,7 @@
         <div class="flex items-center space-x-3">
           <!-- Workspace button (voice + canvas, BETA) -->
           <button
-            v-if="voiceAvailable"
+            v-if="workspaceAvailable"
             @click="goToWorkspace"
             :disabled="agent.status !== 'running'"
             class="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors"
@@ -556,6 +565,10 @@ const props = defineProps({
     default: null
   },
   voiceAvailable: {
+    type: Boolean,
+    default: false
+  },
+  workspaceAvailable: {
     type: Boolean,
     default: false
   }

@@ -26,6 +26,14 @@ writes a JSONL **before** the backend has updated
 ``cached_claude_session_id`` in the DB — the periodic sweep would
 otherwise delete it and break the next resume.
 
+**Issue #678 (JSONL persistence Option B):** the periodic sweep also
+reaps headless task JSONLs by the same mechanism. Long-running headless
+tasks (timeout > 600s) auto-enable JSONL persistence so the stdout-race
+recovery code can fire (see ``headless_executor._setup_headless_command``).
+Their UUIDs are never inserted into ``agent_sessions``, so they fall out
+of the keep set automatically — after the 1h age guard, the next 6h
+sweep cycle reaps them. No separate retention loop needed.
+
 This service uses ``execute_command_in_container`` (the same primitive
 used by ``git_service.py``, ``ssh_service.py``, scheduler pre-check, and
 the agent terminal) — no new agent-server endpoint needed.

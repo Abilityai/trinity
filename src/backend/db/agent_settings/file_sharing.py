@@ -27,7 +27,7 @@ class FileSharingMixin:
             cursor.execute(
                 """
                 SELECT COALESCE(file_sharing_enabled, 0) AS file_sharing_enabled
-                FROM agent_ownership WHERE agent_name = ?
+                FROM agent_ownership WHERE agent_name = ? AND deleted_at IS NULL
                 """,
                 (agent_name,),
             )

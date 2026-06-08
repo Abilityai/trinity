@@ -33,6 +33,10 @@
       "reason": "fork bomb"
     },
     {
+      "pattern": "(\\.trinity/read-only-config\\.json).*[>|]|[>|].*(\\.trinity/read-only-config\\.json)",
+      "reason": "modifying read-only mode configuration"
+    },
+    {
       "pattern": "\\bshutdown\\s+-[hr]\\b|\\breboot\\s+-f\\b|\\bpoweroff\\b",
       "reason": "host shutdown"
     }
@@ -47,6 +51,7 @@
     "/home/developer/.gcp/*",
     "/home/developer/.claude/settings.json",
     "/home/developer/.claude/settings.local.json",
+    "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*"
   ],

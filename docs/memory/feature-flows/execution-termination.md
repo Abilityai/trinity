@@ -486,6 +486,26 @@ Claude Code handles SIGINT gracefully, finishing its current operation before ex
 
 The pgid is captured at spawn time (before `process.wait()` reaps the parent — after that, `os.getpgid(pid)` raises) and stored in the registry entry metadata so termination can signal the full tree even after the parent has exited. See `docker/base-image/agent_server/utils/subprocess_pgroup.py` for the helper functions (`capture_pgid`, `terminate_process_group`, `signal_process_tree`, `drain_reader_threads`).
 
+### Slow-path drain observability (#586)
+
+`drain_reader_threads` emits a structured `[METRIC] drain_outcome` log line once per call **only on the slow path** — when reader threads are still alive after the initial grace window and the post-kill grace is engaged. The fast path (reader exits during initial grace) emits **no** metric: silence is the success signal, so any emission is operationally meaningful.
+
+Three emission sites in `subprocess_pgroup.py` map to three `outcome=` values:
+
+| `outcome=` | Site | Meaning |
+|---|---|---|
+| `natural` | Site B | Reader joined during the post-kill grace window — `terminate_process_group` reaped the claude pgid; the `kill_cgroup_orphans()` sweep in `finally` mops up any grandchildren that escaped via `setsid()` (e.g. `ssh` from `git push`) before the kernel EOFs the pipe. |
+| `force_close` | Site C | Drain budget exceeded, pipes force-closed; reader thread did exit cleanly afterwards (no daemon leak). |
+| `leaked` | Site C | Drain budget exceeded **and** daemon reader threads survived force-close. Bug-class regression signal — operators should alert on a non-zero rate. |
+
+Fields surfaced for operator queries: `pid`, `pgid`, `outcome`, `drain_elapsed_ms`, `stuck_initial`, `orphan_kill_count` (vestigial since the #817 follow-up cgroup-sweep refactor — always `0`; the actual orphan-kill count is logged separately as `Cgroup sweep killed N orphan(s) after drain` and can be correlated by `pid`), and optional `leaked_count` (present only on `outcome=leaked`).
+
+**Fleet audit**: `scripts/586-fleet-check.sh` scans Vector-aggregated agent logs (`/data/logs/agents-*.json`) across the configurable lookback window (default 7d), prints a per-container summary of `[METRIC] drain_outcome` and related slow-path events, and exits non-zero if any residual `still stuck after Ns` or `no result message after` events are found — gating the Issue #586 close-out.
+
+**Authoring escape hatch**: Stop hooks that release the inherited stdout FD before any blocking I/O never enter the slow path at all. See the `TRINITY_COMPATIBLE_AGENT_GUIDE.md` cross-reference below for bash/python/node patterns.
+
+For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRINITY_COMPATIBLE_AGENT_GUIDE.md` → "Stop hook authoring — release inherited stdout"](../../TRINITY_COMPATIBLE_AGENT_GUIDE.md#stop-hook-authoring--release-inherited-stdout).
+
 ---
 
 ## Error Handling

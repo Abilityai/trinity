@@ -136,6 +136,16 @@ async def rename_agent_endpoint(
                 detail="Failed to update database. Agent name may already be taken."
             )
 
+        # RELIABILITY-004 / #307: the heartbeat `seen` marker has no TTL and is
+        # keyed by agent name, so a rename would orphan the old name's key
+        # forever. Clear the old name's heartbeat keys; the renamed container
+        # re-sets `seen` under the new name on its next beat. Best-effort.
+        try:
+            from services import heartbeat_service
+            heartbeat_service.clear_heartbeat(agent_name)
+        except Exception as e:
+            logger.warning(f"Failed to clear heartbeat keys for old name {agent_name}: {e}")
+
         # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
         try:
             for ext in (".webp", ".png"):

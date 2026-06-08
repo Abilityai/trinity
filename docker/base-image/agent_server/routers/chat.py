@@ -42,14 +42,22 @@ async def chat(request: ChatRequest):
         runtime = get_runtime()
         # Use request.model if provided, otherwise use the model set via /api/model endpoint
         effective_model = request.model or agent_state.current_model
-        response_text, execution_log, metadata, raw_messages = await runtime.execute(
-            prompt=request.message,
-            model=effective_model,
-            continue_session=True,
-            stream=request.stream,
-            system_prompt=request.system_prompt,
-            execution_id=request.execution_id
-        )
+        # #1020: feed the richer /health signal — count this execution and
+        # record success/failure (drives consecutive_failures).
+        agent_state.record_task_start()
+        try:
+            response_text, execution_log, metadata, raw_messages = await runtime.execute(
+                prompt=request.message,
+                model=effective_model,
+                continue_session=True,
+                stream=request.stream,
+                system_prompt=request.system_prompt,
+                execution_id=request.execution_id
+            )
+        except BaseException:
+            agent_state.record_task_finish(success=False)
+            raise
+        agent_state.record_task_finish(success=True)
 
         # Add assistant response to history
         agent_state.add_message("assistant", response_text)
@@ -120,18 +128,26 @@ async def execute_task(request: ParallelTaskRequest):
 
     # Execute via runtime adapter in headless mode (no lock, no --continue)
     runtime = get_runtime()
-    response_text, raw_messages, metadata, session_id = await runtime.execute_headless(
-        prompt=request.message,
-        model=request.model,
-        allowed_tools=request.allowed_tools,
-        system_prompt=request.system_prompt,
-        timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
-        max_turns=request.max_turns,
-        execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
-        resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
-        persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
-        images=request.images,  # Vision images from channel adapters (#562)
-    )
+    # #1020: feed the richer /health signal — count this execution and record
+    # success/failure (drives consecutive_failures, consumed by #526).
+    agent_state.record_task_start()
+    try:
+        response_text, raw_messages, metadata, session_id = await runtime.execute_headless(
+            prompt=request.message,
+            model=request.model,
+            allowed_tools=request.allowed_tools,
+            system_prompt=request.system_prompt,
+            timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
+            max_turns=request.max_turns,
+            execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
+            resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
+            persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
+            images=request.images,  # Vision images from channel adapters (#562)
+        )
+    except BaseException:
+        agent_state.record_task_finish(success=False)
+        raise
+    agent_state.record_task_finish(success=True)
 
     logger.info(f"[Task] Task {session_id} completed successfully")
 
@@ -278,12 +294,25 @@ async def terminate_execution(execution_id: str):
 @router.get("/api/executions/running")
 async def list_running_executions():
     """
-    List all currently running executions.
+    List all currently running executions, plus IDs that finished within
+    the recently-completed window (#921).
 
-    Returns execution_id, start time, and metadata for each running process.
+    The backend watchdog (cleanup_service) reads this endpoint to decide
+    "is this execution still being tracked by the agent?" It treats either
+    a currently-running entry OR a recently-completed ID as proof-of-life,
+    so the race between the agent's `finally: unregister()` and the
+    backend's `update_execution_status(SUCCESS)` write never produces a
+    false orphan recovery.
     """
     registry = get_process_registry()
-    return {"executions": registry.list_running()}
+    return {
+        "executions": registry.list_running(),
+        # #921: backend unions this with the `executions` list when computing
+        # the set of agent-known execution_ids. Older backend versions that
+        # don't read this field still work — they just lose the race window
+        # protection (pre-#921 behaviour).
+        "recently_completed_ids": registry.list_recently_completed_ids(),
+    }
 
 
 @router.get("/api/executions/{execution_id}/status")

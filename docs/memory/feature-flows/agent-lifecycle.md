@@ -693,9 +693,11 @@ Auto-generated on agent creation with `scope='agent'`, `agent_name=<this agent>`
 | `trinity.created` | Creation timestamp (ISO format) |
 | `trinity.template` | Template used (empty string if none) |
 
-### Container Security Constants (`src/backend/services/agent_service/lifecycle.py:30-65`)
+### Container Security Constants (`src/backend/services/agent_service/capabilities.py`, re-exported from `lifecycle.py`)
 
 **2026-01-14 Security Fix**: All container creation paths now use centralized capability constants for consistent security.
+
+**2026-05-13 (Issue #602 Phase 3c, PR #830)**: `SYS_PTRACE` / `MKNOD` / `NET_RAW` / `FSETID` dropped from FULL set (each was a documented escalation primitive — SYS_PTRACE in particular closes the AISEC-C2 heap-read OAuth-exfil path). Constants moved to a stdlib-only `capabilities.py` sibling so `tests/unit/test_capability_set.py` can import them without dragging the docker / fastapi / database transitive imports of `lifecycle.py`. `lifecycle.py` re-exports the names so runtime callers (`crud.py`, `system_agent_service.py`) are unchanged.
 
 ```python
 # Restricted mode capabilities - minimum for agent operation (default)
@@ -709,13 +711,9 @@ RESTRICTED_CAPABILITIES = [
 
 # Full capabilities mode - adds package installation support
 FULL_CAPABILITIES = RESTRICTED_CAPABILITIES + [
-    'DAC_OVERRIDE',      # Bypass file permission checks (needed for apt)
+    'DAC_OVERRIDE',      # Bypass file permission checks (needed for sudo apt)
     'FOWNER',            # Bypass permission checks on file owner
-    'FSETID',            # Don't clear setuid/setgid bits
     'KILL',              # Send signals to processes
-    'MKNOD',             # Create special files
-    'NET_RAW',           # Use raw sockets (ping, etc.)
-    'SYS_PTRACE',        # Trace processes (debugging)
 ]
 ```
 
@@ -738,9 +736,11 @@ tmpfs={'/tmp': 'noexec,nosuid,size=100m'}
 **Files Using These Constants**:
 | File | Line | Usage |
 |------|------|-------|
-| `services/agent_service/crud.py` | 477 | Agent creation |
-| `services/agent_service/lifecycle.py` | 393 | Container recreation |
-| `services/system_agent_service.py` | 250 | System agent creation (FULL_CAPABILITIES only) |
+| `services/agent_service/capabilities.py` | — | Definitions (stdlib-only, test-importable) |
+| `services/agent_service/lifecycle.py` | 94 | Re-exports `RESTRICTED_CAPABILITIES` / `FULL_CAPABILITIES` / `PROHIBITED_CAPABILITIES` |
+| `services/agent_service/crud.py` | 615 | Agent creation |
+| `services/agent_service/lifecycle.py` | 535 | Container recreation |
+| `services/system_agent_service.py` | 251 | System agent creation (FULL_CAPABILITIES only) |
 
 ### Network Isolation (line 645)
 - Network: `trinity-agent-network` (Docker network)

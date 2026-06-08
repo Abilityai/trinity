@@ -97,6 +97,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
+- `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
 - `agent_ssh.py` - SSH access endpoint
@@ -139,14 +140,15 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 *Public Access & Monetization:*
 - `public_links.py` - Public agent link management
 - `public.py` - Public chat endpoints
-- `site.py` - Agent website proxy — reverse-proxies `/site/{token}/{path}` to agent port 3000 (SITE-001)
 - `paid.py` - x402 payment-gated chat (NVM-001)
 - `nevermined.py` - Nevermined payment config management
 - `slack.py` - Slack integration (OAuth, events, multi-agent channel routing, per-agent channel binding) (SLACK-001/002)
 - `telegram.py` - Telegram bot integration (webhook receiver, bot binding, group config) (TELEGRAM-001/TGRAM-GROUP)
 - `whatsapp.py` - WhatsApp via Twilio (webhook receiver, binding CRUD + test) (WHATSAPP-001)
+- `voip.py` - VoIP telephony: per-agent Twilio-voice binding CRUD (owner-only), outbound call trigger (idempotent, rate-limited), and the Media Streams WebSocket entrypoint. Feature-flag gated (`voip_available`, default OFF) (VOIP-001, #1056)
 - `webhooks.py` - Public webhook trigger endpoint + JWT-auth webhook management (WEBHOOK-001, #291)
 - `messages.py` - Proactive agent-to-user messaging (#321)
+- `public_memory.py` - Per-user memory write endpoint for channel sessions (MEM-001, #888)
 
 *Subscriptions & Skills:*
 - `subscriptions.py` - Subscription management (SUB-002)
@@ -167,14 +169,15 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `docker_service.py` - Docker container management
 - `docker_utils.py` - Docker utility helpers
 - `template_service.py` - GitHub template cloning and processing
-- `agent_client.py` - HTTP client for agent container communication (chat, session, injection); Redis-backed circuit breaker with exponential backoff + dormant state (#631); only TCP/connection failures count toward the circuit — HTTP 4xx/5xx and 502/503/504 are treated as application errors and skip the failure counter (#474)
+- `agent_client.py` - HTTP client for agent container communication (chat, session, injection); Redis-backed **transport** circuit breaker (`CircuitState`, `agent:circuit:{name}`) with exponential backoff + dormant state (#631); only TCP/connection failures count toward the circuit — HTTP 4xx/5xx and 502/503/504 are treated as application errors and skip the failure counter (#474). Shared Redis plumbing (fail-open client, Lua `ScriptCache`, decode helpers) was extracted to the top-level `redis_breaker_util.py` so the dispatch breaker (#526) reuses it without duplication (RELIABILITY-007).
 - `settings_service.py` - Centralized settings retrieval (API keys, ops config, agent quotas)
 
 *Execution & Scheduling:*
-- `task_execution_service.py` - Unified task execution lifecycle (slot mgmt, activity tracking, sanitization) (EXEC-024)
-- `capacity_manager.py` - **Unified capacity facade (#428, CAPACITY-CONSOLIDATE).** Single public API for admit/release/status across `/chat` (`max_concurrent=max_parallel_tasks`, `queue_in_memory` policy) and `/task` (`queue_persistent` policy). Composes `slot_service.py` and `backlog_service.py` internally; owns the in-memory overflow store (Redis LIST, depth 3). Replaces the prior three-class pyramid (`SlotService` + `ExecutionQueue` + `BacklogService`); `ExecutionQueue` deleted, the other two are now private internals.
+- `task_execution_service.py` - Unified task execution lifecycle (slot mgmt, activity tracking, sanitization) (EXEC-024). On reader-race empty results (502 dict body with `num_turns < 5`, `raw_message_count == 0`, `parse_failure_count == 0`), fires one in-line auto-retry with the same `execution_id` capped at 300s, persisting `retry_count` and rolling previous-attempt cost into the terminal write (#678). **Dispatch breaker outcome recording (#526):** the single execution path, so it records every outcome to `DispatchBreaker` (gated on the combined global+per-agent flag) — `record_outcome(None)` at the success terminal (resets), `record_outcome(AUTH)` gated on `error_code == AUTH` at the HTTP-error terminal (counts). On the `→open` transition it backgrounds `_fail_backlog_and_audit` via `_spawn_bg` (holds a strong task ref so the fire-and-forget drain can't be GC'd mid-flight) — `db.fail_queued_for_agent` → FAILED + clear in-memory queue + audit; if that task is still lost or its DB write throws, the 60s breaker-aware `run_maintenance` sweep re-fails the queued backlog for any still-open breaker (~60s worst case, not the 24h generic expiry). Catches `CircuitOpen` from `acquire` → `TaskExecutionResult(CIRCUIT_OPEN)` + FAILED row; the 3b pre-dispatch check also fast-fails on a non-probe-consuming dispatch `state == "open"` read, but ONLY on the backlog-drain path (`slot_already_held and not dispatch_gate_checked`) so it never blocks a probe an upstream `acquire` gate already admitted.
+- `capacity_manager.py` - **Unified capacity facade (#428, CAPACITY-CONSOLIDATE).** Single public API for admit/release/status across `/chat` (`max_concurrent=max_parallel_tasks`, `queue_in_memory` policy) and `/task` (`queue_persistent` policy). Composes `slot_service.py` and `backlog_service.py` internally; owns the in-memory overflow store (Redis LIST, depth 3). Replaces the prior three-class pyramid (`SlotService` + `ExecutionQueue` + `BacklogService`); `ExecutionQueue` deleted, the other two are now private internals. `acquire(... breaker_enabled=False)` gates on the dispatch breaker at the TOP of `acquire` (before the overflow branch) when both the per-agent flag and global `DISPATCH_BREAKER_ENABLED` are on. A `deny` (open within cooldown, or a sibling holds the probe) raises `CircuitOpen` before any slot/overflow work, so a doomed task is never enqueued (the no-enqueue invariant, #526 D2). When the breaker is open and the call holds the half-open **probe**, the probe is admitted ONLY into a free slot — if slots are full the probe fast-fails (`CircuitOpen`) rather than enqueuing, so the no-enqueue invariant extends across the half-open window and the probe always leads to a recorded dispatch instead of a verdict-less backlog row that would stall the breaker's backoff (#526 F1).
 - `slot_service.py` - Internal: atomic N-ary capacity counter (Redis ZSET) with dynamic per-agent TTL (CAPACITY-001). Used only by `CapacityManager`.
 - `backlog_service.py` - Internal: persistent SQLite-backed FIFO overflow store with drain-on-release (BACKLOG-001). Used only by `CapacityManager`.
+- `dispatch_breaker.py` - **Per-agent dispatch circuit breaker (RELIABILITY-007, #526).** Producer-side breaker fed *only* by execution outcomes in `task_execution_service` — counts **AUTH only** (`error_code == AUTH`, agent answers HTTP 503), NOT TIMEOUT/AGENT_ERROR (D10). Consecutive-failure machine (`closed → open → half-open(probe) → closed`, default threshold 3, base cooldown 30s, exp backoff) in Redis `agent:dispatch:{name}` reusing the proven `CircuitState` Lua pattern (D9). Separate namespace + separate Lua from the transport breaker, so the two never contaminate each other's counter. `record_outcome(error_code)` returns the `(prior,new)` transition; the **caller** backgrounds the drain on `→open` (no `capacity`/`db` import here → no circular dep, D3). Fail-open on Redis down; never raises. Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam. `record_success` is a no-op write (Lua early-return) when the breaker is already closed with zero failures, so a healthy breaker-enabled agent doesn't churn Redis on every successful execution.
 - `scheduler_service.py` - APScheduler-based scheduling service
 - `cleanup_service.py` - Active watchdog reconciliation + passive stale recovery for executions, activities, and slots (CLEANUP-001, #129)
 
@@ -185,6 +188,7 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `activity_service.py` - Activity tracking and timeline
 - `monitoring_service.py` - Fleet-wide health monitoring (MON-001)
 - `monitoring_alerts.py` - Alert threshold configuration
+- `heartbeat_service.py` - Agent push-heartbeat liveness layer (RELIABILITY-004, #307). Owns all Redis heartbeat keys; `record_heartbeat` (SETEX 15s + persistent `seen` marker), `read_heartbeat`, `heartbeat_status`/`heartbeat_status_bulk` (one pipelined round-trip, D4), `authorize_heartbeat` (Option B — only the agent's own agent-scoped MCP key), and `run_heartbeat_watch_loop`/`process_watch_tick` (5s loop, 3-miss guard, fires a cooldown-debounced operator alert via `monitoring_alerts` on the alive→stale transition; writes no health row). Additive to the 30s `monitoring_service.py`, which stays authoritative.
 - `operator_queue_service.py` - Operating Room sync with agent containers (OPS-001)
 
 *Auth & Credentials:*
@@ -202,12 +206,14 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
 - `agent_shared_files_service.py` - Outbound file sharing: path validation, MIME blocklist, quota, Docker `get_archive` extraction, URL building (FILES-001)
+- `loop_service.py` - Sequential agent loops: in-process `asyncio.Task` runner, cooperative stop, template substitution, WS events (`loop_run_completed`, `loop_completed`) (#740)
+- `voip_service.py` - VoIP outbound-call orchestration (VOIP-001, #1056): gate checks (flag/binding) + abuse controls (rate-limit per owner+destination, durable per-agent daily cap), stages a Gemini session intent in Redis keyed by a `call_id` (distinct from the `vs_` VoiceSession id), mints a call-bound WSS ticket, calls Twilio `calls.create(<Connect><Stream>)`, and dispatches the post-call transcript to the **main agent** via `task_execution_service.execute_task(triggered_by="voip")` (default ON). Never calls `connect_and_stream` (cross-worker safety — the WS handler does).
 
 **Channel Adapters (`adapters/`)** — Pluggable external messaging (SLACK-002):
 
 *Core:*
 - `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
-- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline
+- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895)
 
 *Slack:*
 - `slack_adapter.py` - Slack adapter: DMs, @mentions, thread replies, agent identity via `chat:write.customize`
@@ -222,10 +228,15 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - `whatsapp_adapter.py` - WhatsApp adapter: DMs via Twilio (WHATSAPP-001); media with SSRF-gated downloads; `/login`/`/logout`/`/whoami` command handlers + markdown→WhatsApp syntax conversion (#467)
 - `transports/twilio_webhook.py` - Twilio webhook transport: HMAC-SHA1 signature (via `twilio.request_validator`), MessageSid dedup, form-encoded body
 
+*VoIP Telephony (via Twilio Media Streams) — a voice transport, NOT a text `ChannelAdapter` (VOIP-001, #1056):*
+- `transports/twilio_media_stream.py` - Media Streams WS bridge (`handle_media_stream`): `accept()`-then-authenticate — Twilio does NOT forward the `<Stream url>` query string, so the call-bound ticket arrives as a `<Parameter>` in the first `start` frame (`start.customParameters.ticket`), read only after the handshake completes (#1073); a query-string `?ticket=` is still honored as a fallback for non-Twilio/diagnostic clients. Then scope check, `GETDEL` staged intent (consume-once), creates the Gemini `VoiceSession` on the connecting worker, runs the unmodified `connect_and_stream`. Per-connection `_CallBridge`: inbound μ-law→PCM resample, outbound queue + paced 20ms 160-byte μ-law sender, `clear`-on-barge-in, `streamSid` capture, teardown ties Gemini-end→Twilio-close + SETNX-guarded single transcript save (`source="voice"`) + post-call processing dispatch.
+- `transports/voip_audio.py` - Pure stdlib-`audioop` codec helpers (`ulaw8k_to_pcm16k`, `pcm24k_to_ulaw8k` direct 3:1, `pop_frames`). Carries per-direction `ratecv` state across chunks (anti-click). `audioop-lts` pinned for Python ≥ 3.13.
+
 *Database:*
 - `db/slack_channels.py` - Workspace connections (encrypted bot tokens), channel-agent bindings, active threads
 - `db/telegram_channels.py` - Telegram bindings (encrypted bot tokens), group configs, chat links
 - `db/whatsapp_channels.py` - WhatsApp (Twilio) bindings (encrypted AuthToken), chat links, verified-email read/write/by-email lookup (#467 Phase 2)
+- `db/voip.py` - VoIP `voip_bindings` (encrypted Twilio-voice AuthToken, `from_number`, `inbound_number` [Phase 2], `daily_call_cap`) + `voip_call_logs` lifecycle + durable daily-cap window count (VOIP-001)
 
 *Content & Media:*
 - `image_generation_service.py` - Platform image generation via Gemini (prompt refinement + image gen) (IMG-001)
@@ -306,12 +317,12 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 - Tools access auth context via `context.session` parameter
 - Agent-to-agent collaboration uses agent-scoped keys for access control
 
-**Tools** across 16 tool modules (`src/tools/`):
+**Tools** across 17 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
 | `agents.ts` (19) | `list_agents`, `get_agent`, `get_agent_info`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync`, `get_agent_github_pat_status`, `set_agent_github_pat` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (#347) |
-| `chat.ts` (3) | `chat_with_agent`, `get_chat_history`, `get_agent_logs` | Chat (enforces sharing rules), history, logs |
+| `chat.ts` (3) | `chat_with_agent`, `get_chat_history`, `get_agent_logs` | Chat (enforces sharing rules), history, logs. `chat_with_agent` sync mode applies `MCP_CHAT_TIMEOUT_MS` (default 25000) — on abort the client queries `/api/agents/{name}/executions`, matches the in-flight MCP row, and returns `{status:"queued_timeout", execution_id, message}` so callers poll instead of duplicate-queueing (#914). |
 | `schedules.ts` (8) | `list_agent_schedules`, `create_agent_schedule`, `get_agent_schedule`, `update_agent_schedule`, `delete_agent_schedule`, `toggle_agent_schedule`, `trigger_agent_schedule`, `get_schedule_executions` | Schedule CRUD and execution history |
 | `executions.ts` (3) | `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary` | Execution queries, async result polling, activity monitoring (MCP-007) |
 | `skills.ts` (7) | `list_skills`, `get_skill`, `get_skills_library_status`, `assign_skill_to_agent`, `set_agent_skills`, `sync_agent_skills`, `get_agent_skills` | Skill management and assignment |
@@ -326,6 +337,8 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 | `files.ts` (1) | `share_file` | Outbound file sharing — publish file from `/home/developer/public/` and return download URL (FILES-001) |
+| `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
+| `memory.ts` (1) | `write_user_memory` | Write per-user memory blob in isolated store; resolves user email server-side from execution_id (MEM-001, #888) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -361,11 +374,12 @@ docker exec trinity-vector sh -c "tail -50 /data/logs/agents.json" | jq .
 **Internal Server:** `agent-server.py`
 - FastAPI app on port 8000
 - `/api/chat` - Claude Code execution (messages persisted to database)
-- `/health` - Health check
+- `/health` - Health check. Beyond `{status}`, returns a richer signal (#1020): `active_tasks` (concurrent executions across `/api/chat` + `/api/task`), `last_task_at` (ISO), `consecutive_failures` (reset on success, incremented on failure — consumed by the dispatch circuit breaker #526 and fleet-health #307), plus the #333 `diagnostics` gauges. `mailbox_depth` is intentionally NOT emitted — there is no agent-side mailbox until the actor model (#945); the backend derives queue depth from `CapacityManager`. Counters live in `agent_server/state.py` (`record_task_start`/`record_task_finish`); the backend reads `consecutive_failures`/`last_task_at` in `monitoring_service.py` (graceful default for pre-#1020 agent images).
 - `/api/credentials/update` - Hot-reload credentials
 - `/api/chat/session` - Context window stats
 - `/api/files` - List workspace files (recursive tree structure)
 - `/api/files/download` - Download file content (100MB limit)
+- `/api/files/mkdir` - Create a directory (workspace-confined, edit-protected paths rejected) (#37)
 
 **Template-supplied pre-check** (optional, SCHED-COND-001): if the template ships an executable `~/.trinity/pre-check` file, the backend's internal endpoint `POST /api/internal/agents/{name}/pre-check` runs it via `docker exec` before the scheduler fires a cron-triggered chat. The hook is **language-agnostic** — interpreter is selected by the file's shebang line (Python, bash, node, compiled binary, …); Trinity does not invoke `python3` for it. The hook's stdout becomes the chat message; empty stdout + exit 0 records a skipped execution. No HTTP endpoint is exposed on the agent-server for this — the primitive is the same `execute_command_in_container` already used by `services/git_service.py` (persistent-state allowlist), `ssh_service.py`, and the agent terminal.
 
@@ -397,15 +411,16 @@ Services that run continuously in the backend process:
 
 | Service | Module | Description |
 |---------|--------|-------------|
-| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. (CLEANUP-001, #129, #772) |
+| **Cleanup Service** | `cleanup_service.py` | Active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery. Runs every 5 min. Also runs the #772 retention sweeps: nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` rows past `execution_row_retention_days` (default 90), and DELETEs `agent_health_checks` rows past `health_check_retention_days` (default 7). Also runs the #834 Phase 1a soft-deleted-agent purge: hard-deletes `agent_ownership` rows whose `deleted_at` is older than `agent_soft_delete_retention_days` (default 180, `0` = disabled), cascading child tables via the #816 `purge_agent_ownership`/`cascade_delete` primitive. Also runs the #834 Phase 1b soft-deleted-schedule purge: hard-deletes `agent_schedules` rows whose `deleted_at` is older than `schedule_soft_delete_retention_days` (default 30, `0` = disabled) via `purge_schedule()`, which cascades the row's `schedule_executions` (no #816 chain — schedules have no #816-registered children). Each sweep is capped at 5000 rows/cycle so the first post-deploy backfill spans hours, not minutes; `0` disables a sweep. Triggers `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. **Startup hook (#740):** one-shot `mark_orphan_loops_interrupted()` flips any `agent_loops` row left in `queued`/`running` after a restart to `interrupted` (`stop_reason="interrupted"`); loops do not auto-resume. (CLEANUP-001, #129, #772, #834, #740) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back. (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s, upserts `agent_sync_state`, emits `sync_failing` operator-queue entries when consecutive_failures ≥ 3. (#389 S1) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval. (MON-001) |
+| **Heartbeat Watch Loop** | `heartbeat_service.py` | 5s loop (staggered +10s) that fires a soft, cooldown-debounced operator alert (via the existing `monitoring_alerts` notification path) after 3 consecutive missed agent push-heartbeats — and a recovery notification when beats resume. Reads `seen`-marked agents via a batched Redis pipeline; per-tick miss counters live in Redis. Alerts fire **only on the alive→stale transition** (and recovery only after a prior downgrade), so the operator gets one alert per loss episode. It writes **no** health-check row — the 30s monitoring loop stays authoritative for aggregate status. Soft severity + 3-miss guard keep the silent-fail heartbeat's false positives recoverable. Old-image agents (no `seen` marker) resolve to `unsupported` and are ignored. (RELIABILITY-004, #307) |
 | **Scheduler Service** | `scheduler_service.py` | APScheduler-based cron job execution. Async fire-and-forget with DB polling for status. On each cron-triggered fire, optionally invokes the agent's executable `~/.trinity/pre-check` (interpreter chosen by shebang) via the backend's `POST /api/internal/agents/{name}/pre-check` (which `docker exec`s into the agent container). Empty stdout + exit 0 records a skipped execution and does not invoke Claude (SCHED-COND-001, #454). |
-| **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. (BACKLOG-001 / CAPACITY-CONSOLIDATE #428) |
+| **Capacity Maintenance** | `capacity_manager.py` | Calls `CapacityManager.run_maintenance()` every 60s — expires stale queued tasks (>24h) and drains orphans after restart. Also runs the #526 breaker-aware backstop (`_backstop_open_breaker_backlog`): re-fails the queued backlog for any agent whose dispatch breaker is still open, so a lost inline drain recovers in ~60s rather than waiting out the 24h generic expiry (gated on `DISPATCH_BREAKER_ENABLED`; bounded to agents with queued rows). On each successful sweep, writes a unix-timestamp heartbeat to Redis key `canary:drain_tick_at` (read by canary B-02 to distinguish stuck drains from "drain just hasn't run yet"). (BACKLOG-001 / CAPACITY-CONSOLIDATE #428; B-02 heartbeat #882; #526 backstop) |
 | **Audit Retention** | `audit_retention_service.py` | Daily APScheduler job at 04:15 UTC that DELETEs `audit_log` rows past the retention window. Configured via `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design. (#552) |
 | **DB Vacuum** | `db_vacuum_service.py` | Daily APScheduler job at 04:30 UTC that runs `VACUUM` on `/data/trinity.db` to reclaim pages freed by the cleanup-service retention sweeps. Configurable via `DB_VACUUM_ENABLED` / `DB_VACUUM_HOUR` / `DB_VACUUM_MINUTE`. Opens an autocommit (`isolation_level=None`) connection because VACUUM cannot run inside a transaction; accepts the rare BUSY outcome rather than retrying. (#772) |
-| **Session Cleanup** | `session_cleanup_service.py` | Periodic JSONL reaper for the Session tab. Default 6h cycle (`poll_interval_seconds`); each cycle diffs every running agent's `~/.claude/projects/-home-developer/<uuid>.jsonl` set against `agent_sessions.cached_claude_session_id` and deletes JSONLs not in the keep set whose mtime is older than `min_age_seconds` (default 1h race guard). Synchronous best-effort `reap_jsonl()` is also called by the session router on user-initiated reset/delete so the disk reclaim is immediate. Uses `execute_command_in_container` (no agent-server endpoint required). (SESSION_TAB Phase 4.2) |
+| **Session Cleanup** | `session_cleanup_service.py` | Periodic JSONL reaper for the Session tab. Default 6h cycle (`poll_interval_seconds`); each cycle diffs every running agent's `~/.claude/projects/-home-developer/<uuid>.jsonl` set against `agent_sessions.cached_claude_session_id` and deletes JSONLs not in the keep set whose mtime is older than `min_age_seconds` (default 1h race guard). Synchronous best-effort `reap_jsonl()` is also called by the session router on user-initiated reset/delete so the disk reclaim is immediate. Uses `execute_command_in_container` (no agent-server endpoint required). Also reaps headless-task JSONLs created by long-running headless tasks (timeout > 600s) which auto-enable JSONL persistence so the stdout-race recovery code in `agent_server/services/jsonl_recovery.py` can fire — those UUIDs aren't in `agent_sessions`, so they fall out of the keep set automatically and the existing 1h age guard + 6h sweep removes them. (SESSION_TAB Phase 4.2; #678 JSONL persistence Option B) |
 | **Canary Watcher** | `canary_service.py` | Continuous orchestration-invariant harness (CANARY-001 / Issue #411). Every 5 min: `collect_snapshot()` over Redis × SQLite × agent registries, runs deterministic invariant library (S-01, E-02, L-03 in Phase 1), persists violations to `canary_violations`, classifies green→red transitions and fires one Slack webhook POST per transition (`CANARY_SLACK_WEBHOOK_URL` env var; unset = silent sink). Disabled by default; enable on staging/dev with `CANARY_ENABLED=1`. |
 
 The **agent server** also runs a 15-min `auto_sync` heartbeat loop (gated
@@ -413,6 +428,16 @@ by `GIT_SYNC_AUTO` env var; default-on for non-source-mode GitHub-template
 agents) that stages/commits/pushes in-container changes and writes the
 outcome to `.trinity/sync-state.json` — which the Sync Health Service
 picks up on its next poll. (#389 S1a)
+
+The agent server additionally runs a 5s **liveness heartbeat loop**
+(`agent_server/heartbeat.py`, gated on both `TRINITY_BACKEND_URL` and
+`TRINITY_MCP_API_KEY` being present) that POSTs `{memory_mb,
+active_executions, uptime_s}` to `POST /api/agents/{name}/heartbeat`,
+authenticated with the agent's own `TRINITY_MCP_API_KEY` (Option B,
+least-privilege — no master secret injected). `memory_mb` is read from
+`/proc/self/status` `VmRSS` (no psutil dep). The loop sleeps-first and
+swallows **all** exceptions — a failed beat is silent by design; the
+backend's watch loop is what acts on the absence. (RELIABILITY-004, #307)
 
 ---
 
@@ -474,7 +499,7 @@ picks up on its next poll. (#389 S1a)
 
 ## API Endpoints
 
-### Agents (32 endpoints)
+### Agents (33 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents` | List all agents |
@@ -497,8 +522,10 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/stats` | Get live telemetry |
 | GET | `/api/agents/{name}/activity` | Get activity summary |
 | GET | `/api/agents/{name}/info` | Get template metadata |
+| GET | `/api/agents/{name}/a2a/agent-card` | A2A v1.0 Agent Card for external orchestrator discovery (#737) |
 | GET | `/api/agents/{name}/files` | List workspace files (tree structure) |
 | GET | `/api/agents/{name}/files/download` | Download file |
+| POST | `/api/agents/{name}/files/mkdir` | Create a directory in the workspace (NEW: 2026-05-19, #37) |
 | GET | `/api/agents/{name}/folders` | Get shared folder config (NEW: 2025-12-13) |
 | PUT | `/api/agents/{name}/folders` | Update shared folder config |
 | GET | `/api/agents/{name}/folders/available` | List mountable folders from permitted agents |
@@ -509,7 +536,7 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/read-only` | Get read-only mode status and config (NEW: 2026-02-17) |
 | PUT | `/api/agents/{name}/read-only` | Enable/disable read-only mode (blocks source file writes) |
 | GET | `/api/agents/{name}/timeout` | Get execution timeout setting (NEW: 2026-03-12) |
-| PUT | `/api/agents/{name}/timeout` | Set execution timeout (60-7200s, default 3600s = 60min, #665) |
+| PUT | `/api/agents/{name}/timeout` | Set execution timeout (60-7200s, default 3600s = 60min, #665). 400 with `error=agent_timeout_below_active_schedules` if the new cap would drop below any non-deleted schedule's `timeout_seconds` (#929). |
 | GET | `/api/agents/{name}/guardrails` | Get per-agent guardrails config (NEW: 2026-04-15) |
 | PUT | `/api/agents/{name}/guardrails` | Set per-agent guardrails overrides (GUARD-001) |
 | GET | `/api/agents/{name}/file-sharing` | Get outbound file-sharing status + quota (NEW: 2026-04-24, FILES-001) |
@@ -517,6 +544,11 @@ picks up on its next poll. (#389 S1a)
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key; used by `share_file` MCP tool) |
 | GET | `/api/agents/{name}/shared-files` | List active (non-revoked, non-expired) shared files with download counts |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
+| POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; resolves user email from execution_id server-side (MEM-001, #888) |
+| POST | `/api/agents/{name}/heartbeat` | Agent liveness heartbeat (RELIABILITY-004, #307). Auth = the agent's own agent-scoped `TRINITY_MCP_API_KEY` (Option B); 403 unless the key is agent-scoped and its `agent_name` matches the path (user/system/null keys rejected). Validated with `track_usage=False` so a 5s beat doesn't amplify `usage_count`. Best-effort `record_heartbeat`; returns `{ok, stored}`. The five `heartbeat_*` fields surface on `GET /api/monitoring/status` via a single batched Redis read. |
+| GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (NEW: 2026-05-30, #526) |
+| PUT | `/api/agents/{name}/circuit-breaker` | Enable/disable the per-agent dispatch breaker (owner-only); body `{enabled:bool}`. Global `DISPATCH_BREAKER_ENABLED` must also be on to engage (#526) |
+| POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH the transport (`agent:circuit:{name}`) and dispatch (`agent:dispatch:{name}`) breakers to closed (#921, extended #526) |
 
 **Note**: Route ordering is critical. `/context-stats` and `/autonomy-status` must be defined BEFORE `/{name}` catch-all route to avoid 404 errors.
 
@@ -528,6 +560,19 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/voice/prompt` | Get per-agent voice system prompt |
 | PUT | `/api/agents/{name}/voice/prompt` | Set per-agent voice system prompt |
 | GET | `/api/agents/{name}/voice/{session_id}/panel` | Canvas panel state for workspace mode (ownership-gated; returns empty state when session gone, #699) |
+
+### VoIP Telephony (VOIP-001, #1056 — Phase 1, feature-flag gated default OFF)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/agents/{name}/voip` | Owner | Twilio-voice binding status. 404 when `voip_available` off. |
+| PUT | `/api/agents/{name}/voip` | Owner | Configure Twilio voice creds (validated via Twilio Account fetch; AuthToken AES-256-GCM encrypted). |
+| DELETE | `/api/agents/{name}/voip` | Owner | Remove the voice binding. |
+| POST | `/api/agents/{name}/voip/call` | JWT/MCP (`AuthorizedAgent`) | Place an outbound call. Rate-limited per `(owner, destination)` + durable per-agent daily cap; optional `Idempotency-Key` (Invariant #18). Returns `{call_id, status:"ringing", twilio_call_sid}`. |
+| WS | `/api/voip/voice/{call_id}` | Call-bound ticket (`<Parameter>`; `?ticket=` fallback) | Twilio Media Streams audio bridge (no JWT — Twilio can't send one). Ticket arrives via the `start` frame's `customParameters` (Twilio drops the query string — #1073); `scope="voip:{call_id}"`; staged intent consumed once via Redis `GETDEL`. |
+
+MCP tool: `call_user` (`src/mcp-server/src/tools/voip.ts`). The call transcript
+is persisted to `chat_messages` (`source="voice"`) and, by default, dispatched
+to the main agent for processing via `task_execution_service.execute_task(triggered_by="voip")`.
 
 ### Activities (1 endpoint)
 | Method | Path | Description |
@@ -589,28 +634,31 @@ picks up on its next poll. (#389 S1a)
 | GET | `/api/agents/{name}/access-policy` | Get cross-channel access policy (#311) |
 | PUT | `/api/agents/{name}/access-policy` | Set `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | List pending access requests |
-| POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares) or reject |
+| POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares + fires fire-and-forget approval notification back on the requester's originating channel for telegram/slack/whatsapp, #951) or reject |
 
-### Schedules (12 endpoints)
+### Schedules (13 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents/{name}/schedules` | List schedules |
-| POST | `/api/agents/{name}/schedules` | Create schedule |
+| POST | `/api/agents/{name}/schedules` | Create schedule. 400 with `error=schedule_timeout_exceeds_agent_cap` if `body.timeout_seconds > agent.execution_timeout_seconds` (#929). |
 | GET | `/api/agents/{name}/schedules/{id}` | Get schedule |
-| PUT | `/api/agents/{name}/schedules/{id}` | Update schedule |
+| PUT | `/api/agents/{name}/schedules/{id}` | Update schedule. Same 400 when the update touches `timeout_seconds` and the new value exceeds the agent cap (#929). |
 | DELETE | `/api/agents/{name}/schedules/{id}` | Delete schedule |
 | POST | `/api/agents/{name}/schedules/{id}/enable` | Enable schedule |
 | POST | `/api/agents/{name}/schedules/{id}/disable` | Disable schedule |
 | POST | `/api/agents/{name}/schedules/{id}/trigger` | Manual trigger |
 | GET | `/api/agents/{name}/schedules/{id}/executions` | Execution history |
+| GET | `/api/agents/{name}/schedules/{id}/analytics` | Per-schedule analytics — counts, success rate, duration p50/p95/p99, cost total, tool-call top-5 by total duration, daily timeline. `?window_hours=` ∈ {24, 168, 720}, default 168 (#868) |
 | POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token (WEBHOOK-001) |
 | GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL (WEBHOOK-001) |
 | DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token (WEBHOOK-001) |
 
+**Analytics endpoint (#868):** Percentiles computed Python-side via `statistics.quantiles` over the newest 5,000 success rows (`sampled: true, sample_size: 5000` reported back when cap is hit); counts and the daily timeline use the full unsampled rowset. UTC day buckets via `substr(started_at, 1, 10)` then Python gap-fill so chart x-axis is continuous. Tenant boundary lives in the DB layer (`db.schedules.get_schedule_analytics(schedule_id, hours, agent_name=name)`) — `AuthorizedAgent` only validates the path-param agent name, not that `schedule_id` belongs to it. Soft-deleted schedules return 404; the audit/billing surface (cross-trigger per-agent rollup with soft-deleted schedules included) is the deferred #18 endpoint.
+
 ### Webhook Triggers (WEBHOOK-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) | Trigger schedule execution — no JWT required; rate-limited 10 calls/60s per token; returns 202 Accepted |
+| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) | Trigger schedule execution — no JWT required; rate-limited 10 calls/60s per token via the shared sliding-window limiter `services/rate_limiter.py` (#1023); returns 202 Accepted |
 
 **Token lifecycle:** `POST .../webhook` generates a `secrets.token_urlsafe(32)` token stored in `agent_schedules.webhook_token` (partial unique index for O(1) lookup). Calling `POST .../webhook` again rotates the token, instantly invalidating the old URL. `DELETE .../webhook` nulls the token; subsequent trigger calls return 404.
 
@@ -634,6 +682,21 @@ picks up on its next poll. (#389 S1a)
 | GET | `/oauth/{provider}/authorize` | Start OAuth |
 | GET | `/oauth/{provider}/callback` | OAuth callback |
 | GET | `/health` | Health check (unauthenticated, top-level — no `/api/` prefix) |
+| GET | `/api/version` | Platform version + build-time git provenance: `git_commit`, `git_commit_short`, `git_commit_subject`, `git_commit_timestamp`, `git_branch`, `build_date`. Sourced from Dockerfile `ARG`/`ENV` wired through `docker-compose.yml` `backend.build.args` + `scripts/deploy/start.sh`. All git fields default to `"unknown"` when build args are absent (#926). |
+
+### Soft-Delete Admin Recovery (#834 Phase 1c)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/admin/soft-deleted/agents` | Admin | List soft-deleted agents (newest first); each row has computed `purge_eta` (null if `agent_soft_delete_retention_days=0`). `limit` capped at 500. |
+| POST | `/api/admin/soft-deleted/agents/{name}/recover` | Admin | Clear `agent_ownership.deleted_at`. 404 if not soft-deleted. Metadata-only — container NOT recreated (`needs_container_recreate=true`); operator runs `POST /api/agents/{name}/start`. Audit `agent_lifecycle:recover`. |
+| GET | `/api/admin/soft-deleted/schedules` | Admin | List soft-deleted schedules (optional `?agent_name=`); `purge_eta` from `schedule_soft_delete_retention_days`. `limit` capped at 500. |
+| POST | `/api/admin/soft-deleted/schedules/{id}/recover` | Admin | Clear `agent_schedules.deleted_at`. 404 if not soft-deleted. Rejoins the scheduler firing list next poll if enabled. Audit `agent_lifecycle:schedule_recover`. |
+
+Recovery is metadata-only (`deleted_at → NULL`); preserved child rows
+make the entity immediately usable via the regular
+`deleted_at`-filtered read paths. Response models `SoftDeletedAgent` /
+`SoftDeletedSchedule` are in `models.py` (Invariant #14).
 
 ### Fleet Sync Audit (#390 / S6)
 
@@ -681,7 +744,11 @@ agent — detects the §P5 silent-clobber setup at fleet level.
 |--------|------|------|-------------|
 | GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start_time, end_time, limit, offset) |
 | GET | `/api/audit-log/stats` | Admin | Aggregate counts by event_type and actor_type |
+| GET | `/api/audit-log/heatmap` | Admin | Day-of-week × hour-of-day activity heatmap (sparse 7×24 grid). Honors `start_time`/`end_time` and optional `event_type`/`actor_type` filters (#941 v3) |
+| GET | `/api/audit-log/calendar` | Admin | GitHub-style per-day calendar heatmap (sparse `[{date, count}]`). Same filters as `/heatmap`; complement view — *when* in calendar time vs. the *weekly pattern* from `/heatmap` (#941 v3.1) |
 | GET | `/api/audit-log/{event_id}` | Admin | Single entry by UUID |
+| GET | `/api/audit-log/distinct/event-types` | Admin | Sorted unique `event_type` values — populates dashboard filter dropdown (#941) |
+| GET | `/api/audit-log/distinct/actor-types` | Admin | Sorted unique `actor_type` values — dashboard filter dropdown (#941) |
 | GET | `/api/audit-log/export` | Admin | Export time-range entries as `json` or `csv` (Phase 4) |
 | POST | `/api/audit-log/verify` | Admin | Verify SHA-256 hash chain over `start_id..end_id` (Phase 4) |
 | POST | `/api/audit-log/hash-chain/enable` | Admin | Toggle hash chain computation for new entries (Phase 4) |
@@ -709,7 +776,7 @@ export, enable/disable toggle. Issue #20 can be closed.
 **Storage**: `canary_violations` table in main SQLite DB. JSON-encoded
 `observed_state` column carries invariant-specific payload.
 
-**Phase 1 invariants** (S-01, E-02, L-03):
+**Phase 1 invariants** (#653 — S-01, E-02, L-03):
 - **S-01 — Slot–row bijection**: per agent, set of execution_ids in
   `agent:slots:{name}` (Redis ZSET, drain sentinels filtered) equals set
   of execution_ids in `schedule_executions WHERE status='running'`.
@@ -727,6 +794,61 @@ export, enable/disable toggle. Issue #20 can be closed.
   in `agent_ownership`; no Redis `agent:slots:{name}` for missing agent.
   Severity: critical for orphaned `schedule_executions` or Redis slots,
   major otherwise. Catches Issue #129 bug class.
+
+**Phase 2 invariants** (#882 — S-02, E-01, E-05, B-01):
+- **S-02 — No overbooking**: per agent, `ZCARD(agent:slots:{name})`
+  (drain sentinels filtered) ≤ `agent_ownership.max_parallel_tasks`.
+  Severity: critical. Catches `acquire_slot` concurrency-bypass
+  regressions — distinct from S-01 because the violation can be self-
+  consistent (Redis and SQL agree on N+1 running tasks against a cap of N).
+- **E-01 — Terminal-state closure**: no `status='running'` row whose
+  `started_at` is older than the agent's `execution_timeout_seconds + 300s`
+  (matches `SLOT_TTL_BUFFER` so the check fires *after* cleanup has had
+  its window to act). Severity: critical. Tier B.
+- **E-05 — Dispatched rows have session**: no `status='running'` row
+  older than 60s with `claude_session_id IS NULL`. Severity: major.
+  Tier B. Guards Issue #106.
+- **B-01 — Queue-status coherence**: per agent, `db.get_queued_count`
+  (the accessor `BacklogService` calls) agrees with the snapshot's
+  independently-collected `len(queued_exec_ids)`. Severity: critical.
+  Tier A. Trivially-green today after the #428 consolidation; exists as
+  a regression guard against a future cache layer or status-filter drift
+  on the production accessor.
+
+**Phase 3 invariants** (#882, same PR — S-03, B-02, R-01):
+- **S-03 — Slot TTL ≥ execution timeout**: for every member of
+  `agent:slots:{name}`, the companion `agent:slot:{name}:{eid}` HASH
+  must have been created with at least
+  `execution_timeout_seconds + 300s` of TTL. Three failure kinds
+  surfaced explicitly: `missing` (-2, metadata HASH expired ahead of
+  the ZSET — the #226 class), `no_expiry` (-1, `expire()` never set),
+  `below_floor` (initial TTL under the configured floor). Severity:
+  critical. Tier A. **Decay-invariance (#913):** the raw `TTL` of a
+  long-lived slot decays linearly from `EXPIRE`, so once #913 makes the
+  initial TTL equal the floor exactly, a raw `ttl < floor` check would
+  fire by ~1s within the cycle. The Phase 3.1 implementation
+  reconstructs the *initial* TTL as `ttl + age` where
+  `age = snapshot_time - slot_score` (the ZSET member's score is the
+  unix epoch recorded by `SlotService` at ZADD time) and compares
+  against `floor - 1` (1s tolerance for Redis float→int wire rounding).
+  A real #226-class bug (initial TTL set below the floor) still
+  surfaces; natural decay does not.
+- **B-02 — No queued without slots-full**: if any agent has
+  `len(queued_exec_ids) > 0`, then either `slot_count == max_parallel`
+  OR a drain tick fired in the last 60s. Severity: critical. Tier B.
+  Heartbeat written by `CapacityManager.run_maintenance()` to
+  `canary:drain_tick_at` at the END of each successful sweep, so a
+  mid-sweep crash leaves the cursor stale and lets the check catch the
+  breakage.
+- **R-01 — No zombie Claude processes**: for every running
+  `trinity.platform=agent` container,
+  `ps -eo stat,comm | grep '^Z.*claude' | wc -l == 0`. Severity:
+  critical. Tier A. Guards PR #407. New source type for the canary
+  (docker exec); per-container failures recorded in
+  `sources_unavailable` so a single unhealthy container doesn't kill
+  the cycle. The regex is anchored at `^Z` rather than the catalog's
+  ` Z` (leading-space) — procps-ng on the agent base image emits STAT
+  left-aligned without padding.
 
 **Fleet**: `config/canary-fleet.yaml` — synthetic load generators
 (`canary-fleet-burst`, `canary-fleet-long`) deployed via the existing
@@ -769,14 +891,16 @@ anywhere — the canary's value depends on determinism.
 
 Storage: `/data/agent-files/{file_id}` under the existing `trinity-data` volume (no compose changes). Agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); backend uses Docker SDK `get_archive` to extract the named file on demand — never mounts the agent workspace.
 
-### Agent Website Proxy (SITE-001, NEW: 2026-05-03)
+### Sequential Agent Loops (#740, NEW: 2026-05-20)
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/site/{token}` | Token (URL) | Redirect to `/site/{token}/` (301) |
-| GET/POST/… | `/site/{token}/{path}` | Token (URL) | Reverse-proxy to agent's web server at port 3000. 401 on invalid/disabled token, 410 on expired, 429 on rate limit, 502 on unreachable agent. Audit event `site_link_visit`. |
+| POST | `/api/agents/{name}/loops` | JWT/MCP | Start a loop; returns `{loop_id, status, agent_name, max_runs}` immediately (202). Body: `message` (template, supports `{{run}}` + `{{previous_response}}`), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `model`, `allowed_tools`. |
+| GET | `/api/agents/{name}/loops` | JWT/MCP | List loops for the agent, optional `?status=`, `?limit=` (1–200, default 50). |
+| GET | `/api/loops/{loop_id}` | JWT/MCP | Status + per-run summaries + last full response. 404 if unknown; 403 if caller is neither initiator nor agent-accessor. |
+| POST | `/api/loops/{loop_id}/stop` | JWT/MCP | Graceful stop. Returns `{status: "stopping" \| "already_done"}`. |
 
-Rate limiting: dual-bucket (120 req/min per IP + 300 req/min per token). Request headers `authorization`, `cookie`, `x-internal-secret` stripped before forwarding. Hop-by-hop and server-banner response headers stripped. SSRF guard: agent name validated against `^[a-z0-9][a-z0-9\-]*$`. WebSocket upgrades not supported. Token is a `site`-type `agent_public_links` row.
+MCP tools: `run_agent_loop`, `get_loop_status`, `stop_loop` (`src/mcp-server/src/tools/loops.ts`). Loop runner lives in `services/loop_service.py`; each iteration dispatches through `task_execution_service.execute_task()` with `triggered_by="loop"` and the parent `loop_id` carried on the resulting `schedule_executions` row.
 
 ### Platform Settings (5 endpoints)
 
@@ -785,7 +909,7 @@ Rate limiting: dual-bucket (120 req/min per IP + 300 req/min per token). Request
 | GET | `/api/settings/mcp-url` | Get configured MCP server URL (any auth user) |
 | PUT | `/api/settings/mcp-url` | Set MCP server URL (admin-only) |
 | DELETE | `/api/settings/mcp-url` | Reset to auto-detect (admin-only) |
-| GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Exposes `session_tab_enabled` (SESSION_TAB Phase 3) and `voice_available` (`VOICE_ENABLED && bool(GEMINI_API_KEY)`, #699). |
+| GET | `/api/settings/feature-flags` | Public-safe feature flags for UI gating (any auth user). Exposes `session_tab_enabled` (SESSION_TAB Phase 3), `voice_available` (`VOICE_ENABLED && bool(GEMINI_API_KEY)`, #699), `workspace_available` (`voice_available AND WORKSPACE_ENABLED`, #860 — opt-in, default False), `voip_available` (`VOIP_ENABLED && bool(GEMINI_API_KEY)`, #1056 — opt-in, default False; also requires a per-agent `voip_bindings` row to function), and `enterprise_features` — the list of registered enterprise modules (`EntitlementService.list_entitled_features()`; empty in OSS-only builds or under `TRINITY_OSS_ONLY=1`), which gates every enterprise UI surface in the OSS bundle (#847). |
 | GET | `/api/settings/agent-defaults/resources` | Get fleet-wide default CPU/memory for new containers (admin-only, RES-001) |
 | PUT | `/api/settings/agent-defaults/resources` | Set fleet-wide default CPU/memory; valid CPU: 1/2/4/8/16; valid memory: 1g–32g (admin-only, RES-001) |
 
@@ -804,6 +928,28 @@ Rate limiting: dual-bucket (120 req/min per IP + 300 req/min per token). Request
 
 All endpoints return 404 when `is_session_tab_enabled()` is false. The flag at `system_settings.session_tab_enabled` (or `SESSION_TAB_ENABLED` env) is **default ON since GA 2026-05-04**; settable to false to disable platform-wide. All endpoints enforce per-user ownership and return 404 (not 403) on mismatch to avoid leaking session-id existence.
 
+### Enterprise Modules (#847 seam)
+
+Open-core: enterprise backend code lives in the private `trinity-enterprise`
+submodule mounted at `src/backend/enterprise/`. `main.py` conditionally
+`register_enterprise(app)` (no-op `ImportError` in OSS-only builds). Each
+module calls `entitlement_service.register_module("<id>")`; the registry
+drives `GET /api/settings/feature-flags` → `enterprise_features`, which the
+OSS Vue bundle reads to show/hide every enterprise surface. `requires_entitlement("<id>")`
+(in `dependencies.py`) gates each enterprise endpoint (403 when unentitled;
+404 when the submodule is absent and the router was never mounted).
+`TRINITY_OSS_ONLY=1` hard-empties the registry.
+
+| Feature id | Module | Surface |
+|------------|--------|---------|
+| `audit` | (#941) | Entitlement only — flips the OSS audit-log dashboard route visible; `/api/audit-log/*` stay OSS. |
+| `user_management` | `enterprise/backend/user_management/` (#995) | Org lifecycle: **invite** (whitelists the email + sends an `EmailService` invite), **deactivate/reactivate** (over the OSS `users.suspended_at` primitive), per-user **activity** view (reads OSS `audit_log`). Endpoints under `/api/enterprise/user-management/*`; UI integrated into Settings → User Management (gated). |
+| `siem` | `enterprise/backend/siem/` (#997) | **SIEM log export** — ships OSS `audit_log` to a customer SIEM over an HTTP/JSON webhook. Private `enterprise_siem_config` (destination + AES-encrypted token + export cursor); background daemon pusher (Redis-lock-serialised across workers); at-least-once (cursor advances only on a successful POST). Endpoints under `/api/enterprise/siem/*`. No OSS/UI surface. |
+
+Enterprise tables migrate via the two-track runner (Invariant #3): one file
+per migration in each module's `migrations/` package, tracked in
+`enterprise_schema_migrations`.
+
 ---
 
 ## Architectural Invariants
@@ -814,7 +960,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 2. **DB Layer: Class-per-domain with Mixin Composition** — Each `db/` file defines an `XOperations` class. Agent-specific settings use mixins (`db/agent_settings/`) composed into `AgentOperations`. New agent settings → new mixin, not a bigger class.
 
-3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py`. Never create tables ad-hoc in service code.
+3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All OSS table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py` (tracked in the `schema_migrations` table). Never create tables ad-hoc in service code. **Two-track migrations (open-core):** enterprise modules own only `enterprise_*` tables and migrate them through a **separate** runner (`enterprise/backend/_migrations.py`) tracked in `enterprise_schema_migrations` — never the OSS `schema_migrations`, so the two version-lines can't collide. Enterprise authors one file per migration in the module's `migrations/` package (`NNNN_slug.py` with `NAME` + `upgrade(cursor, conn)`, auto-discovered in filename order). Enterprise migrations may FK-into OSS tables but must **never ALTER** an OSS table — anything OSS must enforce goes through an OSS migration as an edition-agnostic primitive (e.g. `users.suspended_at`, #995). The enterprise runner is invoked from `register_enterprise` *after* OSS `init_database`, so OSS tables already exist.
 
 4. **Router Registration Order Matters** — In `main.py`, static routes like `/api/agents/context-stats` must come before `/{name}` catch-all. New collection-level agent endpoints must be registered before parameterized routes.
 
@@ -842,6 +988,10 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 16. **Time-Window SQL uses `iso_cutoff()`, not `datetime('now', ...)`** — Columns written via `utc_now_iso()` are ISO-Z strings (`T` separator, `Z` suffix); SQLite's `datetime('now', ...)` emits a different format (space separator, no suffix), making lexicographic comparison silently incorrect (#476). For rolling-window filters on ISO-Z TEXT columns, compute the cutoff in Python via `iso_cutoff(hours)` from `utils/helpers.py` and pass it as a bound parameter.
 
+17. **Non-root containers** — every Trinity-built image MUST end with a `USER` directive switching to a non-root user. Backend additionally requires `group_add: ${DOCKER_GID:-999}` in compose for Docker socket access on Linux. New service Dockerfiles failing this invariant are rejected at review. Established by #874. CI guards in `.github/workflows/container-security.yml` (path-filtered, runs unconditionally on `docker/**`, `docker-compose*.yml`, `scripts/deploy/start.sh`, `src/mcp-server/Dockerfile` changes — independent of the `ui`-label-gated e2e workflow so backend infra PRs can't silently skip them): `verify-non-root` execs the running backend/scheduler/mcp-server containers (those hold the credentials and the `docker.sock` mount), asserts UID 1000, and proves `group_add` is wired through on Linux by running `docker.from_env().ping()` from inside the backend (NOT a `/api/agents` HTTP probe — `list_all_agents_fast` swallows Docker exceptions and returns `[]`, which made the original gate a false positive); `verify-prod-frontend-uid` builds the prod frontend image out-of-band (start.sh boots the Vite-dev image) and asserts its UID is 101 (`nginxinc/nginx-unprivileged`). Dev-only images (`docker/frontend/Dockerfile`) are intentionally exempt — they have no production attack surface. Existing deployments upgrading through this change must re-own their data path and `agent-configs` volume per [docs/migrations/NON_ROOT_CONTAINERS_2026-05.md](../migrations/NON_ROOT_CONTAINERS_2026-05.md).
+
+18. **Trigger boundaries accept `Idempotency-Key`** (RELIABILITY-006, #525) — every producer boundary that creates an execution accepts an optional `Idempotency-Key` header and routes it through `services/idempotency_service.py` (`begin`/`complete`/`fail`) backed by the `idempotency_keys` table. The same `(scope, key)` within 24h yields one execution; duplicates short-circuit with the original result + `X-Idempotent-Replay: true` (in-flight duplicate → 409). Enforcement lives at the **router** layer, not solely in `TaskExecutionService`, because sync `/chat` runs an inline path and `/api/webhooks/{token}` creates no execution. Wired boundaries: `/chat`, `/task`, `/api/internal/execute-task`, `/api/webhooks/{token}` (auto-derives `(token, body_hash)`), `/api/agents/{name}/fan-out`, and the scheduler (`Idempotency-Key: sched:{execution_id}`) + MCP `chat_with_agent`/`fan_out` (deterministic key over call args). **Any new trigger type must accept an idempotency key before merge** — the dedup layer is fail-open (a key never blocks a real execution), so the cost of adding it is one `begin/complete/fail` triple.
+
 ---
 
 ## Database Schema
@@ -861,9 +1011,19 @@ CREATE TABLE users (
     email TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    last_login TEXT
+    last_login TEXT,
+    suspended_at TEXT                   -- #995: NULL = active; set = deactivated
 );
 ```
+
+**User deactivation primitive (#995):** `suspended_at` is an
+edition-agnostic primitive. OSS owns the column **and** its enforcement —
+`dependencies.get_current_user` rejects any user with `suspended_at` set
+on both the JWT and MCP-key paths, so setting it blocks new logins **and**
+invalidates live tokens on the next request. `/api/users` exposes it
+(read-only). Only the **enterprise** `user_management` module exposes a
+way to set/clear it (core-primitive + enterprise-knob, same shape as
+#834). OSS-only builds ship the column + enforcement but no setter.
 
 **agent_ownership:**
 ```sql
@@ -893,10 +1053,30 @@ CREATE TABLE agent_ownership (
     voice_system_prompt TEXT,
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
+    circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): per-agent dispatch-breaker opt-in (default OFF)
+    deleted_at TEXT,                               -- #834 Phase 1a: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
 );
+
+-- #834 Phase 1a: partial index narrows the retention-sweep scan to
+-- actually-deleted rows so it stays cheap as the live agent count grows.
+CREATE INDEX idx_agent_ownership_deleted_at
+    ON agent_ownership(deleted_at) WHERE deleted_at IS NOT NULL;
 ```
+
+**Soft-delete (#834 Phase 1a)**: `DELETE /api/agents/{name}` marks
+`agent_ownership.deleted_at = NOW` instead of hard-deleting; child rows
+are preserved (recoverable until purge). The Cleanup Service hard-purges
+rows past `agent_soft_delete_retention_days` (default 180, `0` =
+disabled), running the #816 `cascade_delete` primitive at that point to
+wipe every per-agent child table. Name reservation
+(`is_agent_name_reserved()`) sees soft-deleted rows so a soft-deleted
+name cannot be reused before purge. The scheduler's
+`list_all_enabled_schedules()` joins `agent_ownership` and filters
+`deleted_at IS NULL` so a soft-deleted agent's schedules stop firing
+immediately. **Phase 1b** (schedule soft-delete) and **Phase 1c** (admin
+recovery endpoints) build on this.
 
 **agent_sharing:** (cross-channel allow-list — same email admits the user on web, Telegram, and Slack)
 ```sql
@@ -938,6 +1118,7 @@ ALTER TABLE telegram_chat_links ADD COLUMN verified_at TEXT;
 - `ChannelAdapter.resolve_verified_email()` translates native channel identity → verified email.
 - `message_router` runs a single gate: owner/admin/`agent_sharing` → `open_access` → upsert pending `access_requests` row.
 - Approving a request inserts into `agent_sharing` and (if email auth is enabled) whitelists the email.
+- Approval also fires a fire-and-forget proactive notification back to the requester on the originating channel via `proactive_message_service.send_access_grant_notification` — only for `telegram | slack | whatsapp` (web users see the change via the existing `agent_shared` WebSocket event). Notification bypasses the `allow_proactive` opt-in (the user explicitly initiated the request) and the per-recipient rate limit (one-shot, not a campaign). Outcome (`delivered` / `recipient_not_found` / channel error) is audit-logged via `AuditEventType.PROACTIVE_MESSAGE`. Failure to deliver does not roll back the approval. (#951)
 - Group chats bypass the gate; agents with both policy flags off retain legacy permissive behavior (backward compatibility).
 
 **mcp_api_keys:**
@@ -976,11 +1157,31 @@ CREATE TABLE agent_schedules (
     last_run_at TEXT,
     next_run_at TEXT,
     model TEXT,                                  -- MODEL-001: Model override (NULL = agent default)
+    timeout_seconds INTEGER,                     -- #913: NULL = inherit agent_ownership.execution_timeout_seconds
     webhook_token TEXT,                          -- WEBHOOK-001: opaque 43-char urlsafe token, nullable
     webhook_enabled INTEGER DEFAULT 0,           -- WEBHOOK-001: 0 = disabled, 1 = active
+    deleted_at TEXT,                             -- #834 Phase 1b: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );
+
+-- #834 Phase 1b: partial index narrows the schedule retention sweep to
+-- soft-deleted rows.
+CREATE INDEX idx_agent_schedules_deleted_at
+    ON agent_schedules(deleted_at) WHERE deleted_at IS NOT NULL;
 ```
+
+**Schedule soft-delete (#834 Phase 1b)**: `DELETE
+/api/agents/{name}/schedules/{id}` marks `agent_schedules.deleted_at =
+NOW` instead of hard-deleting; the row and its `schedule_executions`
+are preserved for the retention window. All schedule read paths —
+including the cron-firing `list_all_enabled_schedules()` in both the
+backend and the standalone scheduler process — filter `deleted_at IS
+NULL`, so a soft-deleted schedule stops firing immediately. The Cleanup
+Service hard-purges rows past `schedule_soft_delete_retention_days`
+(default 30, `0` = disabled); `purge_schedule()` cascades the
+`schedule_executions` delete alongside the row (consistent with the
+prior hard-delete behavior and with agent-purge `cascade_delete`).
+`delete_schedule()` is idempotent on an already-soft-deleted row.
 
 **schedule_executions:**
 ```sql
@@ -999,13 +1200,85 @@ CREATE TABLE schedule_executions (
     model_used TEXT,                             -- MODEL-001: Which model was used
     queued_at TEXT,                              -- BACKLOG-001: When task entered backlog
     backlog_metadata TEXT,                       -- BACKLOG-001: JSON identity/request for drain replay
+    retry_count INTEGER DEFAULT 0,               -- #678: in-line auto-retry count for reader-race recovery
+    fan_out_id TEXT,                             -- FANOUT-001: Parent fan-out operation ID
+    loop_id TEXT,                                -- #740: Parent agent_loops.id for sequential-loop iterations
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
 -- BACKLOG-001: Partial index for cheap atomic FIFO claim
 CREATE INDEX idx_executions_queued ON schedule_executions(agent_name, queued_at)
     WHERE status = 'queued';
+-- #740: Partial index for joining executions back to their parent loop
+CREATE INDEX idx_executions_loop ON schedule_executions(loop_id)
+    WHERE loop_id IS NOT NULL;
 ```
+
+**agent_loops + agent_loop_runs:** (#740 — Sequential agent loops)
+```sql
+CREATE TABLE agent_loops (
+    id TEXT PRIMARY KEY,                         -- 'loop_<urlsafe>'
+    agent_name TEXT NOT NULL,
+    message_template TEXT NOT NULL,              -- Supports {{run}} and {{previous_response}}
+    max_runs INTEGER NOT NULL,                   -- 1–100 hard cap
+    stop_signal TEXT,                            -- NULL = fixed mode; set = until mode
+    delay_seconds INTEGER NOT NULL DEFAULT 0,
+    timeout_per_run INTEGER,                     -- NULL = agent's execution_timeout_seconds
+    model TEXT,
+    allowed_tools TEXT,                          -- JSON array
+    status TEXT NOT NULL,                        -- queued | running | completed | stopped | failed | interrupted
+    runs_completed INTEGER NOT NULL DEFAULT 0,
+    stop_reason TEXT,                            -- max_runs_reached | stop_signal_matched | user_stopped | error | interrupted
+    last_response TEXT,
+    error TEXT,
+    started_by_user_id INTEGER,
+    started_by_user_email TEXT,
+    source_agent_name TEXT,
+    source_mcp_key_id TEXT,
+    source_mcp_key_name TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX idx_loops_agent ON agent_loops(agent_name);
+CREATE INDEX idx_loops_status ON agent_loops(status);
+CREATE INDEX idx_loops_user ON agent_loops(started_by_user_id);
+
+CREATE TABLE agent_loop_runs (
+    id TEXT PRIMARY KEY,                         -- 'lr_<urlsafe>'
+    loop_id TEXT NOT NULL,
+    run_number INTEGER NOT NULL,                 -- 1-indexed
+    execution_id TEXT,                           -- joins back to schedule_executions
+    status TEXT NOT NULL,                        -- running | completed | failed
+    response TEXT,                               -- Full response for this iteration
+    error TEXT,
+    cost REAL,
+    duration_ms INTEGER,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
+);
+CREATE INDEX idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number);
+```
+
+**Sequential Agent Loops Features:**
+- Loop runner lives in-process as an `asyncio.Task` spawned by
+  `services/loop_service.py`. Each iteration calls
+  `task_execution_service.execute_task()` with
+  `triggered_by="loop"` and the parent `loop_id`; the iteration goes
+  through the standard `capacity_manager` admit/slot path so loops
+  share the agent's `max_parallel_tasks` budget with other traffic.
+- Stop semantics: cooperative. `POST /api/loops/{id}/stop` flips an
+  in-process `should_stop` flag; the current iteration finishes
+  (sequential, fire-and-disconnect) and the runner exits with
+  `stop_reason="user_stopped"`.
+- Restart recovery: `cleanup_service` runs `mark_orphan_loops_interrupted()`
+  on startup — any leftover `queued`/`running` rows flip to
+  `interrupted` with `stop_reason="interrupted"`. Loops do not
+  auto-resume.
+- Timeline integration: iterations appear as normal `schedule_executions`
+  rows tagged with `loop_id` — no dedicated dashboard surface in
+  Phase 1.
 
 **agent_activities:** (Phase 9.7 - Unified Activity Stream)
 ```sql
@@ -1497,6 +1770,35 @@ CREATE INDEX idx_canary_violations_snapshot
 - Populated by `services/canary_service.py` on a 5-min loop or on-demand
   via `POST /api/canary/run-cycle`.
 
+**idempotency_keys:** (RELIABILITY-006 / Issue #525 — NEW: 2026-06-02)
+```sql
+CREATE TABLE idempotency_keys (
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
+    execution_id TEXT,               -- nullable (webhook short-circuit has none)
+    status TEXT NOT NULL,            -- 'in_flight' | 'completed'
+    response_snapshot TEXT,          -- JSON of the original response, for replay
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, idempotency_key)
+);
+CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
+```
+
+**idempotency_keys Features:**
+- `PRIMARY KEY (scope, idempotency_key)` IS the atomic claim — `claim()` INSERTs
+  an `in_flight` row; the loser of a concurrent race catches `IntegrityError`
+  and reads the surviving row (cross-process safe across uvicorn workers + the
+  standalone scheduler, which share one SQLite file).
+- Lifecycle: `claim` → (`attach_execution`) → `complete` (status→`completed`,
+  stores `response_snapshot`) or `release` (delete in_flight so a failed first
+  attempt can retry; never deletes a `completed` row).
+- A row older than the 24h TTL is treated as expired and re-claimed as new.
+- Purged on the 24h window by the cleanup service
+  (`db.idempotency_purge_expired`, report field `idempotency_keys_purged`).
+- DB layer `db/idempotency.py`; orchestration `services/idempotency_service.py`
+  (key derivation + `begin`/`complete`/`fail`). See Invariant #18.
+
 ### Redis
 
 **Credential Storage (DEPRECATED - CRED-002):**
@@ -1522,6 +1824,16 @@ oauth_state:{state} → {
     "user_id": "..."
 }
 ```
+
+**Agent Heartbeat (RELIABILITY-004, #307):**
+```
+agent:heartbeat:{name}        → STRING, 15s TTL (SETEX). JSON {ts, memory_mb, active_executions, uptime_s}
+agent:heartbeat:seen:{name}   → STRING "1", no TTL. Backward-compat hinge: absent ⇒ unsupported (never marked dead), present+TTL-key ⇒ alive, present+TTL-gone ⇒ stale
+agent:heartbeat:misses:{name} → STRING(int), ~60s TTL. Consecutive-miss counter (watch loop INCR/EXPIRE/DEL); never persisted to SQLite
+```
+All three keys are deleted by `heartbeat_service.clear_heartbeat(name)`, called best-effort from the agent **delete** handler and from **rename** (old name) — the `seen` marker has no TTL, so without this it would leak one permanent key per agent ever created and orphan the old name on rename. The `hb`/`misses` keys self-expire but are cleared too.
+
+All ops (`SETEX`/`SET`/`GET`/`GETs via pipeline`/`INCR`/`EXPIRE`/`DEL`) are within the backend Redis ACL (`-@dangerous`) and follow the `agent:*` naming convention.
 
 ---
 
@@ -1762,7 +2074,11 @@ credentials. See `docs/migrations/REDIS_AUTH.md` for the upgrade path.
 
 ## Container Security
 
-- Non-root execution (`developer:1000`)
+- **Non-root execution** — every Trinity-built container runs as a non-root user:
+  backend and scheduler as `trinity` (UID 1000), MCP server as `node` (UID 1000),
+  frontend as `nginx` (UID 101), agents as `developer` (UID 1000). Established by
+  issue #874. Backend additionally requires `group_add: ${DOCKER_GID:-999}` in
+  compose for Docker socket access on Linux hosts.
 - `CAP_DROP: ALL` + `CAP_ADD: NET_BIND_SERVICE`
 - `security_opt: no-new-privileges:true`
 - tmpfs `/tmp` with `noexec,nosuid`
@@ -1785,11 +2101,28 @@ This closes the JWT-leak surface flagged by the April 2026 remediation pentest (
 
 The `/ws/events` endpoint still uses `?token=trinity_mcp_xxx` (MCP API key) for compatibility with documented external scripts (`websocat`, `wscat`); MCP keys are scoped, named, and revocable so the leak surface is bounded relative to a JWT.
 
+`mint_ticket` takes an optional `ttl_seconds` (default 30s, ceiling 600s) used by the VoIP Media Streams socket (VOIP-001, #1056): Twilio cannot send a JWT and a PSTN call's dial+ring exceeds the 30s browser TTL, so the call trigger mints a **call-bound** ticket (`scope="voip:{call_id}"`, 180s) that the WS handler verifies against the URL's `call_id` — binding a single-use ticket to exactly one call.
+
 **Reconnect replay (RELIABILITY-003, #306):** Both `/ws` and `/ws/events` accept an optional `?last-event-id=<stream_id>` query param. The value is regex-gated (`^\d+-\d+$`) by `validate_last_event_id()` in `services/event_bus.py` before reaching `XRANGE`; malformed input is ignored (no catchup). Catchup is capped at `REPLAY_GAP_LIMIT=5000` entries — a larger gap returns `{"type": "resync_required", "reason": "gap_too_large"}` instead of an unbounded `XRANGE`. Authorization (`accessible_agents` for `/ws/events`) is re-applied on replay, not just on live fan-out.
 
 ### Frontend XSS Protection (H-005)
 
 All markdown rendering in Vue components uses `DOMPurify` sanitization via `utils/markdown.js`. No direct `v-html` with unsanitized content.
+
+### Rate limiting (#1023)
+
+Request-rate limits use a single shared **sliding-window** limiter,
+`services/rate_limiter.py` — a Redis sorted-set rolling window (no fixed-window
+boundary burst), fail-open with a bounded per-worker in-process fallback,
+cached Redis client. `enforce(key, limit, window)` raises 429 + `Retry-After`.
+The webhook trigger (`/api/webhooks/{token}`) is the first adopter; new
+request-rate limits should reuse this primitive, not hand-roll Redis counters.
+
+**Not** unified under it: the auth login/OTP limiters (`routers/auth.py`) are
+**failure-counters** (increment on failure, reset on success) — a different
+pattern, intentionally separate. A global ASGI middleware applying limits to
+every route (with a route→policy table) is a tracked follow-up; today the
+limiter is applied per-endpoint via `enforce()`.
 
 ---
 

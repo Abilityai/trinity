@@ -117,6 +117,20 @@ The `tools` array in templates is informational only.
 
 ---
 
+## Error Handling
+
+- **Pipe-drop (`BrokenPipeError` / `ConnectionResetError`) in `execute_headless`**: raised as HTTP 502, not 500. This keeps pipe-drops out of the `agent_client.py` circuit-breaker failure counter — 4xx/5xx/502/503/504 are treated as application errors and skip the failure increment (#474/#873).
+
+---
+
+## Revision History
+
+| Date | Change |
+|------|--------|
+| 2026-05-18 | Pipe-drop reclassification (#474/#873): `BrokenPipeError`/`ConnectionResetError` in `execute_headless` now raise HTTP 502 instead of 500, preventing false circuit-breaker trips when the Gemini child process exits early. |
+
+---
+
 ## Related Documentation
 
 - [Gemini Support Guide](../../GEMINI_SUPPORT.md) - User-facing setup guide

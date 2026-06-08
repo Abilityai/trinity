@@ -486,7 +486,7 @@ task_response.raw_response           # Original response dict
 
 **Note**: The `task()` method was added on 2025-01-02 to fix execution log viewer compatibility. It calls `/api/task` which returns raw Claude Code `stream-json` format, unlike `chat()` which calls `/api/chat` and returns a simplified format.
 
-#### Response Data Classes (`src/backend/services/agent_client.py:126-152`)
+#### Response Data Classes (`src/backend/services/agent_client.py:528-544`)
 
 ```python
 @dataclass
@@ -508,7 +508,7 @@ class AgentChatResponse:
     raw_response: Dict[str, Any]
 ```
 
-#### Response Parsing Logic (`src/backend/services/agent_client.py:435-484`)
+#### Response Parsing Logic (`src/backend/services/agent_client.py:907-958`)
 
 The `_parse_chat_response()` method centralizes response parsing:
 
@@ -682,7 +682,7 @@ The queue management endpoints use a **thin router + service layer** architectur
 | File | Lines | Purpose |
 |------|-------|---------|
 | `src/backend/services/execution_queue.py` | 244 | Redis-backed queue implementation |
-| `src/backend/services/agent_client.py` | 662 | Centralized agent HTTP client (circuit breaker, retry, connection pool — RELIABILITY-001) |
+| `src/backend/services/agent_client.py` | 1130 | Centralized agent HTTP client (Redis-backed circuit breaker, retry, connection pool, per-base_url drop-grace — RELIABILITY-001 / #631 / #474) |
 | `src/scheduler/service.py` | - | Dedicated scheduler (APScheduler, activity tracking) |
 | `src/scheduler/agent_client.py` | - | Scheduler's agent HTTP client |
 | `src/backend/routers/chat.py` | 1004 | Chat endpoint (uses raw httpx with retry) |
@@ -1174,6 +1174,7 @@ See [execution-termination.md](execution-termination.md) for full documentation.
 
 | Date | Changes |
 |------|---------|
+| 2026-05-13 | **Circuit Breaker Sibling-Collapse Fix (#474)**: `AgentClient._request()` in `services/agent_client.py` rewritten to neutralise the burst-collapse where one mid-flight transport drop in a concurrent fan-out tripped the breaker. Added per-base_url `_recent_drops: Dict[str, float]` map with `_DROP_GRACE_SEC = 2.0` window (lines 442-473), helpers `_stamp_drop()` / `_is_within_drop_grace()` / `_build_http_client()` / `_acquire_client() -> (client, is_pooled)` (lines 462-514), and new exception `AgentConnectionDroppedError(AgentNotReachableError)` (lines 570-578). The rewritten exception handler in `_request()` (lines 671-727) now: (a) on `ConnectError` / `TimeoutException` within the drop-grace window, raises `AgentConnectionDroppedError` instead of `AgentNotReachableError` and skips `record_failure()`; (b) on `ReadError` / `WriteError` / `RemoteProtocolError` / `BrokenPipeError` / `ConnectionResetError` mid-flight, stamps the drop, evicts the pooled client only if its identity matches the one this worker acquired (`evicted is client` guard, prevents siblings double-closing), and raises `AgentConnectionDroppedError` — again no `record_failure()`. Non-pooled (in-grace) clients are single-use and `aclose()`'d in `finally` to prevent connection-handle leaks during sustained bursts. The grace map and pool are process-local (per uvicorn worker); the Redis-backed `CircuitState` from #631 remains the fleet-wide source of truth — transport drops never call `record_failure()` in any worker. `AgentConnectionDroppedError` inherits from `AgentNotReachableError` so tenacity `retry_if_exception_type` decorators on `get_session()` / `health_check()` continue to handle it. Solves the 10-concurrent-call scenario where one drop evicts the shared pool and sibling fresh-client retries die with `ConnectError`, previously tripping 9-of-10 sibling failures into the breaker. Tests: `tests/integration/test_circuit_breaker.py` (cross-worker burst scenarios), `tests/unit/test_circuit_breaker.py` (drop-grace state machine, pool-eviction identity check, `AgentConnectionDroppedError` raising). |
 | 2026-02-21 | **Bug Fix (EXEC-023)**: Fixed `DatabaseManager.update_execution_status()` wrapper in `src/backend/database.py:1295-1299` - was missing `claude_session_id` parameter. The wrapper now correctly forwards the parameter to `db/schedules.py:update_execution_status()` (lines 559-610). This affected all execution status updates (chat, task, scheduled) that tried to store Claude Code session IDs for the "Continue Execution as Chat" feature. |
 | 2026-03-15 | **Unified chat execution tracking (#96)**: All `/api/chat` calls now create `schedule_executions` records, not just MCP/agent-to-agent. User chats use `triggered_by=chat`. Execution records are updated on success/failure for all chat types. |
 | 2026-02-16 | **Security Fix (Credential Leakage Prevention)**: Backend now sanitizes execution logs, tool calls, and responses before database persistence. Uses `sanitize_execution_log()` and `sanitize_response()` from `src/backend/utils/credential_sanitizer.py`. Both `/chat` (lines 283-286) and `/task` (lines 468-470, 699-712) endpoints sanitize data before calling `db.update_execution_status()`. This is a defense-in-depth layer that catches any credentials that may have bypassed agent-side sanitization. |

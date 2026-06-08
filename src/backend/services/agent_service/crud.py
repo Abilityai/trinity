@@ -4,6 +4,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 Contains the core logic for creating and deleting agents.
 """
 import os
+import re
 import json
 import docker
 import logging
@@ -36,6 +37,62 @@ from .helpers import validate_base_image
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 
 logger = logging.getLogger(__name__)
+
+# Allowed chars in a `local:`-prefixed template name. Strict enough to
+# block path traversal (`..`, `/`, `\`, leading dots) so the templates
+# directory join in `create_agent_internal` can't escape into arbitrary
+# filesystem reads (CodeQL py/path-injection on #950 PR).
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+# Roots that a resolved local-template path must stay within (#950).
+_LOCAL_TEMPLATE_ROOTS = (
+    Path("/agent-configs/templates").resolve(),
+    Path("/data/deployed-templates").resolve(),
+)
+
+
+def _safe_local_template_path(template_name: str, root: Path) -> Path:
+    """Join `template_name` onto `root` and prove it didn't traverse out.
+
+    Two-step defense:
+
+    1. Regex allowlist on the name (rejects `..`, `/`, `\\`, leading
+       dots etc.) — fail fast with HTTP 400 for obviously hostile input.
+    2. Resolve the joined path and assert `is_relative_to(root)` — this
+       is the pattern CodeQL recognises as a `py/path-injection`
+       barrier, so the static analyser stops marking subsequent
+       `.exists()` / `open()` calls on the returned path as tainted.
+
+    Either failure raises `HTTPException(400)` with structured code
+    `INVALID_LOCAL_TEMPLATE_NAME`.
+    """
+    if (
+        not template_name
+        or ".." in template_name
+        or not _LOCAL_TEMPLATE_NAME_RE.match(template_name)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Invalid local template name {template_name!r}: must match "
+                    f"[a-zA-Z0-9][a-zA-Z0-9_.-]* with no '..' segments."
+                ),
+                "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    candidate = (root / template_name).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Resolved template path {candidate} escaped expected root {root}."
+                ),
+                "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    return candidate
 
 
 def _get_default_resource(key: str) -> str:
@@ -92,7 +149,17 @@ async def create_agent_internal(
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
 
-    if get_agent_by_name(config.name) or db.get_agent_owner(config.name):
+    # #834: the name-reservation check must also catch soft-deleted agents.
+    # `get_agent_owner` filters them out (user-facing 404 transparency), so
+    # we use the unfiltered `is_agent_name_reserved` here. Without this the
+    # create flow walks past the existence guard, the container ends up
+    # created, and the agent_ownership INSERT hits a UNIQUE constraint
+    # IntegrityError leaving the system half-built.
+    if (
+        get_agent_by_name(config.name)
+        or db.get_agent_owner(config.name)
+        or db.is_agent_name_reserved(config.name)
+    ):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
     # Agent quota enforcement: per-role limits (QUOTA-001)
@@ -264,13 +331,20 @@ async def create_agent_internal(
                 )
             )
         elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix
-            template_name = config.template[6:]  # Remove "local:" prefix
-            templates_dir = Path("/agent-configs/templates")
-            if not templates_dir.exists():
-                templates_dir = Path("./config/agent-templates")
+            # Local template - strip "local:" prefix. Look in curated catalog
+            # first (/agent-configs/templates), then in deploy-local writable
+            # store (/data/deployed-templates) per #950. Each candidate path
+            # is validated + resolved to prove it stays under the root before
+            # any filesystem access (regex barrier + is_relative_to barrier).
+            raw_name = config.template[6:]
+            template_path = _safe_local_template_path(
+                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+            )
+            if not (template_path / "template.yaml").exists():
+                template_path = _safe_local_template_path(
+                    raw_name, _LOCAL_TEMPLATE_ROOTS[1]
+                )
 
-            template_path = templates_dir / template_name
             template_yaml = template_path / "template.yaml"
 
             if template_yaml.exists():
@@ -353,14 +427,26 @@ async def create_agent_internal(
         if config.template.startswith("github:"):
             pass  # Agent clones at startup
         elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix for path resolution
-            template_name = config.template[6:]  # Remove "local:" prefix
-            templates_dir = Path("/agent-configs/templates")
-            template_path_in_backend = templates_dir / template_name
-
-            if template_path_in_backend.exists():
+            # Local template - strip "local:" prefix for path resolution.
+            # Curated templates (under /agent-configs/templates) bind their
+            # host path to /template; the agent's startup.sh copies it to
+            # /home/developer on first boot. Deploy-local templates (under
+            # /data/deployed-templates) do NOT bind here — deploy.py has
+            # already pre-populated the agent's workspace volume directly
+            # via put_archive (#950). The bind-mount transport relied on
+            # backend's /data and the agent's host bind resolving to the
+            # same host path, which was true in prod compose (host bind)
+            # but not in dev compose (named volume).
+            raw_name = config.template[6:]
+            curated_path = _safe_local_template_path(
+                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+            )
+            if curated_path.exists():
                 host_templates_base = os.getenv("HOST_TEMPLATES_PATH", "./config/agent-templates")
-                host_template_path = Path(host_templates_base) / template_name
+                # raw_name already validated by _safe_local_template_path; the
+                # join here is on a value that survived the regex + resolve
+                # barriers above, so the bind source can't traverse out.
+                host_template_path = Path(host_templates_base) / curated_path.name
                 template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
 
         if generated_files:
@@ -441,6 +527,11 @@ async def create_agent_internal(
     if agent_mcp_key:
         env_vars['TRINITY_MCP_URL'] = trinity_mcp_url
         env_vars['TRINITY_MCP_API_KEY'] = agent_mcp_key.api_key
+        # RELIABILITY-004 / #307: backend base URL for the liveness heartbeat
+        # loop. The agent authenticates the beat with the MCP key injected
+        # above (Option B — no master internal secret in agents); the agent
+        # heartbeat is gated on both this URL and the MCP key being present.
+        env_vars['TRINITY_BACKEND_URL'] = os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000')
 
     if github_repo_for_agent and github_pat_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent

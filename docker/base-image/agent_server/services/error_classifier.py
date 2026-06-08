@@ -24,7 +24,9 @@ from __future__ import annotations
 import logging
 import os
 from collections import Counter
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+from ..utils.credential_sanitizer import sanitize_dict, sanitize_text
 
 if TYPE_CHECKING:
     from ..models import ExecutionMetadata
@@ -150,7 +152,22 @@ def _diagnose_exit_failure(return_code: int, metadata: Optional["ExecutionMetada
         # Issue #81: This error message was misleading when the actual issue was
         # model incompatibility. Now that we default to 'sonnet' for headless tasks,
         # this message is more likely to be accurate.
-        return "Subscription token may be expired or revoked. Generate a new one with 'claude setup-token'."
+        # #904: stop declaring "token expired" as the diagnosis when we have
+        # zero evidence — exit > 0 with no stderr happens on cgroup OOM kills
+        # whose signal classification didn't fire (e.g. claude wrapping the
+        # SIGKILL as a clean exit 1) just as often as on real token expiry.
+        # The old wording fed SUB-003's substring matcher and triggered a
+        # futile auto-switch on every OOM. Avoid any phrase that
+        # `_is_auth_failure_message` matches (no "token expired",
+        # "setup-token", "oauth token", etc.) so the result can't loop back
+        # into the auth-503 path when used as `error_preview` in
+        # `headless_executor.py`.
+        return (
+            f"Process failed with exit code {return_code} and no diagnostic output. "
+            f"Most likely causes: OOM kill (raise the agent's memory limit), "
+            f"schedule timeout (extend timeout_seconds), or container restart. "
+            f"Check the agent container logs."
+        )
 
     # Exit code hints
     hints = {
@@ -208,12 +225,17 @@ def _classify_signal_exit(
     sig_name = _SIGNAL_EXIT_NAMES.get(signum, f"signal {signum}")
     tool_count = metadata.tool_count if metadata else 0
     num_turns = metadata.num_turns if (metadata and metadata.num_turns) else 0
+    # #929: agent cap is now the schedule ceiling (write-time validation on
+    # the backend), so the SIGKILL cause set is bounded: schedule timeout,
+    # OOM, or operator cancel. Drop the misleading "schedule/agent" disjunction
+    # — the agent cap never silently truncates a schedule under Approach A.
     detail = (
         f"Execution terminated by {sig_name} after {tool_count} tool calls "
         f"/ {num_turns} turns (exit code {return_code}). "
-        f"Likely cause: schedule/agent timeout exceeded, OOM kill, or operator cancel. "
-        f"Increase the schedule's timeout_seconds, raise agent memory, "
-        f"or split the skill into smaller steps."
+        f"Likely cause: schedule timeout exceeded, OOM kill, or operator cancel. "
+        f"To allow longer runs raise the schedule's timeout_seconds "
+        f"(bounded by the agent's execution_timeout_seconds cap); "
+        f"for OOM raise the agent memory limit; otherwise split the skill into smaller steps."
     )
     return (504, detail)
 
@@ -342,7 +364,7 @@ def _classify_empty_result(
     raw_messages: Optional[List[Dict]] = None,
     parse_failure_count: int = 0,
     parse_failure_sample: Optional[str] = None,
-) -> Optional[Tuple[int, str]]:
+) -> Optional[Tuple[int, Dict[str, Any]]]:
     """Classify a clean (return_code == 0) exit that produced no result message.
 
     Issue #520: When the claude subprocess exits 0 but the final
@@ -382,9 +404,18 @@ def _classify_empty_result(
     failed line (sanitized + length-capped) so the next debug session has
     a concrete trace instead of just a generic "child held stdout" guess.
 
-    Returns ``(status_code, detail)`` for empty-result exits, or ``None``
-    if metadata looks well-formed (caller proceeds with the normal
-    response-building path).
+    Returns ``(status_code, detail_dict)`` for empty-result exits, or
+    ``None`` if metadata looks well-formed (caller proceeds with the
+    normal response-building path).
+
+    Issue #678: the detail is a **dict** (was a string until 2026-05-11),
+    carrying partial metadata + raw_messages_count + parse_failure_count
+    so the backend HTTPError handler can salvage cost/context/model_name
+    onto the failure row instead of writing all-null telemetry. Both
+    ``detail["message"]`` and ``detail["metadata"]`` are sanitized via
+    ``sanitize_text`` / ``sanitize_dict`` because
+    ``ExecutionMetadata.error_message`` is populated directly from
+    Claude's output text (`stream_parser.py`) and can leak tokens.
     """
     if metadata is None:
         return None
@@ -422,7 +453,7 @@ def _classify_empty_result(
     else:
         type_summary = "<none>"
 
-    detail = (
+    message = (
         f"Execution completed without a result message after {tool_count} tool calls "
         f"/ {num_turns} turns (raw_messages={raw_message_count} types={type_summary}, "
         f"parse_failures={parse_failure_count}). "
@@ -434,5 +465,21 @@ def _classify_empty_result(
         f"This is a transient infrastructure failure; retry the task."
     )
     if parse_failure_count and parse_failure_sample:
-        detail += f" First malformed stdout line: {parse_failure_sample!r}"
-    return (502, detail)
+        message += f" First malformed stdout line: {parse_failure_sample!r}"
+
+    # #678: structured body so the backend HTTPError handler can salvage
+    # partial telemetry onto the failure row. Sanitize before returning —
+    # `metadata.error_message` is populated directly from Claude output
+    # in stream_parser.py and can carry leaked credentials.
+    partial_metadata: Dict[str, Any] = {}
+    if metadata is not None:
+        partial_metadata = sanitize_dict(metadata.model_dump())
+
+    body: Dict[str, Any] = {
+        "message": sanitize_text(message),
+        "metadata": partial_metadata,
+        "raw_message_count": raw_message_count,
+        "parse_failure_count": parse_failure_count,
+        "recovery_attempted": True,
+    }
+    return (502, body)

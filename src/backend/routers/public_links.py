@@ -13,7 +13,7 @@ from models import User
 from database import db, PublicLinkCreate, PublicLinkUpdate, PublicLinkWithUrl
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
-from config import FRONTEND_URL, SITE_PORT
+from config import FRONTEND_URL
 from services.settings_service import get_public_chat_url
 
 router = APIRouter(prefix="/api/agents", tags=["public-links"])
@@ -30,8 +30,6 @@ def set_websocket_manager(ws_manager):
 
 def _build_public_url(token: str, link_type: str = "chat") -> str:
     """Build the internal public URL for a link token."""
-    if link_type == "site":
-        return f"{FRONTEND_URL}/site/{token}/"
     return f"{FRONTEND_URL}/chat/{token}"
 
 
@@ -40,8 +38,6 @@ def _build_external_url(token: str, link_type: str = "chat") -> str | None:
     public_chat_url = get_public_chat_url()
     if not public_chat_url:
         return None
-    if link_type == "site":
-        return f"{public_chat_url}/site/{token}/"
     return f"{public_chat_url}/chat/{token}"
 
 
@@ -81,9 +77,9 @@ async def create_public_link(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Validate link_type
-    if link_request.link_type not in ("chat", "site"):
-        raise HTTPException(status_code=400, detail="link_type must be 'chat' or 'site'")
+    # Validate link_type — only 'chat' is currently supported
+    if link_request.link_type not in ("chat",):
+        raise HTTPException(status_code=400, detail="link_type must be 'chat'")
 
     # Create the public link
     link = db.create_public_link(

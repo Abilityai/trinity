@@ -1,0 +1,173 @@
+name: container-security
+
+# Regression guards for issue #874 (non-root production containers).
+#
+# These checks used to live in `frontend-e2e.yml`, which is `ui`-label
+# gated and therefore skipped on backend infrastructure PRs — the exact
+# PRs that can break them. This workflow runs unconditionally on any PR
+# (and push to dev/main) that touches the relevant Docker / compose /
+# bootstrap surface, so the guard executes whenever it could possibly
+# regress.
+#
+# Scope:
+#   - `verify-non-root`: every Trinity-built service that holds platform
+#     credentials or the docker.sock mount runs as the expected non-root
+#     UID, AND the backend can still reach `/var/run/docker.sock` on
+#     Linux (`group_add` wired through). The socket reachability check
+#     uses `docker.from_env().ping()` from inside the backend container,
+#     NOT a `/api/agents` HTTP probe — `list_all_agents_fast` swallows
+#     Docker exceptions and returns `[]`, which made the original gate a
+#     silent false-positive.
+#   - `verify-prod-frontend-uid`: builds the prod frontend image
+#     out-of-band (the e2e workflow boots the Vite-dev image) and
+#     asserts its USER UID is 101 (`nginxinc/nginx-unprivileged`).
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'docker/**'
+      - 'docker-compose*.yml'
+      - 'scripts/deploy/start.sh'
+      - 'src/mcp-server/Dockerfile'
+      - '.github/workflows/container-security.yml'
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'docker-compose*.yml'
+      - 'scripts/deploy/start.sh'
+      - 'src/mcp-server/Dockerfile'
+      - '.github/workflows/container-security.yml'
+  workflow_dispatch:
+
+# Least-privilege GITHUB_TOKEN: only `contents: read` is needed for
+# actions/checkout. The workflow runs entirely on the runner (no PR
+# comments, no issue updates, no security-events writes), so anything
+# beyond `contents: read` would be unused authority.
+permissions:
+  contents: read
+
+jobs:
+  verify-non-root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate CI admin password
+        # I-01 fix (cso-diff-2026-05-17): replace any hardcoded fallback
+        # with a per-run random value so the repo never publishes a
+        # default admin credential, even one only reachable from the
+        # runner sandbox. Honours an explicit E2E_ADMIN_PASSWORD secret
+        # override when set. The literal `Aa1!` suffix guarantees OWASP
+        # ASVS 2.1 complexity classes on the random branch (upper /
+        # lower / digit / special); `tr -d` strips base64 chars that
+        # would break form-encoded curl bodies later.
+        env:
+          OVERRIDE: ${{ secrets.E2E_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE:-}" ]; then
+            PASS="$OVERRIDE"
+          else
+            PASS="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          fi
+          echo "::add-mask::$PASS"
+          echo "ADMIN_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Start Trinity stack
+        env:
+          # ADMIN_PASSWORD is inherited from GITHUB_ENV (see the
+          # "Generate CI admin password" step above).
+          ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY || 'placeholder' }}
+        run: |
+          # Generate the minimum .env needed to boot. Real secrets are
+          # not required — these checks only exercise container UIDs and
+          # the Docker socket round-trip.
+          cp .env.example .env
+          echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
+          echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env
+          echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          ./scripts/deploy/start.sh
+
+      - name: Wait for backend health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "backend healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "backend never became healthy"; exit 1
+
+      - name: Skip first-time setup wizard
+        # On a fresh DB the admin user is bootstrapped from ADMIN_PASSWORD,
+        # but `setup_completed` stays false — so /api/token returns 403
+        # `setup_required` until an operator completes the wizard. The
+        # auth+/api/agents probe below is a CI sanity check, not a setup
+        # flow exercise. Flip the flag directly so the probe can run.
+        # Mirrors the equivalent step in frontend-e2e.yml.
+        run: |
+          docker exec trinity-backend python3 -c "from database import db; db.set_setting('setup_completed', 'true'); print('setup_completed=true')"
+
+      - name: Verify non-root containers and Docker socket reachability
+        run: |
+          set -euo pipefail
+          for c in trinity-backend trinity-scheduler trinity-mcp-server; do
+            UID_IN=$(docker exec "$c" id -u)
+            if [ "$UID_IN" != "1000" ]; then
+              echo "FAIL: $c runs as UID $UID_IN (expected 1000)"; exit 1
+            fi
+          done
+          # Real Docker-socket round-trip from inside the backend
+          # (group_add probe). DO NOT replace with an /api/agents HTTP
+          # check — list_all_agents_fast swallows Docker exceptions and
+          # returns [], making the gate a false positive.
+          docker exec trinity-backend python3 -c \
+            "import docker, sys; sys.exit(0 if docker.from_env().ping() else 1)" \
+            || { echo "FAIL: backend cannot reach /var/run/docker.sock"; exit 1; }
+          # Auth + table read sanity (separate signal from the socket
+          # probe above).
+          TOKEN=$(curl -fs -X POST http://localhost:8000/api/token \
+            -d "username=admin&password=${ADMIN_PASSWORD}" | jq -r .access_token)
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "FAIL: token mint"; exit 1; }
+          AGENTS_HTTP=$(curl -s -o /tmp/agents.json -w "%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents)
+          [ "$AGENTS_HTTP" = "200" ] || { echo "FAIL: /api/agents returned $AGENTS_HTTP"; exit 1; }
+          jq -e 'type == "array"' /tmp/agents.json >/dev/null \
+            || { echo "FAIL: /api/agents response is not a JSON array"; exit 1; }
+          echo "verify-non-root: PASS"
+
+      - name: Verify prod frontend image UID
+        # I-02 fix (cso-diff-2026-05-17): close the #874 CI gap for the
+        # prod frontend image. start.sh boots the dev compose (Vite-dev
+        # image), so the prod image (nginxinc/nginx-unprivileged:alpine,
+        # UID 101) is built here out-of-band and its USER UID asserted
+        # directly. Build context matches docker-compose.prod.yml's
+        # `frontend.build` block (context=src/frontend,
+        # file=docker/frontend/Dockerfile.prod).
+        run: |
+          set -euo pipefail
+          docker build \
+            -f docker/frontend/Dockerfile.prod \
+            -t trinity-frontend:prod-check \
+            ./src/frontend
+          UID_FE=$(docker run --rm --entrypoint id trinity-frontend:prod-check -u)
+          if [ "$UID_FE" != "101" ]; then
+            echo "FAIL: prod frontend UID $UID_FE (expected 101)"; exit 1
+          fi
+          echo "verify-prod-frontend-uid: PASS"
+
+      - name: Collect Trinity logs on failure
+        if: failure()
+        run: |
+          docker compose logs --no-color --tail=200 backend frontend mcp-server scheduler > trinity-logs.txt || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-security-failure
+          path: trinity-logs.txt
+          retention-days: 14

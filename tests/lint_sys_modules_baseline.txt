@@ -6,7 +6,7 @@
 3 tests/git-sync/test_s5_conflict_classifier.py
 9 tests/git-sync/test_s7_reserve_instance_id.py
 5 tests/test_canary_invariants.py
-5 tests/test_cb_probe_execution_close.py
+7 tests/test_cb_probe_execution_close.py
 1 tests/test_event_bus.py
 6 tests/test_github_pat_propagation_unit.py
 9 tests/test_inter_agent_timeout_unit.py
@@ -27,7 +27,6 @@
 4 tests/unit/test_channel_image_vision.py
 2 tests/unit/test_chat_sync_backlog.py
 1 tests/unit/test_claude_code_session_id_parser.py
-3 tests/unit/test_cleanup_unreachable_orphan.py
 1 tests/unit/test_config_fail_fast.py
 1 tests/unit/test_credential_sanitizer_backend.py
 1 tests/unit/test_docker_utils.py
@@ -58,6 +57,7 @@
 2 tests/unit/test_slack_dm_default.py
 7 tests/unit/test_slack_multi_connection.py
 4 tests/unit/test_slack_watchdog.py
+6 tests/unit/test_slot_per_slot_ttl.py
 2 tests/unit/test_ssh_service.py
 8 tests/unit/test_start_agent_skip_inject.py
 7 tests/unit/test_subscription_auto_switch_pingpong.py

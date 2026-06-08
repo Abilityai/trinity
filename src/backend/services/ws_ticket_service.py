@@ -39,6 +39,8 @@ from routers.auth import get_redis_client
 logger = logging.getLogger(__name__)
 
 _TICKET_TTL_SECONDS = 30
+# Ceiling for caller-supplied TTLs (VoIP dial+ring); keeps a leaked ticket short-lived.
+_TICKET_TTL_MAX_SECONDS = 600
 _TICKET_KEY_PREFIX = "ws_ticket:"
 
 
@@ -46,18 +48,24 @@ def _key(ticket: str) -> str:
     return f"{_TICKET_KEY_PREFIX}{ticket}"
 
 
-def mint_ticket(subject: str, *, scope: str = "user") -> str:
+def mint_ticket(subject: str, *, scope: str = "user", ttl_seconds: Optional[int] = None) -> str:
     """Mint a single-use opaque WebSocket ticket.
 
     Args:
         subject: The authenticated principal (username for JWT users).
-        scope: Identifier for the auth surface — currently always
-            ``"user"`` for the browser ``/ws`` flow. Reserved for a
-            future ticket variant on ``/ws/events`` (MCP scope).
+        scope: Identifier for the auth surface — ``"user"`` for the
+            browser ``/ws`` flow, or a call-bound value like
+            ``"voip:{call_id}"`` so the ticket only authenticates the
+            one Media Streams URL it was minted for (VOIP-001, #1056).
+        ttl_seconds: Override the default 30s TTL. The browser flow
+            consumes the ticket in milliseconds, but the Twilio Media
+            Streams socket only connects *after* PSTN dial + ring, which
+            routinely exceeds 30s — VoIP mints at a wider TTL. Clamped to
+            a sane ceiling so a caller can't mint a near-permanent ticket.
 
     Returns:
         The opaque ticket string. Hand to client; expect them to
-        present it back on the WebSocket URL within 30 seconds.
+        present it back on the WebSocket URL within the TTL.
 
     Raises:
         RuntimeError: Redis unavailable. Auth must fail closed.
@@ -66,9 +74,10 @@ def mint_ticket(subject: str, *, scope: str = "user") -> str:
     if r is None:
         raise RuntimeError("Redis unavailable — cannot mint WebSocket ticket")
 
+    ttl = _TICKET_TTL_SECONDS if ttl_seconds is None else max(1, min(int(ttl_seconds), _TICKET_TTL_MAX_SECONDS))
     ticket = secrets.token_urlsafe(32)
     payload = json.dumps({"sub": subject, "scope": scope})
-    r.setex(_key(ticket), _TICKET_TTL_SECONDS, payload)
+    r.setex(_key(ticket), ttl, payload)
     return ticket
 
 

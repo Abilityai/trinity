@@ -29,6 +29,7 @@ from pathlib import Path
 from db_models import (
     UserCreate,
     User,
+    SessionMessageInsert,
     AgentShare,
     AgentShareRequest,
     McpApiKeyCreate,
@@ -131,10 +132,13 @@ from db.operator_queue import OperatorQueueOperations
 from db.event_subscriptions import EventSubscriptionOperations
 from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
+from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.sync_state import SyncStateOperations
+from db.idempotency import IdempotencyOperations
+from db.loops import LoopOperations
 
 
 def init_database():
@@ -288,10 +292,13 @@ class DatabaseManager:
         self._event_subscription_ops = EventSubscriptionOperations()
         self._telegram_channel_ops = TelegramChannelOperations()
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
+        self._voip_ops = VoipOperations()
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
+        self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
+        self._loop_ops = LoopOperations()  # #740 sequential agent loops
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -345,6 +352,21 @@ class DatabaseManager:
 
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
+
+    def purge_agent_ownership(self, agent_name: str):
+        return self._agent_ops.purge_agent_ownership(agent_name)
+
+    def find_soft_deleted_agents_past_retention(self, retention_days: int, limit: int = 5000):
+        return self._agent_ops.find_soft_deleted_agents_past_retention(retention_days, limit)
+
+    def is_agent_name_reserved(self, agent_name: str):
+        return self._agent_ops.is_agent_name_reserved(agent_name)
+
+    def recover_agent_ownership(self, agent_name: str):
+        return self._agent_ops.recover_agent_ownership(agent_name)
+
+    def list_soft_deleted_agents(self, limit: int = 200):
+        return self._agent_ops.list_soft_deleted_agents(limit)
 
     def rename_agent(self, old_name: str, new_name: str):
         return self._agent_ops.rename_agent(old_name, new_name)
@@ -543,6 +565,19 @@ class DatabaseManager:
         return self._agent_ops.get_all_agents_parallel_capacity()
 
     # =========================================================================
+    # Dispatch Circuit Breaker opt-in (delegated to db/agents.py) - #526
+    # =========================================================================
+
+    def get_circuit_breaker_enabled(self, agent_name: str) -> bool:
+        return self._agent_ops.get_circuit_breaker_enabled(agent_name)
+
+    def set_circuit_breaker_enabled(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_circuit_breaker_enabled(agent_name, enabled)
+
+    def get_all_circuit_breaker_enabled(self):
+        return self._agent_ops.get_all_circuit_breaker_enabled()
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 
@@ -586,6 +621,9 @@ class DatabaseManager:
 
     def cancel_queued_for_agent(self, agent_name: str, reason: str = "agent_deleted") -> int:
         return self._schedule_ops.cancel_queued_for_agent(agent_name, reason)
+
+    def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
+        return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)
@@ -654,8 +692,8 @@ class DatabaseManager:
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 
-    def validate_mcp_api_key(self, api_key: str):
-        return self._mcp_key_ops.validate_mcp_api_key(api_key)
+    def validate_mcp_api_key(self, api_key: str, *, track_usage: bool = True):
+        return self._mcp_key_ops.validate_mcp_api_key(api_key, track_usage=track_usage)
 
     def get_mcp_api_key(self, key_id: str, username: str):
         return self._mcp_key_ops.get_mcp_api_key(key_id, username)
@@ -685,6 +723,11 @@ class DatabaseManager:
     def list_agent_schedules(self, agent_name: str):
         return self._schedule_ops.list_agent_schedules(agent_name)
 
+    def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
+        return self._schedule_ops.find_active_schedules_exceeding_timeout(
+            agent_name, ceiling_seconds
+        )
+
     def list_all_enabled_schedules(self):
         return self._schedule_ops.list_all_enabled_schedules()
 
@@ -700,6 +743,18 @@ class DatabaseManager:
 
     def delete_schedule(self, schedule_id: str, username: str):
         return self._schedule_ops.delete_schedule(schedule_id, username)
+
+    def purge_schedule(self, schedule_id: str):
+        return self._schedule_ops.purge_schedule(schedule_id)
+
+    def find_soft_deleted_schedules_past_retention(self, retention_days: int, limit: int = 5000):
+        return self._schedule_ops.find_soft_deleted_schedules_past_retention(retention_days, limit)
+
+    def recover_schedule(self, schedule_id: str):
+        return self._schedule_ops.recover_schedule(schedule_id)
+
+    def list_soft_deleted_schedules(self, agent_name=None, limit: int = 200):
+        return self._schedule_ops.list_soft_deleted_schedules(agent_name, limit)
 
     # Webhook token management (WEBHOOK-001, #291)
     def generate_webhook_token(self, schedule_id: str):
@@ -739,6 +794,7 @@ class DatabaseManager:
         source_mcp_key_name: str = None,
         model_used: str = None,
         fan_out_id: str = None,
+        loop_id: str = None,
         subscription_id: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
@@ -751,6 +807,7 @@ class DatabaseManager:
             source_mcp_key_name=source_mcp_key_name,
             model_used=model_used,
             fan_out_id=fan_out_id,
+            loop_id=loop_id,
             subscription_id=subscription_id,
         )
 
@@ -779,10 +836,10 @@ class DatabaseManager:
 
     def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
                                 context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None):
+                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None):
         return self._schedule_ops.update_execution_status(execution_id, status, response, error,
                                                           context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata)
+                                                          compact_metadata, retry_count)
 
     def mark_execution_dispatched(self, execution_id: str) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id)
@@ -860,6 +917,9 @@ class DatabaseManager:
 
     def get_git_auto_sync_enabled(self, agent_name: str):
         return self._schedule_ops.get_git_auto_sync_enabled(agent_name)
+
+    def get_all_git_auto_sync_enabled(self, agent_names=None):
+        return self._schedule_ops.get_all_git_auto_sync_enabled(agent_names)
 
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
@@ -946,20 +1006,8 @@ class DatabaseManager:
     def delete_session(self, session_id: str):
         return self._session_ops.delete_session(session_id)
 
-    def add_session_message(self, session_id: str, agent_name: str, user_id: int,
-                            user_email: str, role: str, content: str,
-                            cost: float = None, context_used: int = None,
-                            context_max: int = None, cache_read_tokens: int = None,
-                            tool_calls: str = None, execution_time_ms: int = None,
-                            claude_session_id: str = None,
-                            compact_metadata: str = None, compact_event_count: int = 0):
-        return self._session_ops.add_session_message(
-            session_id, agent_name, user_id, user_email, role, content,
-            cost=cost, context_used=context_used, context_max=context_max,
-            cache_read_tokens=cache_read_tokens, tool_calls=tool_calls,
-            execution_time_ms=execution_time_ms, claude_session_id=claude_session_id,
-            compact_metadata=compact_metadata, compact_event_count=compact_event_count,
-        )
+    def add_session_message(self, msg: SessionMessageInsert):
+        return self._session_ops.add_session_message(msg)
 
     def get_session_messages(self, session_id: str, limit: int = 100):
         return self._session_ops.get_session_messages(session_id, limit=limit)
@@ -1282,15 +1330,26 @@ class DatabaseManager:
     def delete_public_link_sessions(self, link_id: str):
         return self._public_chat_ops.delete_link_sessions(link_id)
 
-    # Public User Memory (MEM-001)
+    # Public User Memory (MEM-001 + #895 split storage)
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
 
     def increment_public_user_memory_count(self, agent_name: str, user_email: str) -> int:
         return self._public_link_ops.increment_message_count(agent_name, user_email)
 
-    def update_public_user_memory(self, agent_name: str, user_email: str, memory_text: str) -> bool:
-        return self._public_link_ops.update_user_memory(agent_name, user_email, memory_text)
+    def update_public_user_memory_agent_notes(
+        self, agent_name: str, user_email: str, agent_notes: str
+    ) -> bool:
+        return self._public_link_ops.update_user_memory_agent_notes(
+            agent_name, user_email, agent_notes
+        )
+
+    def update_public_user_memory_conversation_summary(
+        self, agent_name: str, user_email: str, conversation_summary: str
+    ) -> bool:
+        return self._public_link_ops.update_user_memory_conversation_summary(
+            agent_name, user_email, conversation_summary
+        )
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -1535,6 +1594,12 @@ class DatabaseManager:
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
 
+    def get_schedule_analytics(self, schedule_id: str, hours: int,
+                                agent_name: str):
+        return self._schedule_ops.get_schedule_analytics(
+            schedule_id, hours, agent_name,
+        )
+
     def get_agent_token_stats(self, agent_name: str):
         return self._schedule_ops.get_agent_token_stats(agent_name)
 
@@ -1777,6 +1842,56 @@ class DatabaseManager:
         return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
     # =========================================================================
+    # VoIP Telephony (delegated to db/voip.py) - VOIP-001 (#1056)
+    # =========================================================================
+
+    def create_voip_binding(self, agent_name, account_sid, auth_token, from_number,
+                            daily_call_cap=None, display_name=None,
+                            inbound_number=None, created_by=None):
+        return self._voip_ops.create_binding(
+            agent_name, account_sid, auth_token, from_number,
+            daily_call_cap=daily_call_cap, display_name=display_name,
+            inbound_number=inbound_number, created_by=created_by,
+        )
+
+    def get_voip_binding(self, agent_name):
+        return self._voip_ops.get_binding_by_agent(agent_name)
+
+    def get_voip_binding_by_webhook_secret(self, webhook_secret):
+        return self._voip_ops.get_binding_by_webhook_secret(webhook_secret)
+
+    def get_voip_auth_token(self, agent_name):
+        return self._voip_ops.get_decrypted_auth_token(agent_name)
+
+    def get_all_voip_bindings(self):
+        return self._voip_ops.get_all_bindings()
+
+    def update_voip_webhook_url(self, agent_name, webhook_url):
+        return self._voip_ops.update_webhook_url(agent_name, webhook_url)
+
+    def delete_voip_binding(self, agent_name):
+        return self._voip_ops.delete_binding(agent_name)
+
+    def create_voip_call_log(self, call_id, agent_name, to_number, chat_session_id=None,
+                            initiated_by_user_id=None, initiated_by_email=None,
+                            direction="outbound"):
+        return self._voip_ops.create_call_log(
+            call_id, agent_name, to_number, chat_session_id=chat_session_id,
+            initiated_by_user_id=initiated_by_user_id,
+            initiated_by_email=initiated_by_email, direction=direction,
+        )
+
+    def update_voip_call_status(self, call_id, status, twilio_call_sid=None,
+                               error=None, duration_ms=None):
+        return self._voip_ops.update_call_status(
+            call_id, status, twilio_call_sid=twilio_call_sid,
+            error=error, duration_ms=duration_ms,
+        )
+
+    def count_voip_calls_since(self, agent_name, hours=24):
+        return self._voip_ops.count_calls_since(agent_name, hours=hours)
+
+    # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================
 
@@ -1928,6 +2043,44 @@ class DatabaseManager:
         """Aggregate counts by event_type and actor_type for the dashboard."""
         return self._audit_ops.get_audit_stats(start_time=start_time, end_time=end_time)
 
+    def get_audit_heatmap(
+        self,
+        start_time: str = None,
+        end_time: str = None,
+        event_type: str = None,
+        actor_type: str = None,
+    ):
+        """Bucket audit rows into a 7×24 dow×hour heatmap grid (#941 v3)."""
+        return self._audit_ops.get_audit_heatmap(
+            start_time=start_time,
+            end_time=end_time,
+            event_type=event_type,
+            actor_type=actor_type,
+        )
+
+    def get_audit_calendar(
+        self,
+        start_time: str = None,
+        end_time: str = None,
+        event_type: str = None,
+        actor_type: str = None,
+    ):
+        """Per-day audit counts for the GitHub-style calendar (#941 v3.1)."""
+        return self._audit_ops.get_audit_calendar(
+            start_time=start_time,
+            end_time=end_time,
+            event_type=event_type,
+            actor_type=actor_type,
+        )
+
+    def get_distinct_event_types(self):
+        """Distinct event_type values across audit_log (sorted)."""
+        return self._audit_ops.get_distinct_event_types()
+
+    def get_distinct_actor_types(self):
+        """Distinct actor_type values across audit_log (sorted)."""
+        return self._audit_ops.get_distinct_actor_types()
+
     def prune_audit_log(self, retention_days: int) -> int:
         """Delete audit_log entries older than ``retention_days``. Returns count removed."""
         return self._audit_ops.prune_audit_log(retention_days)
@@ -1974,6 +2127,71 @@ class DatabaseManager:
     def get_canary_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate canary violation counts by invariant_id and severity."""
         return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
+
+    # =========================================================================
+    # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)
+    # =========================================================================
+
+    def idempotency_claim(self, scope: str, key: str, ttl_hours: int = 24) -> dict:
+        """Atomically claim (scope, key). See IdempotencyOperations.claim."""
+        return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours)
+
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+        """Record the execution_id for an in-flight idempotency claim."""
+        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+        """Mark an idempotency claim completed and store the replay snapshot."""
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+
+    def idempotency_release(self, scope: str, key: str) -> None:
+        """Delete an in-flight idempotency claim so a failed attempt can retry."""
+        return self._idempotency_ops.release(scope, key)
+
+    def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
+        """Purge idempotency rows older than ttl_hours. Returns rows removed."""
+        return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
+
+    # =========================================================================
+    # Sequential Agent Loops (delegated to db/loops.py) - #740
+    # =========================================================================
+
+    def create_loop(self, *args, **kwargs):
+        return self._loop_ops.create_loop(*args, **kwargs)
+
+    def get_loop(self, loop_id: str):
+        return self._loop_ops.get_loop(loop_id)
+
+    def mark_loop_running(self, loop_id: str):
+        return self._loop_ops.mark_loop_running(loop_id)
+
+    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response):
+        return self._loop_ops.update_loop_progress(
+            loop_id, runs_completed=runs_completed, last_response=last_response,
+        )
+
+    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None):
+        return self._loop_ops.finalize_loop(
+            loop_id, status=status, stop_reason=stop_reason, error=error,
+        )
+
+    def list_loops_for_agent(self, agent_name: str, *, status=None, limit: int = 50):
+        return self._loop_ops.list_loops_for_agent(agent_name, status=status, limit=limit)
+
+    def list_non_terminal_loops(self):
+        return self._loop_ops.list_non_terminal_loops()
+
+    def mark_orphan_loops_interrupted(self) -> int:
+        return self._loop_ops.mark_orphans_interrupted()
+
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+        return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
+
+    def finalize_loop_run(self, run_id: str, **kwargs):
+        return self._loop_ops.finalize_loop_run(run_id, **kwargs)
+
+    def list_loop_runs(self, loop_id: str):
+        return self._loop_ops.list_runs(loop_id)
 
 
 # Global database manager instance

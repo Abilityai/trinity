@@ -15,6 +15,17 @@ services:
     build:
       context: .
       dockerfile: docker/backend/Dockerfile
+      # Build-time provenance (#926 / #958). Forwarded to Dockerfile ARGs
+      # → ENV vars → `GET /api/version` payload. The deploy-dev workflow
+      # exports these from the checked-out repo before `docker compose
+      # build`; absent that, the Dockerfile defaults to "unknown".
+      args:
+        VERSION: ${VERSION:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SUBJECT: ${GIT_COMMIT_SUBJECT:-unknown}
+        GIT_COMMIT_TIMESTAMP: ${GIT_COMMIT_TIMESTAMP:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
     restart: unless-stopped
     ports:
@@ -33,6 +44,13 @@ services:
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
+      # SMTP transport (EMAIL_PROVIDER=smtp) — read by src/backend/config.py (#771)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      # SendGrid transport (EMAIL_PROVIDER=sendgrid) — read by src/backend/config.py (#771)
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - NOTION_CLIENT_ID=${NOTION_CLIENT_ID}
@@ -40,6 +58,22 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
+      # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
+      # tune/disable voice in prod (code default is ON; without these lines the
+      # knobs are inert — the #1039 packaging-gap class).
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means
+      # the master switch MUST reach the container or voip_available stays false;
+      # omitting it here was the prod packaging gap (same class as #1039 LOG_*).
+      - VOIP_ENABLED=${VOIP_ENABLED:-false}
+      - VOIP_MAX_CALL_DURATION=${VOIP_MAX_CALL_DURATION:-600}      # per-call cap (s)
+      - VOIP_DEFAULT_DAILY_CALL_CAP=${VOIP_DEFAULT_DAILY_CALL_CAP:-50}  # per-agent/day spend bound
+      - VOIP_CALL_RATE_LIMIT=${VOIP_CALL_RATE_LIMIT:-5}           # calls per owner+destination window
+      - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
+      - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
+      - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
@@ -75,8 +109,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
+    # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
+    # and reaches /var/run/docker.sock via group_add below — not capabilities.
+    # Issue #874: backend runs as UID 1000 (non-root) but still needs to talk
+    # to /var/run/docker.sock. On Linux the socket is group-owned by `docker`
+    # (typically GID 999 on Debian/Ubuntu, ~990 on RHEL family). macOS Docker
+    # Desktop ignores group_add; the default is safe there.
+    group_add:
+      - "${DOCKER_GID:-999}"
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
     # Production: no --reload flag
@@ -97,8 +137,10 @@ services:
     image: trinity-frontend:prod
     container_name: trinity-frontend
     restart: unless-stopped
+    # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
+    # preserved so external URLs do not change.
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       backend:
         condition: service_healthy
@@ -108,13 +150,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-      - CHOWN
-      - SETGID
-      - SETUID
+    # NET_BIND_SERVICE / CHOWN / SETGID / SETUID removed (#874):
+    # unprivileged nginx binds 8080 and does no master-process worker drop.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 30s
       timeout: 10s
       retries: 3

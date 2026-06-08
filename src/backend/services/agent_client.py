@@ -12,10 +12,9 @@ machine transitions are atomic Lua scripts (no TOCTOU races between workers).
 import asyncio
 import json
 import logging
-import threading
 import time
-from dataclasses import dataclass, field
-from typing import Optional, Any, Dict
+from dataclasses import dataclass
+from typing import Optional, Any, Dict, Tuple
 
 import httpx
 import redis as _redis
@@ -24,6 +23,16 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
+)
+
+# Shared Redis plumbing (#526 D4). Top-level module (NOT services/) so this
+# import stays clean when agent_client is loaded standalone in its unit +
+# integration suites — see redis_breaker_util's module docstring.
+from redis_breaker_util import (
+    ScriptCache,
+    decode_pair,
+    get_breaker_redis,
+    reset_breaker_redis_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,71 +69,62 @@ CIRCUIT_BASE_COOLDOWN_SECONDS = 30.0
 CIRCUIT_MAX_COOLDOWN_SECONDS = 300.0
 CIRCUIT_PROBE_LOCK_TTL_SECONDS = 10
 # After this many consecutive open-state probes without recovery, give up
-# active probing and wait for an external signal (container restart, manual
-# health-check trigger). 10 × exponentially-growing backoff ≈ 40min of
-# attempts before falling silent.
+# fast probing and switch to long-cooldown probing. 10 × exponentially-
+# growing backoff ≈ 40min before we slow down.
 CIRCUIT_DORMANT_AFTER_OPEN_PROBES = 10
+# Issue #921: dormant state no longer requires manual recovery — we still
+# probe occasionally on a long cooldown so the breaker self-heals when the
+# underlying problem clears. Bounds the worst-case false-fail outage to
+# ~DORMANT_COOLDOWN instead of "until a human notices". Set above the
+# open-state max cooldown so we don't churn probes pointlessly when the
+# agent really is down.
+CIRCUIT_DORMANT_COOLDOWN_SECONDS = 3600.0  # 1 hour
 
 
-# ----- Redis client (lazy, cached, fail-open on unreachability) -------------
-
-_redis_client: Optional[_redis.Redis] = None
-_redis_client_lock = threading.Lock()
+# ----- Redis client (shared, fail-open) -------------------------------------
+#
+# The cached fail-open client lives in redis_breaker_util (#526 D4) so this
+# transport breaker and the dispatch breaker share one client. These two
+# functions stay as module-level wrappers because tests monkeypatch /
+# call them by name (agent_client._get_circuit_redis,
+# agent_client._reset_circuit_redis_client).
 
 
 def _get_circuit_redis() -> Optional[_redis.Redis]:
-    """Return a Redis client, or None if Redis is unreachable.
+    """Return the shared breaker Redis client, or None if unreachable.
 
-    Mirrors the fail-open pattern used by webhooks.py: the circuit breaker
-    is best-effort coordination — if Redis is down we fall through to
-    allowing the request and let the underlying HTTP failure surface.
+    Thin delegate to ``redis_breaker_util.get_breaker_redis`` — kept as a
+    module function so existing tests can monkeypatch
+    ``agent_client._get_circuit_redis``.
     """
-    global _redis_client
-    if _redis_client is not None:
-        return _redis_client
-    with _redis_client_lock:
-        if _redis_client is not None:
-            return _redis_client
-        try:
-            from config import REDIS_URL
-            client = _redis.from_url(
-                REDIS_URL,
-                decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=1,
-            )
-            client.ping()
-            _redis_client = client
-        except Exception as e:
-            logger.warning("Circuit breaker: Redis unavailable (%s) — failing open", e)
-            return None
-    return _redis_client
+    return get_breaker_redis()
 
 
 def _reset_circuit_redis_client() -> None:
-    """Drop the cached client so the next call rebuilds. For tests + recovery."""
-    global _redis_client, _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
-    with _redis_client_lock:
-        _redis_client = None
-        _ALLOW_SCRIPT = None
-        _RECORD_FAILURE_SCRIPT = None
-        _RECORD_SUCCESS_SCRIPT = None
+    """Drop the cached client + circuit Lua cache so the next call rebuilds.
+
+    For tests + recovery. Resets both the shared client (redis_breaker_util)
+    and this module's circuit script cache.
+    """
+    reset_breaker_redis_client()
+    _CIRCUIT_SCRIPTS.reset()
 
 
 # ----- Lua scripts (atomic state machine transitions) -----------------------
 
 # allow_request: returns "allow" | "probe" | "deny".
-#   closed   → "allow"
-#   dormant  → "deny"
-#   open     → if past next_probe_at AND we win SET-NX-EX on probe-lock → "probe"
-#              otherwise → "deny"
+#   closed         → "allow"
+#   open / dormant → if past next_probe_at AND we win SET-NX-EX on probe-lock
+#                    → "probe", otherwise → "deny"
+# Issue #921: dormant uses the same probe-on-cooldown logic as open, just
+# with a much longer next_probe_at interval set in _RECORD_FAILURE_LUA.
+# This restores baseline recovery behaviour: even if the breaker has been
+# dormant for hours, exactly one request per cooldown window goes through
+# to test whether the agent is back.
 _ALLOW_REQUEST_LUA = """
 local state = redis.call('HGET', KEYS[1], 'state')
 if not state or state == 'closed' then
     return 'allow'
-end
-if state == 'dormant' then
-    return 'deny'
 end
 local now = tonumber(ARGV[1])
 local next_probe_at = tonumber(redis.call('HGET', KEYS[1], 'next_probe_at') or '0')
@@ -151,6 +151,7 @@ local threshold = tonumber(ARGV[2])
 local base = tonumber(ARGV[3])
 local max_cd = tonumber(ARGV[4])
 local dormant_threshold = tonumber(ARGV[5])
+local dormant_cooldown = tonumber(ARGV[6])
 
 local failures = redis.call('HINCRBY', KEYS[1], 'failures', 1)
 redis.call('HSET', KEYS[1], 'last_failure_ts', ARGV[1])
@@ -167,11 +168,19 @@ if probe_count >= dormant_threshold then
     new_state = 'dormant'
 end
 
--- Cooldown = min(base * 2^(probe_count-1), max_cd). Cap exponent for safety.
-local exp = probe_count - 1
-if exp > 20 then exp = 20 end
-local cooldown = base * math.pow(2, exp)
-if cooldown > max_cd then cooldown = max_cd end
+-- Cooldown selection (#921):
+--   open:     exponential backoff capped at max_cd (~5min default)
+--   dormant:  long cooldown (~1h default) so we self-heal slowly instead
+--             of falling silent forever.
+local cooldown
+if new_state == 'dormant' then
+    cooldown = dormant_cooldown
+else
+    local exp = probe_count - 1
+    if exp > 20 then exp = 20 end
+    cooldown = base * math.pow(2, exp)
+    if cooldown > max_cd then cooldown = max_cd end
+end
 local next_probe_at = now + cooldown
 
 redis.call('HSET', KEYS[1], 'state', new_state, 'next_probe_at', next_probe_at)
@@ -191,18 +200,21 @@ redis.call('DEL', KEYS[2])
 return prior_state
 """
 
-_ALLOW_SCRIPT = None
-_RECORD_FAILURE_SCRIPT = None
-_RECORD_SUCCESS_SCRIPT = None
+# Circuit Lua scripts, cached process-wide via the shared ScriptCache (#526 D4).
+_CIRCUIT_SCRIPTS = ScriptCache(
+    allow=_ALLOW_REQUEST_LUA,
+    record_failure=_RECORD_FAILURE_LUA,
+    record_success=_RECORD_SUCCESS_LUA,
+)
 
 
 def _ensure_scripts(client: _redis.Redis):
-    global _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
-    if _ALLOW_SCRIPT is None:
-        _ALLOW_SCRIPT = client.register_script(_ALLOW_REQUEST_LUA)
-        _RECORD_FAILURE_SCRIPT = client.register_script(_RECORD_FAILURE_LUA)
-        _RECORD_SUCCESS_SCRIPT = client.register_script(_RECORD_SUCCESS_LUA)
-    return _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
+    """Register + cache the circuit Lua scripts; return (allow, rf, rs) tuple.
+
+    Tuple shape preserved for the existing call sites that unpack it.
+    """
+    s = _CIRCUIT_SCRIPTS.ensure(client)
+    return s["allow"], s["record_failure"], s["record_success"]
 
 
 # ----- Failure classification (#474) ---------------------------------------
@@ -226,10 +238,15 @@ CIRCUIT_FAILURE_EXCEPTIONS: tuple[type[BaseException], ...] = (
 # callers' `except AgentClientError` blocks keep working) but NOT count
 # toward the circuit threshold. httpx.PoolTimeout is included because
 # pool exhaustion is a client-side resource issue, not agent unhealth.
+#
+# httpx.TimeoutException is the parent class of {Connect,Read,Write,Pool}
+# Timeout. ConnectTimeout is intentionally in CIRCUIT_FAILURE_EXCEPTIONS
+# above and is caught by the *first* `except` arm in _request(), so the
+# parent class here only intercepts bare TimeoutException and any future
+# subclass we don't enumerate — making the drop-grace reclassification
+# total over the timeout hierarchy minus ConnectTimeout.
 TRANSIENT_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
+    httpx.TimeoutException,
     httpx.WriteError,
     httpx.ReadError,
     httpx.RemoteProtocolError,
@@ -244,6 +261,63 @@ def is_circuit_failure(exc: BaseException) -> bool:
     same rule. See CIRCUIT_FAILURE_EXCEPTIONS for the canonical list.
     """
     return isinstance(exc, CIRCUIT_FAILURE_EXCEPTIONS)
+
+
+# ----- Dormant-transition notification (#921) -------------------------------
+#
+# When the breaker enters dormant, surface it in the Operating Room queue so
+# operators see "agent silently failing scheduled tasks" without having to
+# grep logs. Fire-and-forget: if the DB insert blows up, we still log the
+# transition and the breaker is unaffected. Best-effort by design.
+
+def _emit_dormant_alert(agent_name: str) -> None:
+    """Insert a circuit_breaker_dormant operator-queue entry.
+
+    Called from CircuitState.record_failure on the closed/open → dormant
+    transition. The Lua atomicity of _RECORD_FAILURE_LUA guarantees exactly
+    one worker observes the transition, so this fires at most once per
+    distinct dormant entry — no de-dupe layer required.
+    """
+    try:
+        from database import db
+        from utils.helpers import utc_now_iso
+        now = utc_now_iso()
+        # Use the generic 'alert' type so the existing Operating Room UI
+        # (QueueCard.vue / QueueItemDetail.vue branch on 'approval|question|alert')
+        # renders an Acknowledge control. The narrower discriminator goes in
+        # context.alert_type for callers that want to filter — same pattern
+        # the existing `sync_failing` work should adopt when its UI is touched.
+        item = {
+            "id": f"cb-dormant-{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "alert",
+            "status": "pending",
+            "priority": "high",
+            "title": "Agent circuit breaker DORMANT",
+            "question": (
+                f"{agent_name}'s circuit breaker entered DORMANT after "
+                f"{CIRCUIT_DORMANT_AFTER_OPEN_PROBES} consecutive failed probes. "
+                f"Scheduled tasks fast-fail until the agent recovers via the "
+                f"~{int(CIRCUIT_DORMANT_COOLDOWN_SECONDS / 60)} min cooldown "
+                f"probe or an admin reset."
+            ),
+            "context": {
+                "agent_name": agent_name,
+                "alert_type": "circuit_breaker_dormant",
+                "transition": "dormant",
+                "dormant_after_open_probes": CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
+                "dormant_cooldown_seconds": CIRCUIT_DORMANT_COOLDOWN_SECONDS,
+            },
+            "created_at": now,
+        }
+        db.create_operator_queue_item(agent_name, item)
+        logger.warning(
+            "[CB] circuit_breaker_dormant operator-queue entry emitted for %s",
+            agent_name,
+        )
+    except Exception:
+        # Don't let alert-delivery failure mask the breaker transition.
+        logger.exception("[CB] failed to emit dormant alert for %s", agent_name)
 
 
 # ----- Public state object --------------------------------------------------
@@ -303,6 +377,7 @@ class CircuitState:
                     CIRCUIT_BASE_COOLDOWN_SECONDS,
                     CIRCUIT_MAX_COOLDOWN_SECONDS,
                     CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
+                    CIRCUIT_DORMANT_COOLDOWN_SECONDS,
                 ],
                 client=client,
             )
@@ -316,10 +391,17 @@ class CircuitState:
                     )
                 elif new_state == "dormant":
                     logger.warning(
-                        "Circuit DORMANT for agent %s — stopped probing after %d "
-                        "consecutive open-probe failures (manual recovery required)",
-                        self.agent_name, CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
+                        "Circuit DORMANT for agent %s after %d consecutive open-probe "
+                        "failures — switching to %.0fs cooldown probing (#921)",
+                        self.agent_name,
+                        CIRCUIT_DORMANT_AFTER_OPEN_PROBES,
+                        CIRCUIT_DORMANT_COOLDOWN_SECONDS,
                     )
+                    # #921: surface the transition in the Operating Room so
+                    # operators see it without having to grep logs. The Lua
+                    # atomicity guarantees exactly one worker observes the
+                    # transition, so this fires once per dormant entry.
+                    _emit_dormant_alert(self.agent_name)
             return new_state
         except Exception as e:
             logger.warning("Circuit record_failure swallowed (%s)", e)
@@ -381,16 +463,9 @@ class CircuitState:
         return self._read_int("failures")
 
 
-def _decode_pair(result: Any) -> tuple[str, str]:
-    """Lua MULTI return → (prior_state, new_state) as strings."""
-    if not result or len(result) != 2:
-        return ("closed", "closed")
-    prior, new = result
-    if isinstance(prior, bytes):
-        prior = prior.decode()
-    if isinstance(new, bytes):
-        new = new.decode()
-    return prior, new
+# Shared with the dispatch breaker (#526 D4): (prior_state, new_state) decode.
+# Aliased (not re-defined) so agent_client._decode_pair stays importable.
+_decode_pair = decode_pair
 
 
 def _state_dict(data: Dict[str, Any]) -> dict:
@@ -482,20 +557,76 @@ def reset_circuit(agent_name: str) -> None:
 
 _client_pool: Dict[str, httpx.AsyncClient] = {}
 
+# Per-base_url "recent transport drop" timestamps. When the first concurrent
+# caller catches a transport-level disconnect we stamp this map; siblings whose
+# fresh-client retry then dies with ConnectError/Timeout within the grace
+# window are classified as collateral drops (no record_failure). Without this
+# the eviction-then-fresh-client race makes 9-of-10 concurrent drops still
+# trip the breaker — see #474.
+#
+# Scope: both `_recent_drops` and `_client_pool` are process-local. Under
+# multi-uvicorn-worker deployments each worker has its own grace map and its
+# own pool, so the burst-neutralization is per-worker. The Redis-backed
+# circuit (`CircuitState`) remains the single fleet-wide source of truth, so
+# transport drops still never hit `record_failure()` in any worker — only the
+# specific in-burst sibling-collapse fix is per-worker, which is acceptable
+# because the underlying client pool is also per-worker.
+_recent_drops: Dict[str, float] = {}
+_DROP_GRACE_SEC = 2.0
 
-def _get_http_client(base_url: str) -> httpx.AsyncClient:
-    """Get or create a persistent HTTP client for a base URL."""
+
+def _stamp_drop(base_url: str) -> None:
+    _recent_drops[base_url] = time.monotonic()
+
+
+def _is_within_drop_grace(base_url: str) -> bool:
+    ts = _recent_drops.get(base_url)
+    if ts is None:
+        return False
+    if time.monotonic() - ts <= _DROP_GRACE_SEC:
+        return True
+    _recent_drops.pop(base_url, None)
+    return False
+
+
+def _build_http_client(base_url: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url=base_url,
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=30.0,
+        ),
+    )
+
+
+def _acquire_client(base_url: str) -> Tuple[httpx.AsyncClient, bool]:
+    """Acquire an httpx client and report whether it is pooled.
+
+    Returns `(client, is_pooled)`. Non-pooled clients are single-use and
+    MUST be closed by the caller — the in-grace path returns a fresh
+    client so a concurrent drop burst can't repopulate the pool with
+    transient sockets, but the caller is then responsible for `aclose()`
+    to prevent a connection-handle leak.
+    """
+    if _is_within_drop_grace(base_url):
+        return _build_http_client(base_url), False
+
     client = _client_pool.get(base_url)
     if client is None or client.is_closed:
-        client = httpx.AsyncClient(
-            base_url=base_url,
-            limits=httpx.Limits(
-                max_connections=10,
-                max_keepalive_connections=5,
-                keepalive_expiry=30.0,
-            ),
-        )
+        client = _build_http_client(base_url)
         _client_pool[base_url] = client
+    return client, True
+
+
+def _get_http_client(base_url: str) -> httpx.AsyncClient:
+    """Get or create an httpx client for a base URL.
+
+    Backward-compatible wrapper around `_acquire_client` that discards the
+    pooled-ness flag. Callers that need to close non-pooled clients should
+    use `_acquire_client` directly. (`_request` does.)
+    """
+    client, _ = _acquire_client(base_url)
     return client
 
 
@@ -549,6 +680,17 @@ class AgentClientError(Exception):
 
 class AgentNotReachableError(AgentClientError):
     """Agent container is not responding."""
+    pass
+
+
+class AgentConnectionDroppedError(AgentNotReachableError):
+    """Connection dropped mid-flight (transport-level disconnect).
+
+    Distinguishes "in-flight transport broke" from "agent unreachable from the
+    start" so the circuit breaker can stay neutral. Inherits from
+    AgentNotReachableError so tenacity retries (`retry_if_exception_type`) and
+    callers catching `AgentNotReachableError` handle it correctly. (#474.)
+    """
     pass
 
 
@@ -633,7 +775,7 @@ class AgentClient:
             )
 
         timeout = timeout or self.DEFAULT_TIMEOUT
-        client = _get_http_client(self.base_url)
+        client, is_pooled = _acquire_client(self.base_url)
 
         try:
             response = await client.request(
@@ -645,35 +787,110 @@ class AgentClient:
         except asyncio.CancelledError:
             # Cancellation (e.g. MCP client drop propagating through FastAPI)
             # is not an agent-health signal. Explicit re-raise so a future
-            # maintainer can't shadow it with a broader catch.
+            # maintainer can't shadow it with a broader catch. (#798.)
             raise
 
         except CIRCUIT_FAILURE_EXCEPTIONS as e:
             # ConnectError / ConnectTimeout — agent is genuinely unreachable.
             # ConnectTimeout is a TimeoutException subclass, so this branch
-            # must come before any TimeoutException catch.
+            # must come before any TimeoutException catch. (#798.)
+            #
+            # Drop-grace override (#474 sibling-collapse fix): if a peer
+            # caller on the same base_url tripped a transport drop within
+            # the last _DROP_GRACE_SEC, this ConnectError is collateral —
+            # the pool was evicted under us and the fresh client failed
+            # to reconnect mid-burst on a still-healthy agent. Raise the
+            # AgentNotReachableError subclass instead of record_failure()
+            # so siblings of a single drop don't poison the circuit.
+            if _is_within_drop_grace(self.base_url):
+                raise AgentConnectionDroppedError(
+                    f"Connection to agent {self.agent_name} dropped mid-burst "
+                    f"(collateral {type(e).__name__}): {e}"
+                )
             self._circuit.record_failure()
             raise AgentNotReachableError(
                 f"Cannot reach agent {self.agent_name}: "
                 f"{type(e).__name__}: {e}"[:200]
             )
 
-        except TRANSIENT_TRANSPORT_EXCEPTIONS as e:
-            # Read/Write timeouts, pool exhaustion, mid-write broken-pipe /
-            # reset, garbled HTTP framing. Surface to the caller as the
-            # existing typed error so `except AgentClientError` blocks keep
-            # working, but DO NOT count toward the circuit threshold (#474).
+        except (
+            httpx.ReadError,
+            httpx.WriteError,
+            httpx.RemoteProtocolError,
+            BrokenPipeError,
+            ConnectionResetError,
+        ) as e:
+            # Transport drop mid-flight. NOT a circuit-health signal —
+            # the agent itself may be fine and the connection just died
+            # (upstream MCP-sync cancellation, transient socket reset,
+            # broken keepalive). Do NOT record_failure(). (#474.)
             #
-            # NOT caught here (propagate raw, bypass the AgentClientError
-            # typing contract): httpx.CloseError, httpx.LocalProtocolError,
-            # httpx.ProxyError, httpx.UnsupportedProtocol, httpx.InvalidURL,
-            # and raw OSError subclasses (BrokenPipeError, ConnectionResetError).
-            # Those are client-side / configuration bugs, not agent-health
-            # signals — letting them surface loudly is intentional.
+            # This branch is layered ABOVE TRANSIENT_TRANSPORT_EXCEPTIONS
+            # so the stamp+evict side effects always run on the genuine
+            # drop signals (httpx.ReadError / WriteError / RemoteProtocolError
+            # — which also appear in the tuple below — plus the raw
+            # OSError subclasses, which #798 deliberately let propagate).
+            # The tuple-based handler below is then left only with the
+            # timeout / pool-exhaustion members of the contract.
+            #
+            # Pool eviction: a pooled client must be removed so the next
+            # call doesn't reuse a broken keepalive socket. The `is
+            # client` identity check guarantees only the worker that
+            # still owns the pool entry closes it; siblings in a
+            # concurrent burst see the pool empty and skip. Non-pooled
+            # (fresh-during-grace) clients are not in the pool, so the
+            # eviction step is skipped — the outer `finally` closes
+            # them either way.
+            _stamp_drop(self.base_url)
+            if is_pooled:
+                evicted = _client_pool.pop(self.base_url, None)
+                if evicted is client:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        pass
+            raise AgentConnectionDroppedError(
+                f"Connection to agent {self.agent_name} dropped mid-flight: "
+                f"{type(e).__name__}: {e}"
+            )
+
+        except TRANSIENT_TRANSPORT_EXCEPTIONS as e:
+            # Read/Write timeouts and pool exhaustion. Surface to the
+            # caller as the existing typed error so `except AgentClientError`
+            # blocks keep working, but DO NOT count toward the circuit
+            # threshold (#474 / #798). The httpx.ReadError / WriteError /
+            # RemoteProtocolError members of this tuple are intercepted
+            # by the stamp+evict handler above so this branch sees only
+            # the *Timeout / PoolTimeout members in practice.
+            #
+            # Drop-grace override (#474 sibling-collapse fix): if a peer
+            # caller on the same base_url tripped a transport drop within
+            # the last _DROP_GRACE_SEC, surface as AgentConnectionDroppedError
+            # so tenacity / catch chains see a consistent "in-burst" signal
+            # rather than a plain transient.
+            if _is_within_drop_grace(self.base_url):
+                raise AgentConnectionDroppedError(
+                    f"Connection to agent {self.agent_name} dropped mid-burst "
+                    f"(collateral {type(e).__name__}): {e}"
+                )
             raise AgentNotReachableError(
                 f"Transient transport error to agent {self.agent_name}: "
                 f"{type(e).__name__}: {e}"[:200]
             )
+
+        finally:
+            # Non-pooled clients are single-use (returned by `_acquire_client`
+            # while a drop-grace window is active so the pool isn't
+            # repopulated with transient sockets). The body has already
+            # buffered any successful response (default httpx is non-
+            # streaming), so closing here is safe on every exit path and
+            # prevents the connection-handle leak that would otherwise
+            # accumulate during sustained drop bursts. (#474.)
+            if not is_pooled:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
     async def get(self, path: str, timeout: float = None, **kwargs) -> httpx.Response:
         """Make a GET request to the agent."""

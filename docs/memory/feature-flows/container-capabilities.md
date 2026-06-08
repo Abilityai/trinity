@@ -16,18 +16,19 @@ Controls whether agent containers run with full Docker capabilities (allowing pa
 
 ## What "Full Capabilities" Means
 
+Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexec tmpfs) and differ only in which caps are added back. Constants live in `src/backend/services/agent_service/capabilities.py` and are re-exported from `lifecycle.py`.
+
 ### Full Capabilities Mode (`full_capabilities=true`)
-- Container runs with **Docker default capabilities**
-- `cap_drop=[]` (no capabilities dropped)
-- `cap_add=[]` (defaults to Docker defaults)
-- `security_opt=[]` (no additional AppArmor restrictions)
-- `tmpfs={'/tmp': 'size=100m'}` (writable tmp without noexec)
-- **Allows**: `apt-get install`, `sudo`, and system-level operations
+- `cap_drop=['ALL']` (baseline — always)
+- `cap_add=FULL_CAPABILITIES` (9 caps: restricted set + `DAC_OVERRIDE`, `FOWNER`, `KILL`)
+- `security_opt=['apparmor:docker-default']`
+- `tmpfs={'/tmp': 'noexec,nosuid,size=100m'}`
+- **Allows**: `sudo apt-get install` and similar package-installation flows
+- **Still prevents** (Issue #602 / Phase 3c, 2026-05-13): `SYS_PTRACE` (heap-read escalation), `MKNOD` (device-node escape), `NET_RAW` (raw-packet crafting), `FSETID` (setuid-preserve on chmod)
 
 ### Restricted Mode (`full_capabilities=false`, secure default)
-- Container runs with **minimal capabilities**
-- `cap_drop=['ALL']` (all capabilities dropped)
-- `cap_add=['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE']`
+- `cap_drop=['ALL']` (baseline — always)
+- `cap_add=RESTRICTED_CAPABILITIES` (6 caps: `NET_BIND_SERVICE`, `SETGID`, `SETUID`, `CHOWN`, `SYS_CHROOT`, `AUDIT_WRITE`)
 - `security_opt=['apparmor:docker-default']`
 - `tmpfs={'/tmp': 'noexec,nosuid,size=100m'}`
 - **Prevents**: Package installation, most privileged operations
@@ -348,4 +349,5 @@ To enable true per-agent capability control:
 | Date | Change |
 |------|--------|
 | 2026-01-14 | **Security Consistency (HIGH)**: Added `RESTRICTED_CAPABILITIES` and `FULL_CAPABILITIES` constants in `lifecycle.py:31-49`. All container creation paths now ALWAYS apply baseline security (`cap_drop=['ALL']`, AppArmor, noexec tmpfs) before adding back needed capabilities. Previously some paths had inconsistent security settings. See [agent-lifecycle.md](agent-lifecycle.md) for full security constant documentation. |
+| 2026-05-13 | **Cap tightening (Issue #602 Phase 3c, PR #830)**: Dropped `SYS_PTRACE` / `MKNOD` / `NET_RAW` / `FSETID` from `FULL_CAPABILITIES` — each was a documented escalation primitive with no defensible agent use case (SYS_PTRACE closes the AISEC-C2 heap-read OAuth-exfil path). FULL set is now 9 caps (was 13). Constants extracted into `services/agent_service/capabilities.py` so `tests/unit/test_capability_set.py` can pin them stdlib-only; `lifecycle.py` re-exports for runtime callers. Existing containers keep old caps until restart. |
 | 2026-01-13 | Initial documentation - CFG-004 feature flow |

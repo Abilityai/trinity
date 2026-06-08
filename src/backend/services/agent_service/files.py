@@ -391,3 +391,75 @@ async def update_agent_file_logic(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+
+
+async def create_agent_folder_logic(
+    agent_name: str,
+    path: str,
+    current_user: User,
+    request: Request
+) -> dict:
+    """
+    Create a new directory in the agent's workspace.
+
+    Args:
+        agent_name: Name of the agent
+        path: Directory path to create
+        current_user: Current authenticated user
+        request: HTTP request object
+    """
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="You don't have permission to access this agent")
+
+    # AISEC-C2 / #590: backend-side deny check before proxying to the agent.
+    # Same deny-list used for file writes — a folder under a credential /
+    # Trinity-managed path is still a write into that path. The agent-server
+    # re-validates as defense in depth.
+    if not _is_user_writable_path(path):
+        logger.warning(
+            "Folder create blocked at backend deny-list: agent=%s path=%s user=%s",
+            agent_name, path, current_user.username,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot create folder in protected path: {path}"
+        )
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    await container_reload(container)
+    if container.status != "running":
+        raise HTTPException(status_code=400, detail="Agent must be running to create folders")
+
+    try:
+        # Call agent's internal mkdir API with retry
+        response = await agent_http_request(
+            agent_name,
+            "POST",
+            "/api/files/mkdir",
+            params={"path": path},
+            max_retries=3,
+            retry_delay=1.0,
+            timeout=30.0
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=response.json().get("detail", f"Failed to create folder: {response.text}")
+            )
+    except httpx.ConnectError:
+        # Agent server not ready - return 503 so tests can skip
+        raise HTTPException(
+            status_code=503,
+            detail="Agent server not ready. The agent may still be starting up."
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Folder creation timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")

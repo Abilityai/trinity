@@ -309,6 +309,7 @@ import axios from 'axios'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useRole } from '../../composables/useRole'
+import { copyToClipboard } from '../../utils/clipboard'
 
 const authStore = useAuthStore()
 const { isAdmin } = useRole()

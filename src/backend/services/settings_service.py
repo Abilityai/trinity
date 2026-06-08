@@ -44,6 +44,19 @@ OPS_SETTINGS_DEFAULTS = {
     "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days
     "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days
     "health_check_retention_days": "7",   # DELETE agent_health_checks rows after N days
+    # Issue #834 Phase 1a: soft-delete retention for agents. After
+    # DELETE /api/agents/{name}, the agent_ownership row is marked
+    # `deleted_at = NOW` and child rows are preserved. The cleanup
+    # sweep hard-deletes rows older than this many days (cascading
+    # child tables via #816's purge primitive). "0" disables the
+    # sweep entirely — soft-deleted rows then persist until manually
+    # purged.
+    "agent_soft_delete_retention_days": "180",
+    # Issue #834 Phase 1b: per-schedule soft-delete. Schedules are
+    # higher-churn than agents (users tweak/replace cron expressions
+    # often), so default is shorter than the agent window. "0"
+    # disables the sweep.
+    "schedule_soft_delete_retention_days": "30",
 }
 
 # Descriptions for each ops setting
@@ -60,6 +73,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "execution_log_retention_days": "Days to retain the JSONL transcript on schedule_executions (default: 30, 0 = disabled, #772)",
     "execution_row_retention_days": "Days to retain finished schedule_execution rows; rows older than this are deleted (default: 90, 0 = disabled, #772)",
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",
+    "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
+    "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
 }
 
 
@@ -171,6 +186,33 @@ class SettingsService:
         if env_val in ("false", "0", "no"):
             return False
         return True
+
+    # =========================================================================
+    # Workspace feature flag (#860)
+    # =========================================================================
+
+    def is_workspace_enabled(self) -> bool:
+        """
+        Whether the Agent Workspace (voice + canvas) surface is exposed to users.
+
+        Resolves in this order:
+        1. system_settings row 'workspace_enabled' ("true"/"false")
+        2. WORKSPACE_ENABLED env var (only honored as "true"/"1"/"yes" to opt in)
+        3. Default: False (BETA — opt-in required)
+
+        Admins opt in by setting ``workspace_enabled=true`` in system_settings
+        or by exporting ``WORKSPACE_ENABLED=true``.
+
+        Note: workspace also requires voice to be available (VOICE_ENABLED +
+        GEMINI_API_KEY). The feature-flags endpoint combines both conditions.
+        """
+        stored = self.get_setting('workspace_enabled')
+        if stored is not None:
+            return str(stored).lower() in ("true", "1", "yes")
+        env_val = os.getenv('WORKSPACE_ENABLED', '').strip().lower()
+        if env_val in ("true", "1", "yes"):
+            return True
+        return False
 
     # =========================================================================
     # GitHub Templates (TMPL-001)
