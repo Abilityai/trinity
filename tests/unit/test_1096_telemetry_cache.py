@@ -317,6 +317,34 @@ async def test_compute_excludes_errored_containers_from_totals(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_compute_skips_raw_exceptions_from_gather(monkeypatch):
+    """If a per-container fetch RAISES (rather than returning an error-dict),
+    asyncio.gather(return_exceptions=True) yields an Exception object in the
+    results. It must be skipped from BOTH the totals and the container list —
+    parity with the original's explicit `isinstance(result, Exception)` guard.
+    `_get_single_container_stats_sync` normally swallows everything, so this
+    pins the defensive branch against a future regression."""
+    monkeypatch.setattr(
+        telemetry, "list_all_agents_fast",
+        lambda: [_FakeAgent("ok"), _FakeAgent("boom")],
+    )
+
+    def _maybe_raise(name):
+        if name == "boom":
+            raise RuntimeError("docker exploded mid-fetch")
+        return {"name": name, "cpu": 3.0, "memory_mb": 30.0}
+
+    monkeypatch.setattr(telemetry, "_get_single_container_stats_sync", _maybe_raise)
+
+    payload = await telemetry._compute_container_stats()
+
+    assert payload["running_count"] == 2                          # both agents running
+    assert [c["name"] for c in payload["containers"]] == ["ok"]    # raised one excluded
+    assert payload["total_cpu_percent"] == 3.0                     # excluded from totals
+    assert payload["total_memory_mb"] == 30.0
+
+
+@pytest.mark.asyncio
 async def test_refresh_failure_leaves_previous_cache_intact(monkeypatch):
     """A Docker hiccup during refresh must not blow away good cached data nor
     raise — best-effort metrics."""
