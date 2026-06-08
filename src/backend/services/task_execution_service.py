@@ -19,10 +19,11 @@ Lifecycle:
 import asyncio
 import json
 import logging
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -34,7 +35,8 @@ from services.agent_call_limiter import (
     acquire_agent_call_slot,
 )
 from services.agent_client import CircuitState
-from services.capacity_manager import CapacityFull, get_capacity_manager
+from services.capacity_manager import CapacityFull, CircuitOpen, get_capacity_manager
+from services.dispatch_breaker import DispatchBreaker
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
@@ -319,6 +321,124 @@ async def terminate_execution_on_agent(
 
 
 # ---------------------------------------------------------------------------
+# Dispatch circuit breaker helpers (#526, RELIABILITY-007)
+# ---------------------------------------------------------------------------
+
+
+def dispatch_breaker_active(agent_name: str) -> bool:
+    """Combined dispatch-breaker gate: global master switch AND per-agent opt-in.
+
+    Single source of truth for "is the dispatch breaker engaged for this agent?",
+    shared by the routers (chat / task) and ``execute_task``. The global
+    ``DISPATCH_BREAKER_ENABLED`` master switch is checked first, so when the
+    feature is off fleet-wide the per-agent ``circuit_breaker_enabled`` SELECT is
+    short-circuited and a disabled fleet pays nothing on the dispatch hot path
+    (#526 D7). Fail-safe → False; never raises.
+    """
+    try:
+        from config import DISPATCH_BREAKER_ENABLED
+        if not DISPATCH_BREAKER_ENABLED:
+            return False
+        return bool(db.get_circuit_breaker_enabled(agent_name))
+    except Exception:
+        return False
+
+
+# Strong references to fire-and-forget breaker tasks. asyncio's event loop holds
+# only a WEAK reference to a bare ``create_task`` result, so an un-referenced task
+# can be garbage-collected mid-flight (the backlog drain would silently vanish).
+# Holding the task here until it completes closes that window; the done-callback
+# discards it so the set never grows unbounded.
+_background_breaker_tasks: "set[asyncio.Task[Any]]" = set()
+
+
+def _spawn_bg(coro: "Coroutine[Any, Any, None]") -> None:
+    """Schedule a fire-and-forget breaker task with a strong reference held until
+    it finishes — prevents the asyncio weak-ref GC footgun (#526)."""
+    task = asyncio.create_task(coro)
+    _background_breaker_tasks.add(task)
+    task.add_done_callback(_background_breaker_tasks.discard)
+
+
+async def _audit_circuit_transition(agent_name: str, transition: str) -> None:
+    """Audit a dispatch-breaker state transition (open / closed). Best-effort."""
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action=f"circuit_breaker_{transition}",
+            source="system",
+            target_type="agent",
+            target_id=agent_name,
+            details={"breaker": "dispatch", "transition": transition},
+        )
+    except Exception as e:
+        logger.warning(
+            "[DispatchBreaker] audit %s for %s failed: %s", transition, agent_name, e
+        )
+
+
+async def _fail_backlog_and_audit(agent_name: str) -> None:
+    """Drain-on-trip (#526 D3): on the breaker →open transition, fail the doomed
+    persistent backlog, clear the in-memory overflow, and audit the transition.
+
+    Best-effort and never raises — backgrounded by the caller via ``_spawn_bg``
+    (a strong reference is held so the task can't be GC'd mid-flight). If this
+    task is still lost or ``fail_queued_for_agent`` throws, the breaker-aware
+    sweep in ``CapacityManager.run_maintenance`` (60s loop) re-fails the queued
+    backlog for any agent whose dispatch breaker is still open — so the worst
+    case is a ~60s delay, not the 24h generic ``expire_stale`` window.
+    """
+    try:
+        failed = db.fail_queued_for_agent(
+            agent_name, reason="circuit_open: dispatch breaker open"
+        )
+        if failed:
+            logger.warning(
+                "[DispatchBreaker] failed %d queued backlog row(s) for %s on circuit open",
+                failed,
+                agent_name,
+            )
+    except Exception as e:
+        logger.error(
+            "[DispatchBreaker] fail_queued_for_agent(%s) failed: %s", agent_name, e
+        )
+    try:
+        await get_capacity_manager().clear_in_memory_queue(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[DispatchBreaker] clear_in_memory_queue(%s) failed: %s", agent_name, e
+        )
+    await _audit_circuit_transition(agent_name, "open")
+
+
+async def _record_dispatch_terminal(
+    agent_name: str, breaker_enabled: bool, error_code: Optional["TaskExecutionErrorCode"]
+) -> None:
+    """Record a dispatch-breaker outcome at an execution terminal (#526 D10).
+
+    ``error_code``: ``None`` at a SUCCESS terminal; ``TaskExecutionErrorCode.AUTH``
+    at the auth-failure terminal. Callers MUST NOT pass a non-AUTH failure's
+    ``None`` here (it would read as a success and reset the counter — see
+    ``DispatchBreaker.record_outcome``); the AUTH terminal gates on
+    ``error_code == AUTH`` before calling.
+
+    On the →open transition the backlog drain + audit are backgrounded so a slow
+    Redis/DB write never blocks the response. Best-effort; never raises.
+    """
+    if not breaker_enabled:
+        return
+    try:
+        t = DispatchBreaker(agent_name).record_outcome(error_code)
+    except Exception as e:  # pragma: no cover - fail-open is internal to the breaker
+        logger.warning("[DispatchBreaker] record_outcome(%s) failed: %s", agent_name, e)
+        return
+    if t.opened:
+        _spawn_bg(_fail_backlog_and_audit(agent_name))
+    elif t.closed:
+        _spawn_bg(_audit_circuit_transition(agent_name, "closed"))
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -349,6 +469,7 @@ class TaskExecutionService:
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
         fan_out_id: Optional[str] = None,
+        loop_id: Optional[str] = None,
         subscription_id: Optional[str] = None,
         parent_activity_id: Optional[str] = None,
         extra_activity_details: Optional[dict] = None,
@@ -356,6 +477,7 @@ class TaskExecutionService:
         schedule_context: Optional[dict] = None,
         attempt: Optional[int] = None,
         images: Optional[list] = None,
+        dispatch_gate_checked: bool = False,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -391,6 +513,12 @@ class TaskExecutionService:
         if model is None:
             model = settings_service.get_platform_default_model()
 
+        # Dispatch circuit breaker (#526): combined global master-switch AND
+        # per-agent opt-in. Drives the acquire() gate (this path), the
+        # slot_already_held drain-path guard at 3b, and outcome recording at the
+        # terminals. Best-effort read; defaults off so disabled agents pay nothing.
+        breaker_enabled = dispatch_breaker_active(agent_name)
+
         # ---- 1. Create execution record (if not provided) ----------------
         if not execution_id:
             # Snapshot subscription at record time (best-effort) for usage tracking (SUB-004)
@@ -411,6 +539,7 @@ class TaskExecutionService:
                 source_mcp_key_name=source_mcp_key_name,
                 model_used=model,
                 fan_out_id=fan_out_id,
+                loop_id=loop_id,
                 subscription_id=_exec_sub_id,
             )
             execution_id = execution.id if execution else None
@@ -438,6 +567,7 @@ class TaskExecutionService:
                         message_preview=message[:100] if message else "",
                         timeout_seconds=timeout_seconds,
                         overflow_policy="reject",
+                        breaker_enabled=breaker_enabled,
                     )
                     slot_acquired = cap_result.state == "admitted"
                 except CapacityFull:
@@ -456,6 +586,30 @@ class TaskExecutionService:
                         status=TaskExecutionStatus.FAILED,
                         response="",
                         error=error_msg,
+                    )
+                except CircuitOpen as e:
+                    # #526: dispatch breaker open — fast-fail before any agent
+                    # call. The slot was never acquired and nothing was enqueued
+                    # (acquire raised before the overflow branch). Close the row
+                    # FAILED(circuit_open) so it reads as a failed execution.
+                    error_msg = "circuit_open: agent unhealthy (dispatch breaker open)"
+                    logger.warning(
+                        f"[TaskExecService] Dispatch breaker OPEN for {agent_name}; "
+                        f"fast-failing execution {execution_id} "
+                        f"(retry_after={e.retry_after_seconds}s)"
+                    )
+                    if execution_id:
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
+                    return TaskExecutionResult(
+                        execution_id=execution_id or "",
+                        status=TaskExecutionStatus.FAILED,
+                        response="",
+                        error=error_msg,
+                        error_code=TaskExecutionErrorCode.CIRCUIT_OPEN,
                     )
 
             # ---- 3. Track activity start -------------------------------------
@@ -479,12 +633,26 @@ class TaskExecutionService:
                 )
             except Exception as e:
                 logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-            # ---- 3b. Circuit breaker fast-fail (precursor to #526) ----------
-            # Check the per-agent circuit breaker before marking dispatched.
-            # If the CB is open the agent is known-unhealthy; close the record
+            # ---- 3b. Circuit breaker fast-fail ------------------------------
+            # Check the per-agent circuit breakers before marking dispatched.
+            # If a CB is open the agent is known-unhealthy; close the record
             # immediately rather than letting it hang until cleanup (120 min).
+            #
+            # Transport breaker (#631): always consulted.
+            # Dispatch breaker (#526 D2): consulted ONLY on the slot_already_held
+            # DRAIN path where no upstream dispatch gate ran (the
+            # not-slot_already_held path already gated at acquire(); router
+            # pre-acquire sets dispatch_gate_checked=True). A pure state read —
+            # NOT allow_dispatch() — so it never consumes the half-open probe and
+            # cannot block a probe an upstream gate already admitted.
             circuit = CircuitState(agent_name)
-            if not circuit.allow_request():
+            transport_open = not circuit.allow_request()
+            dispatch_open = False
+            if breaker_enabled and slot_already_held and not dispatch_gate_checked:
+                dispatch_open = (
+                    DispatchBreaker(agent_name).to_dict().get("state") == "open"
+                )
+            if transport_open or dispatch_open:
                 error_msg = "Agent circuit breaker open — agent is unhealthy"
                 logger.warning(f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}")
                 if execution_id:
@@ -754,6 +922,11 @@ class TaskExecutionService:
                     },
                 )
 
+            # #526: success terminal — reset the dispatch breaker (consecutive-
+            # failure model; any success closes a recovering breaker / clears the
+            # counter). Backgrounds the recovery audit if this closed an open one.
+            await _record_dispatch_terminal(agent_name, breaker_enabled, None)
+
             return TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.SUCCESS,
@@ -930,6 +1103,13 @@ class TaskExecutionService:
                     status=ActivityState.FAILED,
                     error=error_msg,
                 )
+            # #526 D10: AUTH-only counting. Gate on error_code == AUTH so a
+            # non-auth HTTP failure (error_code is None) is NEVER passed to
+            # record_outcome — which would read None as a success and reset the
+            # counter. On the →open transition this backgrounds the backlog
+            # drain + audit.
+            if error_code == TaskExecutionErrorCode.AUTH:
+                await _record_dispatch_terminal(agent_name, breaker_enabled, error_code)
             return TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.FAILED,

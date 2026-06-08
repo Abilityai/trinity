@@ -35,11 +35,24 @@ The fleet health dashboard is an admin-only view that summarizes the health of a
 
 A background service that automatically recovers stuck resources:
 
-- **Stale executions** -- Any execution with `status='running'` for longer than 120 minutes is marked `failed`.
-- **Stale activities** -- Any activity with `activity_state='started'` for longer than 120 minutes is marked `failed`.
+- **Stale executions** -- Any execution with `status='running'` past its per-slot timeout is marked `failed`.
+- **Stale activities** -- Any activity with `activity_state='started'` past the configured threshold is marked `failed`.
 - **Stale Redis slots** -- Orphaned slot reservations are released.
 - **Run frequency** -- Every 5 minutes, plus a one-shot sweep on backend restart.
 - **Startup recovery** -- Orphaned executions (container down, not in process registry) are marked `failed` immediately and their slots are released.
+
+### Retention Sweeps
+
+The same cleanup service runs daily retention sweeps to keep the database lean:
+
+| Sweep | Default | Setting |
+|-------|---------|---------|
+| `schedule_executions.execution_log` nulled past | 30 days | `execution_log_retention_days` |
+| Terminal `schedule_executions` rows deleted past | 90 days | `execution_row_retention_days` |
+| `agent_health_checks` rows deleted past | 7 days | `health_check_retention_days` |
+| `audit_log` rows deleted past | 365 days | `AUDIT_LOG_RETENTION_DAYS` (floor 365) |
+
+Each sweep is capped at 5,000 rows per cycle, so the first post-deploy backfill spans hours, not minutes. Setting any retention value to `0` disables that sweep. A daily VACUUM at 04:30 UTC reclaims freed pages.
 
 ## Real-Time Event Reliability
 

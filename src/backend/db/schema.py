@@ -44,7 +44,8 @@ TABLES = {
             email TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            last_login TEXT
+            last_login TEXT,
+            suspended_at TEXT
         )
     """,
 
@@ -91,6 +92,7 @@ TABLES = {
             voice_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
+            circuit_breaker_enabled INTEGER DEFAULT 0,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
@@ -173,7 +175,9 @@ TABLES = {
             updated_at TEXT NOT NULL,
             last_run_at TEXT,
             next_run_at TEXT,
-            timeout_seconds INTEGER DEFAULT 3600,
+            -- #913: NULL ⇒ inherit from agent_ownership.execution_timeout_seconds.
+            -- Dropped the DEFAULT 3600 that masked per-agent timeout for cron.
+            timeout_seconds INTEGER,
             allowed_tools TEXT,
             model TEXT,
             max_retries INTEGER DEFAULT 0,
@@ -226,7 +230,55 @@ TABLES = {
             backlog_metadata TEXT,
             fan_out_id TEXT,
             retry_count INTEGER DEFAULT 0,
+            loop_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Agent Loops (#740) — sequential bounded task execution
+    # -------------------------------------------------------------------------
+    "agent_loops": """
+        CREATE TABLE IF NOT EXISTS agent_loops (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message_template TEXT NOT NULL,
+            max_runs INTEGER NOT NULL,
+            stop_signal TEXT,
+            delay_seconds INTEGER NOT NULL DEFAULT 0,
+            timeout_per_run INTEGER,
+            model TEXT,
+            allowed_tools TEXT,
+            status TEXT NOT NULL,
+            runs_completed INTEGER NOT NULL DEFAULT 0,
+            stop_reason TEXT,
+            last_response TEXT,
+            error TEXT,
+            started_by_user_id INTEGER,
+            started_by_user_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            source_mcp_key_name TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT
+        )
+    """,
+
+    "agent_loop_runs": """
+        CREATE TABLE IF NOT EXISTS agent_loop_runs (
+            id TEXT PRIMARY KEY,
+            loop_id TEXT NOT NULL,
+            run_number INTEGER NOT NULL,
+            execution_id TEXT,
+            status TEXT NOT NULL,
+            response TEXT,
+            error TEXT,
+            cost REAL,
+            duration_ms INTEGER,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
         )
     """,
 
@@ -868,6 +920,48 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # VoIP Telephony Tables (VOIP-001 — Twilio Programmable Voice, #1056)
+    # -------------------------------------------------------------------------
+    "voip_bindings": """
+        CREATE TABLE IF NOT EXISTS voip_bindings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL UNIQUE,
+            account_sid TEXT NOT NULL,
+            auth_token_encrypted TEXT NOT NULL,
+            from_number TEXT NOT NULL,
+            inbound_number TEXT,
+            webhook_secret TEXT NOT NULL UNIQUE,
+            webhook_url TEXT,
+            daily_call_cap INTEGER DEFAULT 50,
+            display_name TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+    """,
+
+    "voip_call_logs": """
+        CREATE TABLE IF NOT EXISTS voip_call_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id TEXT NOT NULL UNIQUE,
+            agent_name TEXT NOT NULL,
+            chat_session_id TEXT,
+            to_number TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            status TEXT NOT NULL DEFAULT 'initiated',
+            twilio_call_sid TEXT,
+            initiated_by_user_id INTEGER,
+            initiated_by_email TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            connected_at TEXT,
+            ended_at TEXT,
+            duration_ms INTEGER
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Subscription Rate Limit Tracking (SUB-003)
     # -------------------------------------------------------------------------
     "subscription_rate_limit_events": """
@@ -1037,6 +1131,23 @@ TABLES = {
             observed_state TEXT NOT NULL,
             signal_query TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """,
+    # -------------------------------------------------------------------------
+    # Idempotency (RELIABILITY-006, #525)
+    # -------------------------------------------------------------------------
+    # One row per claimed (scope, key). PRIMARY KEY gives the atomic-claim
+    # uniqueness; rows past the 24h TTL are purged by the cleanup service.
+    "idempotency_keys": """
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            scope TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            execution_id TEXT,
+            status TEXT NOT NULL,
+            response_snapshot TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope, idempotency_key)
         )
     """,
 }
@@ -1233,6 +1344,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_severity ON canary_violations(severity, snapshot_time DESC)",
     "CREATE INDEX IF NOT EXISTS idx_canary_violations_snapshot ON canary_violations(snapshot_time DESC)",
 
+    # Idempotency key index (RELIABILITY-006, #525) — drives the TTL purge sweep
+    "CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)",
+
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_owner ON subscription_credentials(owner_id)",
@@ -1267,6 +1381,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_whatsapp_bindings_webhook ON whatsapp_bindings(webhook_secret)",
     "CREATE INDEX IF NOT EXISTS idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id)",
 
+    # VoIP telephony indexes (VOIP-001) — agent+started_at powers the daily-cap count
+    "CREATE INDEX IF NOT EXISTS idx_voip_bindings_agent ON voip_bindings(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_voip_bindings_webhook ON voip_bindings(webhook_secret)",
+    "CREATE INDEX IF NOT EXISTS idx_voip_call_logs_agent_started ON voip_call_logs(agent_name, started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_voip_call_logs_call_id ON voip_call_logs(call_id)",
+
     # Execution fan-out / backlog / retry partial indexes
     "CREATE INDEX IF NOT EXISTS idx_executions_fan_out ON schedule_executions(fan_out_id)",
     "CREATE INDEX IF NOT EXISTS idx_executions_queued "
@@ -1283,6 +1403,14 @@ INDEXES = [
     # Proactive messaging share lookup (#321)
     "CREATE INDEX IF NOT EXISTS idx_agent_sharing_proactive "
     "ON agent_sharing(agent_name, shared_with_email) WHERE allow_proactive = 1",
+
+    # Sequential agent loops (#740)
+    "CREATE INDEX IF NOT EXISTS idx_loops_agent ON agent_loops(agent_name)",
+    "CREATE INDEX IF NOT EXISTS idx_loops_status ON agent_loops(status)",
+    "CREATE INDEX IF NOT EXISTS idx_loops_user ON agent_loops(started_by_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)",
+    "CREATE INDEX IF NOT EXISTS idx_executions_loop ON schedule_executions(loop_id) "
+    "WHERE loop_id IS NOT NULL",
 ]
 
 

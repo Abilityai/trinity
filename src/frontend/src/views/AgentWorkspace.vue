@@ -138,60 +138,140 @@
       <div class="flex-1 flex flex-col bg-gray-900 border-l border-gray-800 overflow-hidden">
 
         <!-- Canvas header -->
-        <div class="flex-shrink-0 flex items-center justify-between px-5 py-3 border-b border-gray-800">
-          <h2 class="text-sm font-medium text-gray-200">
-            {{ panelState.title || 'Canvas' }}
+        <div class="flex-shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-b border-gray-800">
+          <h2 class="text-sm font-medium text-gray-200 truncate">
+            {{ displayedPanel.title || 'Canvas' }}
           </h2>
-          <span v-if="panelUpdatedAgo" class="text-xs text-gray-600">{{ panelUpdatedAgo }}</span>
+          <div class="flex items-center gap-2 flex-shrink-0">
+            <!-- History navigation (shown once ≥2 snapshots exist) -->
+            <div v-if="hasHistory" class="flex items-center gap-1">
+              <button
+                @click="goPrev"
+                :disabled="effectiveIndex <= 0"
+                class="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Previous snapshot"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <select
+                :value="effectiveIndex"
+                @change="selectSnapshot"
+                class="max-w-[12rem] text-xs bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-gray-300 focus:outline-none focus:border-action-primary-500"
+                title="Jump to snapshot"
+              >
+                <option v-for="(snap, i) in history" :key="i" :value="i">{{ snapshotLabel(snap, i) }}</option>
+              </select>
+              <button
+                @click="goNext"
+                :disabled="isLive"
+                class="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Next snapshot"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+              <span
+                v-if="isLive"
+                class="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-status-success-900/40 text-status-success-400 tracking-wide"
+              >LIVE</span>
+              <span
+                v-else
+                class="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-gray-700 text-gray-300 tracking-wide"
+              >PINNED</span>
+            </div>
+            <span
+              v-if="panelUpdatedAgo"
+              :class="['text-xs transition-colors duration-700', justUpdated ? 'text-state-autonomous-300' : 'text-gray-600']"
+            >{{ panelUpdatedAgo }}</span>
+          </div>
         </div>
 
-        <!-- Canvas content -->
-        <div class="flex-1 overflow-auto p-6">
-          <!-- Empty state -->
-          <div v-if="!panelState.content" class="flex flex-col items-center justify-center h-full gap-4 text-center">
-            <div class="w-16 h-16 rounded-full border-2 border-gray-800 flex items-center justify-center">
-              <svg class="w-7 h-7 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
+        <!-- Canvas content — cross-fades on each update / history navigation;
+             the keyed inner node is the single transition child. -->
+        <div class="flex-1 overflow-auto p-6 relative">
+          <Transition :name="canvasTransition" mode="out-in">
+            <div :key="transitionKey" class="h-full">
+
+              <!-- Empty state -->
+              <div v-if="!displayedPanel.content" class="flex flex-col items-center justify-center h-full gap-4 text-center">
+                <div class="w-16 h-16 rounded-full border-2 border-gray-800 flex items-center justify-center">
+                  <svg class="w-7 h-7 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                </div>
+                <p class="text-gray-600 text-sm max-w-xs">
+                  {{ voice.isActive.value
+                    ? 'The agent can display notes, summaries, and structured content here during your conversation.'
+                    : 'Start a conversation — the agent will display structured content here in real time.' }}
+                </p>
+              </div>
+
+              <!-- Markdown content -->
+              <div
+                v-else-if="displayedPanel.type === 'markdown'"
+                v-html="renderedContent"
+                class="prose prose-sm prose-invert max-w-none
+                  prose-headings:text-gray-100 prose-headings:font-semibold
+                  prose-p:text-gray-300 prose-p:leading-relaxed
+                  prose-strong:text-gray-100
+                  prose-code:text-state-autonomous-300 prose-code:bg-gray-800 prose-code:px-1 prose-code:rounded prose-code:text-xs
+                  prose-pre:bg-gray-800 prose-pre:border prose-pre:border-gray-700
+                  prose-ul:text-gray-300 prose-ol:text-gray-300
+                  prose-li:marker:text-gray-500
+                  prose-blockquote:border-action-primary-500 prose-blockquote:text-gray-400
+                  prose-a:text-action-primary-400 hover:prose-a:text-action-primary-300
+                  prose-hr:border-gray-700
+                  prose-table:text-sm
+                  prose-th:text-gray-200 prose-th:bg-gray-800
+                  prose-td:text-gray-300 prose-td:border-gray-700"
+              />
+
+              <!-- Mermaid diagram — rendered in-parent via the bundled mermaid lib
+                   (securityLevel:'strict') then DOMPurify-sanitized before v-html
+                   (H-005). No iframe: the production CSP (script-src 'self') blocks
+                   inline scripts in a srcdoc iframe and CORP blocks the bundle from
+                   the iframe's opaque origin (#979 prod-CSP regression). -->
+              <div v-else-if="displayedPanel.type === 'mermaid'" class="flex items-center justify-center h-full">
+                <pre
+                  v-if="mermaidError"
+                  class="text-xs text-status-danger-400 whitespace-pre-wrap font-mono max-w-full overflow-auto"
+                >{{ mermaidError }}</pre>
+                <div v-else v-html="mermaidSvg" class="mermaid-host max-w-full max-h-full" />
+              </div>
+
+              <!-- Image — rendered in the parent DOM via a Vue :src binding (safe;
+                   no markup injection). Workspace-path images come from an
+                   authenticated blob fetch; web URLs render directly. -->
+              <div v-else-if="displayedPanel.type === 'image'" class="flex flex-col items-center justify-center h-full gap-3">
+                <img
+                  v-if="displayedImageSrc && !imageError"
+                  :src="displayedImageSrc"
+                  :alt="displayedPanel.title || 'Agent image'"
+                  class="max-w-full max-h-full object-contain rounded-lg"
+                  @error="imageError = true"
+                />
+                <div v-else class="text-sm" :class="imageError ? 'text-status-danger-400' : 'text-gray-500'">
+                  {{ imageError ? 'Image could not be loaded.' : 'Loading image…' }}
+                </div>
+                <p v-if="displayedPanel.caption" class="text-sm text-gray-400 text-center max-w-prose">
+                  {{ displayedPanel.caption }}
+                </p>
+              </div>
+
+              <!-- HTML content — DOMPurify-sanitized and rendered in-parent (H-005),
+                   same trust model as markdown. Scripts are stripped, so agent JS
+                   (e.g. chart.js) does NOT execute — static layout only. Replaces
+                   the prior srcdoc iframe, which the production CSP blocked (#979). -->
+              <div
+                v-else-if="displayedPanel.type === 'html'"
+                v-html="sanitizedHtml"
+                class="agent-html-panel text-sm text-gray-300 max-w-none"
+              />
             </div>
-            <p class="text-gray-600 text-sm max-w-xs">
-              {{ voice.isActive.value
-                ? 'The agent can display notes, summaries, and structured content here during your conversation.'
-                : 'Start a conversation — the agent will display structured content here in real time.' }}
-            </p>
-          </div>
-
-          <!-- Markdown content -->
-          <div
-            v-else-if="panelState.type === 'markdown'"
-            v-html="renderedContent"
-            class="prose prose-sm prose-invert max-w-none
-              prose-headings:text-gray-100 prose-headings:font-semibold
-              prose-p:text-gray-300 prose-p:leading-relaxed
-              prose-strong:text-gray-100
-              prose-code:text-state-autonomous-300 prose-code:bg-gray-800 prose-code:px-1 prose-code:rounded prose-code:text-xs
-              prose-pre:bg-gray-800 prose-pre:border prose-pre:border-gray-700
-              prose-ul:text-gray-300 prose-ol:text-gray-300
-              prose-li:marker:text-gray-500
-              prose-blockquote:border-action-primary-500 prose-blockquote:text-gray-400
-              prose-a:text-action-primary-400 hover:prose-a:text-action-primary-300
-              prose-hr:border-gray-700
-              prose-table:text-sm
-              prose-th:text-gray-200 prose-th:bg-gray-800
-              prose-td:text-gray-300 prose-td:border-gray-700"
-          />
-
-          <!-- HTML content — sandboxed iframe so agent-supplied scripts run in
-               an opaque origin and cannot reach parent localStorage / cookies /
-               JWT. Deliberately omits allow-same-origin / allow-forms /
-               allow-popups / allow-top-navigation / allow-modals. -->
-          <iframe
-            v-else-if="panelState.type === 'html'"
-            ref="htmlPanelEl"
-            sandbox="allow-scripts"
-            class="w-full h-full bg-transparent border-0 block"
-            title="Agent panel"
-          />
+          </Transition>
         </div>
       </div>
 
@@ -200,22 +280,28 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
 import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
 import AgentAvatar from '../components/AgentAvatar.vue'
-// Chart.js is loaded inside the sandboxed iframe (see renderHtmlPanel). The
-// relative path is intentional: chart.js 4 doesn't expose the UMD bundle via
-// its package `exports` field, so a bare specifier like `chart.js/dist/...`
-// fails to resolve. The relative path bypasses module resolution and Vite's
-// `?url` import emits the file as a hashed same-origin asset.
-import chartJsUrl from '../../node_modules/chart.js/dist/chart.umd.js?url'
+// Mermaid renders in-parent (not in a sandboxed iframe): the production CSP
+// (script-src 'self') blocks inline scripts in a srcdoc iframe, and CORP blocks
+// the bundle from the iframe's opaque origin (#979). securityLevel:'strict'
+// disables interactivity/htmlLabels; the output SVG is DOMPurify-sanitized before
+// it touches the DOM (H-005). Imported as a normal ESM dep so it lands in this
+// route's chunk.
+import mermaid from 'mermaid'
+import DOMPurify from 'dompurify'
+
+mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' })
 
 const route = useRoute()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 // route.params.name is a plain string in Vue Router 4 setup()
 const agentName = route.params.name
 const voice = useVoiceSession(agentName)
@@ -223,9 +309,29 @@ const voice = useVoiceSession(agentName)
 const agent = ref(null)
 const selectedVoice = ref('Kore')
 const panelState = ref({ type: 'empty', content: '', title: null, updated_at: null })
-const htmlPanelEl = ref(null)
 let panelPollTimer = null
 let panelFetching = false
+
+// ── Panel history (client-side, ephemeral) ───────────────────────────────────
+// Ring buffer of panel snapshots. "Live" (viewIndex === -1) follows the latest
+// update; navigating back pins a snapshot until the user returns to live or a
+// brand-new update arrives. Frontend-only — no backend/history persistence.
+const HISTORY_MAX = 40
+const history = ref([])      // oldest → newest
+const viewIndex = ref(-1)    // -1 = live; otherwise index into history
+const justUpdated = ref(false)  // drives the header "updated" flash
+
+const prefersReducedMotion =
+  typeof window !== 'undefined' && window.matchMedia
+    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    : false
+
+// Image blob cache: workspace-path images are fetched through the authenticated
+// /files/preview endpoint (a bare <img src> would 401), keyed by path so history
+// navigation reuses them. objectURLs are revoked on eviction + unmount (F2).
+const imageBlobCache = new Map()  // path → objectURL
+const imageObjectUrl = ref(null)
+const imageError = ref(false)
 
 const VOICES = [
   { id: 'Kore',    label: 'Kore — Firm' },
@@ -238,58 +344,176 @@ const VOICES = [
 
 // ── Computed ────────────────────────────────────────────────────────────────
 
+// The snapshot currently shown: a pinned history entry, or the live panel.
+const effectiveIndex = computed(() => {
+  if (viewIndex.value >= 0 && viewIndex.value < history.value.length) return viewIndex.value
+  return history.value.length - 1
+})
+const displayedPanel = computed(() => {
+  const i = effectiveIndex.value
+  if (i >= 0 && i < history.value.length) return history.value[i]
+  return panelState.value
+})
+const isLive = computed(() => effectiveIndex.value === history.value.length - 1)
+const hasHistory = computed(() => history.value.length >= 2)
+
+// Re-key the canvas content on every snapshot change so the Transition fires on
+// both live updates and history navigation. updated_at is unique per snapshot;
+// effectiveIndex disambiguates the empty state.
+const transitionKey = computed(() => `${effectiveIndex.value}:${displayedPanel.value.updated_at || 'empty'}`)
+// prefers-reduced-motion → an undefined transition name (no CSS classes) = instant swap.
+const canvasTransition = computed(() => (prefersReducedMotion ? 'canvas-none' : 'canvas-fade'))
+
+const displayedImageSrc = computed(() => {
+  const p = displayedPanel.value
+  if (p.type !== 'image') return null
+  return p.image_kind === 'url' ? p.content : imageObjectUrl.value
+})
+
 const renderedContent = computed(() =>
-  panelState.value.type === 'markdown' ? renderMarkdown(panelState.value.content || '') : ''
+  displayedPanel.value.type === 'markdown' ? renderMarkdown(displayedPanel.value.content || '') : ''
 )
 
 const panelUpdatedAgo = computed(() => {
-  if (!panelState.value.updated_at) return null
-  const secs = Math.round((Date.now() - new Date(panelState.value.updated_at).getTime()) / 1000)
+  if (!displayedPanel.value.updated_at) return null
+  const secs = Math.round((Date.now() - new Date(displayedPanel.value.updated_at).getTime()) / 1000)
   if (secs < 5)  return 'just now'
   if (secs < 60) return `${secs}s ago`
   return `${Math.round(secs / 60)}m ago`
 })
 
-// ── HTML panel rendering ─────────────────────────────────────────────────────
-
-// Render the agent's HTML inside a sandboxed iframe. The iframe gets an opaque
-// origin (sandbox="allow-scripts" without allow-same-origin), so agent-supplied
-// JS cannot read parent localStorage / cookies / JWT, submit forms, navigate
-// the parent, or open popups. Chart.js is loaded inside the iframe via a
-// same-origin asset URL so new Chart(...) calls in agent HTML still work.
-//
-// Tag delimiters are built via string concat (s_open / s_close) so the SFC
-// parser doesn't see them as nested block tags.
-const s_open = '<' + 's' + 'cript'
-const s_close = '<' + '/' + 's' + 'cript' + '>'
-function renderHtmlPanel(html) {
-  const el = htmlPanelEl.value
-  if (!el) return
-  const chartUrl = new URL(chartJsUrl, window.location.origin).href
-  el.srcdoc = [
-    '<!DOCTYPE html><html><head><meta charset="utf-8"><style>',
-    'body{margin:0;padding:8px;color:#d1d5db;background:transparent;',
-    'font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}',
-    'canvas{max-width:100%}',
-    'table{border-collapse:collapse}th,td{padding:4px 8px}',
-    'a{color:#818cf8}',
-    '</style>',
-    s_open, ' src="', chartUrl, '">', s_close,
-    '</head><body>',
-    html ?? '',
-    '</body></html>',
-  ].join('')
+function snapshotLabel(snap, idx) {
+  const t = snap.updated_at
+    ? new Date(snap.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '—'
+  const kind = snap.type === 'mermaid' ? 'diagram' : snap.type
+  return `${idx + 1}. ${snap.title || kind} · ${t}`
 }
 
-// Re-render HTML panel when panelState content changes
-watch(() => panelState.value, (state) => {
-  if (state.type === 'html') nextTick(() => renderHtmlPanel(state.content || ''))
+// ── History navigation ────────────────────────────────────────────────────────
+
+function goPrev() {
+  const i = effectiveIndex.value
+  if (i > 0) viewIndex.value = i - 1
+}
+function goNext() {
+  const i = effectiveIndex.value
+  if (i < history.value.length - 1) {
+    const next = i + 1
+    viewIndex.value = next >= history.value.length - 1 ? -1 : next  // snap to live at the end
+  }
+}
+function selectSnapshot(e) {
+  const idx = Number(e.target.value)
+  viewIndex.value = idx >= history.value.length - 1 ? -1 : idx
+}
+
+function pushHistory(snap) {
+  history.value.push(snap)
+  while (history.value.length > HISTORY_MAX) {
+    const evicted = history.value.shift()
+    // Revoke a cached image blob only if no remaining snapshot references its path.
+    if (evicted.type === 'image' && evicted.image_kind === 'path') {
+      const stillUsed = history.value.some(
+        (s) => s.type === 'image' && s.image_kind === 'path' && s.content === evicted.content
+      )
+      if (!stillUsed && imageBlobCache.has(evicted.content)) {
+        URL.revokeObjectURL(imageBlobCache.get(evicted.content))
+        imageBlobCache.delete(evicted.content)
+      }
+    }
+  }
+}
+
+// ── In-parent panel rendering (HTML + Mermaid) ───────────────────────────────
+
+// HTML panels render via DOMPurify (same trust model as markdown, H-005). Scripts
+// are stripped, so agent JS (chart.js) does not run — static layout only. This
+// replaces the prior srcdoc iframe, which the production CSP (script-src 'self')
+// + CORP blocked entirely (#979).
+const sanitizedHtml = computed(() =>
+  displayedPanel.value.type === 'html'
+    ? DOMPurify.sanitize(displayedPanel.value.content || '')
+    : ''
+)
+
+// Mermaid renders to an SVG string off-DOM (securityLevel:'strict' disables
+// interactivity + htmlLabels), then DOMPurify-sanitizes the SVG before v-html.
+// mermaid.render is async and the displayed snapshot can change while a render is
+// in flight (live update or history navigation), so a monotonic seq token drops
+// stale results. Invalid syntax surfaces a contained error + the source.
+const mermaidSvg = ref('')
+const mermaidError = ref('')
+let mermaidRenderSeq = 0
+
+async function renderMermaid(src) {
+  const seq = ++mermaidRenderSeq
+  mermaidError.value = ''
+  mermaidSvg.value = ''
+  if (!src) return
+  try {
+    const { svg } = await mermaid.render(`voice-mmd-${seq}`, String(src))
+    if (seq !== mermaidRenderSeq) return  // superseded by a newer snapshot
+    mermaidSvg.value = DOMPurify.sanitize(svg)
+  } catch (e) {
+    if (seq !== mermaidRenderSeq) return
+    mermaidSvg.value = ''
+    mermaidError.value = `Diagram error:\n${(e && e.message) ? e.message : String(e)}\n\n${src}`
+  }
+}
+
+// Fetch a workspace-path image through the authenticated /files/preview endpoint
+// (reuses the store's blob helper) and bind the objectURL. Web-URL images bypass
+// this entirely (rendered directly). Cached by path for history navigation.
+async function loadImageBlob(path) {
+  imageError.value = false
+  if (imageBlobCache.has(path)) {
+    imageObjectUrl.value = imageBlobCache.get(path)
+    return
+  }
+  // Still showing the path we set out to fetch? Guards against out-of-order
+  // resolution when the user navigates history faster than blobs load.
+  const stillCurrent = () =>
+    displayedPanel.value.type === 'image' && displayedPanel.value.content === path
+  try {
+    const res = await agentsStore.getFilePreviewBlob(agentName, path)
+    imageBlobCache.set(path, res.url)  // cache regardless, for later navigation
+    if (stillCurrent()) imageObjectUrl.value = res.url
+  } catch (_) {
+    if (stillCurrent()) {
+      imageObjectUrl.value = null
+      imageError.value = true
+    }
+  }
+}
+
+// Image and mermaid need work on display: a workspace-path image is fetched as an
+// authenticated blob; a mermaid diagram is rendered to SVG asynchronously. HTML
+// renders synchronously via the sanitizedHtml computed.
+watch(displayedPanel, (panel) => {
+  if (panel.type === 'image') {
+    imageError.value = false
+    if (panel.image_kind === 'path') loadImageBlob(panel.content)
+    else imageObjectUrl.value = null  // url-kind renders content directly
+  } else if (panel.type === 'mermaid') {
+    renderMermaid(panel.content)
+  }
 }, { deep: true })
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
 
+function revokeAllImageBlobs() {
+  for (const url of imageBlobCache.values()) URL.revokeObjectURL(url)
+  imageBlobCache.clear()
+  imageObjectUrl.value = null
+}
+
 function resetPanelState() {
   panelState.value = { type: 'empty', content: '', title: null, updated_at: null }
+  history.value = []
+  viewIndex.value = -1
+  imageError.value = false
+  revokeAllImageBlobs()
 }
 
 async function toggleSession() {
@@ -305,6 +529,14 @@ async function toggleSession() {
 }
 
 // ── Panel polling ────────────────────────────────────────────────────────────
+
+let flashTimer = null
+function flashUpdated() {
+  if (prefersReducedMotion) return
+  justUpdated.value = true
+  if (flashTimer !== null) clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { justUpdated.value = false }, 1100)
+}
 
 function startPanelPoll() {
   stopPanelPoll()
@@ -332,6 +564,9 @@ async function fetchPanel() {
     // not found or no tool ever called" — never overwrite real content with it.
     if (r.data.updated_at !== null && r.data.updated_at !== panelState.value.updated_at) {
       panelState.value = r.data
+      pushHistory(r.data)
+      viewIndex.value = -1  // a brand-new update snaps the view back to live
+      flashUpdated()
     }
   } catch (_) {
     // Ignore poll errors (session may have just ended)
@@ -499,6 +734,9 @@ let particles = []
 let currentSprites = null
 let currentHueShift = 0
 let targetHueShift = 0
+// Persistent orb smoothing state (lerped across frames, not recomputed raw).
+let smoothedEnergy = 0
+let coreSize = 58
 
 function rebuildSprites(hueShift) {
   currentSprites = buildSprites(hueShift)
@@ -547,7 +785,14 @@ function renderFrame() {
     if (next !== currentHueShift) rebuildSprites(next)
   }
   const amp = voice.amplitude?.value ?? 0
-  const energy = Math.min(1, amp * 2.5)
+  const targetEnergy = Math.min(1, amp * 2.5)
+  // Asymmetric attack/release: rise quickly toward louder audio (0.18), fall back
+  // gently (0.10) so the orb glides instead of stepping with each amplitude frame.
+  const k = targetEnergy > smoothedEnergy ? 0.18 : 0.10
+  smoothedEnergy = lerp(smoothedEnergy, targetEnergy, k)
+  // Idle "breathe" floor — a slow low-amplitude sine so the orb never goes flat.
+  const breathe = (Math.sin(frameCount * 0.035) * 0.5 + 0.5) * 0.06
+  const energy = Math.max(smoothedEnergy, breathe)
   const bass = energy * 0.8, mid = energy * 0.5, high = energy * 0.3
   ctx.fillStyle = '#000'
   ctx.fillRect(0, 0, W, H)
@@ -555,9 +800,13 @@ function renderFrame() {
   ctx.translate(W/2, H/2)
   for (const p of particles) {
     p.update(energy, bass, mid, high, frameCount)
-    p.draw(ctx, 1.1, 1.1, 1.0)
+    p.draw(ctx, 1.25, 1.25, 1.0)
   }
-  drawCore(ctx, 45 + energy * 20, frameCount)
+  // Smooth the core size toward its target (larger base 58, stronger 32× swing)
+  // so the soft glow grows/shrinks smoothly rather than snapping.
+  const targetCoreSize = 58 + energy * 32
+  coreSize = lerp(coreSize, targetCoreSize, 0.12)
+  drawCore(ctx, coreSize, frameCount)
   ctx.restore()
   rafHandle = requestAnimationFrame(renderFrame)
 }
@@ -585,7 +834,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (rafHandle !== null) cancelAnimationFrame(rafHandle)
+  if (flashTimer !== null) clearTimeout(flashTimer)
   stopPanelPoll()
+  revokeAllImageBlobs()
   window.removeEventListener('resize', resizeCanvas)
   if (voice.isActive.value) voice.stop()
 })
@@ -623,3 +874,43 @@ const statusLabel = computed(() => {
   }
 })
 </script>
+
+<style scoped>
+/* Canvas content cross-fade + subtle slide-in on update / history navigation.
+   The `canvas-none` transition name (used under prefers-reduced-motion) has no
+   matching classes, so Vue swaps content instantly. */
+.canvas-fade-enter-active {
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+.canvas-fade-leave-active {
+  transition: opacity 0.16s ease;
+}
+.canvas-fade-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.canvas-fade-leave-to {
+  opacity: 0;
+}
+
+/* v-html'd panel content (mermaid SVG + sanitized agent HTML) needs :deep() to be
+   reached by scoped styles. */
+.mermaid-host :deep(svg) {
+  max-width: 100%;
+  height: auto;
+}
+.agent-html-panel :deep(table) {
+  border-collapse: collapse;
+}
+.agent-html-panel :deep(th),
+.agent-html-panel :deep(td) {
+  padding: 4px 8px;
+}
+.agent-html-panel :deep(a) {
+  color: #818cf8;
+}
+.agent-html-panel :deep(img),
+.agent-html-panel :deep(canvas) {
+  max-width: 100%;
+}
+</style>

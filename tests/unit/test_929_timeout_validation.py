@@ -262,6 +262,179 @@ def test_enforce_helper_rejects_above_cap_with_structured_detail(monkeypatch):
     assert "Raise the agent cap" in detail["message"]
 
 
+def test_enforce_helper_raises_typeerror_on_none(monkeypatch):
+    """Regression pin for the #913 × #929 interaction.
+
+    After #913 made `ScheduleCreate.timeout_seconds` Optional, the helper
+    is no longer safe to call unconditionally — `None > int` raises
+    TypeError in Python 3. This pins the helper's actual behavior so the
+    write-side `is not None` guards in `create_schedule`/`update_schedule`
+    can't silently regress without breaking this test (which would expose
+    the guard as the contract).
+    """
+    sched_router = _load_sched_router(monkeypatch)
+    monkeypatch.setattr(
+        sched_router.db, "get_execution_timeout", lambda _name: 3600, raising=False
+    )
+    with pytest.raises(TypeError):
+        sched_router._enforce_timeout_below_agent_cap("alice", None)
+
+
+def test_create_schedule_path_skips_enforcement_when_timeout_none(monkeypatch):
+    """`create_schedule` must not call the enforcer when caller omits timeout.
+
+    Eugene's PR #922 review caught the missing `is not None` guard on the
+    POST path: it would 500 with TypeError for every consumer that didn't
+    explicitly set `timeout_seconds`. Pin the guard by asserting the route
+    function does not call `_enforce_timeout_below_agent_cap` on None.
+
+    We invoke the route function directly with stubbed dependencies — going
+    through FastAPI TestClient would drag the whole router init chain.
+    """
+    import asyncio
+
+    sched_router = _load_sched_router(monkeypatch)
+
+    # Track whether the enforcer ran.
+    enforcer_calls = []
+
+    def fake_enforce(agent_name, requested_seconds):
+        enforcer_calls.append((agent_name, requested_seconds))
+
+    monkeypatch.setattr(
+        sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
+    )
+
+    # Stub `db.create_schedule` to return a minimal Schedule-like object so
+    # the route's `ScheduleResponse(**schedule.model_dump())` succeeds.
+    class _FakeSchedule:
+        def model_dump(self):
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            return {
+                "id": "sched-1",
+                "agent_name": "alice",
+                "name": "test",
+                "cron_expression": "*/5 * * * *",
+                "message": "hi",
+                "enabled": True,
+                "timezone": "UTC",
+                "description": None,
+                "created_at": now,
+                "updated_at": now,
+                "last_run_at": None,
+                "next_run_at": None,
+                "timeout_seconds": None,
+                "allowed_tools": None,
+                "model": None,
+                "validation_enabled": False,
+                "validation_prompt": None,
+                "validation_timeout_seconds": 120,
+            }
+
+    monkeypatch.setattr(
+        sched_router.db,
+        "create_schedule",
+        lambda *_a, **_k: _FakeSchedule(),
+        raising=False,
+    )
+
+    # ScheduleCreate with timeout_seconds left at its default (None).
+    schedule_data = sched_router.ScheduleCreate(
+        name="test",
+        cron_expression="*/5 * * * *",
+        message="hi",
+    )
+    assert schedule_data.timeout_seconds is None, (
+        "Test premise: ScheduleCreate.timeout_seconds defaults to None after #913"
+    )
+
+    fake_user = types.SimpleNamespace(username="owner", role="user")
+
+    # Invoke the async route handler directly.
+    asyncio.run(
+        sched_router.create_schedule(
+            name="alice",
+            schedule_data=schedule_data,
+            current_user=fake_user,
+        )
+    )
+
+    assert enforcer_calls == [], (
+        f"Enforcer must not run when timeout_seconds is None; "
+        f"got calls: {enforcer_calls!r}. Eugene's guard regressed."
+    )
+
+
+def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
+    """Counterpart: when caller DOES set `timeout_seconds`, the enforcer fires."""
+    import asyncio
+
+    sched_router = _load_sched_router(monkeypatch)
+
+    enforcer_calls = []
+
+    def fake_enforce(agent_name, requested_seconds):
+        enforcer_calls.append((agent_name, requested_seconds))
+
+    monkeypatch.setattr(
+        sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
+    )
+
+    class _FakeSchedule:
+        def model_dump(self):
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            return {
+                "id": "sched-1",
+                "agent_name": "alice",
+                "name": "test",
+                "cron_expression": "*/5 * * * *",
+                "message": "hi",
+                "enabled": True,
+                "timezone": "UTC",
+                "description": None,
+                "created_at": now,
+                "updated_at": now,
+                "last_run_at": None,
+                "next_run_at": None,
+                "timeout_seconds": 600,
+                "allowed_tools": None,
+                "model": None,
+                "validation_enabled": False,
+                "validation_prompt": None,
+                "validation_timeout_seconds": 120,
+            }
+
+    monkeypatch.setattr(
+        sched_router.db,
+        "create_schedule",
+        lambda *_a, **_k: _FakeSchedule(),
+        raising=False,
+    )
+
+    schedule_data = sched_router.ScheduleCreate(
+        name="test",
+        cron_expression="*/5 * * * *",
+        message="hi",
+        timeout_seconds=600,
+    )
+
+    fake_user = types.SimpleNamespace(username="owner", role="user")
+
+    asyncio.run(
+        sched_router.create_schedule(
+            name="alice",
+            schedule_data=schedule_data,
+            current_user=fake_user,
+        )
+    )
+
+    assert enforcer_calls == [("alice", 600)]
+
+
 # ---------------------------------------------------------------------------
 # Orthogonal SIGKILL error_classifier message (agent-server)
 # ---------------------------------------------------------------------------

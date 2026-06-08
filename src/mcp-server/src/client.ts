@@ -481,7 +481,8 @@ export class TrinityClient {
     name: string,
     message: string,
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<
     | ChatResponse
     | { error: string; queue_status: "busy" | "queue_full"; retry_after: number; agent: string; details?: Record<string, unknown> }
@@ -493,6 +494,12 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key so an SDK-level retry of
+    // the same tool call dedupes instead of dispatching a second execution.
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -513,7 +520,12 @@ export class TrinityClient {
     // is what drives naive callers into duplicate-queue retries. Aborting
     // before the gateway gives us a chance to look up the queued
     // execution_id and return a structured receipt instead.
-    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS ?? 25000);
+    // `||` (not `??`) so a set-but-empty value coalesces to the default —
+    // the TS twin of the #1076 os.getenv shadow bug. `'' ?? 25000` is `''`
+    // and `Number('')` is 0, which would abort every sync chat instantly.
+    // Compose injects `${MCP_CHAT_TIMEOUT_MS:-25000}` (non-empty) today, so
+    // this is defense-in-depth against a future empty injection / `-e VAR=`.
+    const timeoutMs = Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const startTime = Date.now();
@@ -636,7 +648,8 @@ export class TrinityClient {
       chat_session_id?: string;
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<ChatResponse | { status: "accepted"; execution_id: string; agent_name: string; message: string; async_mode: true }> {
     // Prepare headers
     const headers: Record<string, string> = {
@@ -644,6 +657,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",  // Always mark as MCP call for task tracking
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     // Add X-Source-Agent header for collaboration tracking
     if (sourceAgent) {
@@ -745,7 +763,8 @@ export class TrinityClient {
       allowed_tools?: string[];
     },
     sourceAgent?: string,
-    mcpKeyInfo?: { keyId?: string; keyName?: string }
+    mcpKeyInfo?: { keyId?: string; keyName?: string },
+    idempotencyKey?: string
   ): Promise<{
     fan_out_id: string;
     status: string;
@@ -769,6 +788,11 @@ export class TrinityClient {
       ...(this.token && { Authorization: `Bearer ${this.token}` }),
       "X-Via-MCP": "true",
     };
+
+    // RELIABILITY-006 (#525): forward idempotency key (SDK-retry dedup).
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
 
     if (sourceAgent) {
       headers["X-Source-Agent"] = sourceAgent;
@@ -1185,6 +1209,34 @@ export class TrinityClient {
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/messages`,
+      data
+    );
+  }
+
+  // ============================================================================
+  // VoIP Telephony (VOIP-001, #1056)
+  // ============================================================================
+
+  /**
+   * Place an outbound phone call from the agent to a user. Server-side gated
+   * (VoIP enabled + voice binding) and rate-limited.
+   */
+  async placeVoipCall(
+    agentName: string,
+    data: {
+      to_number: string;
+      context?: string;
+      process_transcript?: boolean;
+    }
+  ): Promise<{
+    call_id: string;
+    status: string;
+    to_number: string;
+    twilio_call_sid?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/voip/call`,
       data
     );
   }
@@ -1666,6 +1718,50 @@ export class TrinityClient {
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/telegram/groups/${encodeURIComponent(chatId)}/messages`,
       { message }
+    );
+  }
+
+  // ============================================================================
+  // Sequential Agent Loops (#740)
+  // ============================================================================
+
+  async startAgentLoop(
+    agentName: string,
+    data: {
+      message: string;
+      max_runs: number;
+      stop_signal?: string;
+      delay_seconds?: number;
+      timeout_per_run?: number;
+      model?: string;
+      allowed_tools?: string[];
+    }
+  ): Promise<{
+    loop_id: string;
+    status: string;
+    agent_name: string;
+    max_runs: number;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/loops`,
+      data
+    );
+  }
+
+  async getLoopStatus(loopId: string): Promise<unknown> {
+    return this.request(
+      "GET",
+      `/api/loops/${encodeURIComponent(loopId)}`
+    );
+  }
+
+  async stopAgentLoop(
+    loopId: string
+  ): Promise<{ loop_id: string; status: string }> {
+    return this.request(
+      "POST",
+      `/api/loops/${encodeURIComponent(loopId)}/stop`
     );
   }
 }

@@ -85,17 +85,22 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue'])
 
-// Canonical model list — synced from https://docs.anthropic.com/en/docs/about-claude/models/overview
-// Last updated: 2026-05-13 (#831)
+// Canonical model list — synced from https://platform.claude.com/docs/en/about-claude/models/overview
+// Last updated: 2026-06-06 (#1080)
+// Aliases are undated and resolve to the latest snapshot; do NOT append date suffixes
+// to a current-gen alias. Models retiring 2026-06-15 (claude-opus-4-20250514,
+// claude-sonnet-4-20250514) are removed from the presets — a removed preset is only
+// hidden from the picker, not blocked (free-text passthrough still accepts any string).
 const PRESET_MODELS = [
-  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Most capable (latest)' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart (latest)' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest (latest)' },
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Legacy' },
+  // Current generation
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable (latest)' },
+  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Current' },
+  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Current' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart (current)' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest (current)' },
+  // Legacy (still active)
   { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Legacy' },
   { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Legacy' },
-  { value: 'claude-opus-4-20250514', label: 'Claude Opus 4', note: 'Deprecated — retiring Jun 15 2026' },
-  { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4', note: 'Deprecated — retiring Jun 15 2026' },
 ]
 
 const showDropdown = ref(false)

@@ -1,0 +1,166 @@
+name: build-without-submodule
+
+# #847 Phase 0 — guard against the OSS-only break.
+#
+# The public Trinity backend conditionally imports the private
+# enterprise submodule via `try: from enterprise import register_enterprise`
+# in `src/backend/main.py`. This job proves the conditional import works
+# correctly when the submodule is **absent** — i.e. when a customer
+# without enterprise repo access clones the public repo.
+#
+# Without this gate, a future change to the enterprise loader could
+# accidentally hard-require the submodule and break OSS-only deployments
+# on the next release. The first signal would be customers reporting
+# `ModuleNotFoundError: No module named 'enterprise'` after `git pull`.
+#
+# The job runs:
+#   1. Checkout without submodules
+#   2. Build the backend Docker image
+#   3. Start it on a temp network
+#   4. Assert /health responds and /api/settings/feature-flags returns
+#      `enterprise_features: []`
+#
+# Triggers: every PR + every push to dev/main. Issue #847.
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-without-submodule-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-boot:
+    name: backend boots without enterprise submodule
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout WITHOUT submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: false  # explicit — the whole point of this job
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Confirm enterprise submodule is absent
+        run: |
+          # Single mount point (#847). Enterprise frontend ships in
+          # the OSS bundle and is gated server-side via feature-flags;
+          # the only submodule is the private backend at
+          # src/backend/enterprise/.
+          if [ -f src/backend/enterprise/backend/__init__.py ]; then
+            echo "::error::src/backend/enterprise/backend/__init__.py present — checkout pulled the submodule. The job must run without it."
+            exit 1
+          fi
+          echo "OK: enterprise submodule absent as expected"
+
+      - name: Generate ephemeral secrets for boot
+        run: |
+          # ADMIN_PASSWORD must meet OWASP ASVS 2.1 complexity
+          # (length 12+, upper, lower, digit, special) since
+          # /api/setup/admin-password validates it. Use a fixed
+          # known-strong test password — this container is ephemeral
+          # and CI-only, no security exposure.
+          {
+            echo "SECRET_KEY=$(openssl rand -hex 32)"
+            echo "ADMIN_PASSWORD=Trinity-CI-Test-2026!Aa1"
+            echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
+            echo "REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)"
+            echo "CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32)"
+            echo "INTERNAL_API_SECRET=$(openssl rand -hex 32)"
+          } > .env
+
+      - name: Build backend image
+        run: docker compose build backend
+
+      - name: Boot the stack
+        run: |
+          docker compose up -d backend redis vector
+          # Wait up to 60s for backend /health
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "Backend healthy after ${i}x2s"
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:8000/health || (
+            echo "::error::Backend never became healthy"
+            docker logs trinity-backend --tail 100
+            exit 1
+          )
+
+      - name: Complete first-time setup
+        run: |
+          # A fresh DB requires first-time setup before /api/token works
+          # (`is_setup_completed()` is checked in routers/auth.py). The
+          # setup-token is `print()`ed to stdout but Python's block
+          # buffering on a pipe + the docker-logs capture means we
+          # can't reliably grep it on a short timing window. Skip the
+          # API and complete setup directly: docker exec into the
+          # backend container, hash the password via the same
+          # `dependencies.hash_password` helper the production
+          # endpoint uses, write to the SQLite `users` row, set
+          # `system_settings.setup_completed=true`. Idempotent.
+          ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
+          docker exec -e ADMIN_PW="$ADMIN_PASSWORD" trinity-backend python3 -c "
+          import os
+          from database import db
+          from dependencies import hash_password
+          db.set_setting('setup_completed', 'true')
+          db.update_user_password('admin', hash_password(os.environ['ADMIN_PW']))
+          print('setup completed via direct DB write')
+          "
+
+      - name: Assert OSS-only feature flags
+        run: |
+          ADMIN_PASSWORD=$(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)
+          TOKEN=$(curl -sf -X POST http://localhost:8000/api/token \
+            -d "username=admin&password=${ADMIN_PASSWORD}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          FLAGS=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+            http://localhost:8000/api/settings/feature-flags)
+          echo "feature-flags response: $FLAGS"
+          ENT=$(echo "$FLAGS" | python3 -c "import sys,json; print(json.load(sys.stdin)['enterprise_features'])")
+          if [ "$ENT" != "[]" ]; then
+            echo "::error::Expected enterprise_features=[] in OSS-only build, got: $ENT"
+            exit 1
+          fi
+          echo "OK: enterprise_features=[] as expected"
+
+      - name: Assert SSO router not mounted
+        run: |
+          # No auth needed — the /api/enterprise/sso/* router is
+          # entitlement-gated (not user-gated). When the submodule
+          # is absent, the router never mounts and any path under
+          # /api/enterprise returns 404.
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            http://localhost:8000/api/enterprise/sso/providers)
+          if [ "$CODE" != "404" ]; then
+            echo "::error::Expected 404 from /api/enterprise/sso/providers in OSS-only build, got HTTP $CODE"
+            exit 1
+          fi
+          echo "OK: /api/enterprise/sso/providers returns 404 as expected"
+
+      - name: Confirm OSS-only log line was emitted
+        run: |
+          # The main.py except branch logs an informational message we
+          # can grep for. Catches a future regression where the
+          # ImportError is silently swallowed without a log.
+          if ! docker logs trinity-backend 2>&1 | grep -q "Trinity Enterprise submodule not present"; then
+            echo "::error::Expected 'Trinity Enterprise submodule not present' log line, did not find it"
+            docker logs trinity-backend --tail 60
+            exit 1
+          fi
+          echo "OK: OSS-only mode logged"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans

@@ -232,6 +232,57 @@ class ProactiveMessageService:
         await self._audit_send(agent_name, recipient_email, channel, False, error_msg)
         raise RecipientNotFoundError(error_msg)
 
+    async def send_access_grant_notification(
+        self,
+        agent_name: str,
+        recipient_email: str,
+        channel: Literal["telegram", "slack", "whatsapp"],
+        text: str,
+    ) -> DeliveryResult:
+        """Notify a user that their channel access request was just approved.
+
+        Bypasses the `allow_proactive` opt-in (this is a response to a request
+        the user explicitly initiated, not unsolicited outreach) and skips the
+        per-recipient rate limit (one-shot, not a campaign). Still emits an
+        audit event with the delivery outcome so #951's "delivered / skipped /
+        failed" requirement is observable.
+
+        Channel resolution is explicit — the caller passes the originating
+        channel from `access_requests.channel`. Web is handled upstream via
+        the existing `agent_shared` WebSocket event and never reaches here.
+        """
+        recipient_email = recipient_email.lower()
+        message_preview = text[:100] if text else ""
+
+        try:
+            result = await self._deliver_via_channel(
+                agent_name, recipient_email, text, channel, reply_to_thread=False
+            )
+        except RecipientNotFoundError as e:
+            await self._audit_send(
+                agent_name, recipient_email, channel, False,
+                error=f"recipient_not_found: {e}",
+                message_preview=message_preview,
+            )
+            return DeliveryResult(success=False, channel=channel, error=str(e))
+        except Exception as e:
+            logger.warning(
+                f"[#951] Access-grant notification to {channel} failed: {e}"
+            )
+            await self._audit_send(
+                agent_name, recipient_email, channel, False,
+                error=str(e), message_preview=message_preview,
+            )
+            return DeliveryResult(success=False, channel=channel, error=str(e))
+
+        await self._audit_send(
+            agent_name, recipient_email, channel,
+            success=result.success,
+            error=result.error,
+            message_preview=message_preview,
+        )
+        return result
+
     async def _deliver_via_channel(
         self,
         agent_name: str,

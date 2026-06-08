@@ -178,7 +178,7 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
 
         push = subprocess.run(
             ["git", "push", "origin", "HEAD"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=60,
+            cwd=str(home_dir), capture_output=True, text=True, timeout=300,
         )
         if push.returncode != 0:
             err = _summarize_git_error(push.stderr or push.stdout or "push failed")
@@ -765,7 +765,7 @@ async def sync_to_github(request: GitSyncRequest):
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
-                timeout=60,
+                timeout=300,
             )
             if push_result.returncode != 0:
                 stderr = push_result.stderr or ""
@@ -796,7 +796,7 @@ async def sync_to_github(request: GitSyncRequest):
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
-                timeout=60
+                timeout=300
             )
 
             if push_result.returncode != 0:
@@ -808,7 +808,7 @@ async def sync_to_github(request: GitSyncRequest):
                         capture_output=True,
                         text=True,
                         cwd=str(home_dir),
-                        timeout=60
+                        timeout=300
                     )
                     if upstream_result.returncode != 0:
                         raise HTTPException(

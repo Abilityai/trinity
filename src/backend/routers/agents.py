@@ -18,7 +18,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
 from pydantic import BaseModel
 
-from models import AgentConfig, AgentStatus, User, DeployLocalRequest
+from models import AgentConfig, AgentStatus, User, DeployLocalRequest, CircuitBreakerConfigUpdate
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
 from services.docker_service import (
@@ -256,14 +256,15 @@ async def get_all_sync_health(
     accessible = {a["name"] for a in get_accessible_agents(current_user)}
     rows = db.list_sync_states()
     by_name = {r["agent_name"]: r for r in rows if r["agent_name"] in accessible}
+    # #73: one scoped query instead of an N+1 per-agent lookup.
+    auto_sync_map = db.get_all_git_auto_sync_enabled(accessible)
 
     entries = []
     for name in sorted(accessible):
         row = by_name.get(name)
-        auto_sync = db.get_git_auto_sync_enabled(name)
         entries.append({
             "agent_name": name,
-            "auto_sync_enabled": bool(auto_sync),
+            "auto_sync_enabled": auto_sync_map.get(name, False),
             "last_sync_at": (row or {}).get("last_sync_at"),
             "last_sync_status": (row or {}).get("last_sync_status") or "never",
             "consecutive_failures": (row or {}).get("consecutive_failures") or 0,
@@ -298,9 +299,22 @@ async def get_all_agent_slots(
     capacity = get_capacity_manager()
     slot_states = await capacity.get_all_states(agent_capacities)
 
+    # #526: surface non-closed dispatch breakers for the dashboard badge. Gated
+    # on the global master switch (zero cost when off); pipelined HGETALL over
+    # the known agent list (no keyspace SCAN); only OPEN breakers are returned.
+    circuit_breakers: dict = {}
+    from config import DISPATCH_BREAKER_ENABLED
+    if DISPATCH_BREAKER_ENABLED:
+        from services.dispatch_breaker import get_dispatch_states_for
+        all_states = get_dispatch_states_for(list(agent_capacities.keys()))
+        circuit_breakers = {
+            n: s for n, s in all_states.items() if s.get("state") != "closed"
+        }
+
     return BulkSlotState(
         agents=slot_states,
-        timestamp=utc_now_iso()
+        timestamp=utc_now_iso(),
+        circuit_breakers=circuit_breakers,
     )
 
 
@@ -389,6 +403,17 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     else:
         agent_dict["shares"] = []
 
+    # #526: embed the unified circuit-breaker block so the agent-detail header
+    # badge needs no second round-trip. Gated on the global master switch — the
+    # block costs two Redis reads, so when dispatch breaking is off fleet-wide
+    # we skip it entirely (there's no dispatch badge to show anyway).
+    from config import DISPATCH_BREAKER_ENABLED
+    if DISPATCH_BREAKER_ENABLED:
+        from services.circuit_breaker_view import build_circuit_breaker_block
+        agent_dict["circuit_breaker"] = build_circuit_breaker_block(agent_name)
+    else:
+        agent_dict["circuit_breaker"] = None
+
     return agent_dict
 
 
@@ -474,6 +499,17 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         )
     except Exception as e:
         logger.warning(f"Failed to cancel backlog for agent {agent_name}: {e}")
+
+    # RELIABILITY-004 / #307: clear the agent's heartbeat Redis keys now. The
+    # `seen` marker has no TTL, so without this it would leak past delete; the
+    # hb/misses keys self-expire but are cleared too for cleanliness. The
+    # watch loop bounds itself to live agents, so a stopped container is never
+    # read regardless — this just stops the slow key accumulation. Best-effort.
+    try:
+        from services import heartbeat_service
+        heartbeat_service.clear_heartbeat(agent_name)
+    except Exception as e:
+        logger.warning(f"Failed to clear heartbeat keys for agent {agent_name}: {e}")
 
     # Mark the row as soft-deleted. Children stay until the retention
     # sweep; the unique constraint on agent_name naturally blocks reuse
@@ -673,26 +709,117 @@ async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
     current_user: User = Depends(require_role("admin")),
 ):
-    """Force the agent's circuit breaker to closed (#921).
+    """Force the agent's circuit breakers to closed (#921, #526).
 
-    Admin only. Operator escape hatch for the dormant-CB cascade described
-    in #921 — equivalent to the manual `redis-cli DEL agent:circuit:{name}`
-    workaround. With the 1h auto-probe shipped in #921 this is rarely
-    needed (the breaker self-heals), but it stays as the first-response
-    tool when an operator already knows the agent is healthy and doesn't
-    want to wait a full cooldown.
+    Admin only. Operator escape hatch — resets BOTH the transport breaker
+    (#631/#921, ``agent:circuit:{name}``) and the dispatch breaker
+    (#526, ``agent:dispatch:{name}``) so a single call fully un-trips an
+    agent the operator knows is healthy, without waiting for either cooldown.
     """
     from services.agent_client import CircuitState, reset_circuit
+    from services.dispatch_breaker import DispatchBreaker, reset_dispatch
     # Capture state-before for the response so postmortems can see what we
     # reset out of. Racey against the DEL but fine — best-effort observability.
-    prior_state = CircuitState(agent_name).state
+    prior_transport = CircuitState(agent_name).state
+    prior_dispatch = DispatchBreaker(agent_name).to_dict().get("state", "closed")
     reset_circuit(agent_name)
+    reset_dispatch(agent_name)
     return {
         "agent_name": agent_name,
-        "prior_state": prior_state,
+        "prior_state": prior_transport,  # back-compat field (transport breaker)
+        "prior_transport_state": prior_transport,
+        "prior_dispatch_state": prior_dispatch,
         "new_state": "closed",
         "reset_at": utc_now_iso(),
     }
+
+
+@router.get("/{agent_name}/circuit-breaker")
+async def get_circuit_breaker_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Unified breaker state for an agent (#526).
+
+    Returns both breakers plus a derived ``open`` boolean (true when EITHER the
+    dispatch breaker is open or the transport breaker is open/dormant) and the
+    per-agent + global config flags.
+    """
+    from services.circuit_breaker_view import build_circuit_breaker_block
+
+    return {"agent_name": agent_name, **build_circuit_breaker_block(agent_name)}
+
+
+@router.put("/{agent_name}/circuit-breaker")
+async def set_circuit_breaker_endpoint(
+    agent_name: OwnedAgentByName,
+    body: CircuitBreakerConfigUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable the per-agent dispatch breaker (#526). Owner-only.
+
+    Note: the global ``DISPATCH_BREAKER_ENABLED`` master switch must also be on
+    for the breaker to actually engage (returned in ``global_enabled``).
+    """
+    from config import DISPATCH_BREAKER_ENABLED
+
+    db.set_circuit_breaker_enabled(agent_name, body.enabled)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="circuit_breaker_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled},
+    )
+    return {
+        "agent_name": agent_name,
+        "enabled": body.enabled,
+        "global_enabled": bool(DISPATCH_BREAKER_ENABLED),
+    }
+
+
+# ============================================================================
+# Heartbeat Endpoint (RELIABILITY-004 / #307)
+# ============================================================================
+
+class HeartbeatPayload(BaseModel):
+    """Lightweight liveness payload POSTed by the agent every ~5s."""
+    memory_mb: Optional[float] = None
+    active_executions: Optional[int] = None
+    uptime_s: Optional[float] = None
+
+
+@router.post("/{agent_name}/heartbeat")
+async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: Request):
+    """Receive a liveness heartbeat from an agent (RELIABILITY-004 / #307).
+
+    Authenticated with the agent's own ``TRINITY_MCP_API_KEY`` (Option B,
+    least-privilege) — *not* the user JWT and not the master internal secret.
+    An agent may only heartbeat itself: the key must be agent-scoped and its
+    bound ``agent_name`` must equal the path. User/system/null keys → 403.
+
+    Validation runs with ``track_usage=False`` so a 5s beat doesn't amplify the
+    key's ``usage_count`` or write to SQLite on every beat. The write is
+    best-effort: a Redis blip returns ``stored=false`` rather than 5xx, since
+    the heartbeat is an additive signal and the 30s monitor stays authoritative.
+    """
+    from services import heartbeat_service
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Heartbeat requires the agent's own MCP key")
+    token = auth_header[7:]  # strip "Bearer "
+
+    res = db.validate_mcp_api_key(token, track_usage=False)
+    if not heartbeat_service.authorize_heartbeat(res, agent_name):
+        raise HTTPException(status_code=403, detail="Heartbeat requires the agent's own MCP key")
+
+    stored = heartbeat_service.record_heartbeat(
+        agent_name, payload.model_dump(exclude_none=True)
+    )
+    return {"ok": True, "stored": stored}
 
 
 # ============================================================================

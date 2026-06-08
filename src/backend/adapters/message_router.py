@@ -256,77 +256,27 @@ class ChannelMessageRouter:
         channel = adapter.channel_type
         logger.info(f"[ROUTER:{channel}] START: sender={message.sender_id}, channel={message.channel_id}")
 
-        # 1. Resolve agent
-        agent_name = await adapter.get_agent_name(message)
-        logger.debug(f"[ROUTER:{channel}] Step 1 - resolved agent: {agent_name}")
-        if not agent_name:
-            logger.warning(f"[ROUTER:{channel}] No agent found for channel {message.channel_id}")
+        # 1–2. Resolve agent + bot token (None ⇒ abort).
+        resolved = await self._resolve_agent_and_token(adapter, message, channel)
+        if resolved is None:
             return
+        agent_name, bot_token = resolved
 
-        # 2. Resolve bot token (needed for all responses)
-        bot_token = adapter.get_bot_token(message)
-        logger.debug(f"[ROUTER:{channel}] Step 2 - bot_token: {'yes' if bot_token else 'NO'}")
-        if not bot_token:
-            logger.error(f"[ROUTER:{channel}] No bot token for message in {message.channel_id}")
-            return
+        # 2b. Transcribe Telegram voice notes in place (no-op elsewhere).
+        message = await self._maybe_transcribe_voice(adapter, message, bot_token, channel)
 
-        # 2b. Process voice messages (Telegram only) — transcribe before agent sees it
-        if channel == "telegram":
-            raw_msg = message.metadata.get("raw_message", {})
-            if "voice" in raw_msg and bot_token:
-                logger.debug(f"[ROUTER:{channel}] Step 2b - transcribing voice message")
-                voice_text = await process_voice(bot_token, raw_msg["voice"])
-                # Replace placeholder in message text with transcription
-                placeholder = "[User sent a voice message — voice transcription is not yet available]"
-                if placeholder in message.text:
-                    message = message.model_copy(update={"text": message.text.replace(placeholder, voice_text)})
-                    logger.info(f"[ROUTER:{channel}] Voice transcribed: {voice_text[:100]}...")
-
-        # 3. Rate limiting per channel user
-        rate_key = adapter.get_rate_key(message)
+        # 3 + 3b. Per-user message + file-upload rate limits.
         is_group = message.metadata.get("is_group", False)
-        if not _check_rate_limit(rate_key):
-            logger.warning(f"[ROUTER:{channel}] Rate limited: {rate_key}")
-            # In groups, silently drop to avoid spamming the group with error messages
-            if is_group:
-                return
-            await adapter.send_response(
-                message.channel_id,
-                ChannelResponse(
-                    text="You're sending messages too quickly. Please wait a moment.",
-                    metadata={"bot_token": bot_token, "agent_name": agent_name}
-                ),
-                thread_id=message.thread_id,
-            )
+        if not await self._enforce_rate_limits(
+            adapter, message, agent_name, bot_token, channel, is_group
+        ):
             return
 
-        # 3b. File upload rate limiting (stricter than message rate limit)
-        if message.files:
-            file_rate_key = f"{channel}-files:{message.channel_id}:{message.sender_id}"
-            if not _check_rate_limit(file_rate_key, max_msgs=_FILE_UPLOAD_RATE_LIMIT_MAX, window=_FILE_UPLOAD_RATE_LIMIT_WINDOW):
-                logger.warning(f"[ROUTER] File upload rate limited: {file_rate_key}")
-                await adapter.send_response(
-                    message.channel_id,
-                    ChannelResponse(
-                        text="You're uploading files too quickly. Please wait a moment.",
-                        metadata={"bot_token": bot_token, "agent_name": agent_name}
-                    ),
-                    thread_id=message.thread_id,
-                )
-                return
-
-        # 4. Check agent availability
-        container = get_agent_container(agent_name)
-        container_status = container.status if container else "not_found"
-        logger.debug(f"[ROUTER:{channel}] Step 4 - container: {container_status}")
-        if not container or container.status != "running":
-            await adapter.send_response(
-                message.channel_id,
-                ChannelResponse(
-                    text="Sorry, I'm not available right now. Please try again later.",
-                    metadata={"bot_token": bot_token, "agent_name": agent_name}
-                ),
-            )
+        # 4. Agent availability.
+        container = await self._ensure_agent_available(
+            adapter, message, agent_name, bot_token, channel
+        )
+        if container is None:
             return
 
         # 5. Handle verification (base class default: always verified)
@@ -336,103 +286,14 @@ class ChannelMessageRouter:
         if not verified:
             return
 
-        # 5b. Unified cross-channel access gate (Issue #311).
-        # Resolve a verified email via the adapter, then apply the agent's
-        # access policy. Group chats have separate auth logic via group_auth_mode.
-        policy = db.get_access_policy(agent_name)
-        verified_email: Optional[str] = None
-
-        if is_group:
-            # Group chat auth: apply group_auth_mode policy
-            group_auth_mode = policy.get("group_auth_mode", "none")
-
-            if group_auth_mode == "any_verified":
-                # Check if group is already verified by any member
-                group_verified = await adapter.is_group_verified(message, agent_name)
-
-                if not group_verified:
-                    # Group not verified — check if sender can verify it
-                    try:
-                        verified_email = await adapter.resolve_verified_email(message)
-                    except Exception as e:
-                        logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
-                        verified_email = None
-
-                    # #446 defensive normalization at router boundary.
-                    if verified_email:
-                        verified_email = verified_email.strip().lower() or None
-
-                    if verified_email:
-                        # Sender is verified — unlock the group
-                        await adapter.set_group_verified(message, agent_name, verified_email)
-                        logger.info(
-                            f"[ROUTER:{channel}] Group {message.channel_id} verified by {verified_email}"
-                        )
-                    else:
-                        # No one verified — prompt for auth
-                        logger.info(
-                            f"[ROUTER:{channel}] Group access denied: agent={agent_name} "
-                            f"requires verified member, group={message.channel_id} not verified"
-                        )
-                        await adapter.prompt_group_auth(message, agent_name, bot_token)
-                        return
-            # else: group_auth_mode == "none" — allow all group messages (legacy behavior)
-        else:
-            # DM auth: apply require_email / open_access policy
-            try:
-                verified_email = await adapter.resolve_verified_email(message)
-            except Exception as e:
-                logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
-                verified_email = None
-
-            # Defensive normalization (#446): downstream `email_has_agent_access`
-            # already lowercases, but normalizing at the router boundary keeps
-            # all gate checks and any logging consistent.
-            if verified_email:
-                verified_email = verified_email.strip().lower() or None
-
-            require_email = policy.get("require_email", False)
-            open_access = policy.get("open_access", False)
-
-            if require_email and not verified_email:
-                logger.info(
-                    f"[ROUTER:{channel}] Access denied: agent={agent_name} requires email "
-                    f"and sender={message.sender_id} not verified"
-                )
-                await adapter.prompt_auth(message, agent_name, bot_token)
-                return
-
-            if verified_email and db.email_has_agent_access(agent_name, verified_email):
-                logger.debug(f"[ROUTER:{channel}] Access granted via owner/admin/sharing: {verified_email}")
-            elif open_access:
-                logger.debug(
-                    f"[ROUTER:{channel}] Access granted via open_access "
-                    f"(email={verified_email or 'none'})"
-                )
-            elif verified_email:
-                # Verified email + restrictive policy → record access request
-                try:
-                    db.upsert_access_request(agent_name, verified_email, channel)
-                except Exception as e:
-                    logger.error(f"[ROUTER:{channel}] Failed to upsert access_request: {e}")
-                logger.info(
-                    f"[ROUTER:{channel}] Pending access request: "
-                    f"agent={agent_name}, email={verified_email}"
-                )
-                await adapter.send_response(
-                    message.channel_id,
-                    ChannelResponse(
-                        text=(
-                            "🔒 Your access request is pending approval. "
-                            "I'll let you know once the agent owner responds."
-                        ),
-                        metadata={"bot_token": bot_token, "agent_name": agent_name},
-                    ),
-                    thread_id=message.thread_id,
-                )
-                return
-            # else: no verified email and policy not set → legacy permissive
-            # (preserves backward compat for agents that haven't opted in).
+        # 5b. Unified cross-channel access gate (Issue #311). Returns the
+        # verified email (used downstream for MEM-001 + session source) or
+        # short-circuits the handler when access is denied / pending.
+        allowed, verified_email = await self._enforce_access_policy(
+            adapter, message, agent_name, bot_token, is_group, channel
+        )
+        if not allowed:
+            return
 
         # 6. Get/create session
         logger.debug(f"[ROUTER:{channel}] Step 6 - creating session")
@@ -487,7 +348,43 @@ class ChannelMessageRouter:
         # 8. Show processing indicator (⏳ on Slack, typing on Telegram, etc.)
         await adapter.indicate_processing(message)
 
-        # 9. Execute via TaskExecutionService (same path as web public chat)
+        # 9. Execute via TaskExecutionService (same path as web public chat).
+        # None ⇒ failure/exception already surfaced to the user + uploads cleaned.
+        result = await self._run_agent_task(
+            adapter, message, agent_name, bot_token, channel, is_group,
+            container, upload_dir, context_prompt, verified_email, image_data,
+        )
+        if result is None:
+            return
+        response_text = result.response or ""
+
+        # 10–14. Done indicator, persist, MEM-001, outbound files, send, hooks, cleanup.
+        await self._finalize_response(
+            adapter, message, agent_name, bot_token, channel, is_group,
+            container, upload_dir, session_id, verified_email, result, response_text,
+        )
+
+    async def _run_agent_task(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: str,
+        channel: str,
+        is_group: bool,
+        container,
+        upload_dir: Optional[str],
+        context_prompt: str,
+        verified_email: Optional[str],
+        image_data: list,
+    ):
+        """Step 9: assemble public-channel execution params (source identity,
+        MEM-001 memory injection, restricted tool set) and run the task.
+
+        Returns the execution result on success, or ``None`` after surfacing the
+        error to the user and cleaning up uploads on failure/exception — the
+        caller treats ``None`` as "abort, do not finalize".
+        """
         logger.debug(f"[ROUTER:{channel}] Step 9 - executing via TaskExecutionService")
         # Prefer the verified email (Issue #311) so MEM-001 keys cross-channel
         # off the same identity. Fall back to the channel-native source id.
@@ -556,10 +453,11 @@ class ChannelMessageRouter:
                     thread_id=message.thread_id,
                 )
                 await self._cleanup_uploads(container, upload_dir)
-                return
+                return None
 
             response_text = result.response or ""
             logger.debug(f"[ROUTER:{channel}] Step 9 - agent responded ({len(response_text)} chars, cost=${result.cost or 0:.4f})")
+            return result
 
         except Exception as e:
             logger.error(f"[ROUTER:{channel}] Step 9 - execution error: {e}", exc_info=True)
@@ -573,8 +471,27 @@ class ChannelMessageRouter:
                 thread_id=message.thread_id,
             )
             await self._cleanup_uploads(container, upload_dir)
-            return
+            return None
 
+    async def _finalize_response(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: str,
+        channel: str,
+        is_group: bool,
+        container,
+        upload_dir: Optional[str],
+        session_id: str,
+        verified_email: Optional[str],
+        result,
+        response_text: str,
+    ) -> None:
+        """Steps 10–14: completion indicator, persist the exchange, MEM-001
+        count/summarize, extract outbound files, honor the [NO_REPLY] marker,
+        send the reply, run the post-response hook, and clean up uploads.
+        """
         # 10. Done processing — show completion indicator
         await adapter.indicate_done(message)
 
@@ -648,6 +565,240 @@ class ChannelMessageRouter:
     # =========================================================================
     # Private helpers
     # =========================================================================
+
+    async def _resolve_agent_and_token(
+        self, adapter: ChannelAdapter, message: NormalizedMessage, channel: str
+    ) -> Optional[Tuple[str, str]]:
+        """Steps 1–2: resolve the target agent and its bot token.
+
+        Returns ``(agent_name, bot_token)`` or ``None`` when either is missing
+        (the caller short-circuits). Both return silently — there is no token to
+        reply with on the no-token path.
+        """
+        agent_name = await adapter.get_agent_name(message)
+        logger.debug(f"[ROUTER:{channel}] Step 1 - resolved agent: {agent_name}")
+        if not agent_name:
+            logger.warning(f"[ROUTER:{channel}] No agent found for channel {message.channel_id}")
+            return None
+
+        bot_token = adapter.get_bot_token(message)
+        logger.debug(f"[ROUTER:{channel}] Step 2 - bot_token: {'yes' if bot_token else 'NO'}")
+        if not bot_token:
+            logger.error(f"[ROUTER:{channel}] No bot token for message in {message.channel_id}")
+            return None
+
+        return agent_name, bot_token
+
+    async def _maybe_transcribe_voice(
+        self, adapter: ChannelAdapter, message: NormalizedMessage, bot_token: str, channel: str
+    ) -> NormalizedMessage:
+        """Step 2b: transcribe a Telegram voice note in place.
+
+        Returns the (possibly updated) message; a no-op for non-telegram
+        channels or messages without a voice attachment.
+        """
+        if channel != "telegram":
+            return message
+        raw_msg = message.metadata.get("raw_message", {})
+        if "voice" in raw_msg and bot_token:
+            logger.debug(f"[ROUTER:{channel}] Step 2b - transcribing voice message")
+            voice_text = await process_voice(bot_token, raw_msg["voice"])
+            # Replace placeholder in message text with transcription
+            placeholder = "[User sent a voice message — voice transcription is not yet available]"
+            if placeholder in message.text:
+                message = message.model_copy(update={"text": message.text.replace(placeholder, voice_text)})
+                logger.info(f"[ROUTER:{channel}] Voice transcribed: {voice_text[:100]}...")
+        return message
+
+    async def _enforce_rate_limits(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: str,
+        channel: str,
+        is_group: bool,
+    ) -> bool:
+        """Steps 3 + 3b: per-user message rate limit and (when files are
+        attached) the stricter upload limit.
+
+        Returns ``False`` when limited — the caller aborts. Groups drop
+        silently (to avoid spamming the channel); DMs get a notice first.
+        """
+        rate_key = adapter.get_rate_key(message)
+        if not _check_rate_limit(rate_key):
+            logger.warning(f"[ROUTER:{channel}] Rate limited: {rate_key}")
+            # In groups, silently drop to avoid spamming the group with error messages
+            if is_group:
+                return False
+            await adapter.send_response(
+                message.channel_id,
+                ChannelResponse(
+                    text="You're sending messages too quickly. Please wait a moment.",
+                    metadata={"bot_token": bot_token, "agent_name": agent_name}
+                ),
+                thread_id=message.thread_id,
+            )
+            return False
+
+        if message.files:
+            file_rate_key = f"{channel}-files:{message.channel_id}:{message.sender_id}"
+            if not _check_rate_limit(file_rate_key, max_msgs=_FILE_UPLOAD_RATE_LIMIT_MAX, window=_FILE_UPLOAD_RATE_LIMIT_WINDOW):
+                logger.warning(f"[ROUTER] File upload rate limited: {file_rate_key}")
+                await adapter.send_response(
+                    message.channel_id,
+                    ChannelResponse(
+                        text="You're uploading files too quickly. Please wait a moment.",
+                        metadata={"bot_token": bot_token, "agent_name": agent_name}
+                    ),
+                    thread_id=message.thread_id,
+                )
+                return False
+        return True
+
+    async def _ensure_agent_available(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: str,
+        channel: str,
+    ):
+        """Step 4: confirm the agent container is running.
+
+        Returns the container, or ``None`` after sending an unavailable notice.
+        """
+        container = get_agent_container(agent_name)
+        container_status = container.status if container else "not_found"
+        logger.debug(f"[ROUTER:{channel}] Step 4 - container: {container_status}")
+        if not container or container.status != "running":
+            await adapter.send_response(
+                message.channel_id,
+                ChannelResponse(
+                    text="Sorry, I'm not available right now. Please try again later.",
+                    metadata={"bot_token": bot_token, "agent_name": agent_name}
+                ),
+            )
+            return None
+        return container
+
+    async def _enforce_access_policy(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        agent_name: str,
+        bot_token: str,
+        is_group: bool,
+        channel: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """Cross-channel access gate (Issue #311). Step 5b of the pipeline.
+
+        Resolves a verified email via the adapter and applies the agent's
+        access policy. Group chats use separate auth logic via
+        ``group_auth_mode``. On denial the relevant prompt / pending-request
+        response is already sent here.
+
+        Returns ``(allowed, verified_email)``. ``allowed=False`` means the
+        caller must short-circuit (handler returns). On the allow paths
+        ``verified_email`` may still be ``None`` (open_access / legacy
+        permissive), which downstream steps tolerate.
+        """
+        policy = db.get_access_policy(agent_name)
+        verified_email: Optional[str] = None
+
+        if is_group:
+            # Group chat auth: apply group_auth_mode policy
+            group_auth_mode = policy.get("group_auth_mode", "none")
+
+            if group_auth_mode == "any_verified":
+                # Check if group is already verified by any member
+                group_verified = await adapter.is_group_verified(message, agent_name)
+
+                if not group_verified:
+                    # Group not verified — check if sender can verify it
+                    try:
+                        verified_email = await adapter.resolve_verified_email(message)
+                    except Exception as e:
+                        logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
+                        verified_email = None
+
+                    # #446 defensive normalization at router boundary.
+                    if verified_email:
+                        verified_email = verified_email.strip().lower() or None
+
+                    if verified_email:
+                        # Sender is verified — unlock the group
+                        await adapter.set_group_verified(message, agent_name, verified_email)
+                        logger.info(
+                            f"[ROUTER:{channel}] Group {message.channel_id} verified by {verified_email}"
+                        )
+                    else:
+                        # No one verified — prompt for auth
+                        logger.info(
+                            f"[ROUTER:{channel}] Group access denied: agent={agent_name} "
+                            f"requires verified member, group={message.channel_id} not verified"
+                        )
+                        await adapter.prompt_group_auth(message, agent_name, bot_token)
+                        return False, None
+            # else: group_auth_mode == "none" — allow all group messages (legacy behavior)
+        else:
+            # DM auth: apply require_email / open_access policy
+            try:
+                verified_email = await adapter.resolve_verified_email(message)
+            except Exception as e:
+                logger.warning(f"[ROUTER:{channel}] resolve_verified_email error: {e}")
+                verified_email = None
+
+            # Defensive normalization (#446): downstream `email_has_agent_access`
+            # already lowercases, but normalizing at the router boundary keeps
+            # all gate checks and any logging consistent.
+            if verified_email:
+                verified_email = verified_email.strip().lower() or None
+
+            require_email = policy.get("require_email", False)
+            open_access = policy.get("open_access", False)
+
+            if require_email and not verified_email:
+                logger.info(
+                    f"[ROUTER:{channel}] Access denied: agent={agent_name} requires email "
+                    f"and sender={message.sender_id} not verified"
+                )
+                await adapter.prompt_auth(message, agent_name, bot_token)
+                return False, None
+
+            if verified_email and db.email_has_agent_access(agent_name, verified_email):
+                logger.debug(f"[ROUTER:{channel}] Access granted via owner/admin/sharing: {verified_email}")
+            elif open_access:
+                logger.debug(
+                    f"[ROUTER:{channel}] Access granted via open_access "
+                    f"(email={verified_email or 'none'})"
+                )
+            elif verified_email:
+                # Verified email + restrictive policy → record access request
+                try:
+                    db.upsert_access_request(agent_name, verified_email, channel)
+                except Exception as e:
+                    logger.error(f"[ROUTER:{channel}] Failed to upsert access_request: {e}")
+                logger.info(
+                    f"[ROUTER:{channel}] Pending access request: "
+                    f"agent={agent_name}, email={verified_email}"
+                )
+                await adapter.send_response(
+                    message.channel_id,
+                    ChannelResponse(
+                        text=(
+                            "🔒 Your access request is pending approval. "
+                            "I'll let you know once the agent owner responds."
+                        ),
+                        metadata={"bot_token": bot_token, "agent_name": agent_name},
+                    ),
+                    thread_id=message.thread_id,
+                )
+                return False, None
+            # else: no verified email and policy not set → legacy permissive
+            # (preserves backward compat for agents that haven't opted in).
+
+        return True, verified_email
 
     @staticmethod
     def _extract_outbound_files(response_text: str) -> Tuple[str, List[OutboundFile]]:

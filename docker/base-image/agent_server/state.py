@@ -4,8 +4,9 @@ Agent state management for the agent server.
 import os
 import subprocess
 import logging
+import threading
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .models import ChatMessage
 
@@ -57,6 +58,36 @@ class AgentState:
         self.session_activity = self._create_empty_activity()
         # Store full tool outputs for drill-down (separate from timeline summaries)
         self.tool_outputs: Dict[str, str] = {}
+
+        # Richer /health signal (#1020). Tracked across both execution paths
+        # (/api/chat and /api/task) so the platform gets a real health gauge,
+        # not just {status: ok}. Guarded by a lock because tasks run
+        # concurrently. `mailbox_depth` is intentionally NOT tracked here —
+        # there is no agent-side mailbox until the actor model lands (#945);
+        # the backend derives queue depth from CapacityManager.
+        self._health_lock = threading.Lock()
+        self.active_task_count: int = 0
+        self.last_task_at: Optional[str] = None
+        self.consecutive_failures: int = 0
+
+    def record_task_start(self) -> None:
+        """Mark an execution as started (either chat or headless task)."""
+        with self._health_lock:
+            self.active_task_count += 1
+            self.last_task_at = datetime.now(timezone.utc).isoformat()
+
+    def record_task_finish(self, success: bool) -> None:
+        """Mark an execution as finished. Resets the consecutive-failure
+        counter on success, increments it on failure — this is the signal the
+        dispatch circuit breaker (#526) consumes."""
+        with self._health_lock:
+            if self.active_task_count > 0:
+                self.active_task_count -= 1
+            self.last_task_at = datetime.now(timezone.utc).isoformat()
+            if success:
+                self.consecutive_failures = 0
+            else:
+                self.consecutive_failures += 1
 
     def _get_default_context_window(self) -> int:
         """Get default context window based on runtime"""

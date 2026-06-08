@@ -1344,9 +1344,18 @@ class TestInvariantB01:
 
 
 class TestInvariantS03:
+    # ZSET score must look like a real acquire-time unix epoch, not 1.0
+    # (year 1970), because S-03 reconstructs the slot's initial TTL via
+    # `ttl + (snapshot_time - score)` after #913 made the natural
+    # 1-second TTL decay against the floor a false positive.
+    @staticmethod
+    def _now_score() -> float:
+        import time
+        return time.time()
+
     def test_holds_when_ttl_above_floor(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1", timeout=60)  # floor = 60 + 300 = 360s
-        reload_canary["redis"].zadd("agent:slots:a1", {"e1": 1.0})
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 500)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
@@ -1354,7 +1363,9 @@ class TestInvariantS03:
 
     def test_fires_below_floor(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
-        reload_canary["redis"].zadd("agent:slots:a1", {"e1": 1.0})
+        # Slot acquired ~now with EXPIRE=100. Initial TTL = 100 + ~0 age
+        # = 100 < 360 floor — fires.
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 100)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
@@ -1366,10 +1377,24 @@ class TestInvariantS03:
         assert v[0].observed_state["redis_ttl_seconds"] == 100
         assert v[0].observed_state["floor_seconds"] == 360
 
+    def test_natural_decay_not_below_floor(self, canary_db, reload_canary):
+        """#913 regression — a slot created with EXPIRE=floor and observed
+        seconds later must not fire just because of natural TTL decay."""
+        import time
+        _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
+        # Slot was created 5s ago with the canonical EXPIRE=floor. Real
+        # TTL now reads `360 - 5 = 355` — below the raw floor — but the
+        # reconstructed initial TTL is 360, exactly at the floor.
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": time.time() - 5})
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 355)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
     def test_fires_when_metadata_missing(self, canary_db, reload_canary):
         """ZSET points at a slot whose metadata HASH already expired (#226)."""
         _add_agent(canary_db, "a1", timeout=60)
-        reload_canary["redis"].zadd("agent:slots:a1", {"e1": 1.0})
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # FakeRedis.ttl returns -2 when neither the hash nor the ttl is set.
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
@@ -1381,7 +1406,7 @@ class TestInvariantS03:
     def test_fires_when_ttl_unset(self, canary_db, reload_canary):
         """Metadata HASH exists but no expire was set on it."""
         _add_agent(canary_db, "a1", timeout=60)
-        reload_canary["redis"].zadd("agent:slots:a1", {"e1": 1.0})
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # Populate the HASH so FakeRedis.ttl returns -1 (exists, no TTL).
         reload_canary["redis"].hset("agent:slot:a1:e1", "started_at", "x")
         snap = reload_canary["canary"].collect_snapshot()
@@ -1394,7 +1419,7 @@ class TestInvariantS03:
     def test_drain_sentinels_skipped(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1", timeout=60)
         reload_canary["redis"].zadd(
-            "agent:slots:a1", {"drain-a1-12345": 1.0}
+            "agent:slots:a1", {"drain-a1-12345": self._now_score()}
         )
         # Don't set TTL — would normally be "missing"; sentinel must skip.
         snap = reload_canary["canary"].collect_snapshot()

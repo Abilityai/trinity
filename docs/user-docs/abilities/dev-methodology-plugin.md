@@ -1,6 +1,6 @@
 # dev-methodology Plugin
 
-Documentation-driven development methodology for any codebase. Enforces a structured development cycle: context loading, development, testing, documentation, and PR validation.
+Documentation-driven development methodology for any codebase. Enforces a structured cycle: context loading, development, testing, documentation, and PR validation.
 
 ## Installation
 
@@ -12,30 +12,21 @@ Documentation-driven development methodology for any codebase. Enforces a struct
 
 | Skill | Description |
 |-------|-------------|
-| `/dev-methodology:init` | Scaffold methodology into your project |
+| `/dev-methodology:init` | Scaffold the methodology into your project |
 | `/dev-methodology:read-docs` | Load project context at session start |
 | `/dev-methodology:implement` | End-to-end feature implementation |
-| `/dev-methodology:autoplan` | Analyze an issue and produce an implementation plan before coding |
-| `/dev-methodology:sprint` | Full development cycle — pick issue, plan, review, implement, PR |
-| `/dev-methodology:validate-pr` | Validate PR against methodology |
-| `/dev-methodology:review` | Pre-landing PR review — analyzes branch diff for quality |
+| `/dev-methodology:validate-pr` | Validate a PR against the methodology |
 | `/dev-methodology:commit` | Create well-formatted commits |
-| `/dev-methodology:release` | Cut a release — changelog, version bump, tag, merge |
-| `/dev-methodology:security-check` | Quick security scan |
-| `/dev-methodology:security-analysis` | Deep OWASP-based security analysis |
-| `/dev-methodology:cso` | Chief Security Officer audit — infrastructure-wide security review |
 | `/dev-methodology:add-testing` | Add tests to existing code |
 | `/dev-methodology:tidy` | Clean up code |
+| `/dev-methodology:refactor-audit` | Review changed code for reuse, quality, and efficiency |
 | `/dev-methodology:roadmap` | Query issues for roadmap priorities |
-| `/dev-methodology:groom` | Backlog grooming — audit coverage, rank priorities |
-| `/dev-methodology:update-docs` | Update project documentation after making changes |
-| `/dev-methodology:generate-user-docs` | Generate user-facing docs from source code |
+| `/dev-methodology:security-check` | Quick security scan |
+| `/dev-methodology:security-analysis` | Deep OWASP-based security analysis |
 | `/dev-methodology:feature-flow-analysis` | Create or update a feature flow document |
 | `/dev-methodology:sync-feature-flows` | Analyze code changes and update affected feature flows |
-| `/dev-methodology:validate-architecture` | Detect drift between architecture docs and code |
-| `/dev-methodology:validate-config` | Validate config hygiene — docker-compose, env vars |
-| `/dev-methodology:validate-schema` | Validate database schema consistency |
-| `/dev-methodology:refactor-audit` | Review changed code for reuse, quality, and efficiency |
+| `/dev-methodology:update-docs` | Update project documentation after making changes |
+| `/dev-methodology:generate-user-docs` | Generate user-facing docs from source code |
 
 ## How It Works
 
@@ -46,6 +37,7 @@ Documentation-driven development methodology for any codebase. Enforces a struct
 ```
 
 Scaffolds into your project:
+
 - `docs/memory/` — Architecture and requirements docs
 - `docs/memory/feature-flows/` — Vertical slice documentation
 - `.claude/skills/` — Development playbooks
@@ -57,6 +49,7 @@ Scaffolds into your project:
 ```
 
 Loads project context:
+
 - Architecture overview
 - Current requirements
 - Recent changes
@@ -69,11 +62,12 @@ Loads project context:
 ```
 
 End-to-end flow:
+
 1. Read the issue and understand requirements
 2. Plan the implementation
 3. Write code with tests
 4. Update documentation
-5. Create PR
+5. Create a PR
 
 ### PR Validation
 
@@ -82,6 +76,7 @@ End-to-end flow:
 ```
 
 Checks:
+
 - Code quality and style
 - Test coverage
 - Documentation updates
@@ -94,7 +89,7 @@ The methodology enforces a 5-phase cycle:
 
 ```
 1. Context     2. Plan        3. Implement    4. Document    5. Validate
-read-docs      understand     write code      update docs    validate-pr
+read-docs      understand     write code      update-docs    validate-pr
                requirements   write tests     feature flows
 ```
 
@@ -107,6 +102,7 @@ read-docs      understand     write code      update docs    validate-pr
 ```
 
 Fast checks for common issues:
+
 - Hardcoded secrets
 - SQL injection patterns
 - XSS vulnerabilities
@@ -118,6 +114,7 @@ Fast checks for common issues:
 ```
 
 Comprehensive OWASP-based review:
+
 - Authentication flows
 - Authorization checks
 - Input validation

@@ -46,6 +46,14 @@ _STUBBED_MODULE_NAMES = [
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
     saved = {n: sys.modules.get(n) for n in _STUBBED_MODULE_NAMES}
+    # `_install_db_stub()` mutates `database.db` ON the already-imported real
+    # `database` module object. Restoring the `sys.modules["database"]` *entry*
+    # below does NOT undo that — it's the same object — so the fake `db` would
+    # leak into any later test that re-reads `database.db` (e.g. a module
+    # `importlib.reload` in test_voip_service). Snapshot and restore the real
+    # singleton too. (#1056 regression: voip gate tests vs seed ordering.)
+    _database_mod = sys.modules.get("database")
+    _saved_db = getattr(_database_mod, "db", None) if _database_mod is not None else None
     try:
         yield
     finally:
@@ -54,6 +62,8 @@ def _restore_sys_modules():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+        if _database_mod is not None and _saved_db is not None:
+            _database_mod.db = _saved_db
 
 
 def _install_db_stub(max_parallel_tasks_map: dict[str, int]) -> None:

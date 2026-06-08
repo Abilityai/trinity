@@ -1079,6 +1079,8 @@ export const useNetworkStore = defineStore('network', () => {
     try {
       const response = await axios.get('/api/agents/slots')
       const agentsMap = response.data.agents || {}
+      // #526: per-agent dispatch-breaker state — only OPEN breakers are present.
+      const circuitMap = response.data.circuit_breakers || {}
 
       const newStats = {}
       Object.entries(agentsMap).forEach(([name, stat]) => {
@@ -1089,13 +1091,16 @@ export const useNetworkStore = defineStore('network', () => {
       })
       slotStats.value = newStats
 
-      // Thread slot stats onto node data
+      // Thread slot stats + circuit-breaker state onto node data. Setting
+      // circuitBreaker to null when absent clears a badge once the breaker
+      // recovers (every agent with capacity stats appears here).
       nodes.value.forEach(node => {
         const stats = newStats[node.id]
         if (stats) {
           node.data = {
             ...node.data,
-            slotStats: stats
+            slotStats: stats,
+            circuitBreaker: circuitMap[node.id] || null
           }
         }
       })

@@ -73,7 +73,11 @@ class SchedulerDatabase:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             last_run_at=datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None,
             next_run_at=datetime.fromisoformat(row["next_run_at"]) if row["next_run_at"] else None,
-            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys and row["timeout_seconds"] else 900,
+            # #913: NULL ⇒ inherit from agent's execution_timeout_seconds. The
+            # backend's TaskExecutionService applies that fallback when it
+            # sees None. Substituting 900 here was what made
+            # PUT /api/agents/{name}/timeout silently ineffective for cron.
+            timeout_seconds=row["timeout_seconds"] if "timeout_seconds" in row_keys else None,
             allowed_tools=allowed_tools,
             model=row["model"] if "model" in row_keys else None,
             # Retry configuration (RETRY-001)

@@ -34,9 +34,10 @@ Per-agent memory and CPU limits.
 
 Configurable time limit for agent executions.
 
-- Range: 60--7200 seconds (default: 900 seconds / 15 minutes)
-- Applies to all trigger methods: task, chat, schedule, MCP, and paid endpoints
-- Slot TTL is set to the timeout value plus a 5-minute buffer
+- Range: 60--7200 seconds (default: 3600 seconds / 60 minutes).
+- Applies to all trigger methods: task, chat, schedule, MCP, and paid endpoints.
+- Slot TTL is set to the timeout value plus a 5-minute buffer.
+- **Schedule ceiling**: the agent timeout is the ceiling for every one of its schedules. Setting an agent timeout below an active schedule's `timeout_seconds` is rejected with `400 error=agent_timeout_below_active_schedules`. Conversely, creating or updating a schedule with `timeout_seconds > agent.execution_timeout_seconds` is rejected with `400 error=schedule_timeout_exceeds_agent_cap`. Raise the agent cap first, then the schedule.
 - API: `GET /api/agents/{name}/timeout` and `PUT /api/agents/{name}/timeout`
 
 ### Per-Agent API Key
@@ -50,9 +51,10 @@ Controls which API key the agent uses for Claude.
 
 Choose the Claude model used for tasks and scheduled executions.
 
-- Available models: Opus 4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5
-- Custom model input is supported
-- Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail
+- Available models: Opus, Sonnet, Haiku (latest generations).
+- Custom model input is supported.
+- Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
+- **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.
 
 ### Runtime
 

@@ -1,6 +1,7 @@
 # Trinity — Target Architecture
 
 **Created:** 2026-05-05
+**Updated:** 2026-06-05 — Coordination model revised from a **push actor model** (backend dispatches into a per-agent Redis-stream mailbox) to **pull / work-stealing** (backend owns one durable per-agent queue; agents pull when they have free capacity). The change was driven by an adversarial design review across four coordination architectures: pull scored highest on simplicity, operational complexity, and reachability while delivering the same goals (async-first, the two operator levers, single-source-of-truth, replica groups) with ~80% reuse of existing primitives. See "Coordination Model" below. Tracked in GitHub under Epic #1045: umbrella #1081 (pull migration), #1082 (status-as-projection), #1083 (fire-and-forget dispatch), #1084 (effect-scoped idempotency — the gate), #1085 (correlated-failure controls). The governing principles, data layer, observability, and security sections are otherwise unchanged. **Stack trimmed the same day** to match the lean coordination model: Celery/Celery Beat rejected for APScheduler on a PostgreSQL job store (pull made a second competing-consumers system redundant — #949); PgBouncer and a read replica demoted to deferred scaling levers; Prometheus/Grafana framed as an opt-in observability profile. PostgreSQL is the one non-negotiable new service. **Updated 2026-06-06** — folded in three result-contract tightenings surfaced by the execution-bug meta-analysis (`ORCHESTRATION_BUG_META_ANALYSIS_2026-06.md`): a typed terminal-reason on the reply envelope, an agent-owned out-of-band result record, and credential rotation via hot-reload. The coordination model is unchanged — these close the residual MISCLASSIFIED_FAILURE / READER_RACE / credential-recreate seams that pull alone does not address.
 **Status:** Living document — review quarterly, update on major architectural decisions
 **Purpose:** Describes the optimal steady-state design Trinity should converge toward. This is not a migration plan — it is the destination. Use it to evaluate tradeoffs, prioritize work, and reject changes that move away from it.
 
@@ -22,7 +23,7 @@ These rules take precedence over all other considerations. When in doubt, measur
 2. **One source of truth per domain.** Never split the authoritative state for an entity across two stores. Pick one; the other is a projection or a cache.
 3. **Async-first communication.** No component blocks waiting for another to respond. Sync semantics are thin edge adapters over async internals — not a core design choice.
 4. **Proven primitives.** Use PostgreSQL for relational state, Redis for ephemeral/event state, Docker for isolation. Resist building custom solutions for problems these tools already solve.
-5. **Actor model as the coordination shape.** Each agent is an independent actor with a mailbox, a processor, and a journal. The platform delivers messages and projects journals — it does not own workflow state.
+5. **Pull-based work-stealing as the coordination shape.** The platform owns one durable per-agent work queue. Each agent pulls the next task only when it has free capacity, runs it, and reports the result back — the platform never pushes work into a busy or unhealthy agent. Capacity is a *physical* property of the agent (the size of its worker pool), not a distributed counter. The authoritative execution state ("what is queued" and "what is running") lives in exactly one store — the agent computes results but does not own a parallel copy of that state. This is the industry-standard competing-consumers pattern (Celery, Sidekiq, GitHub Actions runners, Temporal workers); it is chosen over a custom actor framework precisely because it is boring and proven (see Principle #1, #4).
 6. **Sovereign infrastructure.** Trinity runs on hardware the operator controls. Design decisions must work on a single commodity server, not require cloud dependencies or managed services.
 7. **Data exchange over conversation chains.** Agents composing via structured files, queues, and typed outputs is more reliable and testable than chaining conversations. Async data handoffs — shared folders, repo commits, scheduled queue tasks — are the default composition pattern. Direct agent-to-agent conversation is an edge adapter for cases where no data-exchange pattern fits.
 
@@ -37,7 +38,7 @@ These rules take precedence over all other considerations. When in doubt, measur
 │                                                                                       │
 │   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌───────────────────┐   │
 │   │   Frontend   │   │   Backend    │   │  MCP Server  │   │    Scheduler      │   │
-│   │   (Vue.js)   │   │  (FastAPI)   │   │  (FastMCP)   │   │   (Celery Beat)   │   │
+│   │   (Vue.js)   │   │  (FastAPI)   │   │  (FastMCP)   │   │   (APScheduler)   │   │
 │   │   :80        │   │   :8000      │   │   :8080      │   │   (internal)      │   │
 │   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └────────┬──────────┘   │
 │          │                  │                   │                    │               │
@@ -50,8 +51,8 @@ These rules take precedence over all other considerations. When in doubt, measur
 │       │  (primary) │  │(event bus/ │   │   Engine     │                             │
 │       │  :5432     │  │ ephemeral) │   │              │                             │
 │       │            │  │  :6379     │   └──────┬───────┘                             │
-│       │ PgBouncer  │  └────────────┘          │                                     │
-│       │  :6432     │                          │                                     │
+│       │            │  └────────────┘          │                                     │
+│       │            │                          │                                     │
 │       └────────────┘     ┌───────────────────┬┴──────────────────────┐              │
 │                          │                   │                       │              │
 │                    ┌─────┴───┐          ┌────┴────┐            ┌─────┴────┐         │
@@ -59,10 +60,10 @@ These rules take precedence over all other considerations. When in doubt, measur
 │                    │ :8000   │          │ :8000   │            │ :8000    │         │
 │                    └─────────┘          └─────────┘            └──────────┘         │
 │                                                                                       │
-│   Platform Network (172.29.0.0/16): postgres, pgbouncer, redis, scheduler, vector    │
+│   Platform Network (172.29.0.0/16): postgres, redis, scheduler, vector    │
 │   Agent Network (172.28.0.0/16):    agents, backend, mcp-server                     │
 │                                                                                       │
-│   Observability Plane (all services emit):                                            │
+│   Observability Plane (opt-in profile):                                            │
 │   OTEL Collector → Prometheus → Grafana                                               │
 │   Vector → structured log files                                                       │
 └─────────────────────────────────────────────────────────────────────────────────────┘
@@ -78,12 +79,13 @@ Replaces SQLite as the authoritative store for all durable relational state.
 
 **What lives here:**
 - All current SQLite tables (users, agents, schedules, executions, chat history, audit log, activities, subscriptions, skills, tags, operator queue, sync state)
+- **The per-agent work queue and execution state machine** — `schedule_executions` carrying the lifecycle `queued → claimed → running → terminal`. This single table is the sole owner of both "what is waiting" (lever 1: inbox depth) and "what is running" (the fact the old slot-ZSET/SQL split forced the cleanup+canary machinery to reconcile). The atomic claim (`UPDATE … WHERE id = (SELECT … ORDER BY queued_at LIMIT 1) RETURNING`) is the competing-consumer primitive that lets N agent workers — and N replicas — pull without overbooking.
 - Partitioned tables for high-volume, time-series data: `audit_log`, `agent_activities`, `chat_messages`, `agent_session_messages` — partitioned by month, retained per configured window
 - Schema migrations via Alembic (versioned, reversible, automated on startup)
 
 **Access pattern:**
-- All backend processes connect through **PgBouncer** in transaction pooling mode — this is the single connection management point
-- Read-heavy endpoints (activity timeline, execution history, audit log queries) use a read replica
+- Backend and scheduler connect through **asyncpg's built-in connection pool**. **PgBouncer (transaction pooling) is a deferred scaling lever** — added only when process count (multi-replica backend, prefork workers) outgrows PostgreSQL's connection ceiling, not before.
+- Read-heavy endpoints (activity timeline, execution history, audit log queries) run against the primary today; a **read replica is a deferred scaling lever** for when the platform becomes genuinely read-bound.
 - No direct PostgreSQL connections from agent containers — agents communicate only through the backend API
 
 **Why PostgreSQL over SQLite:**
@@ -95,14 +97,14 @@ Redis owns state that is either transient or derivable from the primary store.
 
 **What lives here:**
 - **Event bus**: Redis Streams (`trinity:events`) — all real-time delivery, WebSocket fan-out
-- **Execution slots**: per-agent capacity counters (ZSET) — authoritative only until execution completes; final state written to PostgreSQL
-- **Agent mailboxes**: per-agent task queue (STREAM) — the actor model inbox; drained by the processor, checkpointed to PostgreSQL on completion
+- **Queue wake-up hints**: a lightweight notify-on-enqueue signal so a long-polling agent worker wakes immediately instead of waiting out its poll interval. This is a *hint*, not the queue — the authoritative queue is the PostgreSQL `schedule_executions` table. A lost hint costs latency (the worker picks the task up on its next poll), never correctness.
 - **Session tickets**: WebSocket auth (30s TTL, single-use GETDEL)
 - **Rate limiting**: sliding window counters per endpoint
 - **Distributed locks**: Redis SET NX EX for critical sections (session resume serialization, credential writes)
 
 **What does not live here:**
 - Chat history, execution records, user data, audit log — these are PostgreSQL
+- **The work queue and execution state** — these are PostgreSQL; Redis holds only the wake-up hint, never the authoritative queue or the "is X running" fact. (This is the deliberate departure from the old design, where a per-agent capacity ZSET and a mailbox STREAM split that authority across Redis + SQLite + agent RAM and forced continuous reconciliation.)
 - Redis is never the source of truth for anything a user would expect to retrieve after a restart
 
 ### Clean Separation Rule
@@ -110,8 +112,10 @@ Redis owns state that is either transient or derivable from the primary store.
 | Concern | Store |
 |---------|-------|
 | Durable entity state | PostgreSQL |
+| **Work queue + execution state ("queued"/"running")** | **PostgreSQL** (`schedule_executions`) |
 | Time-series / append-only events | PostgreSQL (partitioned) |
 | Real-time delivery | Redis Streams |
+| Queue wake-up hint (not the queue) | Redis |
 | Ephemeral coordination | Redis |
 | Secrets (transient) | Redis (encrypted values) |
 | Credentials (durable) | Agent `.env` files (encrypted at rest) |
@@ -144,23 +148,32 @@ Redis owns state that is either transient or derivable from the primary store.
 
 ---
 
-## Coordination Model (Actor Model)
+## Coordination Model (Pull / Work-Stealing)
 
-This is the central architectural shift. The full rationale is in `ORCHESTRATION_RELIABILITY_2026-04.md` — this document states the destination shape.
+This is the central architectural shift. The full rationale is in `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` and the 2026-06-05 design review — this document states the destination shape.
+
+**The one-line model:** the platform never pushes work at an agent. It writes every task as a durable row in one per-agent queue; the agent's own worker pool *pulls* the next task whenever it has a free worker, runs it, and reports the result back. A busy, overloaded, or dead agent simply stops pulling — so a task is never handed to an agent that isn't ready (the failure mode that caused most of today's instability).
 
 ### The Model
 
-Every agent is an **actor** with three components:
+**1. Queue (backend-owned)** — one durable FIFO per agent, the `schedule_executions` rows with status `queued`, ordered by `queued_at`. Every producer — scheduler, webhook, human chat turn, agent-to-agent call — writes here and nothing else. There is one writer of "queued" (the backend) and one place it lives (PostgreSQL). This is the single source of truth the old mailbox-STREAM + slot-ZSET + agent-RAM split failed to provide.
 
-**1. Mailbox** — a durable per-agent inbox (Redis STREAM, checkpointed to PostgreSQL). All messages destined for the agent arrive here: scheduled tasks, agent-to-agent calls, webhook triggers, human chat turns. There is no separate dispatch path — the mailbox is the only path in.
+**2. Pull endpoints (backend, internal)** — `GET /api/internal/next-task` (long-poll, woken by the Redis hint) hands the caller the head row via the atomic claim (`UPDATE … status='claimed', lease_expires_at=…, claimed_by_worker=… WHERE id=(SELECT … ORDER BY queued_at LIMIT 1) RETURNING`); `POST /api/internal/tasks/{id}/result` applies the terminal result under a compare-and-set guard. Both sit behind `X-Internal-Secret` — agents reach them over the backend API only, never touching Redis/PostgreSQL (Invariant #589 honored trivially: there is no agent-side store to own).
 
-**2. Processor** — pulls from the mailbox, executes one message at a time per slot (configurable parallelism via `max_parallel_tasks`), emits reply messages or completion events, appends to the journal. The processor is the agent-server's execution loop.
+**3. Worker pool (agent-side)** — the agent-server runs `N = max_parallel_tasks` worker coroutines. A worker long-polls `next-task` *only when idle*, runs the (unchanged) Claude turn, then POSTs the result. **Capacity is therefore physical**: the agent literally cannot run more than N tasks because it has N workers — overbooking is structurally impossible, not policed by a counter. This is also why a hung turn (e.g. a wedged MCP call) consumes an *agent* worker, not a backend resource, and there is no dispatch breaker to trip and cascade.
 
-**3. Journal** — append-only record of everything the agent processed, stored in the agent's git repository (`journal.ndjson`). Replayable. Source of truth for "what happened to this agent." The platform projects the journal into PostgreSQL for observability and querying — it does not own the authoritative workflow state.
+### The Two Operator Levers
+
+The model exposes exactly the two control surfaces an operator needs to run a fleet, each with a single authoritative owner:
+
+- **Lever 1 — Inbox depth** = `COUNT(*) WHERE agent_name=? AND status='queued'`, a single indexed read owned by the backend. Rising depth is the signal to add capacity.
+- **Lever 2 — Capacity** = `agent_ownership.max_parallel_tasks`, enforced physically by the agent's worker count. Changing it takes effect on the next pull (workers grow immediately; shrink lets in-flight finish then stops re-polling) — no container restart.
+
+Depth is what's waiting; capacity is how fast it drains. They are mechanically coupled with zero distributed-counter glue.
 
 ### Message Envelope
 
-Every inter-agent message carries:
+Every queued task — and every agent-to-agent message — carries this envelope (stored in the row's payload column):
 ```json
 {
   "id": "<uuid>",
@@ -175,49 +188,67 @@ Every inter-agent message carries:
 }
 ```
 
-The envelope is the unit of delivery, retry, and deduplication.
+The envelope is the unit of enqueue, re-delivery, and deduplication.
+
+**Typed terminal-reason on the `reply` payload.** A `reply` envelope's `payload` MUST carry a typed terminal outcome the agent produces — `{ "status": "success | failed", "error_code": "AUTH | TIMEOUT | OOM | MAX_TURNS | AGENT_ERROR | NETWORK | …", "cost", "tokens", "session_id" }` — **not** a reason the backend infers from exit codes or stderr substrings. This is the structural cure for the MISCLASSIFIED_FAILURE class (the auth-substring classifier re-patched 5+ times across three hand-synced container copies, where every new kill/OOM shape carrying an auth substring re-triggered a false subscription switch): the platform reads a typed field instead of guessing. Pinning this taxonomy is part of the #945 envelope-payload-schema work — it is a coordination-contract requirement, not an agent implementation detail.
+
+### Recovery: Lease-Expiry Re-Delivery (the only recovery primitive)
+
+"Let it fail" is implemented as exactly one move, with no defensive partial-work rerun, no blind timeout-retry, no reconciliation repair:
+
+- Every claimed/running row carries `lease_expires_at` (= `execution_timeout_seconds` + a grace buffer). A heartbeat from the worker *renews* the lease, so a legitimately long turn is never reaped out from under itself.
+- A single **lease-reaper** sweep flips any expired claimed/running row back to `queued`. Any idle worker — the restarted agent, or a replica — re-pulls it. This one sweep replaces the ~5 reconciliation sweeps and the slot-ZSET watchdog that exist today.
+- Re-delivery reuses the **same `execution_id` and the same `idempotency_key`** (RELIABILITY-006 / #525), so a duplicate result POST is absorbed by the compare-and-set guard, and a re-pulled task is the same unit of work, never a half-finished turn resumed.
+
+Crash taxonomy, all recovered by that one move: agent/container/OOM death mid-turn → lease expires → re-queued; backend restart → in-flight long-polls drop, agents re-poll on reconnect, committed queue rows intact; container recreate (e.g. subscription auto-switch) → the queue lives in the backend, so at most the active turn is lost, recovered by lease expiry (and upgraded to a clean drain by a pre-recreate "stop pulling, finish in-flight" handshake). A `retry_count` cap parks a poison task as `FAILED(MAX_REDELIVERY)` into the operator queue so it cannot loop forever.
+
+### Re-Delivery and Side-Effect Idempotency (the hardest open problem)
+
+Re-delivery is safe **at the coordination boundary** — but it is **not automatically safe for the agent's external side effects**, and this is the single hardest unsolved problem in the whole design. `#525` deduplicates the *trigger* (the `(scope, key)` enqueue), not the agent's downstream tool calls. So a turn that sends an email / posts to Slack / charges a payment / pushes a git commit and *then* crashes before reporting its result will, on re-delivery, **re-run the turn and repeat that side effect**.
+
+This is inherent to every re-pickup model (it is not a defect of pull specifically): under Invariant #589 the agent's local "I finished" write and the backend's idempotency-complete write are on different machines and can never be one transaction, so exactly-once external effects are unattainable at the platform layer.
+
+**The contract, stated honestly rather than papered over:**
+- The platform guarantees **at-least-once delivery with an idempotent coordination boundary**. It cannot make a third party's email/payment API exactly-once.
+- Exactly-once external effects are the agent's responsibility. The platform helps by threading an **effect-scoped idempotency key** `{execution_id}:{effect_ordinal}` from the envelope through every outbound sink — the channel adapters (Slack/Telegram/WhatsApp/VoIP), the MCP outbound tools (`send_message`, `share_file`, `call_user`, `chat_with_agent`), the Nevermined payment path, and git-sync — so a re-delivered turn's repeated send is deduplicated at the sink. None of these carry an idempotency key today; this is a tracked, cross-cutting workstream (see Open Questions).
+- **Rollout rule:** until effect-scoped keys exist, pull mode defaults on only for agents with **no irreversible external side effects** (read/analysis-only). Channel- and payment-bound agents are migrated last, behind the effect-key work.
 
 ### Async-First Communication
 
 `chat_with_agent` (MCP tool) never blocks. It:
-1. Drops a message in the target agent's mailbox
+1. Enqueues a `queued` row in the target agent's queue (idempotency key derived from call args)
 2. Returns immediately: `{execution_id, status: "queued"}`
-3. Caller subscribes to `agent.task.completed` / `agent.task.failed` events via the event bus
-4. Or polls `get_execution_result` — the existing polling path remains valid
+3. Caller subscribes to `agent.task.completed` / `agent.task.failed` events via the event bus, or polls `get_execution_result` — the existing polling path remains valid (including the #914 `queued_timeout` contract).
 
-Human-facing chat is the edge adapter: the WebSocket holds open, drops a message in the mailbox, and forwards the reply when the completion event arrives. The user experience is synchronous; the internals are not.
+Human-facing chat is the edge adapter: the WebSocket (or a `?wait=true` MCP call) holds open, enqueues, and forwards the reply when the completion event arrives. The user experience is synchronous; the internals are not. The held connection must time out so it never pins a worker.
 
-### Fan-Out Without Deadlock
+### Fan-Out With an Explicit Join
 
-`fan_out` creates N messages in N mailboxes and returns a `fan_out_id` immediately. No orchestrator slot is held. The orchestrator subscribes to a synthetic `fan_out.all_complete` event that the platform emits when all `N` branches emit their completion events. The join point is event-driven, not blocking.
-
-This eliminates the fork-join topology instability identified in the scalability analysis — mathematically, there is no deadlock possible when the coordinator holds no resources while waiting.
-
-### Circuit Breaker Per Agent Pair
-
-If calls from Agent A to Agent B accumulate consecutive failures above a threshold, the circuit opens. Agent A receives immediate failure responses without enqueuing — preventing cascade backlog buildup. Auto-resets after Agent B's health check passes. Configured per agent pair, defaulting to 3 consecutive failures.
+`fan_out` enqueues N child tasks and returns a `fan_out_id` immediately — **the coordinator does not hold a worker while waiting** (this is what prevents the deadlock that a naive pull design would hit when a self-fan-out parent waits on children that the same agent's remaining workers must pull). The platform counts the N terminal acks and, when all N are reached, assembles a single **reply envelope** (carrying the `correlation_id`) into the coordinator's queue. The join is a small piece of explicit backend state — accepted honestly, with a canary for stuck joins (parent waiting, child count never reaches N) — not a blocking wait.
 
 ### Saga Pattern for Multi-Step Workflows
 
-Long-running workflows spanning multiple agents define a compensation action for each step. If step N fails, steps N-1 through 1 execute their compensations in reverse order. This prevents partial state corruption from stranded mid-workflow executions. Implemented at the orchestration layer — individual agents remain unaware.
+Long-running workflows spanning multiple agents define a compensation action for each step. If step N fails, steps N-1 through 1 execute their compensations in reverse order. This prevents partial state corruption from stranded mid-workflow executions. Implemented at the orchestration layer — individual agents remain unaware. (Orthogonal to push/pull; unchanged by the coordination revision.)
+
+### Failure Isolation Without a Dispatch Breaker
+
+Pull removes the need for a producer-side dispatch circuit breaker as a *gate*. A dead or wedged agent simply stops calling `next-task`; its queue depth rises (visible on Lever 1) and **zero compute is wasted** — the backend never blocks a thread on a multi-minute turn and never floods a sick agent. The transport breaker for the synchronous edge adapter stays; the per-agent dispatch breaker (#526) is repurposed from a gate into an operator **alert** (depth climbing + no successful results = unhealthy), never a mechanism that fails work pre-emptively. (Note: the `#307` missed-heartbeat → breaker seam is currently *unwired*; pull is the one model that does not depend on it.)
 
 ### Replica Groups for Horizontal Scale
 
-When a single container's `max_parallel_tasks` ceiling — bounded by container CPU, memory, and Claude Code concurrency — is below the throughput a capability needs, the agent is deployed as a **replica group**: N container instances backed by one logical agent identity.
+When a single container's `max_parallel_tasks` ceiling — bounded by container CPU, memory, and Claude Code concurrency — is below the throughput a capability needs, the agent is deployed as a **replica group**: N container instances backed by one logical agent identity. **Pull makes this nearly free**: the atomic row-claim *is* the competing-consumer primitive, so multiple replica containers pulling the same queue distribute work correctly with no Redis consumer-group machinery, no caller-side routing, and no new platform concept.
 
 **Topology:**
 - `agent_ownership.replica_count` (default 1) controls the desired instance count; `replica_count = 1` preserves today's behavior exactly
-- One mailbox (Redis STREAM) per agent name — unchanged
-- Replicas join a Redis Streams consumer group `agent:{name}:processors` — provides at-most-once delivery across replicas, pending-entry tracking, and claim-on-consumer-death without inventing new platform machinery
-- Callers address the agent by name; the consumer group distributes messages. No caller-side dispatch logic. Schedules fire once into the mailbox per tick and exactly one replica drains each trigger.
+- One backend queue per agent name — unchanged. All replicas pull from it; the atomic claim guarantees each task goes to exactly one worker on exactly one replica
+- Callers address the agent by name. No caller-side dispatch logic. Schedules enqueue once per tick and exactly one replica's worker claims each trigger.
 
 **Shared-state discipline (required before `replica_count > 1`):**
 - **Git repo writes**: single-writer election via Redis lock `agent:{name}:git_writer`; only the leader pushes, followers stay read-only
-- **Journal**: serialized through the platform projection path, not written from inside the container — N container writers never race on `journal.ndjson`
 - **Credentials and template files**: read-only after injection — safe to share by image across replicas
 - **Replica-safety**: declared in `template.yaml`. Agents that mutate `~/.trinity/` mid-turn, hold long-running in-memory state, or persist pipeline state in the container filesystem cannot opt into `replica_count > 1` without explicit design work.
 
-**Distinct from agent cloning:** cloning produces two siblings with divergent state and forces every caller to choose between them. Replica groups produce one logical agent with N processors and zero caller-side routing — one `agent_ownership` row, one credential set, one schedule list, one row in the fleet view.
+**Distinct from agent cloning:** cloning produces two siblings with divergent state and forces every caller to choose between them. Replica groups produce one logical agent with N worker pools and zero caller-side routing — one `agent_ownership` row, one credential set, one schedule list, one row in the fleet view.
 
 ---
 
@@ -234,23 +265,27 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 
 ### What Improves
 
+**Pull worker pool**: the agent-server runs `N = max_parallel_tasks` worker coroutines that long-poll the backend's `next-task` endpoint when idle, run the (otherwise unchanged) Claude turn, and POST the result back. This is the agent-side half of the coordination model and is built on the existing in-container asyncio-loop precedent (`auto_sync.py`). Capacity is the worker count; there is no agent-side queue to own.
+
 **Streaming responses**: agent-server supports SSE (Server-Sent Events) on `/api/chat` for real-time token streaming to the frontend. Eliminates the current pattern of waiting for full response completion before delivery.
 
-**Richer health signal**: `/health` returns not just `{status: ok}` but `{status, active_tasks, mailbox_depth, last_task_at, consecutive_failures}`. The platform uses this for circuit breaker decisions and fleet health scoring.
+**Richer health signal**: `/health` returns not just `{status: ok}` but `{status, active_tasks, last_task_at, consecutive_failures}` (#1020). The platform uses this for fleet health scoring and lease-staleness alerting. Note: there is deliberately **no** `mailbox_depth` field — under pull there is no agent-side queue to count; inbox depth (Lever 1) is a backend `COUNT` over the queue table, so the agent never carries a second, reconcilable copy of it.
 
-**Journal writes**: on every task completion, the agent-server appends a structured entry to `~/.trinity/journal.ndjson` in the agent's workspace. The backend projects this into PostgreSQL. The journal is the agent's authoritative history; the database is a queryable projection.
+**Result reporting, not journal-as-truth**: execution state is owned by the backend `schedule_executions` row, applied from the worker's result POST under a compare-and-set guard. The agent *computes* the result; it does not own a parallel authoritative history. An optional `~/.trinity/journal.ndjson` may be kept as a local audit/debug aid, but it is not the source of truth and the platform does not depend on projecting it (this is the deliberate departure from the earlier actor-model design, which made the agent's journal authoritative and thereby reintroduced cross-store reconciliation). **The result *content* the worker reports must come from an agent-owned out-of-band record, not from parsed `stdout`.** Today the authoritative terminal line (`{"type":"result"}`, carrying cost/tokens/turns/session-id) rides the same `stdout` pipe that Claude's grandchild processes inherit (fd 1), so it can be lost or truncated *before* the worker POSTs it (#548/#333) — and lease re-delivery would then re-run a turn that null-everythings the same way. The worker therefore reads its result POST from a durable agent-written record (the recovered JSONL / a result file), which is authoritative *for the result payload the worker uploads* even though the backend row stays authoritative *for execution state*. This is the one deliberate exception to "journal-as-truth": state is the backend's; the uploaded result payload must not depend on a lossy inherited pipe.
 
 **Post-execution hooks**: companion to the existing pre-check hook. `~/.trinity/post-check` runs after every task completion (language-agnostic, shebang-selected). Enables custom alerting, output validation, or state transitions defined by the agent template.
+
+**Credential rotation via hot-reload, not recreate**: rotating an agent's token (subscription auto-switch, key rollover) goes through the existing `/api/credentials/update` hot-reload endpoint and does **not** recreate the container. "Rotate a credential" and "kill every in-flight turn" must stop being the same operation (#1037) — container recreate is reserved for image/template changes, where the pre-recreate "stop pulling, finish in-flight" handshake applies. This removes the credential↔execution collision class structurally instead of recovering from it after the fact.
 
 ---
 
 ## Scheduling
 
-**Celery Beat** replaces APScheduler as the distributed task scheduler. Celery workers consume from a Redis-backed task queue. This eliminates the single-process APScheduler limitation — multiple scheduler instances can run for redundancy, with Redis providing distributed leader election.
+**APScheduler, backed by a PostgreSQL job store**, remains the scheduler — it moves its job store from SQLite to PostgreSQL and otherwise stays the standalone `scheduler` process it is today. Redundancy, when wanted, comes from running a second instance behind a **Redis-lock leader election** (`SET NX EX`), not from adopting a distributed task framework.
 
-The scheduling data model (agent_schedules, schedule_executions) is unchanged. The interface — cron expressions, manual triggers, webhook triggers — is unchanged. The implementation switches from in-process APScheduler to an independent Celery process that publishes messages to agent mailboxes.
+The scheduling data model (agent_schedules, schedule_executions) is unchanged. The interface — cron expressions, manual triggers, webhook triggers — is unchanged. Under the pull model the scheduler is just another producer: on each tick it **enqueues a `queued` task row** (with its `Idempotency-Key: sched:{execution_id}`) and is done — the agent's worker pool drains it when it has capacity. The scheduler never dispatches to or blocks on an agent.
 
-**Why Celery over APScheduler at scale**: APScheduler is excellent for single-process scheduling; it cannot distribute work across processes or provide fault-tolerant redundancy. Celery with Redis backend is the standard distributed task queue for Python systems at this scale.
+**Why not Celery**: Celery is itself a competing-consumers system — adopting it under pull would mean running *two* such systems for no benefit. Pull already moved task *execution* onto the agent worker pools, so the scheduler's entire remaining job is "INSERT a queued row on a cron tick." A broker + worker processes + result backend + routing config is the wrong weight for that. APScheduler on a PostgreSQL job store gives durable, restart-surviving schedules; a Redis lock gives multi-instance redundancy — without Celery's operational surface. (Resolves #949.)
 
 ---
 
@@ -265,7 +300,7 @@ The scheduling data model (agent_schedules, schedule_executions) is unchanged. T
 
 ### What Changes
 
-**Message queue between adapters and agents**: currently adapters call agents synchronously through the message router. In the target state, adapters enqueue to the agent mailbox and return an acknowledgment to the channel immediately. This decouples channel availability from agent availability — a slow agent doesn't stall Slack responses.
+**Message queue between adapters and agents**: currently adapters call agents synchronously through the message router. In the target state, adapters **enqueue a `queued` task row** and return an acknowledgment to the channel immediately; the agent's worker pool pulls it when ready. This decouples channel availability from agent availability — a slow agent doesn't stall Slack responses. (Channel sends are exactly the irreversible side effects that need effect-scoped idempotency keys before a channel-bound agent runs under pull — see the Coordination Model's side-effect contract.)
 
 **Channel-level circuit breakers**: if a channel API (Slack, Telegram, Twilio) is rate-limiting or unreachable, the adapter backs off with exponential retry rather than propagating errors to the routing layer. The agent never sees channel transport failures.
 
@@ -299,6 +334,8 @@ The scheduling data model (agent_schedules, schedule_executions) is unchanged. T
 
 ### Metrics Stack: OTEL → Prometheus → Grafana
 
+> Prometheus + Grafana are an **opt-in observability profile**, not baseline services. The OTEL Collector (already present) and Vector cover the baseline; operators enable the metrics/dashboard stack when they want fleet-level views.
+
 **Emit level**: every service (backend, scheduler, MCP server, agent-server) emits OTEL metrics and traces. The OTEL Collector forwards metrics to Prometheus and traces to a configured backend (Jaeger or Tempo).
 
 **Fleet-level metrics** (not available today):
@@ -306,8 +343,9 @@ The scheduling data model (agent_schedules, schedule_executions) is unchanged. T
 - `trinity_agent_task_duration_seconds` — P50/P95/P99 by agent name
 - `trinity_agent_task_error_rate` — error ratio by agent and error type
 - `trinity_fanout_join_latency_seconds` — time from first branch to last branch completion
-- `trinity_mailbox_depth` — per-agent queued message count (auto-scaling signal)
-- `trinity_circuit_breaker_state` — open/closed/half-open per agent pair
+- `trinity_queue_depth` — per-agent `COUNT(status='queued')`, the Lever-1 backlog signal (auto-scaling input)
+- `trinity_queue_oldest_age_seconds` — age of the oldest queued task per agent (starvation / stuck-drain detector)
+- `trinity_lease_reaper_redeliveries_total` — re-deliveries fired by lease expiry (a rising rate flags crashing/wedged agents)
 
 **Grafana dashboards**:
 - Fleet Operations: capacity, error rates, fan-out health, circuit breakers
@@ -324,8 +362,9 @@ Fleet health is not "all agents responding to /health." It is a derived signal:
 agent_health_score = f(
   recent_task_success_rate,    // last 1h
   p95_task_duration_vs_baseline,
-  mailbox_depth_vs_capacity,
-  circuit_breaker_state,
+  queue_depth_vs_capacity,     // Lever 1 vs Lever 2
+  queue_oldest_age,            // is the drain actually keeping up?
+  lease_redelivery_rate,       // crashing/wedged signal
   last_successful_output_at
 )
 ```
@@ -371,20 +410,21 @@ Docker Compose remains the primary deployment model — it matches Trinity's ICP
 | `backend` | unchanged |
 | `frontend` | unchanged |
 | `mcp-server` | unchanged |
-| `scheduler` | upgraded: Celery worker + Celery Beat (replaces APScheduler inside backend) |
-| `postgres` | **NEW** — replaces SQLite bind mount |
-| `pgbouncer` | **NEW** — connection pooler in front of postgres |
+| `scheduler` | unchanged shape — still a standalone APScheduler process; only its job store moves from SQLite to PostgreSQL. Optional second instance behind a Redis-lock leader election for redundancy. |
+| `postgres` | **NEW** — replaces SQLite bind mount. The one non-negotiable new service. |
 | `redis` | unchanged |
 | `vector` | unchanged |
 | `otel-collector` | already present |
-| `prometheus` | **NEW** — scrapes OTEL Collector metrics |
-| `grafana` | **NEW** — dashboards for fleet operators |
+
+**Deferred scaling levers (not baseline):** `pgbouncer` (transaction-pool in front of postgres — add when process count outgrows the connection ceiling) and a postgres **read replica** (add when read-bound). Both are introduced only when measured load justifies them, never speculatively.
+
+**Opt-in observability profile (not baseline):** `prometheus` (scrapes the already-present OTEL Collector) + `grafana` (fleet dashboards). Enabled by operators who want fleet-level dashboards; OTEL Collector and Vector cover the baseline.
 
 `~/trinity-data/` bind mount expands to cover the PostgreSQL data directory. SQLite is deprecated and removed once migration is complete.
 
 ### Redis ACL
 
-The existing two-user ACL model (`default` admin + `backend` restricted) extends to include a `scheduler` user and a `worker` user. Each process has the minimum permissions it needs. No process has `@dangerous` access except `default`.
+The existing ACL model (`default` admin + restricted `backend`/`scheduler` users, already in place today) is unchanged — no Celery `worker` user is introduced. Each process keeps the minimum permissions it needs; no process has `@dangerous` access except `default`.
 
 ### Kubernetes Compatibility
 
@@ -403,7 +443,7 @@ Two networks remain:
 
 | Network | Members |
 |---------|---------|
-| `trinity-platform-network` | postgres, pgbouncer, redis, scheduler, vector, prometheus, grafana |
+| `trinity-platform-network` | postgres, redis, scheduler, vector (+ pgbouncer, prometheus, grafana when those deferred/opt-in profiles are enabled) |
 | `trinity-agent-network` | agents, frontend |
 
 Bridges (both networks): backend, mcp-server, otel-collector, cloudflared
@@ -435,15 +475,19 @@ These decisions are already correct and should not be revisited without strong e
 
 These are architectural decisions not yet resolved. They should be answered before the relevant components are built. Each has a tracking issue.
 
-1. **Journal format** (issue #945): What does `journal.ndjson` contain per entry? The envelope fields are defined; the payload schema for each `kind` is not. The one-page postcard (envelope + journal format) is required before the Phase 2 actor-model experiment (#946) can be scheduled.
+1. **Message-envelope payload schema** (issue #945): The envelope fields are defined; the `payload` schema for each `kind` is not. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract must be pinned before the pull pilot (#946). In particular the `reply` payload must pin the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the pre-work: `ParallelTaskRequest` has 15 fields today, and the envelope cannot fit honestly until those are demoted to session/agent state or quarantined.
 
-2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
+2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. **Sequencing constraint added by the pull model:** the queue, the atomic claim, the result-write, and the lease-renewal all converge on one DB; at 200 agents that is exactly where SQLite's single-writer lock becomes the ceiling — *before* agent count does. PostgreSQL must therefore land **before** the pull queue carries the full fleet at scale (or no later than the "capacity becomes physical" phase), not after. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
+
+2a. **Side-effect idempotency** (issue #1084): the hardest open problem. Lease-expiry re-delivery re-runs a whole turn, re-emitting any irreversible external effect (email, Slack/Telegram/WhatsApp/VoIP send, Nevermined payment, git push, file share) the first attempt already performed — none of which carry an idempotency key today. The fix is an **effect-scoped key** `{execution_id}:{effect_ordinal}` threaded from the envelope through every channel adapter, MCP outbound tool, the payment path, and git-sync, deduplicated at the sink. This is a cross-cutting workstream that gates defaulting pull mode on for any side-effect-bearing agent; read/analysis-only agents migrate first. See the Coordination Model's side-effect contract.
+
+2b. **Correlated-failure / thundering-herd behavior** (issue #1085): backend restart (which already happens routinely) means ~200 agents simultaneously re-poll, reconnect, and re-deliver against one DB; a shared cause (Claude-API outage, expired platform key, a bad skill pushed fleet-wide) makes the per-agent-benign re-delivery primitive a self-amplifying retry storm. Needs jittered re-poll, per-agent and fleet-wide re-delivery rate caps, and a shared-cause pause. The soak gate must be validated against an *induced* backend restart with the fleet mid-flight, not just steady state.
 
 3. **GuardAgent evaluation** (issue #947): How does the GuardAgent evaluate output quality? Rule-based (regexes, schema validation) is implementable today. LLM-based evaluation (semantic quality scoring) is more powerful but adds latency and cost. The boundary between them needs a design decision.
 
-4. **Celery vs. APScheduler+PG** (issue #949): Celery adds operational surface (worker processes, task routing, retry configuration). Is the distributed redundancy benefit worth it for operators running single-node deployments? The alternative is APScheduler backed by a PostgreSQL job store, which gives persistence without the full Celery stack. Decision should be made before the scheduler migration is planned.
+4. **Scheduler implementation** (issue #949) — *Resolved 2026-06-05*: **APScheduler on a PostgreSQL job store**, not Celery. Pull moved task execution onto the agent worker pools, leaving the scheduler with only "enqueue a row on a cron tick"; a second competing-consumers system (Celery) would add a broker, worker processes, and routing config for no benefit. Redundancy, when needed, is a Redis-lock leader election over a second APScheduler instance — not a distributed task framework. See §Scheduling. (Remaining sub-question, if any: the exact PostgreSQL job-store driver and the leader-election lock semantics — minor, settled at implementation time.)
 
-5. **Replica-group coordination** (issue #927): the single-writer election for git pushes, the journal-projection serialization path, and the `template.yaml` schema for declaring replica-safety all need design before `replica_count > 1` is exposed. Container autoscaling (vs. operator-set replica counts) is explicitly out of scope until real load patterns justify it.
+5. **Replica-group coordination** (issue #927): pull **simplifies** this — the atomic row-claim is the competing-consumer primitive, so there is no Redis consumer-group machinery and no journal-projection serialization path to design (the journal is no longer authoritative). What remains: the single-writer election for git pushes (Redis lock `agent:{name}:git_writer`) and the `template.yaml` schema for declaring replica-safety, both needed before `replica_count > 1` is exposed. Container autoscaling (vs. operator-set replica counts) is explicitly out of scope until real load patterns justify it.
 
 6. **Workflow-scoped capability tokens** (issue #948): the §Security and Trust addition — ephemeral tokens scoped to a `correlation_id` so a compromised agent's blast radius is bounded to its active workflows rather than its permanent permission set. Layered on top of `agent_permissions`, not a replacement. Sequencing depends on the #946 decision gate.
 
@@ -451,21 +495,28 @@ These are architectural decisions not yet resolved. They should be answered befo
 
 Critical-path work toward this architecture is tracked in GitHub:
 
-| Surface | Issues |
-|---------|--------|
-| Cleanup pyramid collapse | #429 |
-| Idempotency keys at trigger boundaries | #525 |
-| Per-agent dispatch circuit breaker | #526 |
-| Agent heartbeat push (5s) | #307 |
-| Actor-model postcard (envelope + journal) | #945 |
-| Phase 2 actor-model experiment (MCP boundary) | #946 |
+All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
+
+| Surface | Issue(s) |
+|---------|----------|
+| **Pull / work-stealing migration — umbrella** (schema → dark pull endpoints → agent worker-pool → capacity-physical + lease-reaper → sync edge + fan-out join → default-on + delete) | **#1081** |
+| ├─ Bankable win 1 — status-as-projection (CAS-guarded; retires canary S-01; ships independently) | #1082 |
+| ├─ Bankable win 2 — fire-and-forget dispatch (a hung turn holds zero backend resource; kills the Cornelius runaway; ships independently) | #1083 |
+| ├─ Side-effect-scoped idempotency keys (**the gate** — pull stays read-only-agents-first until this lands) | #1084 |
+| ├─ Correlated-failure / herd controls (jitter + re-delivery caps + shared-cause pause) | #1085 |
+| ├─ Pilot: route MCP `chat_with_agent` through the agent queue | #946 |
+| ├─ Cleanup pyramid → single lease-reaper | #429 |
+| └─ PostgreSQL migration (sequence **before** the queue carries the fleet) | #300 |
+| Message-envelope payload schema (gates the pilot #946) | #945 |
+| Idempotency keys at trigger boundaries (shipped) | #525 |
+| Per-agent dispatch circuit breaker — repurposed gate→alert under pull (shipped) | #526 |
+| Agent heartbeat push — repurposed gate→alert under pull | #307 |
+| Replica groups — now row-claim competing-consumers, no Redis consumer groups | #927 |
+| Scheduler: APScheduler+PG job store — Celery rejected (pull made it redundant) | #949 |
 | GuardAgent design + rule-based prototype | #947 |
 | Workflow-scoped capability tokens | #948 |
-| Celery vs APScheduler+PG decision | #949 |
-| Replica groups | #927 |
-| PostgreSQL migration | #300 |
 
-See `ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
+See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
 
 ---
 

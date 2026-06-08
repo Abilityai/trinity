@@ -92,6 +92,34 @@ def test_version_payload_falls_back_to_unknown_when_env_missing(monkeypatch):
     assert payload["build_date"] == "unknown"
 
 
+def test_version_payload_prefers_version_env(monkeypatch):
+    """#993 — the build-stamped VERSION env var (e.g. `0.9.0+g4c640b6e`)
+    takes precedence over the VERSION file so dev (bind-mount) and prod
+    (build-arg) agree for the same commit."""
+    monkeypatch.setenv("VERSION", "0.9.0+gdeadbeef")
+
+    build = _load_builder()
+    payload = build(voice_enabled=False)
+
+    assert payload["version"] == "0.9.0+gdeadbeef"
+    # Version flows into the component descriptors too.
+    assert payload["components"]["backend"] == "0.9.0+gdeadbeef"
+    assert payload["components"]["base_image"] == "trinity-agent-base:0.9.0+gdeadbeef"
+
+
+def test_version_payload_empty_version_env_falls_back_to_file(monkeypatch):
+    """An empty VERSION env var must not shadow the file fallback —
+    `os.getenv("VERSION") or None` treats "" as unset (#993)."""
+    monkeypatch.setenv("VERSION", "")
+
+    build = _load_builder()
+    payload = build(voice_enabled=False)
+
+    # Repo VERSION file is read via the injected __file__ path.
+    assert payload["version"] != ""
+    assert payload["version"] != "unknown"  # file present in repo
+
+
 def test_version_payload_preserves_existing_fields(monkeypatch):
     """Pre-#926 keys (version, platform, components, runtimes, voice_enabled)
     must still be present so existing callers don't break."""

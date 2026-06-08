@@ -13,12 +13,28 @@ AI-generated avatars for agents using reference images, emotion variants, and de
 - **Dark Mode Compatible** -- Avatar styling adapts to dark mode.
 - **Dashboard Timeline** -- Avatars display in Dashboard Timeline tiles at large size with a border ring.
 
+## Generation Failures
+
+When avatar generation fails, the **Generate** dialog shows an actionable reason instead of a generic "Failed to generate avatar." Each failure is classified so you know whether to fix configuration, change the prompt, or just retry:
+
+| Reason | Meaning | What to do |
+|--------|---------|------------|
+| `not_configured` | No image-generation API key is set | Add `GEMINI_API_KEY` in **Settings → AI Keys** |
+| `invalid_input` | The reference image or prompt was rejected | Adjust the prompt or upload a different reference image |
+| `safety_filter` | The upstream model blocked the request on safety grounds | Reword the identity prompt |
+| `rate_limited` | The image provider is throttling requests | Wait and retry |
+| `timeout` | The request timed out (e.g. a gateway 504) | Retry; if persistent, check provider status |
+| `upstream_error` / `unknown` | An unexpected provider or network error | Retry; check the platform logs if it recurs |
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/avatar` | GET | Serve the agent's current avatar |
-| `/api/agents/{name}/avatar` | POST | Generate or upload a new avatar |
+| `/api/agents/{name}/avatar/generate` | POST | Generate a new avatar (optionally from a reference image / identity prompt) |
+| `/api/agents/{name}/avatar/regenerate` | POST | Generate a fresh variation from the existing avatar |
+| `/api/agents/{name}/avatar` | DELETE | Remove the agent's custom avatar |
+| `/api/agents/avatars/generate-defaults` | POST | Admin — generate default avatars for all agents without one |
 
 ## See Also
 

@@ -80,7 +80,7 @@
 
 <script setup>
 import { ref, watch } from 'vue'
-import axios from 'axios'
+import api from '@/api'
 import AgentAvatar from './AgentAvatar.vue'
 
 const props = defineProps({
@@ -105,19 +105,37 @@ watch(() => props.show, (val) => {
   }
 })
 
+// #957: Map axios failures to actionable strings. Backend now sends a
+// friendly `detail` per kind, but we still need a fallback chain for the
+// no-response cases (network, nginx 504 with HTML body) that strip detail.
+function describeAvatarError(err, verb = 'generate') {
+  if (err?.response?.data?.detail && typeof err.response.data.detail === 'string') {
+    return err.response.data.detail
+  }
+  const status = err?.response?.status
+  if (status === 504) return `Avatar ${verb} timed out — please retry.`
+  if (status === 502 || status === 503) {
+    return `Image generation service is unavailable right now — please retry in a few minutes.`
+  }
+  if (!err?.response) {
+    return `Network error while trying to ${verb} avatar — check your connection and retry.`
+  }
+  return `Failed to ${verb} avatar (HTTP ${status}).`
+}
+
 async function generate() {
   if (!identityPrompt.value.trim()) return
   generating.value = true
   error.value = ''
 
   try {
-    await axios.post(`/api/agents/${props.agentName}/avatar/generate`, {
+    await api.post(`/api/agents/${props.agentName}/avatar/generate`, {
       identity_prompt: identityPrompt.value.trim()
-    })
+    }, { timeout: 180000 })
     emit('updated')
     emit('close')
   } catch (err) {
-    error.value = err.response?.data?.detail || 'Failed to generate avatar'
+    error.value = describeAvatarError(err, 'generate')
   } finally {
     generating.value = false
   }
@@ -128,11 +146,11 @@ async function removeAvatar() {
   error.value = ''
 
   try {
-    await axios.delete(`/api/agents/${props.agentName}/avatar`)
+    await api.delete(`/api/agents/${props.agentName}/avatar`)
     emit('updated')
     emit('close')
   } catch (err) {
-    error.value = err.response?.data?.detail || 'Failed to remove avatar'
+    error.value = describeAvatarError(err, 'remove')
   } finally {
     removing.value = false
   }

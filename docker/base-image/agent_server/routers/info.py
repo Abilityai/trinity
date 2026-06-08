@@ -111,6 +111,14 @@ async def health_check():
         # Backward compatibility
         "claude_available": agent_state.claude_code_available,
         "message_count": len(agent_state.conversation_history),
+        # #1020: richer health signal (target-arch §Agent Runtime). Named,
+        # contractual fields the platform consumes for the dispatch circuit
+        # breaker (#526) and fleet-health scoring (#307). `mailbox_depth` is
+        # intentionally absent — there is no agent-side mailbox yet (actor
+        # model, #945); the backend derives queue depth from CapacityManager.
+        "active_tasks": agent_state.active_task_count,
+        "last_task_at": agent_state.last_task_at,
+        "consecutive_failures": agent_state.consecutive_failures,
         "diagnostics": _diagnostics(),
     }
 

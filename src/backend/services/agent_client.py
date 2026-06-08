@@ -12,9 +12,8 @@ machine transitions are atomic Lua scripts (no TOCTOU races between workers).
 import asyncio
 import json
 import logging
-import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Any, Dict, Tuple
 
 import httpx
@@ -24,6 +23,16 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
+)
+
+# Shared Redis plumbing (#526 D4). Top-level module (NOT services/) so this
+# import stays clean when agent_client is loaded standalone in its unit +
+# integration suites — see redis_breaker_util's module docstring.
+from redis_breaker_util import (
+    ScriptCache,
+    decode_pair,
+    get_breaker_redis,
+    reset_breaker_redis_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,49 +81,33 @@ CIRCUIT_DORMANT_AFTER_OPEN_PROBES = 10
 CIRCUIT_DORMANT_COOLDOWN_SECONDS = 3600.0  # 1 hour
 
 
-# ----- Redis client (lazy, cached, fail-open on unreachability) -------------
-
-_redis_client: Optional[_redis.Redis] = None
-_redis_client_lock = threading.Lock()
+# ----- Redis client (shared, fail-open) -------------------------------------
+#
+# The cached fail-open client lives in redis_breaker_util (#526 D4) so this
+# transport breaker and the dispatch breaker share one client. These two
+# functions stay as module-level wrappers because tests monkeypatch /
+# call them by name (agent_client._get_circuit_redis,
+# agent_client._reset_circuit_redis_client).
 
 
 def _get_circuit_redis() -> Optional[_redis.Redis]:
-    """Return a Redis client, or None if Redis is unreachable.
+    """Return the shared breaker Redis client, or None if unreachable.
 
-    Mirrors the fail-open pattern used by webhooks.py: the circuit breaker
-    is best-effort coordination — if Redis is down we fall through to
-    allowing the request and let the underlying HTTP failure surface.
+    Thin delegate to ``redis_breaker_util.get_breaker_redis`` — kept as a
+    module function so existing tests can monkeypatch
+    ``agent_client._get_circuit_redis``.
     """
-    global _redis_client
-    if _redis_client is not None:
-        return _redis_client
-    with _redis_client_lock:
-        if _redis_client is not None:
-            return _redis_client
-        try:
-            from config import REDIS_URL
-            client = _redis.from_url(
-                REDIS_URL,
-                decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=1,
-            )
-            client.ping()
-            _redis_client = client
-        except Exception as e:
-            logger.warning("Circuit breaker: Redis unavailable (%s) — failing open", e)
-            return None
-    return _redis_client
+    return get_breaker_redis()
 
 
 def _reset_circuit_redis_client() -> None:
-    """Drop the cached client so the next call rebuilds. For tests + recovery."""
-    global _redis_client, _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
-    with _redis_client_lock:
-        _redis_client = None
-        _ALLOW_SCRIPT = None
-        _RECORD_FAILURE_SCRIPT = None
-        _RECORD_SUCCESS_SCRIPT = None
+    """Drop the cached client + circuit Lua cache so the next call rebuilds.
+
+    For tests + recovery. Resets both the shared client (redis_breaker_util)
+    and this module's circuit script cache.
+    """
+    reset_breaker_redis_client()
+    _CIRCUIT_SCRIPTS.reset()
 
 
 # ----- Lua scripts (atomic state machine transitions) -----------------------
@@ -207,18 +200,21 @@ redis.call('DEL', KEYS[2])
 return prior_state
 """
 
-_ALLOW_SCRIPT = None
-_RECORD_FAILURE_SCRIPT = None
-_RECORD_SUCCESS_SCRIPT = None
+# Circuit Lua scripts, cached process-wide via the shared ScriptCache (#526 D4).
+_CIRCUIT_SCRIPTS = ScriptCache(
+    allow=_ALLOW_REQUEST_LUA,
+    record_failure=_RECORD_FAILURE_LUA,
+    record_success=_RECORD_SUCCESS_LUA,
+)
 
 
 def _ensure_scripts(client: _redis.Redis):
-    global _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
-    if _ALLOW_SCRIPT is None:
-        _ALLOW_SCRIPT = client.register_script(_ALLOW_REQUEST_LUA)
-        _RECORD_FAILURE_SCRIPT = client.register_script(_RECORD_FAILURE_LUA)
-        _RECORD_SUCCESS_SCRIPT = client.register_script(_RECORD_SUCCESS_LUA)
-    return _ALLOW_SCRIPT, _RECORD_FAILURE_SCRIPT, _RECORD_SUCCESS_SCRIPT
+    """Register + cache the circuit Lua scripts; return (allow, rf, rs) tuple.
+
+    Tuple shape preserved for the existing call sites that unpack it.
+    """
+    s = _CIRCUIT_SCRIPTS.ensure(client)
+    return s["allow"], s["record_failure"], s["record_success"]
 
 
 # ----- Failure classification (#474) ---------------------------------------
@@ -467,16 +463,9 @@ class CircuitState:
         return self._read_int("failures")
 
 
-def _decode_pair(result: Any) -> tuple[str, str]:
-    """Lua MULTI return → (prior_state, new_state) as strings."""
-    if not result or len(result) != 2:
-        return ("closed", "closed")
-    prior, new = result
-    if isinstance(prior, bytes):
-        prior = prior.decode()
-    if isinstance(new, bytes):
-        new = new.decode()
-    return prior, new
+# Shared with the dispatch breaker (#526 D4): (prior_state, new_state) decode.
+# Aliased (not re-defined) so agent_client._decode_pair stays importable.
+_decode_pair = decode_pair
 
 
 def _state_dict(data: Dict[str, Any]) -> dict:

@@ -141,10 +141,14 @@ class TestFeatureFlagsEndpoint:
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either the code default or a valid admin override
+        # Accept either the code default or a valid admin override. The override
+        # set must stay in lockstep with the options offered in Settings.vue's
+        # platform-default dropdown (#1080 added claude-opus-4-8).
         assert data["platform_default_model"] in (
             "claude-sonnet-4-6",
+            "claude-opus-4-8",
             "claude-opus-4-7",
+            "claude-opus-4-6",
         ), f"Unexpected default: {data['platform_default_model']}"
 
     def test_feature_flags_unauthenticated_returns_401(self):

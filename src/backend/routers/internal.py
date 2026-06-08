@@ -11,7 +11,7 @@ Falls back to SECRET_KEY if INTERNAL_API_SECRET is not set.
 import asyncio
 import os
 import hmac
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 import logging
@@ -21,6 +21,7 @@ from models import ActivityState, ActivityType, ShareFileRequest, ShareFileRespo
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import idempotency_service
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +249,10 @@ def _schedule_context_from(request: "InternalTaskExecutionRequest") -> Optional[
 
 
 @router.post("/execute-task")
-async def execute_task_internal(request: InternalTaskExecutionRequest):
+async def execute_task_internal(
+    request: InternalTaskExecutionRequest,
+    idempotency_key: Optional[str] = Header(None),
+):
     """
     Execute a task via the unified TaskExecutionService.
 
@@ -277,6 +281,39 @@ async def execute_task_internal(request: InternalTaskExecutionRequest):
 
     task_service = get_task_execution_service()
 
+    # RELIABILITY-006 (#525): idempotency gate. The scheduler sends a
+    # deterministic key (sched:{execution_id}); a network blip + resend of the
+    # same dispatch resolves to the same key and is short-circuited here instead
+    # of double-dispatching. Optional header — absent → no dedup.
+    idem = idempotency_service.begin(
+        idempotency_service.make_agent_scope(request.agent_name), idempotency_key
+    )
+    if idem.replay:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="idempotent_replay",
+            source="scheduler",
+            target_type="agent",
+            target_id=request.agent_name,
+            endpoint="/api/internal/execute-task",
+            details={
+                "idempotency_key": idempotency_key,
+                "execution_id": idem.execution_id,
+                "in_flight": idem.in_flight,
+            },
+        )
+        if idem.snapshot is not None:
+            return idem.snapshot
+        # Still in flight (or no snapshot stored) — acknowledge without
+        # re-dispatching; the scheduler polls the DB by execution_id.
+        return {
+            "status": "accepted",
+            "execution_id": idem.execution_id or request.execution_id,
+            "async_mode": bool(request.async_mode),
+            "idempotent_replay": True,
+        }
+    idempotency_service.attach_execution(idem, request.execution_id)
+
     # Audit schedule-triggered execution (source=scheduler, actor=system)
     if request.triggered_by == "schedule":
         await platform_audit_service.log(
@@ -300,11 +337,15 @@ async def execute_task_internal(request: InternalTaskExecutionRequest):
         asyncio.create_task(_execute_task_internal_background(
             task_service, request
         ))
-        return {
+        accepted = {
             "status": "accepted",
             "execution_id": request.execution_id,
             "async_mode": True,
         }
+        # Mark the claim completed with the accepted ack so a resend replays it
+        # rather than re-dispatching (the background task owns the real result).
+        idempotency_service.complete(idem, request.execution_id, accepted)
+        return accepted
 
     # Synchronous mode (default, backward compatible)
     try:
@@ -320,7 +361,7 @@ async def execute_task_internal(request: InternalTaskExecutionRequest):
             attempt=request.attempt,
         )
 
-        return {
+        result_payload = {
             "execution_id": result.execution_id,
             "status": result.status,
             "response": result.response,
@@ -330,9 +371,12 @@ async def execute_task_internal(request: InternalTaskExecutionRequest):
             "session_id": result.session_id,
             "error": result.error,
         }
+        idempotency_service.complete(idem, result.execution_id, result_payload)
+        return result_payload
 
     except Exception as e:
         logger.error(f"Internal task execution failed for {request.agent_name}: {e}")
+        idempotency_service.fail(idem)
         raise HTTPException(status_code=500, detail=str(e))
 
 

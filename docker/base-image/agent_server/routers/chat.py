@@ -42,14 +42,22 @@ async def chat(request: ChatRequest):
         runtime = get_runtime()
         # Use request.model if provided, otherwise use the model set via /api/model endpoint
         effective_model = request.model or agent_state.current_model
-        response_text, execution_log, metadata, raw_messages = await runtime.execute(
-            prompt=request.message,
-            model=effective_model,
-            continue_session=True,
-            stream=request.stream,
-            system_prompt=request.system_prompt,
-            execution_id=request.execution_id
-        )
+        # #1020: feed the richer /health signal — count this execution and
+        # record success/failure (drives consecutive_failures).
+        agent_state.record_task_start()
+        try:
+            response_text, execution_log, metadata, raw_messages = await runtime.execute(
+                prompt=request.message,
+                model=effective_model,
+                continue_session=True,
+                stream=request.stream,
+                system_prompt=request.system_prompt,
+                execution_id=request.execution_id
+            )
+        except BaseException:
+            agent_state.record_task_finish(success=False)
+            raise
+        agent_state.record_task_finish(success=True)
 
         # Add assistant response to history
         agent_state.add_message("assistant", response_text)
@@ -120,18 +128,26 @@ async def execute_task(request: ParallelTaskRequest):
 
     # Execute via runtime adapter in headless mode (no lock, no --continue)
     runtime = get_runtime()
-    response_text, raw_messages, metadata, session_id = await runtime.execute_headless(
-        prompt=request.message,
-        model=request.model,
-        allowed_tools=request.allowed_tools,
-        system_prompt=request.system_prompt,
-        timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
-        max_turns=request.max_turns,
-        execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
-        resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
-        persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
-        images=request.images,  # Vision images from channel adapters (#562)
-    )
+    # #1020: feed the richer /health signal — count this execution and record
+    # success/failure (drives consecutive_failures, consumed by #526).
+    agent_state.record_task_start()
+    try:
+        response_text, raw_messages, metadata, session_id = await runtime.execute_headless(
+            prompt=request.message,
+            model=request.model,
+            allowed_tools=request.allowed_tools,
+            system_prompt=request.system_prompt,
+            timeout_seconds=request.timeout_seconds or 900,  # Default 15 minutes for research tasks
+            max_turns=request.max_turns,
+            execution_id=request.execution_id,  # Use provided ID for process registry (enables termination)
+            resume_session_id=request.resume_session_id,  # Resume previous session (EXEC-023)
+            persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
+            images=request.images,  # Vision images from channel adapters (#562)
+        )
+    except BaseException:
+        agent_state.record_task_finish(success=False)
+        raise
+    agent_state.record_task_finish(success=True)
 
     logger.info(f"[Task] Task {session_id} completed successfully")
 

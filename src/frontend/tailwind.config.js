@@ -22,6 +22,7 @@ export default {
       //   action-*  interactive surface that performs a verb (primary buttons,
       //             links, focus rings).
       colors: {
+        gray: { ...colors.gray, 750: 'rgb(42, 48, 60)' },
         'status-success':    colors.green,
         'status-warning':    colors.yellow,
         'status-danger':     colors.red,

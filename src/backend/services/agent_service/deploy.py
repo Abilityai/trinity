@@ -4,6 +4,7 @@ Agent Service Deploy - Local agent deployment logic.
 Contains the business logic for deploying local agents via MCP.
 """
 import base64
+import os
 import tarfile
 import tempfile
 import shutil
@@ -11,6 +12,7 @@ import logging
 from pathlib import Path
 from io import BytesIO
 
+import docker
 from fastapi import HTTPException, Request
 
 from models import (
@@ -23,7 +25,10 @@ from models import (
     MAX_DEPLOY_CREDENTIALS,
 )
 from database import db
-from services.template_service import is_trinity_compatible
+from services.template_service import (
+    is_trinity_compatible,
+    collect_mcp_credential_warnings,
+)
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop
 from utils.helpers import sanitize_agent_name
@@ -35,6 +40,118 @@ logger = logging.getLogger(__name__)
 # Size limits for local deployment
 MAX_ARCHIVE_SIZE = 50 * 1024 * 1024  # 50 MB
 MAX_FILES = 1000
+
+# Container-side path for deployed-local templates (#950). Sits under
+# /data which is host-bound to TRINITY_DATA_PATH (default ./trinity-data),
+# writable, and owned by UID 1000 — separate from the curated catalog at
+# /agent-configs/templates which is intentionally read-only.
+DEPLOYED_TEMPLATES_DIR_IN_BACKEND = "/data/deployed-templates"
+
+# Image used by the workspace pre-population transient container (#950).
+# Pinned to a specific tag so a Docker Hub `latest` swap can't silently
+# change deploy behavior.
+_PREPOP_IMAGE = "alpine:3.20"
+
+
+def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) -> None:
+    """Pre-populate `agent-{version_name}-workspace` with the template files (#950).
+
+    Creates (or reuses) the docker named volume that the agent container
+    will mount at `/home/developer`, then copies the extracted template
+    contents into it via an ephemeral alpine container (`put_archive`).
+    A `.trinity-initialized` marker is included in the same tar so the
+    agent's `startup.sh` skips its `/template`→`/home/developer` copy on
+    boot. This bypasses the host-path bind-mount transport that was
+    inconsistent between dev (named volume `/data`) and prod (host bind
+    `/data`) compose files.
+
+    Failures raise HTTPException(500) — partial pre-population would
+    leave the deploy in an inconsistent state.
+    """
+    workspace_vol = f"agent-{version_name}-workspace"
+    client = docker.from_env()
+
+    try:
+        client.volumes.get(workspace_vol)
+    except docker.errors.NotFound:
+        client.volumes.create(
+            name=workspace_vol,
+            labels={
+                "trinity.platform": "agent-workspace",
+                "trinity.agent-name": version_name,
+            },
+        )
+
+    # Stream template + .trinity-initialized marker into the volume.
+    # Both files captured under uid=1000/gid=1000 so the agent container
+    # (running as `developer`, UID 1000 per #874) can read & write them.
+    tar_buf = BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+        def _set_owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            info.uid = 1000
+            info.gid = 1000
+            info.uname = "developer"
+            info.gname = "developer"
+            return info
+
+        tar.add(str(template_dir), arcname=".", filter=_set_owner)
+
+        marker = tarfile.TarInfo(name=".trinity-initialized")
+        marker.size = 0
+        marker.uid = 1000
+        marker.gid = 1000
+        marker.uname = "developer"
+        marker.gname = "developer"
+        tar.addfile(marker, BytesIO(b""))
+
+    tar_buf.seek(0)
+    tar_bytes = tar_buf.read()
+
+    transient = None
+    try:
+        # Auto-pull the image if it isn't already present on the daemon
+        # (docker SDK's `containers.create` doesn't pull, unlike `run`).
+        try:
+            client.images.get(_PREPOP_IMAGE)
+        except docker.errors.ImageNotFound:
+            logger.info(f"Pulling {_PREPOP_IMAGE} for workspace pre-pop")
+            client.images.pull(_PREPOP_IMAGE)
+        transient = client.containers.create(
+            _PREPOP_IMAGE,
+            # Chown the volume root after put_archive — Docker creates new
+            # volumes root-owned, and put_archive only sets ownership on
+            # the entries inside, not on the mount point itself. Without
+            # this, the agent (UID 1000) can't write to /home/developer.
+            command=["sh", "-c", "chown 1000:1000 /dest && chmod 755 /dest"],
+            volumes={workspace_vol: {"bind": "/dest", "mode": "rw"}},
+        )
+        ok = transient.put_archive("/dest", tar_bytes)
+        if not ok:
+            raise RuntimeError("put_archive returned False")
+        transient.start()
+        result = transient.wait(timeout=30)
+        if result.get("StatusCode", 1) != 0:
+            log_tail = transient.logs(tail=20).decode(errors="replace")
+            raise RuntimeError(
+                f"chown step failed (exit {result.get('StatusCode')}): {log_tail}"
+            )
+        logger.info(
+            f"Pre-populated workspace volume {workspace_vol} from {template_dir}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"Failed to pre-populate workspace for {version_name}: {e}",
+                "code": "WORKSPACE_PREPOP_FAILED",
+            },
+        )
+    finally:
+        if transient is not None:
+            try:
+                transient.remove(force=True)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -326,24 +443,56 @@ async def deploy_local_agent_logic(
             except Exception as e:
                 logger.warning(f"Failed to stop previous version {previous_version.name}: {e}")
 
-        # 8. Copy to templates directory
-        # Try /agent-configs/templates first, but check if writable (not just if exists)
-        # The read-only mount makes this path exist but not writable
-        templates_dir = Path("/agent-configs/templates")
-
-        # Check if writable by attempting to create a test file
+        # 8. Copy to deployed-templates directory (#950).
+        # The historical /agent-configs/templates mount is intentionally read-only
+        # in compose to protect the curated catalog; the prior writability probe
+        # always failed and silently fell back to ./config/agent-templates which
+        # resolved INSIDE the backend container, leaving the new agent's bind
+        # mount pointing at a host path that didn't exist → empty agents.
+        # /data is host-mapped (TRINITY_DATA_PATH), writable, owned by UID 1000.
+        templates_dir = Path(DEPLOYED_TEMPLATES_DIR_IN_BACKEND)
         try:
-            test_file = templates_dir / ".write_test"
-            test_file.touch()
-            test_file.unlink()
-        except (OSError, PermissionError):
-            # Fall back to local config path
-            templates_dir = Path("./config/agent-templates")
-
-        if not templates_dir.exists():
             templates_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": (
+                        f"Deployed-templates directory {templates_dir} is not writable: {e}. "
+                        f"Check that {DEPLOYED_TEMPLATES_DIR_IN_BACKEND}'s host bind "
+                        f"(TRINITY_DATA_PATH default './trinity-data') exists and is owned "
+                        f"by UID 1000 (see docs/migrations/NON_ROOT_CONTAINERS_2026-05.md)."
+                    ),
+                    "code": "DEPLOYED_TEMPLATES_DIR_UNWRITABLE",
+                }
+            )
 
         dest_path = templates_dir / version_name
+
+        # Path-containment guard (#950). version_name is already a single
+        # sanitized slug (sanitize_agent_name strips path separators), but
+        # normalize + verify containment so the value reaching every downstream
+        # file access provably stays under templates_dir. This is
+        # defense-in-depth AND the CodeQL-recognized path-injection barrier:
+        # normalize, inline startswith prefix-check, and use the normalized
+        # value downstream.
+        _templates_base = os.path.normpath(str(templates_dir))
+        _normalized_dest = os.path.normpath(str(dest_path))
+        if _normalized_dest != _templates_base and not _normalized_dest.startswith(
+            _templates_base + os.sep
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Resolved template path escapes deployed-templates "
+                        f"directory: {version_name}"
+                    ),
+                    "code": "TEMPLATE_PATH_ESCAPE",
+                },
+            )
+        dest_path = Path(_normalized_dest)
+
         if dest_path.exists():
             shutil.rmtree(dest_path)
 
@@ -399,6 +548,27 @@ async def deploy_local_agent_logic(
             credentials_injected = len(body.credentials)
             logger.info(f"Wrote {credentials_injected} credentials to template for agent {version_name}")
 
+        # 9b-advisory. Warn about MCP servers whose ${VAR} references have no
+        # matching credential in the post-merge .env (#950 deferred hardening).
+        # Read dest_path/.env — that's where body.credentials were merged just
+        # above; extract_root still holds the un-merged archive copy.
+        warnings = collect_mcp_credential_warnings(dest_path)
+        if warnings:
+            logger.info(
+                f"Deploy {version_name}: {len(warnings)} MCP credential warning(s)"
+            )
+
+        # 9c. Pre-populate the agent's workspace volume from the extracted
+        # template (#950). Sidesteps the bind-mount transport entirely:
+        # dev compose uses a docker-managed named volume for /data while
+        # prod uses a host bind, so any host-path math in crud.py would be
+        # right on prod and wrong on dev. By writing into the workspace
+        # volume directly here, both environments behave identically.
+        # The `.trinity-initialized` marker tells the agent's startup.sh
+        # to skip its `/template` -> `/home/developer` copy (which won't
+        # run anyway since no /template bind is set up — see crud.py).
+        _prepopulate_workspace_from_template(version_name, dest_path)
+
         agent_status = await create_agent_fn(
             agent_config,
             current_user,
@@ -418,6 +588,7 @@ async def deploy_local_agent_logic(
             ),
             credentials_imported=credentials_imported,
             credentials_injected=credentials_injected,
+            warnings=warnings,
         )
 
     except HTTPException:

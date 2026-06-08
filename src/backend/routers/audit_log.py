@@ -78,6 +78,37 @@ class AuditLogStatsResponse(BaseModel):
     by_actor_type: dict = Field(default_factory=dict)
 
 
+class AuditHeatmapCell(BaseModel):
+    """Single populated bucket in the 7×24 dow×hour heatmap."""
+
+    dow: int = Field(..., ge=0, le=6, description="Weekday (0=Sunday)")
+    hour: int = Field(..., ge=0, le=23, description="Hour 0–23 UTC")
+    count: int = Field(..., ge=0)
+
+
+class AuditHeatmapResponse(BaseModel):
+    """Sparse 7×24 dow×hour heatmap. Zero-count cells omitted."""
+
+    cells: List[AuditHeatmapCell]
+    total: int
+    max_count: int
+
+
+class AuditCalendarDay(BaseModel):
+    """Single populated day in the calendar heatmap."""
+
+    date: str = Field(..., description="UTC date, ISO 'YYYY-MM-DD'")
+    count: int = Field(..., ge=0)
+
+
+class AuditCalendarResponse(BaseModel):
+    """Sparse per-day calendar heatmap (GitHub-style). Quiet days omitted."""
+
+    days: List[AuditCalendarDay]
+    total: int
+    max_count: int
+
+
 # ---------------------------------------------------------------------------
 # Endpoints — all admin-only
 # ---------------------------------------------------------------------------
@@ -92,6 +123,52 @@ async def audit_log_stats(
     """Aggregate counts by event_type and actor_type for the time window."""
     stats = db.get_audit_stats(start_time=start_time, end_time=end_time)
     return AuditLogStatsResponse(**stats)
+
+
+@router.get("/heatmap", response_model=AuditHeatmapResponse)
+async def audit_log_heatmap(
+    start_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive lower bound"),
+    end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
+    event_type: Optional[str] = Query(None, description="Optional event_type filter"),
+    actor_type: Optional[str] = Query(None, description="Optional actor_type filter"),
+    _admin: User = Depends(require_admin),
+):
+    """Day-of-week × hour-of-day activity heatmap for the time window (#941 v3).
+
+    Buckets use SQLite ``strftime`` over the stored UTC timestamp — no
+    timezone shift. Sparse payload (zero-count cells omitted).
+    """
+    result = db.get_audit_heatmap(
+        start_time=start_time,
+        end_time=end_time,
+        event_type=event_type,
+        actor_type=actor_type,
+    )
+    return AuditHeatmapResponse(**result)
+
+
+@router.get("/calendar", response_model=AuditCalendarResponse)
+async def audit_log_calendar(
+    start_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive lower bound"),
+    end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
+    event_type: Optional[str] = Query(None, description="Optional event_type filter"),
+    actor_type: Optional[str] = Query(None, description="Optional actor_type filter"),
+    _admin: User = Depends(require_admin),
+):
+    """Per-day calendar heatmap (GitHub-style) for the time window (#941 v3.1).
+
+    Complements the dow×hour heatmap: this view shows *when in calendar
+    time* activity happened (which days were heavy), the dow×hour view
+    shows the *recurring weekly pattern*. Sparse payload — quiet days
+    omitted; the frontend lays them onto a dense week × dow grid.
+    """
+    result = db.get_audit_calendar(
+        start_time=start_time,
+        end_time=end_time,
+        event_type=event_type,
+        actor_type=actor_type,
+    )
+    return AuditCalendarResponse(**result)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +302,29 @@ async def list_audit_log(
         limit=limit,
         offset=offset,
     )
+
+
+# ---------------------------------------------------------------------------
+# Distinct-value endpoints (#941) — populate dashboard filter dropdowns
+# without hardcoding the enum on the frontend. MUST stay above the
+# `/{event_id}` catch-all (invariant #4: static routes before parametrised).
+# ---------------------------------------------------------------------------
+
+
+@router.get("/distinct/event-types", response_model=List[str])
+async def list_distinct_event_types(
+    _admin: User = Depends(require_admin),
+):
+    """Return sorted unique event_type values present in the audit log."""
+    return db.get_distinct_event_types()
+
+
+@router.get("/distinct/actor-types", response_model=List[str])
+async def list_distinct_actor_types(
+    _admin: User = Depends(require_admin),
+):
+    """Return sorted unique actor_type values present in the audit log."""
+    return db.get_distinct_actor_types()
 
 
 @router.get("/{event_id}", response_model=AuditLogEntry)

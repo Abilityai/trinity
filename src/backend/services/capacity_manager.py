@@ -38,10 +38,8 @@ Overflow policies:
 from __future__ import annotations
 
 import logging
-import os
 import time
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
@@ -54,6 +52,7 @@ from models import (
     QueueStatus,
 )
 from services.backlog_service import BacklogService
+from services.dispatch_breaker import DispatchBreaker
 from services.slot_service import SlotService
 
 logger = logging.getLogger(__name__)
@@ -140,6 +139,26 @@ class CapacityFull(Exception):
         )
 
 
+class CircuitOpen(Exception):
+    """Raised by ``acquire`` when the per-agent dispatch breaker is open
+    (RELIABILITY-007, #526).
+
+    Sibling to ``CapacityFull``. Raised at the TOP of ``acquire`` — before the
+    slot acquisition and overflow branch — so the doomed execution is never
+    enqueued (the no-enqueue invariant). The caller maps it to HTTP 503 +
+    ``Retry-After`` / ``X-Circuit-Open`` and closes the pre-created execution
+    row FAILED(circuit_open).
+    """
+
+    def __init__(self, agent_name: str, retry_after_seconds: int = 0):
+        self.agent_name = agent_name
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            f"Agent '{agent_name}' dispatch circuit open; "
+            f"retry after {retry_after_seconds}s"
+        )
+
+
 # ---------------------------------------------------------------------------
 # CapacityManager
 # ---------------------------------------------------------------------------
@@ -201,13 +220,56 @@ class CapacityManager:
         source_user_id: Optional[str] = None,
         source_user_email: Optional[str] = None,
         message: Optional[str] = None,
+        breaker_enabled: bool = False,
     ) -> AcquireResult:
         """Try to acquire a slot. On overflow, dispatch to the chosen policy.
 
+        Args:
+            breaker_enabled: per-agent dispatch-breaker opt-in
+                (``agent_ownership.circuit_breaker_enabled``). When True AND the
+                global ``DISPATCH_BREAKER_ENABLED`` master switch is on, the
+                per-agent dispatch breaker gates this call. Default False →
+                zero added cost on the dispatch hot path (#526 D7).
+
         Raises:
+            CircuitOpen: if the dispatch breaker is open (raised BEFORE slot
+                         acquisition / overflow so the doomed task is never
+                         enqueued — the no-enqueue invariant, #526 D2).
             CapacityFull: if at capacity AND overflow store is also full
                           (or overflow_policy="reject").
         """
+        # ---- 0. Dispatch breaker gate (#526) ----------------------------
+        # Checked FIRST so a raised CircuitOpen never reaches the overflow
+        # branch → no backlog poisoning. Per-agent opt-in short-circuits the
+        # global-flag read so disabled agents pay nothing.
+        if breaker_enabled:
+            from config import DISPATCH_BREAKER_ENABLED
+            if DISPATCH_BREAKER_ENABLED:
+                breaker = DispatchBreaker(agent_name)
+                if not breaker.allow_dispatch():
+                    # Open within cooldown, or a sibling already holds the probe.
+                    raise CircuitOpen(agent_name, breaker.retry_after_seconds())
+                # allow_dispatch() returned True either because the breaker is
+                # CLOSED (no probe consumed) or because we just claimed the
+                # half-open PROBE. In the probe case the dispatch must be REAL: a
+                # probe spent on a backlog enqueue records no verdict, so
+                # next_probe_at never advances and the breaker re-probes every
+                # lock-TTL (10s) instead of backing off (#526 F1). So when the
+                # breaker is open, admit the probe ONLY into a free slot and
+                # NEVER enqueue — extending the no-enqueue invariant (D2) across
+                # the half-open window.
+                if breaker.to_dict().get("state") == "open":
+                    probe_admitted = await self._slots.acquire_slot(
+                        agent_name=agent_name,
+                        execution_id=execution_id,
+                        max_parallel_tasks=max_concurrent,
+                        message_preview=message_preview,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    if not probe_admitted:
+                        raise CircuitOpen(agent_name, breaker.retry_after_seconds())
+                    return AcquireResult(state="admitted", execution_id=execution_id)
+
         # First try to acquire a slot directly. SlotService already does the
         # atomic ZADD + count check.
         admitted = await self._slots.acquire_slot(
@@ -421,6 +483,10 @@ class CapacityManager:
         a backend restart between enqueue and drain). Called from main.py's
         60s loop.
 
+        Then runs the #526 breaker-aware backstop (re-fails queued rows for any
+        agent whose dispatch breaker is still open) so a lost inline drain
+        recovers in ~60s rather than waiting out the 24h `expire_stale` window.
+
         On success — and only on success — writes a `canary:drain_tick_at`
         Redis key with the current unix timestamp. The canary's B-02
         invariant (no queued without slots-full) reads this to distinguish
@@ -433,12 +499,47 @@ class CapacityManager:
         """
         await self._backlog.expire_stale(max_age_hours=max_age_hours)
         await self._backlog.drain_orphans_all()
+        await self._backstop_open_breaker_backlog()
         try:
             self._redis.set("canary:drain_tick_at", str(time.time()))
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(
                 f"[Capacity] failed to write canary drain-tick heartbeat: {e}"
             )
+
+    async def _backstop_open_breaker_backlog(self) -> None:
+        """#526 breaker-aware backstop. If the inline drain on a breaker →open
+        transition was lost (task dropped, or `fail_queued_for_agent` threw),
+        re-fail the queued backlog for any agent whose dispatch breaker is still
+        open. Bounded to agents that actually have queued rows; one pipelined
+        breaker-state read. Gated on the global master switch, so it's a no-op
+        when the feature is off. Never raises — must not break the sweep."""
+        try:
+            from config import DISPATCH_BREAKER_ENABLED
+            if not DISPATCH_BREAKER_ENABLED:
+                return
+            from database import db
+            from services.dispatch_breaker import get_dispatch_states_for
+
+            queued_agents = db.list_agents_with_queued()
+            if not queued_agents:
+                return
+            for name, state in get_dispatch_states_for(queued_agents).items():
+                if state.get("state") != "open":
+                    continue
+                failed = db.fail_queued_for_agent(
+                    name, reason="circuit_open: maintenance backstop"
+                )
+                if failed:
+                    await self.clear_in_memory_queue(name)
+                    logger.warning(
+                        "[Capacity] breaker-backstop failed %d queued row(s) for "
+                        "open-breaker agent '%s'",
+                        failed,
+                        name,
+                    )
+        except Exception as e:
+            logger.warning(f"[Capacity] breaker-aware backstop sweep failed: {e}")
 
     async def cancel_all_overflow(self, agent_name: str, reason: str) -> int:
         """Cancel all queued work (in-memory + persistent) for an agent.

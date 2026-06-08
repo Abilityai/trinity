@@ -12,11 +12,9 @@ Connect, deploy, and sync agents to the Trinity platform. Three skills covering 
 
 | Skill | Description |
 |-------|-------------|
-| `/trinity:connect` | One-time: authenticate and configure MCP connection |
+| `/trinity:connect` | One-time: authenticate and configure the MCP connection |
 | `/trinity:onboard` | Per-agent: compatibility check, file creation, deploy |
-| `/trinity:deploy` | Deploy current agent to Trinity (lighter-weight than onboard) |
-| `/trinity:sync` | Ongoing: sync changes between local and remote |
-| `/trinity:create-dashboard` | Create or update the agent's `dashboard.yaml` |
+| `/trinity:sync` | Ongoing: sync changes between local and the running remote agent |
 
 ## How It Works
 
@@ -27,12 +25,14 @@ Connect, deploy, and sync agents to the Trinity platform. Three skills covering 
 ```
 
 This:
+
 1. Prompts for your Trinity instance URL
 2. Authenticates via email verification
 3. Provisions an MCP API key
 4. Configures `.mcp.json` for Trinity MCP tools
 
 After connecting, Trinity MCP tools become available:
+
 - `mcp__trinity__list_agents`
 - `mcp__trinity__chat_with_agent`
 - `mcp__trinity__deploy_local_agent`
@@ -44,11 +44,13 @@ After connecting, Trinity MCP tools become available:
 ```
 
 For each agent you want to deploy:
+
 1. **Compatibility check** — Verifies required files exist
 2. **File creation** — Generates missing Trinity files
-3. **Deploy** — Pushes agent to Trinity platform
+3. **Deploy** — Pushes the agent to the Trinity platform
 
 Required files (created if missing):
+
 - `template.yaml` — Agent metadata
 - `.env.example` — Environment variable documentation
 - `.mcp.json.template` — MCP server configuration
@@ -60,8 +62,9 @@ Required files (created if missing):
 ```
 
 After making local changes:
+
 - Detects modified files
-- Pushes updates to remote agent
+- Pushes updates to the remote agent
 - Optionally restarts the agent
 
 ## Alternative: Trinity CLI
@@ -92,6 +95,7 @@ Agents must have:
 | `.env.example` | Documents required environment variables |
 
 Optional but recommended:
+
 - `dashboard.yaml` — Custom metrics dashboard
 - `.mcp.json.template` — MCP server configuration
 

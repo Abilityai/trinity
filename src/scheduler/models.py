@@ -45,7 +45,11 @@ class Schedule:
     updated_at: datetime
     last_run_at: Optional[datetime] = None
     next_run_at: Optional[datetime] = None
-    timeout_seconds: int = 900  # Default 15 minutes
+    # #913: None = inherit from agent_ownership.execution_timeout_seconds.
+    # Scheduler must round-trip None through to /api/internal/execute-task so
+    # the backend's TaskExecutionService falls back to the per-agent value.
+    # Treating NULL as 900 was the bug.
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None  # None = all tools allowed
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
     # Retry configuration (RETRY-001). 0 = disabled (default, #476), 1-5 opt-in.

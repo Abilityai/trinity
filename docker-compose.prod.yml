@@ -15,6 +15,17 @@ services:
     build:
       context: .
       dockerfile: docker/backend/Dockerfile
+      # Build-time provenance (#926 / #958). Forwarded to Dockerfile ARGs
+      # → ENV vars → `GET /api/version` payload. The deploy-dev workflow
+      # exports these from the checked-out repo before `docker compose
+      # build`; absent that, the Dockerfile defaults to "unknown".
+      args:
+        VERSION: ${VERSION:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_COMMIT_SUBJECT: ${GIT_COMMIT_SUBJECT:-unknown}
+        GIT_COMMIT_TIMESTAMP: ${GIT_COMMIT_TIMESTAMP:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
     restart: unless-stopped
     ports:
@@ -47,6 +58,22 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}  # For Gemini-powered agents
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # For platform image generation (IMG-001)
+      # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
+      # tune/disable voice in prod (code default is ON; without these lines the
+      # knobs are inert — the #1039 packaging-gap class).
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Default-OFF means
+      # the master switch MUST reach the container or voip_available stays false;
+      # omitting it here was the prod packaging gap (same class as #1039 LOG_*).
+      - VOIP_ENABLED=${VOIP_ENABLED:-false}
+      - VOIP_MAX_CALL_DURATION=${VOIP_MAX_CALL_DURATION:-600}      # per-call cap (s)
+      - VOIP_DEFAULT_DAILY_CALL_CAP=${VOIP_DEFAULT_DAILY_CALL_CAP:-50}  # per-agent/day spend bound
+      - VOIP_CALL_RATE_LIMIT=${VOIP_CALL_RATE_LIMIT:-5}           # calls per owner+destination window
+      - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
+      - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
+      - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}

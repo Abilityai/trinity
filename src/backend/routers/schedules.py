@@ -110,7 +110,8 @@ class ScheduleResponse(BaseModel):
     updated_at: datetime
     last_run_at: Optional[datetime]
     next_run_at: Optional[datetime]
-    timeout_seconds: int = 900
+    # #913: null means "inherit from agent_ownership.execution_timeout_seconds".
+    timeout_seconds: Optional[int] = None
     allowed_tools: Optional[List[str]] = None
     model: Optional[str] = None  # Model override (MODEL-001)
     # Validation configuration (VALIDATE-001)
@@ -224,6 +225,10 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
     `agent_ownership.execution_timeout_seconds` is the hard ceiling.
     Raises HTTPException(400) with a structured `detail` dict so clients
     can branch on `detail["error"] == "schedule_timeout_exceeds_agent_cap"`.
+
+    Callers must guard with `is not None` — after #913 both
+    `ScheduleCreate.timeout_seconds` and `ScheduleUpdateRequest.timeout_seconds`
+    are `Optional[int]`, and `None > int` raises TypeError in Python 3.
     """
     cap = db.get_execution_timeout(agent_name)
     if requested_seconds > cap:
@@ -268,7 +273,9 @@ async def create_schedule(
 
     # #929: schedule timeout cannot exceed the agent cap. Validated here so
     # the operator gets the 400 at config time instead of a SIGKILL at run time.
-    _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
+    # After #913 the field is Optional — only enforce when the caller set it.
+    if schedule_data.timeout_seconds is not None:
+        _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
 
     schedule = db.create_schedule(name, current_user.username, schedule_data)
     if not schedule:

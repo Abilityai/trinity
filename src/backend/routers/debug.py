@@ -3,7 +3,7 @@ Debug / observability endpoints.
 
 Admin-only. Cheap to expose — exposes in-memory counters only, no DB queries.
 Primary use case: #306 Redis Streams event bus soak dashboard (gates defined in
-``docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md``).
+``docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md``).
 
 Endpoints:
     GET /api/debug/event-bus-stats — publisher/consumer counters + cumulative

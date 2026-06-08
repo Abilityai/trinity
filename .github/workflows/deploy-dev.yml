@@ -62,11 +62,93 @@ jobs:
             git pull --ff-only origin dev
             echo "Version: $(git log -1 --oneline)"
 
+            echo "=== Submodule (enterprise) ==="
+            # #847 — try to init the private trinity-enterprise submodule
+            # so the dev deploy lights up enterprise features (audit
+            # dashboard, etc.). If the VM lacks read access to the private
+            # repo, this is a non-fatal warning — the conditional import
+            # in main.py falls back to OSS-only mode and the deploy
+            # continues. Enterprise UI surfaces simply stay hidden.
+            if git submodule update --init --recursive src/backend/enterprise; then
+              ENT_SHA=$(git -C src/backend/enterprise rev-parse --short HEAD 2>/dev/null || echo "unknown")
+              echo "ENTERPRISE: initialized at ${ENT_SHA}"
+            else
+              echo "::warning::Enterprise submodule init failed — deploying in OSS-only mode"
+              echo "ENTERPRISE: confirm the dev VM has read access to Abilityai/trinity-enterprise"
+              echo "ENTERPRISE: (deploy key, PAT in a credential helper, or org membership all work)"
+            fi
+
+            # Compose file list: base prod + enterprise overlay. The
+            # overlay bind-mounts ./src/backend/enterprise into
+            # /app/enterprise inside the backend container. If the
+            # submodule init above failed, the host directory will be
+            # empty (or contain just .git), and the conditional import
+            # in main.py will fall through to OSS-only mode — same
+            # outcome as if the overlay weren't applied.
+            COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.prod.enterprise.yml"
+
+            echo "=== Volume ownership (#874 / #958) ==="
+            # Backend + scheduler run as UID 1000 (issue #874). Existing
+            # deployments rolled before #874 still have data paths owned by
+            # root from the prior root-container era. The first migration to
+            # actually UPDATE existing rows (#922's null_legacy_schedule_
+            # timeouts) hits "attempt to write a readonly database" on
+            # startup, /health returns 503 forever, deploy times out.
+            # Canonical recipe: docs/migrations/NON_ROOT_CONTAINERS_2026-05.md.
+            # Both checks are idempotent — silent no-ops on healthy VMs.
+            TRINITY_DATA_PATH="${TRINITY_DATA_PATH:-./trinity-data}"
+            if [ -d "$TRINITY_DATA_PATH" ]; then
+              DATA_UID=$(stat -c %u "$TRINITY_DATA_PATH")
+              if [ "$DATA_UID" != "1000" ]; then
+                echo "Re-owning $TRINITY_DATA_PATH from UID=$DATA_UID to UID=1000"
+                sudo chown -R 1000:1000 "$TRINITY_DATA_PATH"
+              fi
+            fi
+            # agent-configs is a named volume; check + chown via ephemeral
+            # alpine container running as root.
+            PROJECT=$(basename "$PWD")
+            VOL_NAME="${PROJECT}_agent-configs"
+            if sudo docker volume inspect "$VOL_NAME" >/dev/null 2>&1; then
+              VOL_UID=$(sudo docker run --rm -v "$VOL_NAME:/v" alpine stat -c %u /v 2>/dev/null || echo "0")
+              if [ "$VOL_UID" != "1000" ]; then
+                echo "Re-owning volume $VOL_NAME from UID=$VOL_UID to UID=1000"
+                sudo docker run --rm -v "$VOL_NAME:/v" --user 0 alpine chown -R 1000:1000 /v
+              fi
+            fi
+
             echo "=== Build ==="
-            sudo docker compose -f docker-compose.prod.yml build --no-cache backend frontend mcp-server scheduler
+            # Build-time provenance (#926 / #958 / #993). docker-compose.prod.yml
+            # backend.build.args reads these env vars; absent them, the
+            # Dockerfile defaults to "unknown" and Build Info in the UI
+            # shows a wall of unknown values. Mirrors scripts/deploy/start.sh.
+            #
+            # #993: pass via `sudo env VAR=val …` — NOT `sudo VAR=val …`.
+            # Under default Ubuntu sudoers (env_reset on, setenv off), env
+            # assignments placed before the command are filtered out, so the
+            # prior form silently dropped every var and compose fell back to
+            # ${VAR:-unknown}. `env` is the program sudo execs, so the
+            # assignments are its arguments and reach docker compose intact.
+            GIT_COMMIT=$(git rev-parse HEAD)
+            GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
+            GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
+            GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # #993: dynamic version = VERSION file + git short sha (+ .dirty).
+            BASE_VER=$(cat VERSION 2>/dev/null || echo unknown)
+            SHORT_SHA=$(git rev-parse --short=8 HEAD)
+            git diff --quiet HEAD 2>/dev/null || SHORT_SHA="${SHORT_SHA}.dirty"
+            VERSION="${BASE_VER}+g${SHORT_SHA}"
+            sudo env \
+              VERSION="${VERSION}" \
+              GIT_COMMIT="${GIT_COMMIT}" \
+              GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT}" \
+              GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP}" \
+              GIT_BRANCH="${GIT_BRANCH}" \
+              BUILD_DATE="${BUILD_DATE}" \
+              docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
 
             echo "=== Restart ==="
-            sudo docker compose -f docker-compose.prod.yml up -d backend frontend mcp-server scheduler
+            sudo docker compose ${COMPOSE_FILES} up -d backend frontend mcp-server scheduler
 
             echo "=== Health ==="
             sleep 10

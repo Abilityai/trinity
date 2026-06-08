@@ -66,6 +66,24 @@
             >
               Settings
             </router-link>
+            <!-- #847 Phase 0 — Enterprise catalogue landing. Visible
+                 iff ANY enterprise feature is entitled
+                 (`hasAnyEnterprise`). The landing lists each enterprise
+                 feature as a card with status; non-entitled and
+                 Coming-soon features render disabled. OSS-only builds
+                 have an empty `enterpriseFeatures` list so this link
+                 is hidden entirely. The store's `featureFlagsLoaded`
+                 guard means the link doesn't flicker on first paint
+                 (loadFeatureFlags fires in onMounted below). -->
+            <router-link
+              v-if="enterpriseStore.hasAnyEnterprise"
+              to="/enterprise"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/enterprise') }"
+            >
+              Enterprise
+              <span class="ml-1 px-1.5 py-0.5 text-[10px] font-bold leading-none rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200">PRO</span>
+            </router-link>
           </div>
         </div>
         <div class="flex items-center space-x-4">
@@ -201,7 +219,7 @@
       @click.self="showBuildInfoModal = false"
     >
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 p-6">
-        <div class="flex justify-between items-start mb-4">
+        <div class="flex justify-between items-start mb-2">
           <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Build Info</h2>
           <button
             @click="showBuildInfoModal = false"
@@ -212,6 +230,16 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+          Commit, branch, and build date the running platform was built from.
+        </p>
+        <div
+          v-if="buildInfo.isMissing.value"
+          class="mb-4 p-3 rounded bg-gray-50 dark:bg-gray-900 text-xs text-gray-600 dark:text-gray-400"
+        >
+          Build metadata not available — rebuild with
+          <code class="font-mono">scripts/deploy/start.sh</code> to populate.
         </div>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between">
@@ -254,6 +282,7 @@ import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
+import { useEnterpriseStore } from '../stores/enterprise'
 import { useWebSocket } from '../utils/websocket'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
@@ -263,6 +292,9 @@ const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const notificationsStore = useNotificationsStore()
 const operatorQueueStore = useOperatorQueueStore()
+// #847 Phase 0 — feature-flags load is fired on mount below; the
+// `Enterprise` nav link template is `v-if="enterpriseStore.hasAnyEnterprise"`.
+const enterpriseStore = useEnterpriseStore()
 const { isConnected } = useWebSocket()
 
 // #926: cached fetch of /api/version (singleton across NavBar + Settings)
@@ -332,6 +364,11 @@ onMounted(async () => {
   } catch (e) {
     console.warn('Failed to fetch user role:', e)
   }
+
+  // #847 Phase 0 — load enterprise entitlements. Fires once per page
+  // load (the store gates on `featureFlagsLoaded`). The Enterprise nav
+  // link is hidden until this resolves.
+  enterpriseStore.loadFeatureFlags()
 })
 
 onUnmounted(() => {

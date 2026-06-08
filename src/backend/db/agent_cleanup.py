@@ -88,6 +88,16 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_schedules",              "agent_name",        Policy.CASCADE),
     AgentRef("schedule_executions",          "agent_name",        Policy.KEEP),
 
+    # --- Agent loops (#740 Phase 1) ----------------------------------------
+    # Loop ownership lives on the TARGET agent. `agent_loops` carries a
+    # second column `source_agent_name` for the initiator (audit-trail
+    # only — analogous to `chat_messages.user_id`); it's intentionally
+    # NOT registered here. The parity test's regex doesn't match
+    # `source_agent_name`, which matches that semantic distinction.
+    # `agent_loop_runs` chains via `loop_id` and is cleaned up below in
+    # LINK_CHAINED_DELETES (no agent column of its own).
+    AgentRef("agent_loops",                  "agent_name",        Policy.CASCADE),
+
     # --- Chat / session history --------------------------------------------
     # Children before parents for future FK-enforced Postgres migration:
     # chat_messages → chat_sessions; agent_session_messages → agent_sessions.
@@ -136,6 +146,11 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("slack_active_threads",         "agent_name",        Policy.CASCADE),
     AgentRef("telegram_bindings",            "agent_name",        Policy.CASCADE),
     AgentRef("whatsapp_bindings",            "agent_name",        Policy.CASCADE),
+    # VoIP (VOIP-001, #1056) — bindings carry encrypted Twilio creds; both
+    # must rename WITH the agent (else calls break after rename) and be wiped
+    # on purge.
+    AgentRef("voip_bindings",                "agent_name",        Policy.CASCADE),
+    AgentRef("voip_call_logs",               "agent_name",        Policy.CASCADE),
 
     # --- Monetization -------------------------------------------------------
     AgentRef("nevermined_agent_config",      "agent_name",        Policy.CASCADE),
@@ -167,6 +182,11 @@ LINK_CHAINED_DELETES: List[tuple] = [
     ("telegram_chat_links",       "binding_id", "telegram_bindings",   "agent_name"),
     ("telegram_group_configs",    "binding_id", "telegram_bindings",   "agent_name"),
     ("whatsapp_chat_links",       "binding_id", "whatsapp_bindings",   "agent_name"),
+    # agent_loop_runs (#740) chains via loop_id → agent_loops.agent_name.
+    # Must run BEFORE the AGENT_REFS delete of agent_loops itself (the
+    # main cascade loop runs LINK_CHAINED_DELETES first, then
+    # AGENT_REFS — so the JOIN still resolves).
+    ("agent_loop_runs",           "loop_id",    "agent_loops",         "agent_name"),
 ]
 
 

@@ -20,6 +20,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,6 +65,35 @@ logger = logging.getLogger(__name__)
 # the cost/pain inflection: short fan-out is cheap to re-run, long
 # deliverables aren't.
 _JSONL_PERSIST_THRESHOLD_S = 600
+
+# #970: cadence for the bounded subprocess wait, and the no-progress ceiling
+# for a single tool_use that never receives a tool_result. Claude Code has
+# NO per-MCP-tool timeout, so a hung stdio tools/call would otherwise wedge
+# `process.wait` for the full execution budget (the ticket's 2h false-
+# timeout). The stall limit is intentionally generous — "tool running" is
+# not "tool stalled" — so only a genuinely wedged call trips it.
+_WAIT_POLL_S = 2.0
+_STALL_LIMIT_S = 300.0
+
+
+def _open_tool_exceeding(ctx: HeadlessRunContext, limit_s: float) -> Optional[str]:
+    """Name of a tool_use open (no matching tool_result) for > ``limit_s``, else None.
+
+    #970 stall-watchdog signal. Reuses the stream parser's existing
+    bookkeeping — ``tool_start_times`` (set on every tool_use) and the
+    ``execution_log`` tool_result entries that close them. A hung stdio
+    MCP ``tools/call`` never emits a tool_result, so its tool_use stays
+    open: the only externally-visible signal that claude is wedged.
+    """
+    log = list(ctx.execution_log)  # snapshot — reader thread mutates concurrently
+    completed = {e.id for e in log if e.type == "tool_result"}
+    now = datetime.now()
+    for e in log:
+        if e.type == "tool_use" and e.id not in completed:
+            started = ctx.tool_start_times.get(e.id)
+            if started and (now - started).total_seconds() > limit_s:
+                return e.tool
+    return None
 
 
 def _attempt_empty_result_recovery(
@@ -192,6 +222,7 @@ class HeadlessRunContext:
     auth_abort_event: threading.Event = field(default_factory=threading.Event)
     auth_abort_reason: List[str] = field(default_factory=list)
     permission_mode_validated: bool = False
+    result_seen: threading.Event = field(default_factory=threading.Event)  # #970: claude emitted {"type":"result"}
     stdout_exc: List[BaseException] = field(default_factory=list)
 
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
@@ -530,6 +561,13 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                         ctx.tool_start_times,
                         ctx.response_parts,
                     )
+
+                    # #970 early-completion: the result line is the definitive
+                    # end of a `claude --print` turn. Signal it AFTER parsing so
+                    # metadata/response_parts are populated; the wait loop can
+                    # then finalize even if the process lingers in teardown.
+                    if isinstance(raw_msg, dict) and raw_msg.get("type") == "result":
+                        ctx.result_seen.set()
                 except RuntimeError:
                     raise  # Re-raise permission-mode failures
                 except Exception as line_err:  # noqa: BLE001
@@ -582,14 +620,44 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     process.stdin.write(stdin_payload)
     process.stdin.close()
 
-    # Bounded wait on the subprocess itself. If claude hangs, we
-    # never wedge the executor thread for more than effective_timeout.
+    # Bounded, polling wait. Three exits beyond the overall budget (#970):
+    #   (a) early-completion — claude emitted its {"type":"result"} (the turn
+    #       is definitively over) but the process lingers in teardown (e.g. a
+    #       stdio MCP child holding the pipe). Finalize with the captured
+    #       result instead of burning the budget. The result IS success, so
+    #       set return_code=0 — genuine errors were already classified into
+    #       metadata.error_type from the stream and are surfaced in finalize.
+    #   (b) stall watchdog — an open tool_use with no tool_result for
+    #       >_STALL_LIMIT_S. Claude Code has no per-MCP-tool timeout, so a
+    #       hung tools/call would otherwise wedge until the full budget.
+    #   (c) effective_timeout budget — unchanged backstop.
+    deadline = time.monotonic() + ctx.effective_timeout
+    stalled_tool: Optional[str] = None
     try:
-        ctx.return_code = process.wait(timeout=ctx.effective_timeout)
+        while True:
+            try:
+                ctx.return_code = process.wait(timeout=_WAIT_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                if ctx.result_seen.is_set():
+                    logger.warning(
+                        f"[Headless Task] Task {ctx.task_session_id} produced a result "
+                        f"but did not exit — finalizing early, terminating teardown"
+                    )
+                    _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+                    ctx.return_code = 0
+                    break
+                stalled_tool = _open_tool_exceeding(ctx, _STALL_LIMIT_S)
+                if stalled_tool or time.monotonic() >= deadline:
+                    raise
     except subprocess.TimeoutExpired:
+        reason = (
+            f"tool '{stalled_tool}' stalled with no result for >{_STALL_LIMIT_S:.0f}s"
+            if stalled_tool
+            else f"timed out after {ctx.effective_timeout}s"
+        )
         logger.error(
-            f"[Headless Task] Task {ctx.task_session_id} timed out after {ctx.effective_timeout}s "
-            f"— killing process group"
+            f"[Headless Task] Task {ctx.task_session_id} {reason} — killing process group"
         )
         _terminate_process_group(process, graceful_timeout=5, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
         _drain_bounded(process, stdout_thread, stderr_thread,

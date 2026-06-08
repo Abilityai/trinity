@@ -6,7 +6,7 @@ Verifies that:
 - Auth failure patterns in Claude Code stderr are detected and result in HTTP 503
 - Max-turns termination is correctly classified and results in HTTP 422 (not 503)
 
-Related: docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md
+Related: docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md
 """
 import pytest
 

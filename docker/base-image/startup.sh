@@ -113,11 +113,15 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             # Restore Python packages (these are from the base image, not the repo)
             cp -r /tmp/.local.bak /home/developer/.local 2>/dev/null || true
 
-            # Add Python packages to .gitignore (don't sync these to GitHub)
-            if [ ! -f /home/developer/.gitignore ]; then
-                echo "# Trinity agent infrastructure files" > /home/developer/.gitignore
-            fi
-            grep -q ".local/" /home/developer/.gitignore || echo ".local/" >> /home/developer/.gitignore
+            # #953: do NOT touch .gitignore from startup.sh. The canonical
+            # pattern list lives in `_GITIGNORE_PATTERNS`
+            # (src/backend/services/git_service.py) and is applied by
+            # `_build_gitignore_merge_command` on first Trinity-orchestrated
+            # init/push. The old shell-level append produced `M .gitignore`
+            # against `origin/main` whenever the cloned template's
+            # `.gitignore` already (correctly) contained the patterns —
+            # because the unanchored/anchored greps gave false negatives on
+            # trailing whitespace, CRLF, or missing newline-terminator.
 
             echo "Git sync initialization complete"
             else
@@ -375,12 +379,12 @@ fi
 echo "Setting up content folder convention..."
 mkdir -p /home/developer/content/{videos,audio,images,exports}
 
-# Ensure content/ is in .gitignore (prevents large files from bloating Git repos)
-if [ ! -f /home/developer/.gitignore ]; then
-    echo "# Trinity agent infrastructure files" > /home/developer/.gitignore
-fi
-grep -q "^content/$" /home/developer/.gitignore || echo "content/" >> /home/developer/.gitignore
-grep -q "^\.local/$" /home/developer/.gitignore || echo ".local/" >> /home/developer/.gitignore
+# #953: do NOT touch .gitignore here. `content/` and `.local/` are in the
+# canonical `_GITIGNORE_PATTERNS` list applied by
+# `_build_gitignore_merge_command` on first Trinity-orchestrated init and
+# again on every push via `_migrate_workspace_gitignore`. The previous
+# shell-level append created `M .gitignore` drift for freshly-deployed
+# agents whose template already shipped the patterns correctly.
 
 echo "Agent ready. Keeping container alive..."
 tail -f /dev/null

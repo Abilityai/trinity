@@ -5,7 +5,7 @@
 Single public facade for per-agent execution capacity. Replaces the
 three-class pyramid `ExecutionQueue` + `SlotService` + `BacklogService`
 with one entry point: `services/capacity_manager.py`. Issue #428 (PR #527,
-Tier 2.5 of `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md`).
+Tier 2.5 of `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md`).
 
 ## Why one facade
 
@@ -28,7 +28,7 @@ LOC); summary table:
 
 | Method | Purpose |
 |--------|---------|
-| `acquire(agent, exec_id, max_concurrent, *, overflow_policy, overflow_payload?, ...)` | Try to admit; on overflow, dispatch to chosen policy. Returns `AcquireResult{state, execution_id, queue_position?}`. Raises `CapacityFull` when at capacity AND overflow is unavailable/full. |
+| `acquire(agent, exec_id, max_concurrent, *, overflow_policy, overflow_payload?, breaker_enabled=False, ...)` | Try to admit; on overflow, dispatch to chosen policy. Returns `AcquireResult{state, execution_id, queue_position?}`. Raises `CapacityFull` when at capacity AND overflow is unavailable/full. Raises `CircuitOpen` (before slot acquisition) when `breaker_enabled` AND the dispatch breaker is open (#526 — see [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md)). |
 | `release(agent, exec_id)` | Release a slot. In-memory queue is popped (bookkeeping); persistent backlog drains via internal slot-release callback. |
 | `release_if_matches(agent, exec_id)` | Watchdog-safe release: only releases if `exec_id` actually holds a slot. Returns `bool`. |
 | `get_status(agent, max_concurrent)` | `QueueStatus` for the `/api/agents/{name}/queue` endpoint (current + in-memory queue only; persistent backlog is exposed via executions endpoints). |
@@ -38,7 +38,7 @@ LOC); summary table:
 | `force_release(agent)` | Emergency: clear ALL slots + the in-memory queue. Returns `ForceReleaseResult`. |
 | `clear_in_memory_queue(agent)` | Clear only the overflow queue (running executions untouched). |
 | `cancel_all_overflow(agent, reason)` | Cancel queued (in-memory + persistent) — used on agent deletion. Returns count of persistent cancellations. |
-| `run_maintenance(max_age_hours=24)` | Periodic: expire stale persistent rows + drain orphaned backlog. Called from `main.py` 60s loop. |
+| `run_maintenance(max_age_hours=24)` | Periodic: expire stale persistent rows + drain orphaned backlog, then run the #526 breaker-aware backstop (`_backstop_open_breaker_backlog`). Writes the `canary:drain_tick_at` heartbeat on success. Called from `main.py` 60s loop. |
 
 `get_capacity_manager()` returns a process-wide singleton.
 `reset_capacity_manager()` exists for tests.
@@ -52,6 +52,53 @@ Three modes selected per call via the `overflow_policy` keyword:
 | `reject` | Raises `CapacityFull(reason="rejected")`. | Internal callers that have already pre-acquired upstream — e.g., `TaskExecutionService` (the router admitted the slot; the service is just being defensive). |
 | `queue_in_memory` | LPUSH onto Redis LIST `agent:queue:{name}` bounded by `IN_MEMORY_DEPTH=3`. Returns `state="queued_in_memory"` with a 1-based `queue_position`. The caller still proceeds — the agent's Claude subprocess is the real serialization point; the queue exists for observability + crude rate limiting. Raises `CapacityFull(reason="in_memory_full")` at depth 3. | `/chat` (synchronous HTTP, short request, caller is blocked anyway). |
 | `queue_persistent` | Marks the pre-created `schedule_executions` row `status='queued'` with `queued_at` + `backlog_metadata`. Returns `state="queued_persistent"`. Caller should reply 202 Accepted; the drain reconstructs the request later. Raises `CapacityFull(reason="persistent_full")` if the backlog is at its configured depth. Requires `overflow_payload: PersistentTaskPayload`. | `/task` (async + sync long-poll variants). Restart-durable. |
+
+## Dispatch circuit-breaker gate (#526)
+
+`acquire()` is the single chokepoint where the per-agent **dispatch breaker**
+(RELIABILITY-007) gates new work. Step 0 — *before* slot acquisition and the
+overflow branch — runs when the caller passes `breaker_enabled=True` AND the
+global `DISPATCH_BREAKER_ENABLED` master switch is on:
+
+```python
+if breaker_enabled:                       # per-agent opt-in short-circuits the global read
+    from config import DISPATCH_BREAKER_ENABLED
+    if DISPATCH_BREAKER_ENABLED:
+        breaker = DispatchBreaker(agent_name)
+        if not breaker.allow_dispatch():  # deny → open within cooldown / sibling holds probe
+            raise CircuitOpen(agent_name, breaker.retry_after_seconds())
+        # allow_dispatch() True = CLOSED (no probe consumed) OR we hold the
+        # half-open PROBE. A probe must lead to a REAL dispatch — spending it on
+        # a backlog enqueue records no verdict and stalls backoff (#526 F1) — so
+        # when the breaker is open, admit the probe ONLY into a free slot:
+        if breaker.to_dict().get("state") == "open":
+            if await self._slots.acquire_slot(...):
+                return AcquireResult(state="admitted", execution_id=execution_id)
+            raise CircuitOpen(agent_name, breaker.retry_after_seconds())  # full → fast-fail, NEVER enqueue
+```
+
+**No-enqueue invariant (#526 D2 + F1):** `CircuitOpen` is raised *before* the
+`queue_persistent` / `queue_in_memory` branch — both for a `deny` and for a
+half-open probe that can't get a free slot — so a doomed task is never written
+to the backlog (the invariant now spans the half-open window too). The whole
+point is to stop poisoning the persistent queue when an agent is auth-dead.
+`/chat` doesn't feed the breaker, so it gates with a **pure state read**
+(fast-fail 503 while open) and never consumes a probe; only the recording
+`/task` path drives recovery. Callers map `CircuitOpen` to HTTP 503 +
+`X-Circuit-Open` / `Retry-After` and close the pre-created `schedule_executions`
+row `FAILED(circuit_open)`. When `breaker_enabled=False` (the default), the gate
+is skipped entirely — disabled agents pay zero added cost on the dispatch hot
+path (R3: `acquire` is byte-for-byte unchanged when off).
+
+`run_maintenance()` also carries the breaker's recovery backstop:
+`_backstop_open_breaker_backlog()` re-fails the queued backlog (FAILED) for any
+agent whose dispatch breaker is still open — so a lost inline drain (the
+fire-and-forget `fail_queued_for_agent` on the →open transition, owned by
+`task_execution_service`) self-corrects in ~60s instead of waiting out the 24h
+`expire_stale` window. Bounded to agents with queued rows; gated on the global
+switch; never raises. Full breaker mechanics, the two-breaker split, and outcome
+recording at the execution terminals live in
+[dispatch-circuit-breaker.md](dispatch-circuit-breaker.md).
 
 ## End-to-end flow
 
@@ -153,11 +200,12 @@ APIs.
 ## Issue references
 
 - **#428** — Tier 2.5 facade work (this flow). PR #527, branch `feature/428-capacity-manager`.
+- **#526 (RELIABILITY-007)** — `acquire(breaker_enabled=…)` dispatch-breaker gate (raises `CircuitOpen` before overflow) + the `run_maintenance` backstop. See [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md).
 - **CAPACITY-001** — `SlotService` (now internal). See [parallel-capacity.md](parallel-capacity.md).
 - **BACKLOG-001 (#260)** — `BacklogService` (now internal). See [persistent-task-backlog.md](persistent-task-backlog.md).
 - **EXEC-024** — `TaskExecutionService` consumer. See [task-execution-service.md](task-execution-service.md).
 - **TIMEOUT-001** — per-agent dynamic slot TTL.
-- `docs/planning/ORCHESTRATION_RELIABILITY_2026-04.md` — Tier 2.5 (Simplification) plan; this issue is the cornerstone of "one capacity surface, three policies."
+- `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` — Tier 2.5 (Simplification) plan; this issue is the cornerstone of "one capacity surface, three policies."
 
 ## Related flows
 
@@ -168,3 +216,4 @@ APIs.
 - [parallel-headless-execution.md](parallel-headless-execution.md) — `/task` endpoint flow; the persistent path is the queue-overflow story.
 - [cleanup-service.md](cleanup-service.md) — uses `reclaim_stale` + `release_if_matches` for stale-slot recovery.
 - [execution-termination.md](execution-termination.md) — uses `force_release`.
+- [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) — #526 per-agent dispatch breaker; `acquire()` is its enforcement chokepoint (the Step 0 gate) and `run_maintenance` carries its backlog backstop.

@@ -409,6 +409,75 @@ class MonitoringAlertService:
         await self._broadcast_alert(notification)
         return notification.id
 
+    async def alert_heartbeat_lost(
+        self,
+        agent_name: str,
+        missed_beats: int
+    ) -> Optional[str]:
+        """Send a soft alert when an agent stops sending liveness heartbeats.
+
+        RELIABILITY-004 / #307: fired by the heartbeat watch loop on the
+        alive->stale transition (after the N-consecutive-miss guard). Soft
+        severity + the existing cooldown keep a transient agent->backend POST
+        failure from storming the operator — the 30s monitoring loop stays the
+        authoritative status signal.
+        """
+        condition = "heartbeat_lost"
+
+        if db.is_in_alert_cooldown(agent_name, condition, self.config.degraded_cooldown):
+            return None
+
+        notification = db.create_notification(
+            agent_name=agent_name,
+            data=NotificationCreate(
+                notification_type="alert",
+                title=f"Agent {agent_name} heartbeat lost",
+                message=f"No liveness heartbeat for {missed_beats} consecutive checks",
+                priority="high",
+                category="health",
+                metadata={
+                    "agent_name": agent_name,
+                    "missed_beats": missed_beats,
+                    "timestamp": utc_now_iso()
+                }
+            )
+        )
+
+        db.set_alert_cooldown(agent_name, condition)
+        await self._broadcast_alert(notification)
+        return notification.id
+
+    async def alert_heartbeat_recovered(
+        self,
+        agent_name: str
+    ) -> Optional[str]:
+        """Send a notification when an agent's heartbeat returns (#307).
+
+        Fired only when the watch loop had previously downgraded the agent, so
+        the operator who saw the loss also sees the recovery. No cooldown — a
+        recovery is rare and always worth surfacing.
+        """
+        condition = "heartbeat_recovered"
+
+        notification = db.create_notification(
+            agent_name=agent_name,
+            data=NotificationCreate(
+                notification_type="alert",
+                title=f"Agent {agent_name} heartbeat recovered",
+                message="Liveness heartbeat resumed",
+                priority="normal",
+                category="health",
+                metadata={
+                    "agent_name": agent_name,
+                    "timestamp": utc_now_iso()
+                }
+            )
+        )
+
+        db.set_alert_cooldown(agent_name, condition)
+        await self._broadcast_alert(notification)
+        return notification.id
+
 
 # Global service instance
 _alert_service: Optional[MonitoringAlertService] = None

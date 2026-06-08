@@ -104,10 +104,45 @@ CORS_ORIGINS = [
 # Falls back to GOOGLE_API_KEY (used for Gemini-powered agents) if GEMINI_API_KEY not set
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 
+# Dispatch Circuit Breaker — global master switch (RELIABILITY-007, #526).
+# Producer-side per-agent breaker that fast-fails NEW executions (HTTP 503)
+# when an agent is auth-dead, instead of poisoning the persistent backlog.
+# Default OFF: this is the global gate; per-agent opt-in lives in
+# agent_ownership.circuit_breaker_enabled (also default OFF). Both must be on
+# for the breaker to engage — a true opt-in canary (D7/D11).
+DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
+
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
-VOICE_MODEL = os.getenv("VOICE_MODEL", "models/gemini-3.1-flash-live-preview")
+# Coalesce empty → default (#1076): os.getenv(name, default) returns the
+# default only when the var is UNSET, not when it is set-but-empty. A blank
+# VOICE_MODEL (a stray `.env` line, a manual export, or an older compose that
+# injected `${VOICE_MODEL:-}`) would otherwise shadow the default and send
+# model="" to Gemini Live ("model is required" → every voice path DOA). `or`
+# defends against an empty value from any source. This line is the authoritative
+# source of the default model id — keep compose/.env.example in agreement.
+# (mirrors the GEMINI_API_KEY `or` coalesce above.)
+VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
+
+# VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
+# Default OFF — mirrors the workspace_available opt-in (#860). The feature
+# also requires a per-agent voip_bindings row to function. `voip_available`
+# in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
+VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
+# VoIP-specific max call duration (seconds) — deliberately distinct from the
+# inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
+VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))
+# Durable per-agent daily call cap (overridable per binding). Bounds PSTN spend.
+VOIP_DEFAULT_DAILY_CALL_CAP = int(os.getenv("VOIP_DEFAULT_DAILY_CALL_CAP", "50"))
+# WSS ticket TTL for the Twilio Media Streams socket — wide enough to cover
+# PSTN dial + ring (the 30s browser default is too short, call setup > 30s).
+VOIP_TICKET_TTL_SECONDS = int(os.getenv("VOIP_TICKET_TTL_SECONDS", "180"))
+# Redis staged-intent TTL (seconds) — consumed at WS-connect, sized for ringing.
+VOIP_INTENT_TTL_SECONDS = int(os.getenv("VOIP_INTENT_TTL_SECONDS", "180"))
+# Outbound-call trigger rate limit (per owner+destination sliding window).
+VOIP_CALL_RATE_LIMIT = int(os.getenv("VOIP_CALL_RATE_LIMIT", "5"))
+VOIP_CALL_RATE_WINDOW = int(os.getenv("VOIP_CALL_RATE_WINDOW", "60"))  # seconds
 
 # Default GitHub Template Repositories
 # Just repo identifiers — metadata is fetched from each repo's template.yaml at runtime.

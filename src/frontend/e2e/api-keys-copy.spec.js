@@ -78,17 +78,27 @@ test.describe('@smoke api-keys copy buttons (#677, #859)', () => {
 })
 
 async function cleanupKey(page, keyName) {
-  // The list refreshes after the modal closes — find the row by name and delete.
-  const row = page.locator('li', { has: page.getByText(keyName, { exact: true }) }).first()
-  if (await row.count() === 0) return
-
-  // Revoke first if still active, then delete. Both buttons trigger a confirm dialog.
-  const revokeBtn = row.getByRole('button', { name: /revoke/i })
-  if (await revokeBtn.isVisible().catch(() => false)) {
-    await revokeBtn.click()
-    await page.getByRole('button', { name: /^confirm$/i }).click().catch(() => {})
-    await page.waitForTimeout(200)
+  // Cleanup via the backend API rather than clicking through the UI. The
+  // test under test is clipboard behavior; cleanup is housekeeping. The
+  // old UI-walk (revoke modal → confirm → delete modal → confirm) ran
+  // ~6 sequential clicks and routinely blew the per-test 30s budget on
+  // slow CI runners, leaving the test red even though the assertions
+  // had already passed.
+  //
+  // DELETE /api/mcp/keys/{id} hard-deletes the row regardless of
+  // active/revoked state (no need for the revoke → delete sequence the
+  // UI enforces). JWT lives in localStorage['token'] (`stores/auth.js`).
+  const token = await page.evaluate(() => localStorage.getItem('token'))
+  if (!token) return
+  const headers = { Authorization: `Bearer ${token}` }
+  const list = await page.request
+    .get('/api/mcp/keys', { headers })
+    .then((r) => (r.ok() ? r.json() : []))
+    .catch(() => [])
+  const match = Array.isArray(list) ? list.find((k) => k.name === keyName) : null
+  if (match) {
+    await page.request
+      .delete(`/api/mcp/keys/${match.id}`, { headers })
+      .catch(() => {})
   }
-  await row.getByRole('button', { name: /delete/i }).click()
-  await page.getByRole('button', { name: /^confirm$/i }).click().catch(() => {})
 }

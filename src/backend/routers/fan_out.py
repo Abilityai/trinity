@@ -11,6 +11,7 @@ import re
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dependencies import get_current_user, get_authorized_agent
@@ -20,6 +21,8 @@ from services.fan_out_service import (
     FanOutTaskInput,
     get_fan_out_service,
 )
+from services import idempotency_service
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,7 @@ async def fan_out(
     x_via_mcp: Optional[str] = Header(None),
     x_mcp_key_id: Optional[str] = Header(None),
     x_mcp_key_name: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None),
 ):
     """
     Fan out N independent tasks to an agent in parallel and collect results.
@@ -153,6 +157,34 @@ async def fan_out(
             detail=f"Fan-out target must be 'self' or '{name}'. Cross-agent fan-out is not yet supported.",
         )
 
+    # RELIABILITY-006 (#525): idempotency over the whole batch — a duplicate
+    # fan-out replays the original aggregated result instead of re-dispatching
+    # all N subtasks. Optional header; absent → no dedup.
+    idem = idempotency_service.begin(
+        idempotency_service.make_agent_scope(name), idempotency_key
+    )
+    if idem.replay:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="idempotent_replay",
+            source="mcp" if x_via_mcp else "api",
+            actor_user=current_user if not x_source_agent else None,
+            actor_agent_name=x_source_agent,
+            target_type="agent",
+            target_id=name,
+            endpoint=f"/api/agents/{name}/fan-out",
+            details={"idempotency_key": idempotency_key, "in_flight": idem.in_flight},
+        )
+        if idem.in_flight:
+            raise HTTPException(
+                status_code=409,
+                detail="A fan-out with this Idempotency-Key is still being processed.",
+            )
+        if idem.snapshot is not None:
+            return JSONResponse(
+                content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+            )
+
     service = get_fan_out_service()
 
     # Convert to service-layer task inputs
@@ -164,22 +196,26 @@ async def fan_out(
     # Determine source agent for origin tracking
     source_agent = x_source_agent or (name if request.agent == "self" else None)
 
-    result = await service.execute(
-        agent_name=name,
-        tasks=task_inputs,
-        max_concurrency=request.max_concurrency,
-        timeout_seconds=request.timeout_seconds,
-        model=request.model,
-        system_prompt=request.system_prompt,
-        allowed_tools=request.allowed_tools,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email,
-        source_agent_name=source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
-    )
+    try:
+        result = await service.execute(
+            agent_name=name,
+            tasks=task_inputs,
+            max_concurrency=request.max_concurrency,
+            timeout_seconds=request.timeout_seconds,
+            model=request.model,
+            system_prompt=request.system_prompt,
+            allowed_tools=request.allowed_tools,
+            source_user_id=current_user.id,
+            source_user_email=current_user.email,
+            source_agent_name=source_agent,
+            source_mcp_key_id=x_mcp_key_id,
+            source_mcp_key_name=x_mcp_key_name,
+        )
+    except Exception:
+        idempotency_service.fail(idem)
+        raise
 
-    return FanOutResponse(
+    response = FanOutResponse(
         fan_out_id=result.fan_out_id,
         status=result.status,
         total=result.total,
@@ -200,3 +236,7 @@ async def fan_out(
             for r in result.results
         ],
     )
+
+    # Store the aggregated batch result so a duplicate replays it (#525).
+    idempotency_service.complete(idem, result.fan_out_id, response.model_dump())
+    return response

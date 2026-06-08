@@ -505,7 +505,7 @@ async def sync_to_github(
 
     try:
         # Call the agent's internal sync endpoint
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=360.0) as client:
             payload = {"strategy": strategy}
             if message:
                 payload["message"] = message
