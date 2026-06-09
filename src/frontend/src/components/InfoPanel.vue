@@ -90,6 +90,23 @@
         </div>
       </div>
 
+      <!-- Technical details — exhaustive template.yaml metadata, tucked behind a
+           collapsible so the About + "What You Can Ask" lead the glance (#1107).
+           Native <details> for free keyboard + screen-reader semantics. -->
+      <details v-if="hasTechnicalDetails" class="group" data-testid="info-technical-details">
+        <summary class="cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden px-5 py-3 flex items-center justify-between bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+          <span class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider flex items-center">
+            <svg class="w-4 h-4 mr-2 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            Technical details
+          </span>
+          <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+          </svg>
+        </summary>
+        <div class="mt-4 space-y-4">
+
       <!-- Resources Section -->
       <div v-if="templateInfo.resources && Object.keys(templateInfo.resources).length > 0" class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3 flex items-center">
@@ -268,12 +285,14 @@
           </span>
         </div>
       </div>
+        </div>
+      </details>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 
 const props = defineProps({
@@ -292,6 +311,23 @@ const emit = defineEmits(['item-click'])
 const agentsStore = useAgentsStore()
 const templateInfo = ref(null)
 const loading = ref(true)
+
+// Whether there's any exhaustive metadata to tuck behind the "Technical details"
+// collapsible — hides the toggle entirely when the template has none (#1107).
+const hasTechnicalDetails = computed(() => {
+  const t = templateInfo.value
+  if (!t) return false
+  return (
+    (t.resources && Object.keys(t.resources).length > 0) ||
+    (t.sub_agents && t.sub_agents.length > 0) ||
+    (t.commands && t.commands.length > 0) ||
+    (t.mcp_servers && t.mcp_servers.length > 0) ||
+    (t.skills && t.skills.length > 0) ||
+    (t.capabilities && t.capabilities.length > 0) ||
+    (t.platforms && t.platforms.length > 0) ||
+    (t.tools && t.tools.length > 0)
+  )
+})
 
 const loadTemplateInfo = async () => {
   loading.value = true

@@ -92,6 +92,11 @@
               </nav>
             </div>
 
+            <!-- Overview Tab Content (#1107 — platform-rendered, deterministic default landing) -->
+            <div v-if="activeTab === 'overview'" class="p-6">
+              <OverviewPanel :agent-name="agent.name" :agent="agent" @navigate="handleOverviewNavigate" @item-click="handleInfoItemClick" />
+            </div>
+
             <!-- Info Tab Content -->
             <div v-if="activeTab === 'info'" class="p-6">
               <InfoPanel :agent-name="agent.name" :agent-status="agent.status" @item-click="handleInfoItemClick" />
@@ -268,6 +273,7 @@ import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
+import OverviewPanel from '../components/OverviewPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import GuardrailsPanel from '../components/GuardrailsPanel.vue'
 
@@ -307,7 +313,10 @@ const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3
 const agent = ref(null)
 const loading = ref(true)
 const error = ref('')
-const activeTab = ref('tasks')
+// Single source of truth for `?tab=` deep-link validation — hoisted to kill the
+// onMounted/onActivated two-copy drift (#1107). Overview is the default landing tab.
+const VALID_TABS = ['overview', 'tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
+const activeTab = ref('overview')
 // Tabs that need a full-viewport flex layout (input pinned to bottom).
 // Chat + Session both render ChatMessages which depends on flex-1 grow.
 const isFullscreenTab = computed(() => activeTab.value === 'chat' || activeTab.value === 'session')
@@ -591,8 +600,9 @@ const {
 const visibleTabs = computed(() => {
   const isSystem = agent.value?.is_system
 
-  // Primary tabs - most frequently used
+  // Primary tabs - most frequently used. Overview is the default landing tab (#1107).
   const tabs = [
+    { id: 'overview', label: 'Overview' },
     { id: 'tasks', label: 'Tasks' },
     { id: 'chat', label: 'Chat' }
   ]
@@ -927,7 +937,7 @@ watch(() => route.params.name, async (newName, oldName) => {
     nextTick(() => {
       const validTabIds = visibleTabs.value.map(t => t.id)
       if (!validTabIds.includes(activeTab.value)) {
-        activeTab.value = 'tasks'
+        activeTab.value = 'overview'
       }
     })
     startAllPolling()
@@ -1013,8 +1023,7 @@ onMounted(async () => {
   // Handle tab query param (from Timeline click navigation)
   if (route.query.tab) {
     const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
-    if (validTabs.includes(requestedTab)) {
+    if (VALID_TABS.includes(requestedTab)) {
       activeTab.value = requestedTab
     }
   }
@@ -1038,8 +1047,7 @@ onActivated(async () => {
   // Must also check here since onMounted doesn't fire for cached components
   if (route.query.tab) {
     const requestedTab = route.query.tab
-    const validTabs = ['tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'info']
-    if (validTabs.includes(requestedTab)) {
+    if (VALID_TABS.includes(requestedTab)) {
       activeTab.value = requestedTab
     }
   }
@@ -1066,6 +1074,19 @@ onUnmounted(() => {
   stopAllPolling()
   stopEmotionCycling()
 })
+
+// Handle navigation requests from the Overview tab — deep-link to another tab,
+// optionally highlighting an execution in the Tasks tab (#1107).
+const handleOverviewNavigate = ({ tab, executionId }) => {
+  if (executionId) {
+    activeTab.value = 'tasks'
+    router.replace({ query: { ...route.query, execution: executionId } })
+    return
+  }
+  if (tab && VALID_TABS.includes(tab)) {
+    activeTab.value = tab
+  }
+}
 
 // Handle item click from Info tab - switch to Tasks tab with prefilled message
 const handleInfoItemClick = ({ type, text }) => {
