@@ -337,19 +337,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("OpenTelemetry tracing disabled (set OTEL_ENABLED=1 to enable)")
 
-    # Print setup token if first-time setup is not yet complete (SEC #177).
+    # Emit setup token if first-time setup is not yet complete (SEC #177).
     # Only someone with access to server logs can read this token and complete setup,
     # preventing installation hijack by unauthenticated remote attackers.
+    #
+    # Use logger.warning (not print) because the lifespan runs under uvicorn
+    # with stdout connected to a pipe — without PYTHONUNBUFFERED=1, print()
+    # output is block-buffered and the token is silently lost from
+    # `docker logs`. The logging module flushes after every record, so this
+    # works regardless of Dockerfile drift.
     from database import db as _db
     if _db.get_setting_value('setup_completed', 'false') != 'true':
         _setup_token = get_setup_setup_token()
-        print("=" * 60)
-        print("TRINITY FIRST-TIME SETUP REQUIRED")
-        print("=" * 60)
-        print(f"Setup token: {_setup_token}")
-        print("Visit the Trinity UI and enter this token to set the admin password.")
-        print("This token is only valid for this session.")
-        print("=" * 60)
+        logger.warning("=" * 60)
+        logger.warning("TRINITY FIRST-TIME SETUP REQUIRED")
+        logger.warning("=" * 60)
+        logger.warning(f"Setup token: {_setup_token}")
+        logger.warning("Visit the Trinity UI and enter this token to set the admin password.")
+        logger.warning("This token is only valid for this session.")
+        logger.warning("=" * 60)
 
     if docker_client:
         try:
