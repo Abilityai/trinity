@@ -108,6 +108,19 @@ export function createLoopTools(
           .describe(
             "Per-iteration timeout in seconds (defaults to agent's configured execution_timeout_seconds)."
           ),
+        max_duration_seconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(604_800)
+          .optional()
+          .describe(
+            "Optional loop-level wall-clock deadline in seconds (1–604800 = up to 7 days). " +
+              "Checked at each iteration boundary; an in-flight run is never killed mid-turn. " +
+              "When the deadline passes the loop stops with stop_reason='deadline_exceeded'. " +
+              "Must be >= timeout_per_run (or the agent's execution timeout when unset). " +
+              "Omit for no time bound (max_runs still applies)."
+          ),
         model: z
           .string()
           .optional()
@@ -125,6 +138,7 @@ export function createLoopTools(
           stop_signal?: string;
           delay_seconds?: number;
           timeout_per_run?: number;
+          max_duration_seconds?: number;
           model?: string;
           allowed_tools?: string[];
         },
@@ -146,6 +160,7 @@ export function createLoopTools(
             stop_signal: params.stop_signal,
             delay_seconds: params.delay_seconds,
             timeout_per_run: params.timeout_per_run,
+            max_duration_seconds: params.max_duration_seconds,
             model: params.model,
             allowed_tools: params.allowed_tools,
           });

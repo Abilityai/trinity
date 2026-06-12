@@ -8,6 +8,7 @@ POST /api/loops/{loop_id}/stop          Graceful stop.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
@@ -36,6 +37,10 @@ MAX_MESSAGE_LEN = 100_000
 MAX_DELAY_SECONDS = 3600
 MAX_TIMEOUT_PER_RUN = 7200
 MAX_STOP_SIGNAL_LEN = 200
+MAX_DURATION_SECONDS = 604_800  # 7 days — hard ceiling on the wall-clock deadline
+# Fallback per-run timeout used for deadline validation when neither
+# timeout_per_run nor an agent-specific timeout is available.
+DEFAULT_PER_RUN_TIMEOUT = 3600
 
 
 class StartLoopRequest(BaseModel):
@@ -44,6 +49,10 @@ class StartLoopRequest(BaseModel):
     stop_signal: Optional[str] = Field(default=None, max_length=MAX_STOP_SIGNAL_LEN)
     delay_seconds: int = Field(default=0, ge=0, le=MAX_DELAY_SECONDS)
     timeout_per_run: Optional[int] = Field(default=None, ge=10, le=MAX_TIMEOUT_PER_RUN)
+    # #1156: optional loop-level wall-clock deadline. NULL = unbounded
+    # (max_runs is still the hard stop). Lower bound vs the per-run timeout
+    # is validated in the endpoint (needs the agent's configured timeout).
+    max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=MAX_DURATION_SECONDS)
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -88,6 +97,10 @@ class LoopStatusResponse(BaseModel):
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    # #1156: wall-clock deadline (NULL = unbounded) + elapsed since started_at
+    # (frozen at completed_at once terminal). Both NULL before the loop runs.
+    max_duration_seconds: Optional[int] = None
+    elapsed_seconds: Optional[int] = None
 
 
 class StopLoopResponse(BaseModel):
@@ -100,6 +113,29 @@ class StopLoopResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 RESPONSE_PREVIEW_CHARS = 500
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse a utc_now_iso() timestamp (ISO-Z) to an aware UTC datetime."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _elapsed_seconds(loop: dict) -> Optional[int]:
+    """Whole seconds from started_at to completed_at (terminal) or now.
+
+    None until the loop has started. Powers the GET deadline/elapsed view
+    (#1156) so operators can see how close a running loop is to its bound.
+    """
+    started = _parse_iso(loop.get("started_at"))
+    if started is None:
+        return None
+    end = _parse_iso(loop.get("completed_at")) or datetime.now(timezone.utc)
+    return max(0, int((end - started).total_seconds()))
 
 
 def _build_status_response(loop: dict) -> LoopStatusResponse:
@@ -133,6 +169,8 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
         created_at=loop["created_at"],
         started_at=loop["started_at"],
         completed_at=loop["completed_at"],
+        max_duration_seconds=loop.get("max_duration_seconds"),
+        elapsed_seconds=_elapsed_seconds(loop),
     )
 
 
@@ -162,6 +200,26 @@ async def start_loop(
     x_mcp_key_name: Optional[str] = Header(None),
 ):
     """Start a sequential agent loop; return loop_id immediately (202)."""
+    # #1156: a deadline shorter than a single run can never let even one
+    # iteration finish — reject it. Compare against the effective per-run
+    # timeout (explicit override, else the agent's configured timeout).
+    if payload.max_duration_seconds is not None:
+        effective_per_run = payload.timeout_per_run
+        if effective_per_run is None:
+            try:
+                effective_per_run = db.get_execution_timeout(name)
+            except Exception:
+                effective_per_run = DEFAULT_PER_RUN_TIMEOUT
+        if payload.max_duration_seconds < effective_per_run:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"max_duration_seconds ({payload.max_duration_seconds}s) must be "
+                    f">= the per-run timeout ({effective_per_run}s); otherwise no "
+                    f"iteration could complete before the deadline."
+                ),
+            )
+
     service = get_loop_service()
     loop_row = await service.start_loop(
         agent_name=name,
@@ -170,6 +228,7 @@ async def start_loop(
         stop_signal=payload.stop_signal,
         delay_seconds=payload.delay_seconds,
         timeout_per_run=payload.timeout_per_run,
+        max_duration_seconds=payload.max_duration_seconds,
         model=payload.model,
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,

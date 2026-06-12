@@ -2505,6 +2505,23 @@ def _migrate_agent_compatibility_results_table(cursor, conn):
     print("Created agent_compatibility_results table (#668)")
 
 
+def _migrate_agent_loops_max_duration(cursor, conn):
+    """#1156 — loop-level wall-clock deadline.
+
+    Adds `max_duration_seconds INTEGER` (NULL = no deadline) to `agent_loops`.
+    The runner stops the loop at the next iteration boundary once the deadline
+    measured from `started_at` is exceeded (stop_reason='deadline_exceeded'),
+    bounding total loop duration alongside the existing `max_runs` cap.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "max_duration_seconds",
+        "ALTER TABLE agent_loops ADD COLUMN max_duration_seconds INTEGER",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2581,4 +2598,5 @@ MIGRATIONS = [
     ("activities_created_index", _migrate_activities_created_index),
     ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
     ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
+    ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
 ]
