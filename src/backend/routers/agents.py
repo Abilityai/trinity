@@ -11,9 +11,7 @@ Related routers (same /api/agents prefix):
 - agent_ssh.py     — SSH access
 """
 import json
-import docker
 import logging
-from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
 from pydantic import BaseModel
@@ -22,16 +20,13 @@ from models import AgentConfig, AgentStatus, User, DeployLocalRequest, CircuitBr
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
 from services.docker_service import (
-    docker_client,
     get_agent_container,
     get_agent_by_name,
 )
 from services.docker_utils import (
-    container_stop, container_remove, container_reload,
-    volume_get, volume_remove
+    container_stop, container_remove,
 )
-from services import git_service
-from services.image_generation_prompts import AVATAR_EMOTIONS
+from services import heartbeat_service
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -41,14 +36,8 @@ from services.platform_audit_service import (
 from services.agent_service import (
     # Helpers - re-exported for external modules
     get_accessible_agents,
-    get_agents_by_prefix,
-    get_next_version_name,
-    get_latest_version,
-    check_shared_folder_mounts_match,
-    check_api_key_env_matches,
     # Lifecycle
     start_agent_internal,
-    recreate_container_with_updated_config,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
