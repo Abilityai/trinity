@@ -2,6 +2,11 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+# Unbuffered stdout/stderr — otherwise Python block-buffers print() to the
+# Docker pipe (~8KB) and lifespan output (notably the first-time setup token
+# in main.py) never reaches `docker logs`. Matches docker/scheduler/Dockerfile.
+ENV PYTHONUNBUFFERED=1
+
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
 RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 && rm -rf /var/lib/apt/lists/*
 
