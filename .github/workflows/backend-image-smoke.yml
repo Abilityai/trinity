@@ -75,7 +75,7 @@ jobs:
       COMPOSE_PROJECT_NAME: trinity-smoke
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Generate boot secrets (.env)
         # docker-compose.prod.yml fails to render unless ADMIN_PASSWORD,
