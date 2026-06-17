@@ -20,7 +20,7 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "fastmcp": "^3.32.0",
+    "fastmcp": "^4.3.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
