@@ -4,6 +4,38 @@ set -e
 
 cd "$(dirname "$0")/../.."
 
+TAILNET_MODE=false
+TAILNET_HOSTNAME=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tailnet)
+            TAILNET_MODE=true
+            ;;
+        --tailnet-hostname)
+            TAILNET_MODE=true
+            TAILNET_HOSTNAME="${2:-}"
+            shift
+            ;;
+    esac
+    shift
+done
+
+if [ "$TAILNET_MODE" = true ]; then
+    # shellcheck source=scripts/lib/tailnet.sh
+    source "scripts/lib/tailnet.sh"
+    tn_check_tailscale || true
+    if [ -n "$TAILNET_HOSTNAME" ]; then
+        _tn_hostname=$(tn_detect_hostname --tailnet-hostname "$TAILNET_HOSTNAME")
+    else
+        _tn_hostname=$(tn_detect_hostname) || _tn_hostname=""
+    fi
+    tn_check_ports
+    # Intentionally generate the default override; no script args are forwarded here.
+    # shellcheck disable=SC2119
+    tn_generate_override
+    [ -n "$_tn_hostname" ] && tn_apply_env "$_tn_hostname"
+fi
+
 echo "====================================="
 echo "Trinity Agent Platform - Starting"
 echo "====================================="
@@ -173,10 +205,11 @@ fi
 # isn't a git checkout (CI tarball install) fall back to "unknown" so the
 # downstream Dockerfile defaults still produce a well-typed response.
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    export GIT_COMMIT=$(git rev-parse HEAD)
-    export GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
-    export GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
-    export GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    GIT_COMMIT=$(git rev-parse HEAD)
+    GIT_COMMIT_SUBJECT=$(git log -1 --pretty=%s)
+    GIT_COMMIT_TIMESTAMP=$(git log -1 --pretty=%cI)
+    GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    export GIT_COMMIT GIT_COMMIT_SUBJECT GIT_COMMIT_TIMESTAMP GIT_BRANCH
     # #993: dynamic version = curated semver (VERSION file) + git short sha
     # (+ ".dirty" when the tree has uncommitted changes), e.g.
     # "0.9.0+g4c640b6e". Env-stamped so dev and prod agree per commit.
@@ -185,10 +218,16 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git diff --quiet HEAD 2>/dev/null || _short_sha="${_short_sha}.dirty"
     export VERSION="${_base_ver}+g${_short_sha}"
 fi
-export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export BUILD_DATE
 
 echo "Starting services..."
 docker compose up -d
+
+if [ "$TAILNET_MODE" = true ] && [ -n "${_tn_hostname:-}" ]; then
+    tn_configure_serve || true
+    tn_print_summary "$_tn_hostname"
+fi
 
 echo ""
 echo "Waiting for services to be ready..."

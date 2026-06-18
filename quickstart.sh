@@ -17,7 +17,29 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 DEFAULTS_MODE=false
-[ "$1" = "--defaults" ] && DEFAULTS_MODE=true
+TAILNET_MODE=false
+TAILNET_HOSTNAME=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --defaults)
+            DEFAULTS_MODE=true
+            ;;
+        --tailnet)
+            TAILNET_MODE=true
+            ;;
+        --tailnet-hostname)
+            TAILNET_MODE=true
+            TAILNET_HOSTNAME="${2:-}"
+            shift
+            ;;
+    esac
+    shift
+done
+
+if [ "$TAILNET_MODE" = true ]; then
+    # shellcheck source=scripts/lib/tailnet.sh
+    source "$(dirname "$0")/scripts/lib/tailnet.sh"
+fi
 
 echo ""
 echo -e "${BOLD}=================================================${NC}"
@@ -119,6 +141,23 @@ echo ""
 echo -e "${GREEN}✓ Environment configured${NC}"
 echo ""
 
+if [ "$TAILNET_MODE" = true ]; then
+    echo -e "${BOLD}Configuring tailnet deployment...${NC}"
+    tn_check_tailscale || true
+    if [ -n "$TAILNET_HOSTNAME" ]; then
+        _tn_hostname=$(tn_detect_hostname --tailnet-hostname "$TAILNET_HOSTNAME")
+    else
+        _tn_hostname=$(tn_detect_hostname) || _tn_hostname=""
+    fi
+    tn_check_ports
+    # Intentionally generate the default override; no script args are forwarded here.
+    # shellcheck disable=SC2119
+    tn_generate_override
+    [ -n "$_tn_hostname" ] && tn_apply_env "$_tn_hostname"
+    echo -e "${GREEN}✓ Tailnet deployment files configured${NC}"
+    echo ""
+fi
+
 # ── 3. Base image ─────────────────────────────────────────────────────────────
 
 echo -e "${BOLD}Checking base agent image...${NC}"
@@ -135,6 +174,12 @@ echo ""
 
 echo -e "${BOLD}Starting Trinity services...${NC}"
 docker compose up -d
+
+if [ "$TAILNET_MODE" = true ] && [ -n "${_tn_hostname:-}" ]; then
+    tn_configure_serve || true
+    tn_print_summary "$_tn_hostname"
+fi
+
 echo ""
 echo "Waiting for services to initialize..."
 sleep 8
@@ -152,6 +197,9 @@ FRONTEND_PORT=$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || ec
 FRONTEND_PORT=${FRONTEND_PORT:-80}
 WEB_URL="http://localhost"
 [ "$FRONTEND_PORT" != "80" ] && WEB_URL="http://localhost:${FRONTEND_PORT}"
+if [ "$TAILNET_MODE" = true ] && [ -n "${_tn_hostname:-}" ]; then
+    WEB_URL="https://${_tn_hostname}"
+fi
 
 echo ""
 echo -e "${BOLD}=================================================${NC}"

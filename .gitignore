@@ -26,6 +26,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!scripts/lib/
+!scripts/lib/tailnet.sh
 lib64/
 parts/
 sdist/

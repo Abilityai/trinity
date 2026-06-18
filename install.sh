@@ -11,6 +11,22 @@
 
 set -e
 
+TAILNET_MODE=false
+TAILNET_HOSTNAME=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tailnet)
+            TAILNET_MODE=true
+            ;;
+        --tailnet-hostname)
+            TAILNET_MODE=true
+            TAILNET_HOSTNAME="${2:-}"
+            shift
+            ;;
+    esac
+    shift
+done
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -164,6 +180,21 @@ fi
 
 cd "$TRINITY_DIR"
 
+if [ "$TAILNET_MODE" = true ]; then
+    # shellcheck source=scripts/lib/tailnet.sh
+    source "scripts/lib/tailnet.sh"
+    tn_check_tailscale || true
+    if [ -n "$TAILNET_HOSTNAME" ]; then
+        _tn_hostname=$(tn_detect_hostname --tailnet-hostname "$TAILNET_HOSTNAME")
+    else
+        _tn_hostname=$(tn_detect_hostname) || _tn_hostname=""
+    fi
+    tn_check_ports
+    # Intentionally generate the default override; no script args are forwarded here.
+    # shellcheck disable=SC2119
+    tn_generate_override
+fi
+
 # -----------------------------------------------------------------------------
 # Step 3: Create .env file
 # -----------------------------------------------------------------------------
@@ -198,6 +229,11 @@ else
 fi
 
 log_success "Environment configured"
+
+if [ "$TAILNET_MODE" = true ] && [ -n "${_tn_hostname:-}" ]; then
+    tn_apply_env "$_tn_hostname"
+fi
+
 echo ""
 echo -e "  ${YELLOW}Admin Credentials (save these!):${NC}"
 echo -e "    Username: ${GREEN}admin${NC}"
@@ -224,6 +260,11 @@ fi
 log_info "Starting Trinity services..."
 
 docker compose up -d
+
+if [ "$TAILNET_MODE" = true ] && [ -n "${_tn_hostname:-}" ]; then
+    tn_configure_serve || true
+    tn_print_summary "$_tn_hostname"
+fi
 
 # Wait for services to be healthy
 log_info "Waiting for services to start..."
