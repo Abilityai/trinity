@@ -37,6 +37,9 @@ Each agent runs in its own isolated Docker container with real-time observabilit
 
 > 🤖 **AI agent reading this repo?** Start at [AGENTS.md](AGENTS.md) — a task router with exact commands, key facts, and verification steps. Detailed docs index: [docs/user-docs/README.md](docs/user-docs/README.md).
 
+> [!IMPORTANT]
+> **PostgreSQL is the recommended database for production.** SQLite stays the zero-config default for local development and evaluation, but production instances should run on PostgreSQL — opt in with a single `DATABASE_URL` ([setup guide](docs/POSTGRESQL_SETUP.md), #300). **Already on SQLite?** Migrate with the [Trinity Ops Agent](https://github.com/abilityai/trinity-ops-public)'s `/migrate-to-postgres` skill — a gated, validate-then-cutover flow that leaves your SQLite file untouched for instant rollback.
+
 ## Why Trinity?
 
 **The problem:** Everyone wants autonomous AI agents. But your options are terrible — SaaS platforms where data leaves your security perimeter, custom builds that take 6-12 months, or frameworks that don't handle governance and audit trails.
@@ -145,7 +148,7 @@ cp .env.example .env
 
 > **Don't want to self-host?** Trinity also runs as a managed instance on any cloud you control. [Talk to an engineer →](mailto:hello@ability.ai) — an engineer reads this, not a CRM. Reply in one business day, your time zone.
 
-> **Deploying to a remote server?** `/trinity:deploy-new-instance` from the [abilities marketplace](https://github.com/abilityai/abilities) provisions Trinity on any server you can SSH into — and scaffolds an ops agent to manage it.
+> **Deploying to a remote server?** `/trinity:deploy-new-instance` from the [abilities marketplace](https://github.com/abilityai/abilities) provisions Trinity on any server you can SSH into — and scaffolds the [Trinity Ops Agent](https://github.com/abilityai/trinity-ops-public) to manage it (health, logs, updates, rollback, and SQLite→PostgreSQL migration).
 
 ### Phase B — Build & deploy agents from Claude Code
 
@@ -595,6 +598,7 @@ Events include: `agent_started`, `agent_stopped`, `agent_activity` (chat/task co
 |----------|----------|-------------|
 | `SECRET_KEY` | Yes | JWT signing key (generate with `openssl rand -hex 32`) |
 | `ADMIN_PASSWORD` | Yes | Admin password for admin login |
+| `DATABASE_URL` | No | PostgreSQL backend (recommended for production); unset → SQLite default (#300) |
 | `ANTHROPIC_API_KEY` | No | For Claude-powered agents (can also be set via Settings UI) |
 | `GITHUB_PAT` | No | GitHub PAT for cloning private template repos |
 | `OTEL_ENABLED` | No | Enable OpenTelemetry metrics export (default: false) |
@@ -618,6 +622,19 @@ ADMIN_PASSWORD=your-secure-password
 EMAIL_PROVIDER=console  # Use 'resend' or 'smtp' for production
 ```
 
+### Database
+
+Trinity runs on **SQLite by default** — zero-config, perfect for local development and evaluation (file at `TRINITY_DB_PATH`, default `/data/trinity.db`). For production, **PostgreSQL is the recommended backend** (#300): set a single `DATABASE_URL` and both the backend and the scheduler switch over. Selection is non-sticky and non-destructive — comment the variable out and you're back on SQLite on the next restart.
+
+```bash
+# Opt in to the bundled PostgreSQL container
+DATABASE_URL=postgresql://trinity:your-password@postgres:5432/trinity
+docker compose --profile postgres up -d
+```
+
+- **Stand up a new instance on PostgreSQL** → [docs/POSTGRESQL_SETUP.md](docs/POSTGRESQL_SETUP.md)
+- **Migrate an existing SQLite instance** → the [Trinity Ops Agent](https://github.com/abilityai/trinity-ops-public)'s `/migrate-to-postgres` skill stands up a parallel Postgres container, copies and validates your data, then cuts over in a short downtime window — your SQLite file is never written, so rollback is always one line.
+
 ## We run on Trinity. So do our customers.
 
 <!-- TODO: verify these metrics are current before publishing — keep the qualifiers, they're what
@@ -635,6 +652,7 @@ EMAIL_PROVIDER=console  # Use 'resend' or 'smtp' for production
 
 - [**AGENTS.md**](AGENTS.md) — Entry point for AI agents: task router, key facts, verification steps
 - [**Abilities Plugin Marketplace**](https://github.com/abilityai/abilities) — Claude Code plugins defining the agent lifecycle workflows (scaffold, develop, deploy, iterate)
+- [**Trinity Ops Agent**](https://github.com/abilityai/trinity-ops-public) — Claude Code-powered ops agent for any instance: health, logs, updates, rollback, cloud provisioning, and SQLite→PostgreSQL migration (`/migrate-to-postgres`)
 - [**User Documentation**](docs/user-docs/README.md) — Complete guide for UI workflows, agent management, and API reference
 - [**User Scenarios**](docs/user-scenarios/README.md) — Step-by-step task walkthroughs (CLI, UI, API)
 - [CLI Reference](docs/CLI.md) — Full `trinity` command reference and multi-instance profiles
