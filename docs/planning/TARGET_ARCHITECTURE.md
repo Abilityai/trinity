@@ -475,7 +475,7 @@ These decisions are already correct and should not be revisited without strong e
 
 These are architectural decisions not yet resolved. They should be answered before the relevant components are built. Each has a tracking issue.
 
-1. **Message-envelope payload schema** (issue #945): The envelope fields are defined; the `payload` schema for each `kind` is not. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract must be pinned before the pull pilot (#946). In particular the `reply` payload must pin the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the pre-work: `ParallelTaskRequest` has 15 fields today, and the envelope cannot fit honestly until those are demoted to session/agent state or quarantined.
+1. **Message-envelope payload schema** (issue #945) — *Resolved (postcard written): see [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md).* The envelope fields are defined; the `payload` schema for each `kind` is now pinned in the postcard. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract is pinned before the pull pilot (#946). In particular the `reply` payload pins the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope and the postcard. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the *physical-enforcement* pre-work: `ParallelTaskRequest` has 15 fields today, and the envelope cannot replace that shape as a wire format until those are demoted to session/agent state or quarantined (the postcard is the documented contract; the pilot rides the existing reconstruction shape).
 
 2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. **Sequencing constraint added by the pull model:** the queue, the atomic claim, the result-write, and the lease-renewal all converge on one DB; at 200 agents that is exactly where SQLite's single-writer lock becomes the ceiling — *before* agent count does. PostgreSQL must therefore land **before** the pull queue carries the full fleet at scale (or no later than the "capacity becomes physical" phase), not after. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
 
@@ -507,7 +507,7 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | ├─ Pilot: route MCP `chat_with_agent` through the agent queue | #946 |
 | ├─ Cleanup pyramid → single lease-reaper | #429 |
 | └─ PostgreSQL migration (sequence **before** the queue carries the fleet) | #300 |
-| Message-envelope payload schema (gates the pilot #946) | #945 |
+| Message-envelope payload schema (gates the pilot #946) — postcard written (`ACTOR_MODEL_POSTCARD.md`) | #945 |
 | Idempotency keys at trigger boundaries (shipped) | #525 |
 | Per-agent dispatch circuit breaker — repurposed gate→alert under pull (shipped) | #526 |
 | Agent heartbeat push — repurposed gate→alert under pull | #307 |

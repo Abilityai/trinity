@@ -1587,6 +1587,11 @@ async def execute_parallel_task(
             # enqueue, so nothing was backlogged. Close the pre-created row
             # FAILED(circuit_open) and return 503.
             logger.warning(f"[Task Async] Agent '{name}' dispatch circuit open, rejecting")
+            # #946: nothing dispatched — release the idempotency claim so the
+            # caller can retry with the same key once the breaker recovers,
+            # mirroring /chat (line 242) and the CapacityFull branch above.
+            # Without this the in_flight row blocks same-key retries for 24h.
+            idempotency_service.fail(idem)
             _raise_circuit_open_503(name, execution_id, e)
 
         if cap_result.state == "queued_persistent":
@@ -1703,6 +1708,9 @@ async def execute_parallel_task(
         # #526: dispatch breaker open — raised before the queue_persistent
         # enqueue. Close the pre-created row FAILED(circuit_open) and 503.
         logger.warning(f"[Task Sync] Agent '{name}' dispatch circuit open, rejecting")
+        # #946: release the idempotency claim so the same-key retry isn't
+        # blocked for 24h, mirroring /chat (line 242) and CapacityFull above.
+        idempotency_service.fail(idem)
         _raise_circuit_open_503(name, execution_id, e)
 
     sync_slot_acquired = sync_cap_result.state == "admitted"

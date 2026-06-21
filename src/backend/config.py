@@ -134,6 +134,22 @@ DISPATCH_ASYNC = os.getenv("DISPATCH_ASYNC", "false").lower() == "true"
 # MUST stay sync; `event` POSTs the agent directly (bypassing execute_task).
 ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
 
+# Pull-pilot routing for agent→agent MCP chat (#946, Phase 2 PoC for Epic
+# #1045 / umbrella #1081). When ON, an agent→agent (scope='agent', non-self)
+# `chat_with_agent` sequential call is routed by the MCP server through the
+# durable async `/task` path instead of the synchronous held `/chat` call;
+# the caller receives an immediate `{accepted|queued, execution_id}` receipt
+# and polls `get_execution_result`. scope='user', self-tasks, and flag-OFF keep
+# today's synchronous `/chat` unchanged. Default OFF — a flag flip / MCP routing
+# revert is the whole rollback. The actual routing gate lives MCP-side
+# (`MCP_AGENT_CHAT_PULL_ENABLED` read in the MCP server at startup, mirroring
+# `MCP_REQUIRE_API_KEY`); this backend declaration is the canonical registry
+# entry and is surfaced via GET /api/settings/feature-flags
+# (`mcp_agent_chat_pull_enabled`) for operator observability during the soak.
+# Both services read the SAME env key, so a normal single-`.env` deployment
+# can't drift.
+MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
+
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # Coalesce empty → default (#1076): os.getenv(name, default) returns the
