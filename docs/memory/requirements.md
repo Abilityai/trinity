@@ -2956,6 +2956,67 @@ a fourth runtime.
 
 ---
 
+## 41. Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
+
+### 41.1 Declared Data Paths over the Existing Home Volume (#1169 — PR1)
+
+Agents accumulate runtime data (SQLite DBs, datasets) that can't live in the
+git-synced template repo (bloat) yet must survive container lifecycle events and
+be portable to another Trinity instance. The agent home directory
+(`/home/developer`) is **already** a persistent named Docker volume
+(`agent-{name}-workspace`) that survives recreate, image upgrade, template
+re-pull, and subscription auto-switch — so data dropped under
+`/home/developer/data` is already durable today. This feature therefore reduces
+to a **declaration** (`data_paths`) plus a real **snapshot/export/import**
+capability over that existing volume — **no separate volume, no platform schema
+change** (snapshots are filesystem artifacts; audit rides the existing
+`audit_log`). Schema-free by design, to stay decoupled from the in-flight
+SQLite→PostgreSQL migration (#1183).
+
+**Functional requirements:**
+- **FR-1 — Declaration:** a template may declare `data_paths:` (a list of globs
+  under `data/`) in `template.yaml`. At creation, the backend materializes
+  `~/.trinity/data-paths.yaml` inside the agent (quoted-heredoc write, glob-safe),
+  mirroring the S4 persistent-state pattern. Opt-in — default `[]` (no file, no
+  side effects when undeclared).
+- **FR-2 — Durability:** declared data lives under `/home/developer/data` on the
+  existing persistent home volume; no new volume is created. (Met by reuse.)
+- **FR-3 — Gitignore:** when `data_paths` is non-empty, the declared paths and the
+  `data/` root are appended to the **agent's own** `.gitignore` (idempotent
+  `grep -qxF` merge) so runtime data is never committed. The fleet-wide ignore
+  list is untouched.
+- **FR-4 — On-demand export:** `POST /api/agents/{name}/data/export` (owner/admin)
+  streams a tar of `/home/developer/data` (via `get_archive`, no workspace mount)
+  to a temp file under `/data`, then returns it as a `StreamingResponse`. A
+  configurable size cap (`AGENT_DATA_EXPORT_MAX_BYTES`) returns **413** on
+  overflow. The tar embeds a self-describing **manifest** (`data-paths.yaml` +
+  agent/version metadata). Accepts `Idempotency-Key` (Invariant #18); audited as
+  `data_export`.
+- **FR-5 — On-demand import/restore:** `POST /api/agents/{name}/data/import`
+  (owner/admin) restores an uploaded tar into `/home/developer/data` via the
+  existing agent-server `POST /api/agent-server/restore` primitive, whose
+  `restore_from_tar` enforces the `data/**` allowlist and rejects absolute / `..`
+  traversal. Audited as `data_import`.
+- **FR-6 — Concurrency:** export and import are serialized per agent by a Redis
+  operation lock (409 on contention).
+- **FR-7 — Portability (MCP):** `export_agent_data` / `import_agent_data` MCP tools
+  expose the capability so "move an agent" = template URL + `.credentials.enc` +
+  data tar.
+
+**Non-functional:** export never loads the full dataset into memory (stream →
+temp → stream); the temp file is removed after the response is sent
+(`BackgroundTask`). System agents are out of scope (no public/shared volumes;
+`.trinity` is reset on their reset path).
+
+**Out of scope (PR2 / follow-ups):** scheduled background snapshots,
+`~/.trinity/pre-snapshot` SQLite-quiesce hook (`sqlite3 .backup` staging copy to
+eliminate the hook-vs-tar race), snapshot retention, and the rename/purge
+snapshot-dir cascade — all deferred to PR2. The pre-existing
+home/public/shared **volume leak-on-purge** + **strand-on-rename** is a separate
+fleet-wide bug filed independently.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

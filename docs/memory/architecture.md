@@ -70,6 +70,7 @@
 - `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
+- `agent_data.py` - Runtime-data export/import (`data_paths`) over the durable home volume (#1169)
 - `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
@@ -244,7 +245,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` (19) | `list_agents`, `get_agent`, `get_agent_info`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync`, `get_agent_github_pat_status`, `set_agent_github_pat` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (#347) |
+| `agents.ts` (21) | `list_agents`, `get_agent`, `get_agent_info`, `create_agent`, `rename_agent`, `delete_agent`, `start_agent`, `stop_agent`, `list_templates`, `get_credential_status`, `inject_credentials`, `export_credentials`, `import_credentials`, `get_credential_encryption_key`, `get_agent_ssh_access`, `deploy_local_agent`, `initialize_github_sync`, `get_agent_github_pat_status`, `set_agent_github_pat`, `export_agent_data`, `import_agent_data` | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (#347), runtime-data export/import (#1169) |
 | `chat.ts` (3) | `chat_with_agent`, `get_chat_history`, `get_agent_logs` | Chat (enforces sharing rules), history, logs. Sync mode applies `MCP_CHAT_TIMEOUT_MS` (default 25000); on abort the client queries `/api/agents/{name}/executions`, matches the in-flight MCP row, and returns `{status:"queued_timeout", execution_id, message}` so callers poll instead of duplicate-queueing (#914) |
 | `schedules.ts` (8) | `list_agent_schedules`, `create_agent_schedule`, `get_agent_schedule`, `update_agent_schedule`, `delete_agent_schedule`, `toggle_agent_schedule`, `trigger_agent_schedule`, `get_schedule_executions` | Schedule CRUD and execution history |
 | `executions.ts` (3) | `list_recent_executions`, `get_execution_result`, `get_agent_activity_summary` | Execution queries, async result polling, activity monitoring (MCP-007) |
@@ -440,6 +441,16 @@ Per-agent opt-in (`agent_ownership.file_sharing_enabled`). The agent writes to `
 
 Download URL: `{public_chat_url}/api/files/{file_id}?sig={token}` — the param is `?sig=` (NOT `?download_token=`) so the credential sanitizer's `.*TOKEN.*` pattern doesn't redact it in agent transcripts; `/api/*` rides existing Vite/nginx proxy rules. Cascades are manual per platform convention: the agent delete handler removes rows + on-disk files + volume; `rename_agent()` updates `agent_name` across 17 tables. MCP tool `share_file`; endpoints under [Outbound File Sharing](#outbound-file-sharing-files-001-1) in API Endpoints.
 
+### Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
+
+Declared runtime data (SQLite DBs, datasets) over the **existing durable home volume** — **no separate volume, no platform schema change** (snapshots are filesystem artifacts; audit rides `audit_log`). The agent home (`/home/developer`) is already a persistent named Docker volume (`agent-{name}-workspace`) that survives recreate/upgrade/template-repull/sub-switch, so data under `/home/developer/data` is already durable; this feature adds only the **declaration + export/import** surface.
+
+**Declaration:** a template's `template.yaml data_paths:` (globs under `data/`) is surfaced by `template_service` (github + local builders) and materialized at creation by `crud.py` → `git_service.materialize_data_paths()`: writes `~/.trinity/data-paths.yaml` (quoted-heredoc, glob-safe) AND appends `data/` + each declared path to the agent's **own** `.gitignore` (idempotent `grep -qxF`, never the fleet-wide `_GITIGNORE_PATTERNS`). Opt-in — an empty list is a complete no-op. The S4 persistent-state functions and data_paths now share one extracted primitive (`materialize_trinity_yaml_list`/`_read_trinity_yaml_list`, heredoc delimiter parameterized so persistent_state keeps `PSTATE_EOF`).
+
+**Export** (`routers/agent_data.py`, `POST /api/agents/{name}/data/export`, owner/admin): streams `container_get_archive("/home/developer/data")` (workspace never mounted) → temp file under `/data/agent-data-tmp` → `StreamingResponse` (temp removed via `BackgroundTask`); `AGENT_DATA_EXPORT_MAX_BYTES` (default 5 GiB) → 413; the tar embeds a self-describing `manifest.json` (data-paths + agent/version). Missing `data/` → a manifest-only tar, not a 500. `?format=base64` returns the tar inline as JSON up to `AGENT_DATA_INLINE_MAX_BYTES` (default 10 MiB) for the MCP surface. Export is a naturally-idempotent read (accepts `Idempotency-Key` for contract consistency; creates no execution).
+
+**Import** (`POST /api/agents/{name}/data/import`, owner/admin): proxies the uploaded tar to the agent-server `POST /api/agent-server/restore` primitive, whose `restore_from_tar` enforces the `data/**` allowlist and rejects absolute/`..` traversal; deduped via `Idempotency-Key` (Invariant #18). Both endpoints are serialized per agent by a cross-worker Redis op lock (`agent:data_op:{name}`, SETNX+TTL, fail-open, 409 on contention). MCP tools `export_agent_data`/`import_agent_data` (Invariant #13) carry the base64 tar — "move an agent" = template URL + `.credentials.enc` + data tar. System agents are out of scope. **PR2 (deferred):** scheduled snapshots + `~/.trinity/pre-snapshot` SQLite-quiesce hook + retention + rename/purge snapshot-dir cascade.
+
 ### Git Sync Health (#389/#390)
 
 **Agent side:** 15-min `auto_sync` heartbeat loop in the agent server (gated by `GIT_SYNC_AUTO`; default-on for non-source-mode GitHub-template agents) stages/commits/pushes in-container changes and writes the outcome to `.trinity/sync-state.json` (S1a).
@@ -521,6 +532,8 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 | GET | `/api/agents/{name}/shared-files` | List active shared files with download counts |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
 | POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) |
+| POST | `/api/agents/{name}/data/export` | Export agent `data/` as a tar (owner/admin; `?format=stream`\|`base64`; 413 over cap; per-agent op lock). See [Agent Runtime Data](#agent-runtime-data--data_paths--snapshotexport-1169) (#1169) |
+| POST | `/api/agents/{name}/data/import` | Restore an uploaded tar into agent `data/` via the agent-server restore primitive (owner/admin; `data/**` allowlist + traversal guard; `Idempotency-Key`; op lock) (#1169) |
 | POST | `/api/agents/{name}/heartbeat` | Agent liveness heartbeat — auth and semantics in [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307) |
 | POST | `/api/agents/{name}/executions/{execution_id}/result` | Fire-and-forget terminal callback — agent's own MCP key + ownership + durable async-marker gate; finalizes via `apply_result`. See [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083) (#1083) |
 | GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (#526) |
@@ -1553,5 +1566,5 @@ Local and production use the same ports. Local URLs, auth, and admin credentials
 
 ## Data Persistence
 
-- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite).
-- **Docker volumes**: `redis-data` (Redis AOF), `agent-configs`, `audit-data`, `audit-logs`, per-agent `agent-{name}-public` (FILES-001) and shared-folder volumes.
+- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite), `agent-files/` (FILES-001), and `agent-data-tmp/` (transient export staging, #1169).
+- **Docker volumes**: `redis-data` (Redis AOF), `agent-configs`, `audit-data`, `audit-logs`, per-agent `agent-{name}-workspace` (the durable home volume — declared `data_paths` runtime data lives under `/home/developer/data` here, #1169), `agent-{name}-public` (FILES-001), and shared-folder volumes.

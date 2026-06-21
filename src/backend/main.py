@@ -44,6 +44,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
 from routers.agent_config import router as agent_config_router
+from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
@@ -863,6 +864,7 @@ async def add_security_headers(request: Request, call_next):
 app.include_router(auth_router)
 app.include_router(agents_router)
 app.include_router(agent_config_router)
+app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)

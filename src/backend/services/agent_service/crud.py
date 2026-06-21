@@ -864,6 +864,25 @@ async def create_agent_internal(
                     f"{config.name}: {e}"
                 )
 
+            # #1169: Materialize the declared `data_paths` into the agent.
+            # Opt-in (empty list = no-op), so undeclared agents are
+            # untouched. Writes `.trinity/data-paths.yaml` and gitignores the
+            # `data/` root in the agent's own .gitignore. Non-fatal — the
+            # home volume is already durable; the declaration just enables
+            # selective snapshot/export and keeps runtime data out of git.
+            data_paths = (template_data or {}).get(
+                "data_paths", git_service.DEFAULT_DATA_PATHS
+            )
+            try:
+                await git_service.materialize_data_paths(
+                    config.name, data_paths
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[#1169] Failed to materialize data-paths.yaml for "
+                    f"{config.name}: {e}"
+                )
+
             # #389 S1a: opt non-source-mode GitHub-template agents into the
             # auto-sync heartbeat by default. Source-mode agents stay opt-in
             # (auto-pushing to main would clobber protected branches).

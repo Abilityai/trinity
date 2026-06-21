@@ -1826,4 +1826,73 @@ export class TrinityClient {
       `/api/loops/${encodeURIComponent(loopId)}/stop`
     );
   }
+
+  /**
+   * Export an agent's runtime data (`/home/developer/data`) inline as a
+   * base64 tar (#1169). Only succeeds for small datasets — large data must
+   * use the streaming download endpoint (413 otherwise). The tar embeds a
+   * self-describing manifest.json.
+   * @param name - Agent name
+   */
+  async exportAgentData(name: string): Promise<{
+    agent_name: string;
+    size_bytes: number;
+    format: string;
+    filename: string;
+    tar_base64: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/data/export?format=base64`
+    );
+  }
+
+  /**
+   * Restore a base64 tar into an agent's `data/` directory (#1169). The
+   * backend delegates to the agent-server restore primitive, which enforces
+   * the `data/**` allowlist and rejects path traversal. Uploaded as multipart
+   * (the binary doesn't fit the JSON request path).
+   * @param name - Agent name
+   * @param tarBase64 - base64-encoded tar, typically from exportAgentData
+   */
+  async importAgentData(
+    name: string,
+    tarBase64: string
+  ): Promise<{
+    agent_name: string;
+    restored: string[];
+    skipped: string[];
+    bytes_received: number;
+  }> {
+    if (!this.token) {
+      throw new Error(
+        "Not authenticated. Call authenticate() first or setToken()."
+      );
+    }
+    const buf = Buffer.from(tarBase64, "base64");
+    const form = new FormData();
+    form.append(
+      "tarball",
+      new Blob([buf], { type: "application/x-tar" }),
+      "data.tar"
+    );
+    const response = await fetch(
+      `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/data/import`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.token}` },
+        body: form,
+      }
+    );
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`API error (${response.status}): ${error}`);
+    }
+    return response.json() as Promise<{
+      agent_name: string;
+      restored: string[];
+      skipped: string[];
+      bytes_received: number;
+    }>;
+  }
 }
