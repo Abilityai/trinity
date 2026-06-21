@@ -30,7 +30,7 @@
   },
   "overrides": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "hono": ">=4.12.18",
+    "hono": ">=4.12.25",
     "axios": ">=1.15.2",
     "fast-uri": ">=3.1.2",
     "@hono/node-server": ">=1.19.13",

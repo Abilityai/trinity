@@ -30,7 +30,7 @@ const devSecurityHeaders = {
     "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data: blob:; " +
     "font-src 'self'; " +
-    "connect-src 'self' ws: wss:; " +
+    "connect-src 'self' ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net; " +
     "frame-ancestors 'self'; " +
     "base-uri 'self'; " +
     "form-action 'self'",

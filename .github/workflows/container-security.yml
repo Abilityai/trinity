@@ -4,10 +4,11 @@ name: container-security
 #
 # These checks used to live in `frontend-e2e.yml`, which is `ui`-label
 # gated and therefore skipped on backend infrastructure PRs — the exact
-# PRs that can break them. This workflow runs unconditionally on any PR
-# (and push to dev/main) that touches the relevant Docker / compose /
-# bootstrap surface, so the guard executes whenever it could possibly
-# regress.
+# PRs that can break them. This workflow runs on every PR (and push to
+# dev/main); the heavy `verify-non-root` job is gated by the `changes`
+# detector so it executes whenever the Docker / compose / bootstrap
+# surface changes and is SKIPPED (→ passing required check) otherwise.
+# That keeps it a safe required status check — see #1222.
 #
 # Scope:
 #   - `verify-non-root`: every Trinity-built service that holds platform
@@ -25,19 +26,7 @@ name: container-security
 on:
   push:
     branches: [dev, main]
-    paths:
-      - 'docker/**'
-      - 'docker-compose*.yml'
-      - 'scripts/deploy/start.sh'
-      - 'src/mcp-server/Dockerfile'
-      - '.github/workflows/container-security.yml'
   pull_request:
-    paths:
-      - 'docker/**'
-      - 'docker-compose*.yml'
-      - 'scripts/deploy/start.sh'
-      - 'src/mcp-server/Dockerfile'
-      - '.github/workflows/container-security.yml'
   workflow_dispatch:
 
 # Least-privilege GITHUB_TOKEN: only `contents: read` is needed for
@@ -48,7 +37,37 @@ permissions:
   contents: read
 
 jobs:
+  # Cheap path detector — runs on every PR/push so the required `verify-non-root`
+  # context is ALWAYS produced. The heavy stack-boot job below is gated on it, so
+  # an unrelated PR skips it (→ passing required check) rather than leaving the
+  # context "expected" forever (the #1222 freeze).
+  changes:
+    runs-on: ubuntu-latest
+    # paths-filter resolves the PR's changed-file list via the API; the heavy
+    # verify-non-root job keeps the workflow-level least-privilege contents: read.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'docker/**'
+              - 'docker-compose*.yml'
+              - 'scripts/deploy/start.sh'
+              - 'src/mcp-server/Dockerfile'
+              - '.github/workflows/container-security.yml'
+
   verify-non-root:
+    needs: changes
+    # Skipped (→ reported as a passing required check) when no docker/compose
+    # paths changed; boots the stack and verifies UIDs for real when they did.
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

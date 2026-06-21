@@ -15,6 +15,11 @@ updates:
     labels:
       - dependencies
       - github-actions
+    groups:
+      # One PR per week for all action bumps, not one PR per action (#1243).
+      github-actions:
+        patterns:
+          - "*"
 
   # Frontend (Vite + Vue): catches Vue / Vite / Chart.js / DOMPurify CVEs.
   - package-ecosystem: npm
@@ -57,6 +62,21 @@ updates:
     labels:
       - dependencies
       - mcp-server
+    groups:
+      patch-and-minor:
+        update-types:
+          - patch
+          - minor
+
+  # git-sync test harness (#1243): previously uncovered, which left esbuild CVEs
+  # here (alert #152) only reachable via security updates against main.
+  - package-ecosystem: npm
+    directory: /tests/git-sync
+    target-branch: dev
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
     groups:
       patch-and-minor:
         update-types:

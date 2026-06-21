@@ -6,34 +6,56 @@ name: Schema Parity Gate
 # SQLite snapshots (schema-only vs full init_database lifecycle) and diffs
 # tables/columns/indexes/triggers.
 #
-# MAINTAINER NOTE: do NOT add this job to required-status-checks in branch
-# protection until it has been green for ~1 week of normal PR traffic.
-# Otherwise any path-filter false-negative (e.g. a future module move that
-# bypasses the filter) would brick PRs that don't touch DB files. The
-# workflow self-skips on unrelated PRs (no path match -> no run -> no
-# required check needed) so leaving it optional is safe.
+# REQUIRED-CHECK SAFE (#1222): path filtering lives on the `changes` job below
+# (job-level `if:`), NOT on `on.pull_request.paths`. The workflow runs on every
+# PR, so the `schema-parity` context is always produced: on an unrelated PR the
+# job is SKIPPED, which GitHub counts as a passing required check; when DB paths
+# change it runs for real and can block. This supersedes the earlier "do not
+# make this required" note — a required check filtered via `on.paths` posts NO
+# status on unrelated PRs, which froze the entire dev merge queue (#1222).
 
 on:
   pull_request:
-    paths:
-      - 'src/backend/db/**'
-      - 'src/backend/database.py'
-      - 'src/backend/utils/helpers.py'
-      - 'tests/unit/test_schema_parity.py'
-      - 'tests/requirements-test.txt'
-      - '.github/workflows/schema-parity.yml'
   push:
     branches: [main, dev]
-    paths:
-      - 'src/backend/db/**'
-      - 'src/backend/database.py'
-      - 'src/backend/utils/helpers.py'
-      - 'tests/unit/test_schema_parity.py'
-      - 'tests/requirements-test.txt'
-      - '.github/workflows/schema-parity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  # Cheap path detector — runs on every PR/push so the required `schema-parity`
+  # context is ALWAYS produced. The heavy job below is gated on its output, so an
+  # unrelated PR skips it (→ passing required check) instead of leaving the
+  # context "expected" forever (the #1222 freeze).
+  changes:
+    runs-on: ubuntu-latest
+    # paths-filter resolves the PR's changed-file list via the API; the heavy
+    # schema-parity job keeps the workflow-level least-privilege contents: read.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      db: ${{ steps.filter.outputs.db }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            db:
+              - 'src/backend/db/**'
+              - 'src/backend/database.py'
+              - 'src/backend/utils/helpers.py'
+              - 'tests/unit/test_schema_parity.py'
+              - 'tests/requirements-test.txt'
+              - '.github/workflows/schema-parity.yml'
+
   schema-parity:
+    needs: changes
+    # Skipped (→ reported as a passing required check) when no DB paths changed;
+    # runs for real and can block when they did. See #1222.
+    if: needs.changes.outputs.db == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
