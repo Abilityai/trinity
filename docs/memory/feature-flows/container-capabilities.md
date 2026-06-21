@@ -22,7 +22,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `cap_drop=['ALL']` (baseline — always)
 - `cap_add=FULL_CAPABILITIES` (9 caps: restricted set + `DAC_OVERRIDE`, `FOWNER`, `KILL`)
 - `security_opt=['apparmor:docker-default']`
-- `tmpfs={'/tmp': 'noexec,nosuid,size=100m'}`
+- `tmpfs=AGENT_TMPFS_MOUNT` → `{'/tmp': 'noexec,nosuid,size=512m'}` (size from `AGENT_TMP_SIZE`, default `512m`; `noexec,nosuid` always applied, both modes — #1098/#1231)
 - **Allows**: `sudo apt-get install` and similar package-installation flows
 - **Still prevents** (Issue #602 / Phase 3c, 2026-05-13): `SYS_PTRACE` (heap-read escalation), `MKNOD` (device-node escape), `NET_RAW` (raw-packet crafting), `FSETID` (setuid-preserve on chmod)
 
@@ -30,7 +30,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `cap_drop=['ALL']` (baseline — always)
 - `cap_add=RESTRICTED_CAPABILITIES` (6 caps: `NET_BIND_SERVICE`, `SETGID`, `SETUID`, `CHOWN`, `SYS_CHROOT`, `AUDIT_WRITE`)
 - `security_opt=['apparmor:docker-default']`
-- `tmpfs={'/tmp': 'noexec,nosuid,size=100m'}`
+- `tmpfs=AGENT_TMPFS_MOUNT` → `{'/tmp': 'noexec,nosuid,size=512m'}` (size from `AGENT_TMP_SIZE`, default `512m`; `noexec,nosuid` always applied, both modes — #1098/#1231)
 - **Prevents**: Package installation, most privileged operations
 
 ## Backend Layer
@@ -135,7 +135,7 @@ container = docker_client.containers.run(
     security_opt=['apparmor:docker-default'] if not full_capabilities else [],
     cap_drop=[] if full_capabilities else ['ALL'],
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
-    tmpfs={'/tmp': 'size=100m'} if full_capabilities else {'/tmp': 'noexec,nosuid,size=100m'},
+    tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m; same hardened mount both modes (#1098/#1231)
     ...
 )
 ```
@@ -204,7 +204,7 @@ new_container = docker_client.containers.run(
     security_opt=['apparmor:docker-default'] if not full_capabilities else [],
     cap_drop=[] if full_capabilities else ['ALL'],
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
-    tmpfs={'/tmp': 'size=100m'} if full_capabilities else {'/tmp': 'noexec,nosuid,size=100m'},
+    tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m; same hardened mount both modes (#1098/#1231)
     ...
 )
 ```
@@ -267,7 +267,7 @@ Container recreated with new settings
    - `SYS_CHROOT`: Change root directory
    - `AUDIT_WRITE`: Write audit logs
 3. **AppArmor Profile**: Additional confinement via `apparmor:docker-default`
-4. **Noexec tmpfs**: Prevents execution from /tmp (`noexec,nosuid`)
+4. **Noexec tmpfs**: Prevents execution from /tmp (`noexec,nosuid` — always applied; only the size is operator-tunable via `AGENT_TMP_SIZE`, default `512m`, validated `^\d+[mg]$` with invalid/empty → default, #1231)
 
 ### When Full Capabilities is Needed
 - Agent templates requiring `apt-get install`
@@ -348,6 +348,7 @@ To enable true per-agent capability control:
 
 | Date | Change |
 |------|--------|
+| 2026-06-19 | **Configurable /tmp tmpfs size (#1231, PR #1233)**: agent `/tmp` size now read from `AGENT_TMP_SIZE` (env on the backend service, which builds the agent mount spec), default `512m` (was a hardcoded `100m`), validated `^\d+[mg]$` with empty/invalid → default. The hardened `noexec,nosuid` flags stay fixed — only size is tunable, and it stays bounded (counts against the agent memory cgroup). `AGENT_TMPFS_MOUNT` in `capabilities.py` is the single source of truth, so create (`crud.py`) and recreate (`lifecycle.py`) can't drift. Closes the gap (built on #1098 TMPDIR redirect) where tools that hardcode `/tmp` (e.g. `gh` CLI install artifacts ~38 MB) exhaust the cap and silently break later `/tmp` writes incl. git commit scratch. Creation-time: existing agents pick up a new size on recreate, not restart. `tests/unit/test_1231_agent_tmp_size.py`. |
 | 2026-01-14 | **Security Consistency (HIGH)**: Added `RESTRICTED_CAPABILITIES` and `FULL_CAPABILITIES` constants in `lifecycle.py:31-49`. All container creation paths now ALWAYS apply baseline security (`cap_drop=['ALL']`, AppArmor, noexec tmpfs) before adding back needed capabilities. Previously some paths had inconsistent security settings. See [agent-lifecycle.md](agent-lifecycle.md) for full security constant documentation. |
 | 2026-05-13 | **Cap tightening (Issue #602 Phase 3c, PR #830)**: Dropped `SYS_PTRACE` / `MKNOD` / `NET_RAW` / `FSETID` from `FULL_CAPABILITIES` — each was a documented escalation primitive with no defensible agent use case (SYS_PTRACE closes the AISEC-C2 heap-read OAuth-exfil path). FULL set is now 9 caps (was 13). Constants extracted into `services/agent_service/capabilities.py` so `tests/unit/test_capability_set.py` can pin them stdlib-only; `lifecycle.py` re-exports for runtime callers. Existing containers keep old caps until restart. |
 | 2026-01-13 | Initial documentation - CFG-004 feature flow |
