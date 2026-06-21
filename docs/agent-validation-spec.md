@@ -110,6 +110,11 @@
 | I-003 | SOFT | AI | Composability | If the agent produces data for downstream consumers, an output schema or format is documented |
 | I-004 | SOFT | AI | Composability | Agent has a clear "interface" — what goes in, what comes out — not just a description of what it does |
 | I-005 | INFO | STATIC | Composability | `~/.trinity/post-check` exists if the agent declares output contracts (validates own output before delivery) |
+| DP-001 | HARD | STATIC | Runtime Data | Every `data_paths` entry in `template.yaml` resolves under `data/` (relative to `/home/developer`) — no `../`, no absolute paths, no escape from the data root |
+| DP-002 | HARD | STATIC | Runtime Data | If `data_paths` is declared, the `data/` root is excluded in `.gitignore` (Trinity appends it at creation; a template that ships `.gitignore` should pre-include it) |
+| DP-003 | SOFT | STATIC | Runtime Data | `data_paths` entries do not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state` (those are managed separately) |
+| DP-004 | SOFT | STATIC | Runtime Data | If `data_paths` is declared, the agent is NOT replica-safe — its runtime data is instance-local and must travel via export/import, not template clone (feeds #927) |
+| DP-005 | INFO | STATIC | Runtime Data | `~/.trinity/pre-snapshot` (if present) is executable and has a valid shebang (PR2 SQLite-quiesce hook; A-004 analog) |
 
 ---
 
@@ -556,6 +561,32 @@ An agent designed for composition should explicitly state what it accepts as inp
 **I-005** — `post-check` hook exists when output contracts are declared  
 Severity: INFO | Type: STATIC  
 If the agent documents an output format or schema (detected by presence of `schemas/` directory, `output_format:` key in `template.yaml`, or `output contract` / `output format` in CLAUDE.md), a `~/.trinity/post-check` hook should exist to validate outputs before delivery. Without it, the declared contract is aspirational rather than enforced.
+
+---
+
+### Category: Runtime Data Paths (#1169)
+
+`data_paths` in `template.yaml` declares the agent's runtime data (SQLite DBs, datasets) that live under `/home/developer/data` on the already-durable home volume — kept out of git, but exportable/importable for portability. These checks fire only when `data_paths` is declared (it is opt-in).
+
+**DP-001** — `data_paths` entries resolve under `data/`  
+Severity: HARD | Type: STATIC  
+Each entry, after normalization, must stay under the `data/` root (relative to `/home/developer`). Reject absolute paths, `../` traversal, or any entry that escapes the data root. The export/import primitive only captures and restores `data/**`, so an out-of-root declaration is silently never snapshotted.
+
+**DP-002** — `data/` root is gitignored  
+Severity: HARD | Type: STATIC  
+Trinity appends `data/` (and each declared entry) to the agent's `.gitignore` at creation, but a template shipping its own `.gitignore` should pre-include `data/`. Without it, runtime data risks being committed on the first auto-sync.
+
+**DP-003** — `data_paths` don't overlap managed paths  
+Severity: SOFT | Type: STATIC  
+Entries must not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state`. Those surfaces are materialized and managed separately; overlapping declarations create ambiguous ownership and double-handling.
+
+**DP-004** — `data_paths` ⇒ not replica-safe  
+Severity: SOFT | Type: STATIC  
+A `data_paths` declaration means the agent carries instance-local runtime state. Such an agent cannot be replicated by cloning its template alone — its data must travel via `data/export` → `data/import`. Flag for replica-safety tooling (#927).
+
+**DP-005** — `.trinity/pre-snapshot` is executable with a shebang  
+Severity: INFO | Type: STATIC  
+If present (the PR2 SQLite-quiesce hook that stages a consistent `.backup` copy before snapshot), verify a `#!` shebang on line 1 — `docker exec` fails to run it otherwise. Analogous to A-004 for `pre-check`.
 
 ---
 

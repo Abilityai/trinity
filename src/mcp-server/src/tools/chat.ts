@@ -117,8 +117,16 @@ async function checkAgentAccess(
  * Create chat tools with the given client
  * @param client - Base Trinity client (provides base URL, no auth when requireApiKey=true)
  * @param requireApiKey - Whether API key authentication is enabled
+ * @param agentChatPullEnabled - #946 pull pilot. When true, an agent→agent
+ *   (scope='agent', non-self) *sequential* chat_with_agent is routed through the
+ *   durable async /task path instead of the synchronous /chat. Default OFF —
+ *   flag-OFF, scope='user', self-task, and parallel=true are all unchanged.
  */
-export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
+export function createChatTools(
+  client: TrinityClient,
+  requireApiKey: boolean,
+  agentChatPullEnabled: boolean = false
+) {
   /**
    * Get Trinity client with appropriate authentication
    * When requireApiKey is true, REQUIRES MCP API key from auth context
@@ -259,8 +267,14 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         },
         context: any
       ) => {
-        // Get auth context from FastMCP session
-        const authContext = requireApiKey ? context?.session : undefined;
+        // Get auth context from FastMCP session. Read unconditionally (mirrors
+        // operator_queue.ts) so the #946 scope-based pull routing is decidable
+        // in tests: in production this is behaviour-equivalent — with
+        // requireApiKey=false FastMCP installs no authenticate callback, so the
+        // session carries no scope/mcpApiKey and getClient() still returns the
+        // base client; agent-scoped keys only exist on the requireApiKey=true
+        // path, where this was already `context?.session`.
+        const authContext = context?.session;
 
         // Get authenticated client for this request
         const apiClient = getClient(authContext);
@@ -283,6 +297,25 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
         // SELF-EXEC-001: Detect self-call (agent calling itself)
         const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
 
+        // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
+        // durable async /task path instead of the synchronous held /chat. Gated
+        // on the MCP-side flag (MCP_AGENT_CHAT_PULL_ENABLED) AND scope='agent'
+        // AND non-self. Parallel calls already use /task, so this only affects
+        // the sequential branch below.
+        //
+        // Why self-task is EXCLUDED (Codex finding, deliberate asymmetry from
+        // scope='agent'): a self-task carries inject_result / chat_session_id
+        // semantics (SELF-EXEC-001) that write the result back into the caller's
+        // OWN chat session — an interactive contract a fire-and-forget /task
+        // receipt would silently break. scope='user' (human-facing) stays
+        // synchronous for the same reason: the pilot's blast radius is
+        // agent→agent delegation only, never a human's chat turn.
+        const usePullRouting =
+          !parallel &&
+          agentChatPullEnabled &&
+          authContext?.scope === "agent" &&
+          !isSelfTask;
+
         // Log collaboration or self-task
         if (authContext?.scope === "agent") {
           if (isSelfTask) {
@@ -298,12 +331,23 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
           keyName: authContext.keyName,
         } : undefined;
 
+        // #946 (D8): the dispatch ROUTE is part of the idempotency identity.
+        // The backend derives the same `agent:{name}` idempotency scope for BOTH
+        // /chat and /task, so a sequential agent→agent call dispatched as sync
+        // /chat (flag OFF) vs async /task (flag ON) must NOT share a key — else a
+        // flag flip mid-soak could replay a wrong-shape snapshot across endpoints.
+        // The pull-routed sequential call therefore gets a distinct token, while
+        // a transport retry WITHIN one mode keeps the same key (still dedupes).
+        // Today's parallel / self-task / scope='user' tokens are unchanged, so no
+        // in-flight key is invalidated on deploy.
+        const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
+
         // RELIABILITY-006 (#525): deterministic key so a transport retry of this
         // exact call dedupes at the backend.
         const idempotencyKey = deriveMcpIdempotencyKey([
           sourceAgent || authContext?.userId,
           agent_name,
-          parallel ? "task" : "chat",
+          routeToken,
           model,
           asyncMode ? "async" : "sync",
           message,
@@ -333,6 +377,28 @@ export function createChatTools(client: TrinityClient, requireApiKey: boolean) {
             idempotencyKey
           );
           return JSON.stringify(response, null, 2);
+        }
+
+        // #946 pull pilot: agent→agent sequential call routed through the
+        // durable async /task path. Returns an immediate {accepted|queued,
+        // execution_id} receipt; the caller polls get_execution_result
+        // (polling is the contract — the backend emits no completion event).
+        // Only async_mode is forwarded: model/allowed_tools/system_prompt are
+        // parallel-only and were never applied in sequential mode, so omitting
+        // them preserves sequential semantics (agent defaults). The idempotency
+        // key carries the pull route token (D8), so this can't collide with the
+        // sync /chat snapshot under the shared agent:{name} scope.
+        if (usePullRouting) {
+          console.log(`[Agent Chat Pull #946] Routing ${sourceAgent} -> ${agent_name} via async /task`);
+          const receipt = await apiClient.task(
+            agent_name,
+            message,
+            { async_mode: true },
+            sourceAgent,
+            mcpKeyInfo,
+            idempotencyKey
+          );
+          return JSON.stringify(receipt, null, 2);
         }
 
         // Sequential chat mode - uses queue, maintains context

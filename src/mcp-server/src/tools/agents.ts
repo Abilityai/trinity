@@ -488,6 +488,63 @@ export function createAgentTools(
     },
 
     // ========================================================================
+    // export_agent_data - Export an agent's runtime data (#1169)
+    // ========================================================================
+    exportAgentData: {
+      name: "export_agent_data",
+      description:
+        "Export an agent's runtime data (the /home/developer/data directory: SQLite DBs, " +
+        "datasets) as a base64-encoded tar with an embedded manifest. Together with the " +
+        "template URL and .credentials.enc, this is the portable artifact for moving an " +
+        "agent to another Trinity instance (pair with import_agent_data). " +
+        "INLINE LIMIT: only small datasets fit this MCP response (a few MB); larger data " +
+        "must use the streaming download endpoint POST /api/agents/{name}/data/export. " +
+        "Owner/admin only; the agent must be running.",
+      parameters: z.object({
+        name: z.string().describe("The name of the agent to export data from"),
+      }),
+      execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        console.log(`[export_agent_data] Exporting data from agent '${name}'`);
+
+        const result = await apiClient.exportAgentData(name);
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // import_agent_data - Restore runtime data into an agent (#1169)
+    // ========================================================================
+    importAgentData: {
+      name: "import_agent_data",
+      description:
+        "Restore runtime data into an agent's /home/developer/data directory from a " +
+        "base64-encoded tar (typically produced by export_agent_data). The backend enforces " +
+        "the data/** allowlist and rejects path traversal, so only data/ entries are written. " +
+        "Owner/admin only; the agent must be running.",
+      parameters: z.object({
+        name: z.string().describe("The name of the agent to restore data into"),
+        tar_base64: z
+          .string()
+          .describe("base64-encoded tar of the data directory, from export_agent_data"),
+      }),
+      execute: async (
+        { name, tar_base64 }: { name: string; tar_base64: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        console.log(`[import_agent_data] Restoring data into agent '${name}'`);
+
+        const result = await apiClient.importAgentData(name, tar_base64);
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
     // get_credential_encryption_key - Get encryption key for local agents
     // ========================================================================
     getCredentialEncryptionKey: {

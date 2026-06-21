@@ -27,6 +27,13 @@ from typing import Optional
 from database import db
 from db_models import NotificationCreate
 
+# Re-export the shared SUB-003 auth-class classifier (#1088) so existing
+# consumers (routers/chat.py, services/task_execution_service.py) and their
+# test patch targets keep importing `is_auth_failure` from this module
+# unchanged. The redundant alias makes this an explicit re-export (recognised
+# by ruff F401 + mypy --no-implicit-reexport).
+from services.failure_classifier import is_auth_failure as is_auth_failure
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,58 +84,6 @@ def _reset_locks_for_test() -> None:
     global _AGENT_SWITCH_LOCKS_GUARD
     _AGENT_SWITCH_LOCKS.clear()
     _AGENT_SWITCH_LOCKS_GUARD = None
-
-
-# Substrings that indicate an auth-class subscription failure. Mirrors the
-# scheduler's classification at `src/scheduler/service.py` (which now imports
-# this same list to keep the two surfaces from drifting).
-AUTH_INDICATORS = [
-    "credit balance",
-    "unauthorized",
-    "authentication",
-    "credentials",
-    "forbidden",
-    "401",
-    "403",
-    "oauth",
-    "token expired",
-    "not authenticated",
-]
-
-# #904: unambiguous signal-kill / OOM / timeout markers. When the error
-# message contains any of these we short-circuit `is_auth_failure` to
-# False even if an AUTH_INDICATOR also happens to match — a SIGKILL is
-# evidence the subprocess died from outside, not from a real auth
-# response on the wire, and triggering SUB-003 burns the 2h skip-list
-# slot for the alternative subscription without fixing anything.
-NON_AUTH_KILL_MARKERS = [
-    "sigkill",
-    "sigterm",
-    "sigint",
-    "exit code -9",
-    "exit code -15",
-    "exit code -2",
-    "exit code 137",   # 128 + 9 (shell-encoded SIGKILL)
-    "exit code 143",   # 128 + 15 (shell-encoded SIGTERM)
-    "exit code 130",   # 128 + 2 (shell-encoded SIGINT)
-    "terminated by",
-    "killed by",
-    "out of memory",
-    "oom",
-    "memory cgroup",
-]
-
-
-def is_auth_failure(error_message: str) -> bool:
-    """Return True if `error_message` contains any AUTH_INDICATORS substring
-    AND does not also contain an unambiguous signal-kill / OOM / timeout
-    marker (#904)."""
-    if not error_message:
-        return False
-    error_lower = error_message.lower()
-    if any(marker in error_lower for marker in NON_AUTH_KILL_MARKERS):
-        return False
-    return any(ind in error_lower for ind in AUTH_INDICATORS)
 
 
 async def handle_subscription_failure(

@@ -242,6 +242,89 @@ DEFAULT_PERSISTENT_STATE: list[str] = [
 
 _PERSISTENT_STATE_PATH = "/home/developer/.trinity/persistent-state.yaml"
 
+# #1169: declared runtime-data paths over the existing durable home volume.
+# Opt-in (empty default) — undeclared agents get no file and no side effects.
+DEFAULT_DATA_PATHS: list[str] = []
+
+_DATA_PATHS_PATH = "/home/developer/.trinity/data-paths.yaml"
+
+# #1169: the agent's runtime-data root, relative to the git repo root
+# (`/home/developer`). Always gitignored alongside any declared paths so
+# runtime data never lands in a commit.
+_DATA_ROOT_GITIGNORE = "data/"
+
+
+# ---------------------------------------------------------------------------
+# Shared `.trinity/<file>.yaml` list primitives (#1169)
+#
+# Extracted from the S4 persistent-state functions (#383) so persistent_state
+# and data_paths share one injection-safe write/read implementation. The
+# heredoc delimiter is a parameter so each caller keeps its own marker (the
+# S4 tests pin `PSTATE_EOF`).
+# ---------------------------------------------------------------------------
+
+
+async def materialize_trinity_yaml_list(
+    agent_name: str,
+    *,
+    path: str,
+    key: str,
+    patterns: list[str],
+    heredoc: str,
+    timeout: int = 10,
+) -> None:
+    """Write `{key: [patterns]}` as YAML to `path` inside the agent container.
+
+    The single-quoted heredoc preserves glob characters verbatim and is
+    injection-safe (no shell expansion inside the body).
+    """
+    import yaml as _yaml
+    body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
+    cmd = (
+        f"mkdir -p /home/developer/.trinity && "
+        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
+    )
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "{cmd}"',
+        timeout=timeout,
+    )
+
+
+async def _read_trinity_yaml_list(
+    agent_name: str,
+    *,
+    path: str,
+    key: str,
+    default: list[str],
+    timeout: int = 5,
+) -> list[str]:
+    """Read a `{key: [...]}` list from `path`, falling back to `default`.
+
+    Returns the on-disk list when present and valid; otherwise returns a
+    fresh copy of `default` (never a reference — callers may mutate the
+    result, and must not mutate a shared default constant).
+    """
+    import yaml as _yaml
+    result = await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "cat {path} 2>/dev/null || true"',
+        timeout=timeout,
+    )
+    if result.get("exit_code", 0) != 0:
+        return list(default)
+    raw = result.get("output", "").strip()
+    if not raw:
+        return list(default)
+    try:
+        data = _yaml.safe_load(raw) or {}
+    except _yaml.YAMLError:
+        return list(default)
+    patterns = data.get(key)
+    if not isinstance(patterns, list) or not patterns:
+        return list(default)
+    return [str(p) for p in patterns]
+
 
 async def materialize_persistent_state(
     agent_name: str, patterns: list[str]
@@ -252,19 +335,12 @@ async def materialize_persistent_state(
     Operators may edit the file thereafter; runtime readers treat the
     on-disk copy as authoritative.
     """
-    import yaml as _yaml
-    body = _yaml.safe_dump(
-        {"persistent_state": list(patterns)}, sort_keys=False
-    )
-    # Heredoc quotes preserve glob characters verbatim.
-    cmd = (
-        f"mkdir -p /home/developer/.trinity && "
-        f"cat > {_PERSISTENT_STATE_PATH} <<'PSTATE_EOF'\n{body}PSTATE_EOF"
-    )
-    await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "{cmd}"',
-        timeout=10,
+    await materialize_trinity_yaml_list(
+        agent_name,
+        path=_PERSISTENT_STATE_PATH,
+        key="persistent_state",
+        patterns=patterns,
+        heredoc="PSTATE_EOF",
     )
 
 
@@ -277,25 +353,108 @@ async def _persistent_state_for(agent_name: str) -> list[str]:
     reset-preserve-state operation from #384) must not mutate the default
     constant, hence the defensive `list(...)` copies on every fallback.
     """
-    import yaml as _yaml
-    result = await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "cat {_PERSISTENT_STATE_PATH} 2>/dev/null || true"',
-        timeout=5,
+    return await _read_trinity_yaml_list(
+        agent_name,
+        path=_PERSISTENT_STATE_PATH,
+        key="persistent_state",
+        default=DEFAULT_PERSISTENT_STATE,
     )
-    if result.get("exit_code", 0) != 0:
-        return list(DEFAULT_PERSISTENT_STATE)
-    raw = result.get("output", "").strip()
-    if not raw:
-        return list(DEFAULT_PERSISTENT_STATE)
-    try:
-        data = _yaml.safe_load(raw) or {}
-    except _yaml.YAMLError:
-        return list(DEFAULT_PERSISTENT_STATE)
-    patterns = data.get("persistent_state")
-    if not isinstance(patterns, list) or not patterns:
-        return list(DEFAULT_PERSISTENT_STATE)
-    return [str(p) for p in patterns]
+
+
+# #1169 L1: a declared data_path must be a plain glob over the data root —
+# alphanumerics, path separators, and glob metacharacters only. The heredoc
+# write below runs in the agent's OWN container (no privilege boundary), but a
+# shell metacharacter (quote, `$`, backtick, `;`, `|`, …) in a template-supplied
+# entry would still corrupt the `bash -c` tokenization and fail the whole
+# materialization, so unsafe entries are dropped loudly rather than silently
+# breaking the declaration. `re.fullmatch` rejects any embedded/trailing
+# newline that `$` would otherwise tolerate.
+_SAFE_DATA_PATH_RE = re.compile(r"[A-Za-z0-9_./*?{},\[\] -]+")
+
+
+def _is_safe_data_path(path: str) -> bool:
+    """True if `path` is a shell-safe glob over the data root (#1169 L1)."""
+    return bool(path) and _SAFE_DATA_PATH_RE.fullmatch(path) is not None
+
+
+async def materialize_data_paths(agent_name: str, paths: list[str]) -> None:
+    """Materialize an agent's declared `data_paths` (#1169).
+
+    Writes `.trinity/data-paths.yaml` (key `data_paths`) AND appends the
+    runtime-data root + each declared path to the agent's own `.gitignore`,
+    so the declaration and its ignore rule are materialized together.
+
+    Opt-in: a falsy/whitespace-only declaration is a complete no-op — no
+    file is written and no `.gitignore` is touched — so undeclared agents
+    are entirely unaffected. Entries carrying shell metacharacters are
+    dropped (logged) before any container write (#1169 L1).
+    """
+    cleaned = [str(p).strip() for p in (paths or []) if str(p).strip()]
+    safe: list[str] = []
+    dropped: list[str] = []
+    for p in cleaned:
+        (safe if _is_safe_data_path(p) else dropped).append(p)
+    if dropped:
+        logger.warning(
+            "[#1169] Dropping %d unsafe data_paths entr%s for %s "
+            "(shell metacharacters): %r",
+            len(dropped),
+            "y" if len(dropped) == 1 else "ies",
+            agent_name,
+            dropped,
+        )
+    if not safe:
+        return
+    await materialize_trinity_yaml_list(
+        agent_name,
+        path=_DATA_PATHS_PATH,
+        key="data_paths",
+        patterns=safe,
+        heredoc="DATAPATHS_EOF",
+    )
+    await _append_agent_gitignore(
+        agent_name, _data_paths_gitignore_entries(safe)
+    )
+
+
+async def _data_paths_for(agent_name: str) -> list[str]:
+    """Read an agent's declared `data_paths` (#1169).
+
+    Returns the on-disk list when `.trinity/data-paths.yaml` is present and
+    valid; otherwise a fresh empty list (data_paths is opt-in).
+    """
+    return await _read_trinity_yaml_list(
+        agent_name,
+        path=_DATA_PATHS_PATH,
+        key="data_paths",
+        default=DEFAULT_DATA_PATHS,
+    )
+
+
+def _data_paths_gitignore_entries(paths: list[str]) -> list[str]:
+    """Gitignore lines for declared data_paths: the `data/` root plus each
+    declared path, deduped and order-preserving.
+    """
+    entries = [_DATA_ROOT_GITIGNORE]
+    for p in paths:
+        if p not in entries:
+            entries.append(p)
+    return entries
+
+
+async def _append_agent_gitignore(agent_name: str, patterns: list[str]) -> None:
+    """Append `patterns` to the agent's own `/home/developer/.gitignore` (#1169).
+
+    Idempotent (exact-line `grep -qxF` gate). Best-effort and scoped to the
+    agent's repo root — never the fleet-wide `_GITIGNORE_PATTERNS`.
+    """
+    if not patterns:
+        return
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=_build_gitignore_append_command("/home/developer", patterns),
+        timeout=10,
+    )
 
 
 async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
@@ -752,18 +911,29 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
 )
 
 
+def _build_gitignore_append_command(git_dir: str, patterns) -> str:
+    """Build a bash command that appends any missing ``patterns`` to
+    ``{git_dir}/.gitignore`` without clobbering user-supplied rules.
+    Idempotent — each pattern is gated by an exact-line ``grep -qxF`` check,
+    so a second run is a no-op. Generic over the pattern list so both the
+    fleet-wide ignore merge and the per-agent data_paths append (#1169) share
+    one implementation.
+    """
+    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
+    for p in patterns:
+        q = shlex.quote(p)
+        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
+    script = " && ".join(parts)
+    return f"bash -c {shlex.quote(script)}"
+
+
 def _build_gitignore_merge_command(git_dir: str) -> str:
     """Build a bash command that appends any missing ``_GITIGNORE_PATTERNS``
     entries to ``{git_dir}/.gitignore`` without clobbering user-supplied
     rules. Idempotent — each pattern is gated by an exact-line ``grep -qxF``
     check, so a second run is a no-op.
     """
-    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
-    for p in _GITIGNORE_PATTERNS:
-        q = shlex.quote(p)
-        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
-    script = " && ".join(parts)
-    return f"bash -c {shlex.quote(script)}"
+    return _build_gitignore_append_command(git_dir, _GITIGNORE_PATTERNS)
 
 
 def _build_rm_cached_ignored_command(git_dir: str) -> str:

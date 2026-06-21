@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-01-23 (Line numbers and code references verified)
+**Last Updated**: 2026-06-21 (Pull-pilot routing #946 added)
 
 ---
 
@@ -214,6 +214,101 @@ async chat(name: string, message: string, sourceAgent?: string): Promise<ChatRes
   // ...
 }
 ```
+
+---
+
+## Pull-Pilot Routing (#946)
+
+**Phase 2 PoC for pull / work-stealing coordination** (Epic #1045, umbrella #1081 — see `docs/planning/TARGET_ARCHITECTURE.md`). A flag-gated routing fork on the EXISTING sequential agent→agent `chat_with_agent` path described above.
+
+### What it does
+
+When `MCP_AGENT_CHAT_PULL_ENABLED` is ON, a **sequential** (`parallel=false`) agent→agent (`scope='agent'`, non-self) `chat_with_agent` call is routed by the MCP server through the durable async `/task` path (`apiClient.task(..., {async_mode: true})`) **instead of** the synchronous held `/chat` call. The caller gets an immediate `{status: "accepted" | "queued", execution_id, agent_name, ...}` receipt and **polls `get_execution_result(execution_id)`** for the result.
+
+- **Polling is the contract** — the backend emits no completion event for this path; the caller must poll.
+- **Default OFF.** Rollback is a flag flip + MCP routing revert (no schema, no data migration).
+
+### What stays UNCHANGED (deliberate exclusions)
+
+| Case | Behavior | Why excluded |
+|------|----------|--------------|
+| Flag OFF | Synchronous `/chat` | Default; pilot is opt-in |
+| `scope='user'` (human-facing chat) | Synchronous `/chat` | A human's chat turn expects a synchronous reply; blast radius is agent→agent delegation only |
+| Self-task (`sourceAgent === agent_name`, SELF-EXEC-001) | Existing path | `inject_result`/`chat_session_id` write the result back into the caller's OWN chat session — an interactive contract a fire-and-forget receipt would silently break |
+| `parallel=true` | Already uses `/task` | The pilot only changes the sequential branch |
+
+### MCP Routing Fork
+
+**File**: `src/mcp-server/src/tools/chat.ts`
+**Function**: `createChatTools(client, requireApiKey, agentChatPullEnabled = false)` — chat.ts:125-129
+
+- **Auth context read unconditionally** — `const authContext = context?.session;` (chat.ts:277). Previously `requireApiKey ? context?.session : undefined`; now read unconditionally (mirrors `operator_queue.ts`) so the scope-based routing is decidable in tests. Production is behaviour-equivalent: with `requireApiKey=false` FastMCP installs no `authenticate` callback, so the session carries no `scope`/`mcpApiKey` and `getClient()` still returns the base client — agent-scoped keys only exist on the `requireApiKey=true` path (chat.ts:270-276).
+- **Routing predicate** — chat.ts:313-317:
+  ```typescript
+  const usePullRouting =
+    !parallel &&
+    agentChatPullEnabled &&
+    authContext?.scope === "agent" &&
+    !isSelfTask;
+  ```
+- **Pull branch** — chat.ts:391-402: calls `apiClient.task(agent_name, message, { async_mode: true }, sourceAgent, mcpKeyInfo, idempotencyKey)` and returns the receipt JSON. Only `async_mode` is forwarded; `model`/`allowed_tools`/`system_prompt` are parallel-only and were never applied in sequential mode, so omitting them preserves sequential semantics (agent defaults).
+
+### D8 — Route is part of the idempotency identity
+
+**File**: `src/mcp-server/src/tools/chat.ts`
+**Lines**: 334-354
+
+```typescript
+const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
+const idempotencyKey = deriveMcpIdempotencyKey([
+  sourceAgent || authContext?.userId,
+  agent_name,
+  routeToken,
+  model,
+  asyncMode ? "async" : "sync",
+  message,
+]);
+```
+
+**Why**: the backend derives the same `agent:{name}` idempotency scope for BOTH `/chat` and `/task`. A sequential agent→agent call dispatched as sync `/chat` (flag OFF) vs async `/task` (flag ON) must NOT share an idempotency key — else a flag flip mid-soak could replay a wrong-shape snapshot across endpoints. The pull-routed call therefore gets a distinct `"chat-pull-task"` token. A transport retry WITHIN one mode keeps the same key (still dedupes). Existing parallel / self-task / `scope='user'` tokens are unchanged, so no in-flight key is invalidated on deploy. (See `idempotency-keys.md`, Invariant #18.)
+
+### Flag plumbing
+
+**MCP server** — `src/mcp-server/src/server.ts`:
+- `ServerConfig.agentChatPullEnabled` — server.ts:42-48
+- `agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true"` — server.ts:99-102 (mirrors `requireApiKey ← MCP_REQUIRE_API_KEY`)
+- Threaded into `createChatTools(client, requireApiKey, agentChatPullEnabled)` — server.ts:219
+- Startup log of routing mode for the soak's control/treatment window — server.ts:194-196:
+  `Agent→agent chat pull routing (#946): ON (async /task) | OFF (sync /chat)`
+
+**Backend** — `src/backend/config.py`:
+- `MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"` — config.py:151. This is the **canonical registry entry**. Both services read the SAME env key, so a single-`.env` deploy can't drift. The actual routing gate is MCP-side.
+- Surfaced as `mcp_agent_chat_pull_enabled` in `get_public_feature_flags` / `GET /api/settings/feature-flags` — settings.py:110-145 (auth-gated, **observability-only** — lets an operator confirm whether the treatment window is active; NOT a UI surface).
+
+### T5 — Deny-path idempotency claim release
+
+**File**: `src/backend/routers/chat.py`
+**Function**: `execute_parallel_task` (chat.py:1289)
+
+The pull pilot routes agent→agent sequential chat through the async `/task` path, so it exercises the two dispatch-breaker-open (`CircuitOpen`) deny branches. Both now call `idempotency_service.fail(idem)` before `_raise_circuit_open_503(...)` to release the `in_flight` claim:
+- Async path — chat.py:1585-1595
+- Sync path — chat.py:1707-1714
+
+This mirrors the existing `/chat` (chat.py:242) and `CapacityFull` (chat.py:1577/1699) releases. Without it, a breaker-open reject would leave the `in_flight` idempotency row in place and silently block every same-key retry for 24h. (See `dispatch-circuit-breaker.md`.)
+
+### Tests
+
+| Test | Covers |
+|------|--------|
+| `src/mcp-server/src/chat.test.ts` | Routing fork + D8 dispatch-mode idempotency key (`#946 chat_with_agent pull routing`, `#946 D8 dispatch-mode idempotency key`) |
+| `tests/unit/test_946_task_idempotency_on_deny.py` | T5 — `/task` CircuitOpen deny path releases the idempotency claim |
+| `tests/test_platform_default_model.py` | `feature-flags` exposes `mcp_agent_chat_pull_enabled`; defaults OFF |
+
+### Reference docs
+
+- `docs/planning/PULL_PILOT_946_SOAK.md` — soak harness + go/no-go criteria
+- `docs/planning/ACTOR_MODEL_POSTCARD.md`, `docs/planning/TARGET_ARCHITECTURE.md` — pull-coordination direction (Epic #1045 / #1081)
+- `mcp-orchestration.md`, `task-execution-service.md`, `idempotency-keys.md`, `dispatch-circuit-breaker.md`
 
 ---
 
@@ -640,3 +735,4 @@ See [Parallel Headless Execution](parallel-headless-execution.md) for complete a
 | 2026-01-23 | Full review: verified all line numbers, added code snippets, documented CORS config, activity tracking details |
 | 2026-01-29 | **MCP Schedule Management (MCP-SCHED-001)**: Added System Agent Schedule Management section - system-scoped agents can now manage schedules across all agents via 8 new MCP schedule tools. Updated Related Flows to reference scheduling.md |
 | 2026-01-30 | **Async Mode**: Added async mode (fire-and-forget) section to Parallel Delegation Mode. When `async=true` with `parallel=true`, orchestrator receives `execution_id` immediately and can poll for results later. |
+| 2026-06-21 | **Pull-Pilot Routing (#946)**: Added Pull-Pilot Routing section (Phase 2 PoC, Epic #1045/#1081). Flag-gated (`MCP_AGENT_CHAT_PULL_ENABLED`, default OFF) MCP routing fork — sequential agent→agent (`scope='agent'`, non-self) `chat_with_agent` routed through async `/task` with a poll-for-result receipt. Documents the D8 idempotency route token, flag plumbing, feature-flag exposure, and the T5 `/task` deny-path claim release. |

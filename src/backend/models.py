@@ -490,6 +490,19 @@ class SharedFilesList(BaseModel):
     quota_bytes: int
 
 
+class AgentDataImportResponse(BaseModel):
+    """Response for POST /api/agents/{name}/data/import (#1169).
+
+    `restored`/`skipped` come straight from the agent-server restore
+    primitive (`restore_from_tar`); `skipped` entries fell outside the
+    `data/**` allowlist or tripped a path-traversal guard.
+    """
+    agent_name: str
+    restored: List[str]
+    skipped: List[str]
+    bytes_received: int
+
+
 class AgentDefaultResourcesUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/resources (RES-001)."""
     cpu: Optional[str] = None
