@@ -1,8 +1,8 @@
 # Feature Flow: Subscription Auto-Switch (SUB-003)
 
 > **Requirement**: `docs/requirements/SUB-003-subscription-auto-switch.md`
-> **Issue**: #153, threshold + scope update #441, hot-reload #1089
-> **Status**: Implemented (2026-03-21), updated 2026-04-25 (#441), 2026-06-13 (#1089 — switch hot-reloads instead of recreating the container)
+> **Issue**: #153, threshold + scope update #441, hot-reload #1089, classifier unify #1088
+> **Status**: Implemented (2026-03-21), updated 2026-04-25 (#441), 2026-06-13 (#1089 — switch hot-reloads instead of recreating the container), 2026-06-21 (#1088 — auth classifier extracted to a shared module)
 
 ## Overview
 
@@ -66,13 +66,23 @@ create and chmod. Canonical home: architecture.md
 | Error message matches `AUTH_INDICATORS` | credit balance / expired token / unauthorized / etc. | `auth` |
 
 `AUTH_INDICATORS` (canonical list in
-`src/backend/services/subscription_auto_switch.py::is_auth_failure`):
+`src/backend/services/failure_classifier.py::is_auth_failure`, #1088):
 `credit balance`, `unauthorized`, `authentication`, `credentials`,
 `forbidden`, `401`, `403`, `oauth`, `token expired`, `not authenticated`.
+`is_auth_failure` also short-circuits to `False` on any
+`NON_AUTH_KILL_MARKERS` substring (SIGKILL/SIGTERM/SIGINT, shell-encoded
+137/143/130, OOM/memory-cgroup) so an externally-killed subprocess never
+trips SUB-003 (#904). `subscription_auto_switch.py` re-exports
+`is_auth_failure` unchanged so existing importers and their test patch
+targets keep working.
 
-The scheduler service (`src/scheduler/service.py`) maintains a duplicate
-copy of this list because it runs in a separate container and cannot
-import from `backend.services`. Keep the two in sync when editing either.
+The scheduler runs in a separate container and cannot import from
+`backend.services`, so the classifier is vendored byte-identically at
+`src/scheduler/failure_classifier.py` (the scheduler uses it for
+**log-labelling only** — it picks the `logger.error` wording, never gates
+a switch). Byte-identity between the canonical copy and the mirror is
+enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerParity`
+— edit the backend copy and regenerate the mirror; do not hand-sync.
 
 ## Files
 
@@ -81,12 +91,15 @@ import from `backend.services`. Keep the two in sync when editing either.
 | DB | `src/backend/db/subscriptions.py` | Rate-limit event CRUD, best-alternative selection |
 | DB | `src/backend/db/migrations.py` | `subscription_rate_limit_events` table |
 | DB | `src/backend/database.py` | Delegation methods |
-| Service | `src/backend/services/subscription_auto_switch.py` | Orchestration: detect, switch, log, notify |
+| Service | `src/backend/services/subscription_auto_switch.py` | Orchestration: detect, switch, log, notify. Re-exports `is_auth_failure` from `failure_classifier` (#1088) |
+| Classifier | `src/backend/services/failure_classifier.py` | **Canonical** auth-class classifier (#1088): `is_auth_failure`, `AUTH_INDICATORS`, `NON_AUTH_KILL_MARKERS` |
+| Classifier | `src/scheduler/failure_classifier.py` | Byte-identical vendored mirror for the separate scheduler container (#1088) |
 | Router | `src/backend/routers/subscriptions.py` | Setting GET/PUT endpoints |
 | Service | `src/backend/services/task_execution_service.py` | 429 interception for all execution paths (schedules, MCP, agent-to-agent) |
 | Router | `src/backend/routers/chat.py` | 429 interception in chat proxy + background tasks |
 | Frontend | `src/frontend/src/views/Settings.vue` | Toggle in Subscriptions section |
 | Tests | `tests/test_subscription_auto_switch.py` | Smoke tests |
+| Tests | `tests/unit/test_904_sigkill_no_false_auth.py` | #904 SIGKILL/OOM no-false-AUTH coverage + `TestBackendSchedulerParity` byte-identity guard on the canonical↔mirror classifier (#1088) |
 | Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention; `TestRateLimitAging` (#476) pins 2h-window correctness; `TestHotReloadSwitch` + `TestKeyRolloverFanOut` (#1089) pin the hot-reload helper, auto-switch wire-in, and key-rollover fan-out |
 | Tests | `tests/unit/test_subscription_reassign_hotreload.py` | #1089 — manual sub→sub hot-reload under the lock (no `container_stop`), mode-change still recreates, register/upsert key-rollover fan-out, and the admin-only gate on `register_subscription` (non-admin → 403 before any create or fan-out) |
 | Tests | `tests/unit/test_reload_token_endpoint.py` | #1089 — agent-server `POST /api/credentials/reload-token`: sets env, atomically writes the `/var/lib/trinity/oauth-token` override at `0600`, no `.env` write, `remove_api_key` pops `ANTHROPIC_API_KEY`, empty token → 400 |

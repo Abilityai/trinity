@@ -143,6 +143,11 @@ services:
       # `enterprise_features` list is empty. Default (unset = 0): allow
       # entitlements based on license (Phase 0 stub: all-entitled).
       - TRINITY_OSS_ONLY=${TRINITY_OSS_ONLY:-0}
+      # #946 pull-pilot routing flag — backend reads it only to surface
+      # mcp_agent_chat_pull_enabled in GET /api/settings/feature-flags
+      # (observability). The actual routing gate is the mcp-server's read of the
+      # SAME env key; keep both in sync via this single .env var.
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
@@ -317,6 +322,11 @@ services:
       # secret twice (issue #692).
       - TRINITY_PASSWORD=${ADMIN_PASSWORD:-}
       - MCP_REQUIRE_API_KEY=true
+      # #946 pull-pilot: the MCP server routes sequential agent→agent
+      # chat_with_agent through the async /task path when ON. THIS is the routing
+      # gate (the backend reads the same key only for feature-flags observability).
+      # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend

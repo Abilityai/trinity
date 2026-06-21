@@ -1,20 +1,31 @@
 """
-Tests for Issue #904: SIGKILL / OOM / timeout must not be misclassified as
-an auth failure that triggers SUB-003 subscription auto-switch.
+Tests for Issue #904 (SIGKILL / OOM / timeout must not be misclassified as an
+auth failure that triggers SUB-003 subscription auto-switch) and Issue #1088
+(unify the auth-class classifier into one shared module + drift guard).
 
-Three regression surfaces:
+Four regression surfaces:
 
-1. `subscription_auto_switch.is_auth_failure` short-circuits to False when
-   the message contains an unambiguous signal-kill / OOM / timeout marker,
-   even if an AUTH_INDICATOR substring also happens to match.
-2. `src/scheduler/service.py:_is_auth_failure` mirrors the same exclusion
-   list (the scheduler runs in a separate container and can't import
-   from backend.services — see the comment on `_NON_AUTH_KILL_MARKERS`).
-3. `error_classifier._diagnose_exit_failure` no longer returns the
+1. `failure_classifier.is_auth_failure` — the canonical classifier at
+   `src/backend/services/failure_classifier.py` (#1088). Short-circuits to
+   False when the message contains an unambiguous signal-kill / OOM / timeout
+   marker, even if an AUTH_INDICATOR substring also happens to match (#904).
+   `subscription_auto_switch` re-exports it for its SUB-003 consumers.
+2. The scheduler copy at `src/scheduler/failure_classifier.py` is a
+   byte-identical vendored mirror of the canonical backend file — the
+   scheduler runs in a separate container and cannot import from
+   backend.services, and it uses the classifier for log-labelling only.
+   `TestBackendSchedulerParity` enforces byte-identity so the two can never
+   drift; `TestBackendReExportGuard` pins the backend re-export (#1088).
+3. `error_classifier._is_auth_failure_message` — the AGENT-runtime classifier
+   — is a genuinely DIFFERENT classifier (token-state markers, and crucially
+   NO kill-marker short-circuit). It is kept kill-safe one level up by
+   `_classify_signal_exit` running BEFORE the auth check (precedence).
+   `TestAgentClassifierKillSafetyContract` documents that contract honestly;
+   merging it is out of scope (#1088 / #945).
+4. `error_classifier._diagnose_exit_failure` no longer returns the
    "Subscription token may be expired" string for the OAuth-only-config
-   branch, so its output cannot loop back through
-   `_is_auth_failure_message` and surface as a 503 auth failure on
-   `headless_executor.py`.
+   branch, so its output cannot loop back through `_is_auth_failure_message`
+   and surface as a 503 auth failure on `headless_executor.py`.
 """
 from __future__ import annotations
 
@@ -25,83 +36,36 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_BACKEND = _REPO_ROOT / "src" / "backend"
-_SCHEDULER = _REPO_ROOT / "src" / "scheduler"
+_BACKEND_CLASSIFIER = _REPO_ROOT / "src" / "backend" / "services" / "failure_classifier.py"
+_SCHEDULER_CLASSIFIER = _REPO_ROOT / "src" / "scheduler" / "failure_classifier.py"
+_SUBSCRIPTION_AUTO_SWITCH = _REPO_ROOT / "src" / "backend" / "services" / "subscription_auto_switch.py"
 
 
-# `_load_backend_is_auth_failure` and the scheduler slice both stub
-# heavy backend imports (`database`, `db_models`, apscheduler.*) via
-# `sys.modules[name] = stub` so the pure-function code under test
-# exec's without pulling in the real `DatabaseManager()` / APScheduler
-# objects. The sanctioned snapshot/restore pattern (precedent:
-# `tests/unit/test_agent_cleanup_parity.py`) tells
-# `tests/lint_sys_modules.py:_has_stubbed_module_names_helper` to
-# exempt this file from the no-bare-`sys.modules`-mutation lint.
-_STUBBED_MODULE_NAMES = [
-    "database",
-    "db_models",
-    "apscheduler",
-    "apscheduler.schedulers",
-    "apscheduler.schedulers.asyncio",
-    "apscheduler.triggers",
-    "apscheduler.triggers.cron",
-    "apscheduler.executors",
-    "apscheduler.executors.asyncio",
-]
+def _load_module_from_path(path: Path, mod_name: str):
+    """Exec a single source file in isolation and return the module.
 
+    Used for the two `failure_classifier.py` copies, which are pure stdlib
+    (#1088) — no heavy backend / apscheduler imports, no `sys.modules` stubs,
+    and nothing registered in `sys.modules` (no cross-test pollution)."""
+    import importlib.util
 
-@pytest.fixture(autouse=True)
-def _restore_sys_modules():
-    saved = {n: sys.modules.get(n) for n in _STUBBED_MODULE_NAMES}
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+    spec = importlib.util.spec_from_file_location(mod_name, str(path))
+    if spec is None or spec.loader is None:
+        pytest.skip(f"source not available: {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # -----------------------------------------------------------------------------
-# subscription_auto_switch.is_auth_failure  — backend side
+# failure_classifier.is_auth_failure  — canonical backend copy
 # -----------------------------------------------------------------------------
 
 
 def _load_backend_is_auth_failure():
-    """Load `is_auth_failure` directly from the source file by path.
-
-    Avoids importing the whole `services.subscription_auto_switch` module,
-    which pulls in `database` (real `db = DatabaseManager()` init) — heavy
-    and not needed for the pure-function test.
-    """
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "_iaf_backend",
-        str(_BACKEND / "services" / "subscription_auto_switch.py"),
-    )
-    if spec is None or spec.loader is None:
-        pytest.skip("backend source not available")
-    # The module's top-level `from database import db` would trigger heavy
-    # backend init. Stub `database` to a no-op so the file's pure
-    # functions are exec'd without side effects.
-    if "database" not in sys.modules:
-        stub_db = type(sys)("database")
-        stub_db.db = type("_Db", (), {})()
-        sys.modules["database"] = stub_db
-    if "db_models" not in sys.modules:
-        stub_models = type(sys)("db_models")
-
-        class _NotificationCreate:  # pragma: no cover — just a placeholder
-            pass
-
-        stub_models.NotificationCreate = _NotificationCreate
-        sys.modules["db_models"] = stub_models
-
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.is_auth_failure
+    """Load the canonical `is_auth_failure` from
+    `src/backend/services/failure_classifier.py` by path (#1088)."""
+    return _load_module_from_path(_BACKEND_CLASSIFIER, "_iaf_backend").is_auth_failure
 
 
 class TestBackendIsAuthFailureNonAuthMarkers:
@@ -140,37 +104,15 @@ class TestBackendIsAuthFailureNonAuthMarkers:
 
 
 # -----------------------------------------------------------------------------
-# scheduler._is_auth_failure  — scheduler-side copy must stay in sync
+# scheduler failure_classifier  — byte-identical mirror must stay in sync
 # -----------------------------------------------------------------------------
 
 
 def _load_scheduler_is_auth_failure():
-    import importlib.util
-
-    # Stub the scheduler's heavy imports so we can exec just the module.
-    # The function is at module scope, so spec exec works even with the
-    # SchedulerService class body present below it.
-    for stub_name in ("apscheduler", "apscheduler.schedulers", "apscheduler.schedulers.asyncio",
-                      "apscheduler.triggers", "apscheduler.triggers.cron",
-                      "apscheduler.executors", "apscheduler.executors.asyncio"):
-        if stub_name not in sys.modules:
-            sys.modules[stub_name] = type(sys)(stub_name)
-
-    # Grab the function via a pure ast-eval approach: read the file, exec
-    # just the top-level constants + function definitions we need.
-    src = (_SCHEDULER / "service.py").read_text(encoding="utf-8")
-    # Slice from the `_AUTH_INDICATORS = [` line through the end of
-    # `_is_auth_failure` — keep the test independent of other top-level
-    # symbols that pull in apscheduler etc.
-    start_marker = "_AUTH_INDICATORS = ["
-    end_marker = "class SchedulerService:"
-    if start_marker not in src or end_marker not in src:
-        pytest.skip("scheduler service.py layout changed")
-    snippet = src[src.index(start_marker): src.index(end_marker)]
-
-    ns: dict = {}
-    exec(compile(snippet, "<scheduler-slice>", "exec"), ns)  # noqa: S102
-    return ns["_is_auth_failure"]
+    """Load the scheduler's vendored-mirror `is_auth_failure` from
+    `src/scheduler/failure_classifier.py` by path (#1088). Pure stdlib mirror —
+    no apscheduler stubs or service.py text-slicing needed."""
+    return _load_module_from_path(_SCHEDULER_CLASSIFIER, "_iaf_scheduler").is_auth_failure
 
 
 class TestSchedulerIsAuthFailureNonAuthMarkers:
@@ -197,8 +139,58 @@ class TestSchedulerIsAuthFailureNonAuthMarkers:
 
 
 # -----------------------------------------------------------------------------
-# error_classifier._diagnose_exit_failure — OAuth-only branch must NOT
-# return a string that `_is_auth_failure_message` matches.
+# #1088 — single-source-of-truth guards: byte-identity + backend re-export
+# -----------------------------------------------------------------------------
+
+
+class TestBackendSchedulerParity:
+    """#1088: the scheduler copy is a byte-identical vendored mirror of the
+    canonical backend classifier. Any drift re-introduces the #904 bug class
+    on the scheduler-driven path and breaks the single source of truth."""
+
+    def test_classifier_files_are_byte_identical(self):
+        backend_bytes = _BACKEND_CLASSIFIER.read_bytes()
+        scheduler_bytes = _SCHEDULER_CLASSIFIER.read_bytes()
+        assert backend_bytes == scheduler_bytes, (
+            "src/scheduler/failure_classifier.py has drifted from the canonical "
+            "src/backend/services/failure_classifier.py. Re-sync the scheduler "
+            "mirror from the backend copy:\n"
+            "    cp src/backend/services/failure_classifier.py "
+            "src/scheduler/failure_classifier.py"
+        )
+
+
+class TestBackendReExportGuard:
+    """#1088: subscription_auto_switch must re-export `is_auth_failure` from
+    the shared module and must NOT redefine it (or the duplicated tables), so
+    the single source of truth holds and consumers' patch targets stay valid."""
+
+    @pytest.fixture
+    def source(self):
+        return _SUBSCRIPTION_AUTO_SWITCH.read_text(encoding="utf-8")
+
+    def test_reexports_from_failure_classifier(self, source):
+        assert "from services.failure_classifier import is_auth_failure" in source, (
+            "subscription_auto_switch.py must re-export is_auth_failure from "
+            "services.failure_classifier (#1088)"
+        )
+
+    def test_does_not_redefine_classifier(self, source):
+        assert "def is_auth_failure" not in source, (
+            "subscription_auto_switch.py must NOT redefine is_auth_failure — it "
+            "now lives in services.failure_classifier (#1088)"
+        )
+        assert "AUTH_INDICATORS = [" not in source, (
+            "subscription_auto_switch.py must not redefine AUTH_INDICATORS (#1088)"
+        )
+        assert "NON_AUTH_KILL_MARKERS = [" not in source, (
+            "subscription_auto_switch.py must not redefine NON_AUTH_KILL_MARKERS (#1088)"
+        )
+
+
+# -----------------------------------------------------------------------------
+# error_classifier (AGENT runtime) — separate classifier; kill-safety is by
+# PRECEDENCE, not a kill-marker short-circuit.
 # -----------------------------------------------------------------------------
 
 
@@ -216,6 +208,50 @@ def _load_classifier():
         return importlib.import_module("agent_server.services.error_classifier")
     except ImportError as e:
         pytest.skip(f"error_classifier import failed: {e}")
+
+
+class TestAgentClassifierKillSafetyContract:
+    """D4 (#1088): the AGENT-runtime classifier
+    (`error_classifier._is_auth_failure_message`) is intentionally NOT the
+    shared backend/scheduler classifier — it uses token-state markers and,
+    crucially, has NO kill-marker short-circuit. This documents that
+    divergence honestly: a kill+auth message classifies True here BY DESIGN.
+
+    The agent is kept kill-safe NOT by this function but by precedence —
+    `_classify_signal_exit` runs BEFORE the auth check on the live exit path
+    (pinned by `test_signal_classification_takes_precedence` and
+    `TestChatPathSignalExitWireUp`). Merging it into the shared table is out of
+    scope: separate Docker build context + semantic divergence (#1088 / #945)."""
+
+    @pytest.fixture
+    def classifier(self):
+        return _load_classifier()
+
+    def test_agent_classifier_has_no_kill_short_circuit_by_design(self, classifier):
+        # A message carrying BOTH an OOM-kill marker AND an auth marker
+        # ("credentials expired") classifies True here — the agent function
+        # has no NON_AUTH_KILL_MARKERS short-circuit, unlike the shared
+        # backend/scheduler classifier. This asymmetry is intentional; the
+        # agent path stays kill-safe via _classify_signal_exit precedence.
+        assert classifier._is_auth_failure_message("OOM killed: credentials expired") is True, (
+            "agent _is_auth_failure_message is expected to be kill-blind by "
+            "design; it is kept kill-safe by _classify_signal_exit precedence, "
+            "NOT by a kill-marker short-circuit (#1088 D4)"
+        )
+
+    def test_shared_classifier_short_circuits_the_same_message(self):
+        # Contrast: the SHARED backend/scheduler classifier DOES short-circuit
+        # the very same message to False (the kill-marker wins). This is the
+        # behavioural divergence that the agent's precedence contract compensates
+        # for — the two classifiers must not be naively merged.
+        is_auth_failure = _load_backend_is_auth_failure()
+        assert is_auth_failure("OOM killed: credentials expired") is False
+
+
+# -----------------------------------------------------------------------------
+# error_classifier._diagnose_exit_failure — OAuth-only branch must NOT
+# return a string that `_is_auth_failure_message` matches.
+# -----------------------------------------------------------------------------
 
 
 class TestDiagnoseExitFailureOauthOnlyBranch:

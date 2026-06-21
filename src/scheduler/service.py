@@ -26,59 +26,14 @@ from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule
 from .database import SchedulerDatabase
 from .locking import get_lock_manager, LockManager
+# Shared SUB-003 auth-class classifier (#1088). The scheduler uses it for
+# log-labelling ONLY — the call sites below just pick a logger.error wording.
+# Aliased to the historical `_is_auth_failure` name so those call sites stay
+# unchanged. Source of truth: src/backend/services/failure_classifier.py,
+# mirrored byte-identically at src/scheduler/failure_classifier.py.
+from .failure_classifier import is_auth_failure as _is_auth_failure
 
 logger = logging.getLogger(__name__)
-
-
-# Substrings indicating an auth-class subscription failure. Mirrors
-# `src/backend/services/subscription_auto_switch.py::AUTH_INDICATORS` —
-# the scheduler runs in a separate container and cannot import from
-# backend.services, so this list is duplicated by necessity. Keep the
-# two in sync when editing either side.
-_AUTH_INDICATORS = [
-    "credit balance",
-    "unauthorized",
-    "authentication",
-    "credentials",
-    "forbidden",
-    "401",
-    "403",
-    "oauth",
-    "token expired",
-    "not authenticated",
-]
-
-# #904: see `subscription_auto_switch.NON_AUTH_KILL_MARKERS` — same list,
-# duplicated here because the scheduler runs in a separate container and
-# can't import from backend.services. Keep in sync.
-_NON_AUTH_KILL_MARKERS = [
-    "sigkill",
-    "sigterm",
-    "sigint",
-    "exit code -9",
-    "exit code -15",
-    "exit code -2",
-    "exit code 137",
-    "exit code 143",
-    "exit code 130",
-    "terminated by",
-    "killed by",
-    "out of memory",
-    "oom",
-    "memory cgroup",
-]
-
-
-def _is_auth_failure(error_msg: str) -> bool:
-    """Return True if `error_msg` matches any AUTH_INDICATORS substring AND
-    does not contain an unambiguous signal-kill / OOM / timeout marker
-    (#904)."""
-    if not error_msg:
-        return False
-    error_lower = error_msg.lower()
-    if any(marker in error_lower for marker in _NON_AUTH_KILL_MARKERS):
-        return False
-    return any(ind in error_lower for ind in _AUTH_INDICATORS)
 
 
 def _describe_exception(e: BaseException) -> str:

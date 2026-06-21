@@ -39,6 +39,13 @@ export interface ServerConfig {
   trinityPassword?: string;
   port?: number;
   requireApiKey?: boolean;
+  /**
+   * #946 pull pilot. When true, an agent→agent (scope='agent', non-self)
+   * sequential chat_with_agent is routed through the durable async /task path
+   * instead of the synchronous /chat. Read from MCP_AGENT_CHAT_PULL_ENABLED at
+   * startup (mirrors requireApiKey ← MCP_REQUIRE_API_KEY). Default OFF.
+   */
+  agentChatPullEnabled?: boolean;
 }
 
 export interface McpApiKeyValidationResult {
@@ -89,6 +96,10 @@ export async function createServer(config: ServerConfig = {}) {
     trinityPassword = process.env.TRINITY_PASSWORD,
     port = parseInt(process.env.MCP_PORT || "8080", 10),
     requireApiKey = process.env.MCP_REQUIRE_API_KEY === "true",
+    // #946 pull pilot — default OFF. Routing gate for agent→agent chat (see
+    // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
+    // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
+    agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
   } = config;
 
   // Create Trinity API client (base URL only)
@@ -180,6 +191,9 @@ export async function createServer(config: ServerConfig = {}) {
   });
 
   console.log(`MCP API Key authentication: ${requireApiKey ? "ENABLED" : "DISABLED"}`);
+  // #946 pilot — surface the routing mode at startup so the soak's control vs
+  // treatment window is unambiguous in the logs.
+  console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
 
   // SEC-001 Phase 3: Wrap tool execute functions with audit logging.
   // withAudit captures tool name, auth context, timing, and success/failure,
@@ -202,7 +216,7 @@ export async function createServer(config: ServerConfig = {}) {
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
     createAgentTools(client, requireApiKey),
-    createChatTools(client, requireApiKey),
+    createChatTools(client, requireApiKey, agentChatPullEnabled),
     createSystemTools(client, requireApiKey),
     createDocsTools(),
     createSkillsTools(client, requireApiKey),
