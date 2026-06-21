@@ -35,30 +35,56 @@ if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
 
-def _load_git_service():
-    """Import git_service with heavy dependencies mocked out.
+# Backend deps git_service imports at module load — stubbed in _load_git_service
+# and restored after each test by _restore_sys_modules so other test files get
+# clean imports (the mock-built git_service must not leak either). This is the
+# named snapshot/restore exception recognized by tests/lint_sys_modules.py
+# (precedent: tests/unit/test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    "docker", "docker.errors", "docker.types",
+    "redis", "redis.asyncio",
+    "database",
+    "services.docker_service",
+    "services.git_service",
+]
 
-    Mirrors tests/unit/test_persistent_state_allowlist.py::_load_git_service so
-    the two test modules stay in sync on how they stub the backend.
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore after."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
+def _load_git_service():
+    """Import git_service with heavy dependencies stubbed out.
+
+    Installs lightweight stubs for the backend deps git_service imports at
+    module load, evicts any cached copy, and re-imports against the stubs. The
+    autouse `_restore_sys_modules` fixture restores sys.modules after each test.
+    Mirrors tests/unit/test_persistent_state_allowlist.py on which deps it stubs.
     """
-    mock_modules = {}
     for mod in [
         "docker", "docker.errors", "docker.types",
         "redis", "redis.asyncio",
         "database",
         "services.docker_service",
     ]:
-        mock_modules[mod] = Mock()
+        sys.modules[mod] = Mock()
 
-    mock_modules["database"].db = Mock()
-    mock_modules["database"].AgentGitConfig = Mock
-    mock_modules["database"].GitSyncResult = Mock
+    sys.modules["database"].db = Mock()
+    sys.modules["database"].AgentGitConfig = Mock
+    sys.modules["database"].GitSyncResult = Mock
 
-    with patch.dict("sys.modules", mock_modules):
-        for key in list(sys.modules.keys()):
-            if key.startswith("services.git_service"):
-                del sys.modules[key]
-        import services.git_service as gs
+    sys.modules.pop("services.git_service", None)
+    import services.git_service as gs
     return gs
 
 
