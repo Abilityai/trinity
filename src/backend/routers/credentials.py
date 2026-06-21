@@ -21,6 +21,7 @@ from models import (
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
 from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -65,7 +66,7 @@ async def get_agent_credentials_status(
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/credentials/status",
                 timeout=10.0
@@ -231,7 +232,7 @@ async def inject_credentials(
             )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/credentials/inject",
                 json={"files": request_body.files},

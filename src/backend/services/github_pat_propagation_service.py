@@ -20,6 +20,7 @@ import httpx
 
 from database import db
 from models import AgentPropagationStatus, GithubPatPropagationResult
+from services.agent_auth import build_agent_auth_headers
 from services.docker_service import list_all_agents_fast, get_agent_container
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ def _env_has_github_pat(env_content: str) -> bool:
 
 async def _apply_pat_to_env(
     client: httpx.AsyncClient,
+    agent_name: str,
     base_url: str,
     pat: str,
     *,
@@ -74,6 +76,7 @@ async def _apply_pat_to_env(
         f"{base_url}/api/credentials/read",
         params={"paths": ".env"},
         timeout=AGENT_HTTP_TIMEOUT_SECONDS,
+        headers=build_agent_auth_headers(agent_name),
     )
     read_resp.raise_for_status()
     env_content = read_resp.json().get("files", {}).get(".env")
@@ -90,6 +93,7 @@ async def _apply_pat_to_env(
         f"{base_url}/api/credentials/inject",
         json={"files": {".env": patched}},
         timeout=AGENT_HTTP_TIMEOUT_SECONDS,
+        headers=build_agent_auth_headers(agent_name),
     )
     inject_resp.raise_for_status()
     return "updated"
@@ -122,7 +126,7 @@ async def propagate_pat_to_single_agent(agent_name: str, pat: str) -> dict:
     base_url = f"http://agent-{agent_name}:8000"
     async with httpx.AsyncClient(timeout=AGENT_HTTP_TIMEOUT_SECONDS) as client:
         try:
-            await _apply_pat_to_env(client, base_url, pat, add_if_missing=True)
+            await _apply_pat_to_env(client, agent_name, base_url, pat, add_if_missing=True)
             env_updated = True
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             logger.warning("single-agent PAT .env inject failed for %s: %s", agent_name, e)
@@ -150,7 +154,7 @@ async def _propagate_to_agent(
     """Read .env from one agent, patch GITHUB_PAT, write it back (global-PAT path)."""
     base_url = f"http://agent-{agent_name}:8000"
     try:
-        status = await _apply_pat_to_env(client, base_url, new_pat, add_if_missing=False)
+        status = await _apply_pat_to_env(client, agent_name, base_url, new_pat, add_if_missing=False)
         return AgentPropagationStatus(agent_name=agent_name, status=status)
     except httpx.HTTPStatusError as e:
         error = f"agent returned {e.response.status_code}: {e.response.text[:200]}"

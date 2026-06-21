@@ -40,6 +40,11 @@ ensure_hex32_secret() {
 ensure_hex32_secret CREDENTIAL_ENCRYPTION_KEY
 ensure_hex32_secret SECRET_KEY
 ensure_hex32_secret INTERNAL_API_SECRET
+# AGENT_AUTH_SECRET (#1159): stable master from which the backend derives each
+# agent's in-container auth token. Same persist-once, never-rotate contract as
+# the three above — once set it must not change, or every agent's token would
+# shift and the running fleet would 401 until recreated.
+ensure_hex32_secret AGENT_AUTH_SECRET
 
 # ADMIN_PASSWORD has no sensible default — operator must choose. Fail fast
 # rather than booting into a state the operator can't log into. (#443)

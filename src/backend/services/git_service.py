@@ -8,7 +8,6 @@ Handles:
 - Initializing git in agent containers
 """
 import asyncio
-import httpx
 import os
 import re
 import shlex
@@ -20,6 +19,7 @@ from enum import Enum
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
 
 logger = logging.getLogger(__name__)
@@ -504,7 +504,7 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
 
     try:
         # Call the agent's internal git status endpoint
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with agent_httpx_client(agent_name, timeout=30.0) as client:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/git/status"
             )
@@ -557,7 +557,7 @@ async def sync_to_github(
 
     try:
         # Call the agent's internal sync endpoint
-        async with httpx.AsyncClient(timeout=360.0) as client:
+        async with agent_httpx_client(agent_name, timeout=360.0) as client:
             payload = {"strategy": strategy}
             if message:
                 payload["message"] = message
@@ -625,7 +625,7 @@ async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, An
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with agent_httpx_client(agent_name, timeout=30.0) as client:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/git/log",
                 params={"limit": limit}
@@ -657,7 +657,7 @@ async def pull_from_github(agent_name: str, strategy: Optional[str] = "clean") -
         return {"success": False, "message": "Agent must be running to pull"}
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with agent_httpx_client(agent_name, timeout=120.0) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/git/pull",
                 json={"strategy": strategy}
@@ -1126,7 +1126,7 @@ async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
             ),
         }
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with agent_httpx_client(agent_name, timeout=180.0) as client:
         response = await client.post(
             f"http://agent-{agent_name}:8000/api/git/reset-to-main-preserve-state"
         )

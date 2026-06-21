@@ -25,7 +25,8 @@ from services.docker_utils import (
 from services.agent_service.helpers import validate_base_image
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, is_claude_runtime
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
+from services.agent_auth import derive_agent_token
 from .file_sharing import check_public_folder_mount_matches
 from .read_only import inject_read_only_hooks, remove_read_only_hooks
 
@@ -264,7 +265,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
         not check_full_capabilities_match(container, agent_name) or
-        not check_guardrails_env_matches(container, agent_name)
+        not check_guardrails_env_matches(container, agent_name) or
+        not check_agent_auth_token_env_matches(container, agent_name)
     )
 
     if needs_recreation:
@@ -419,6 +421,13 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         env_vars['AGENT_GUARDRAILS'] = _json.dumps(guardrails_override)
     else:
         env_vars.pop('AGENT_GUARDRAILS', None)
+
+    # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
+    # this re-derives under the CURRENT name — the load-bearing part of the
+    # rename fix (a renamed container otherwise keeps derive(old_name) and 401s
+    # once enforcement is on). check_agent_auth_token_env_matches forces this
+    # recreate whenever the running token is missing or stale.
+    env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
 
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))

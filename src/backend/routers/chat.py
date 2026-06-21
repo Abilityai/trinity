@@ -16,6 +16,7 @@ from typing import NamedTuple, NoReturn, Optional
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
@@ -1886,7 +1887,7 @@ async def get_agent_chat_history(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/chat/history",
                 timeout=10.0
@@ -1919,7 +1920,7 @@ async def reset_agent_chat_history(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.delete(
                 f"http://agent-{name}:8000/api/chat/history",
                 timeout=10.0
@@ -1960,7 +1961,7 @@ async def get_agent_chat_session(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/chat/session",
                 timeout=10.0
@@ -2002,7 +2003,7 @@ async def get_agent_activity(
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/activity",
                 timeout=10.0
@@ -2041,7 +2042,7 @@ async def get_agent_activity_detail(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/activity/{tool_id}",
                 timeout=10.0
@@ -2074,7 +2075,7 @@ async def clear_agent_activity(
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.delete(
                 f"http://agent-{name}:8000/api/activity",
                 timeout=10.0
@@ -2109,7 +2110,7 @@ async def get_agent_model(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/model",
                 timeout=10.0
@@ -2143,7 +2144,7 @@ async def set_agent_model(
         )
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(name) as client:
             response = await client.put(
                 f"http://agent-{name}:8000/api/model",
                 json={"model": request.model},
@@ -2371,7 +2372,7 @@ async def terminate_agent_execution(
 
     try:
         # Proxy termination request to agent container
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with agent_httpx_client(name, timeout=15.0) as client:
             response = await client.post(
                 f"http://agent-{name}:8000/api/executions/{execution_id}/terminate"
             )
@@ -2458,7 +2459,7 @@ async def get_agent_running_executions(
         return {"executions": []}
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(name, timeout=10.0) as client:
             response = await client.get(
                 f"http://agent-{name}:8000/api/executions/running"
             )
@@ -2504,7 +2505,7 @@ async def stream_execution_log(
             # Connect timeout prevents hanging if agent is unresponsive,
             # but read timeout is None since SSE streams are long-lived
             timeout = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with agent_httpx_client(name, timeout=timeout) as client:
                 async with client.stream("GET", agent_url) as response:
                     if response.status_code == 404:
                         # Execution not found on agent (race condition: task not started yet)

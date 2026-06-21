@@ -497,11 +497,11 @@ async def test_backend_refuses_when_agent_busy():
         {"id": "x", "activity_type": "chat_start"}
     ]
 
-    with patch.object(gs, "httpx") as httpx_mod:
+    with patch.object(gs, "agent_httpx_client") as mock_client_factory:
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "agent_busy"
-    httpx_mod.AsyncClient.assert_not_called()
+    mock_client_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -526,7 +526,7 @@ async def test_backend_proxies_when_idle():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["commit_sha"] == "abc1234"
@@ -552,7 +552,7 @@ async def test_backend_surfaces_agent_server_conflict_header():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "no_remote_main"
@@ -574,7 +574,7 @@ async def test_backend_surfaces_unexpected_status_as_proxy_failed():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "proxy_failed"

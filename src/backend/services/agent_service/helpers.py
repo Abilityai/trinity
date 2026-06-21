@@ -21,6 +21,7 @@ from services.docker_service import (
     get_agent_container,
 )
 from services.docker_utils import volume_get
+from services.agent_auth import derive_agent_token, merge_auth_headers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, settings_service
 from utils.helpers import sanitize_agent_name
 
@@ -146,6 +147,10 @@ async def agent_http_request(
         httpx.TimeoutException: If request times out
     """
     agent_url = f"http://agent-{agent_name}:8000{path}"
+
+    # #1159: stamp the per-agent auth token (overriding any caller-supplied
+    # value case-insensitively) so every retry attempt carries it.
+    kwargs["headers"] = merge_auth_headers(agent_name, kwargs.get("headers"))
 
     last_error = None
     for attempt in range(max_retries):
@@ -483,6 +488,25 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
         return _json.loads(current or "{}") == desired
     except (_json.JSONDecodeError, ValueError):
         return False
+
+
+def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
+    """#1159: verify the container's ``TRINITY_AGENT_AUTH_TOKEN`` matches the
+    token derived for the agent's CURRENT name. Returns ``True`` if it matches,
+    ``False`` (→ recreate) when the env is missing or stale.
+
+    Catches two cases:
+      * old-image / pre-#1159 container with no token → recreate injects it;
+      * a renamed container still carrying ``derive(old_name)`` → recreate
+        re-derives under the new name so it stops 401-ing once enforcement is on.
+
+    Deterministic derive means the value this checks is exactly what the
+    create/recreate inject writes, so the recreate converges in a single pass
+    (no infinite recreate loop — same contract as the guardrails/PAT matchers).
+    """
+    env_list = container.attrs.get("Config", {}).get("Env", [])
+    env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+    return env_dict.get("TRINITY_AGENT_AUTH_TOKEN") == derive_agent_token(agent_name)
 
 
 def needs_per_agent_pat_injection(agent_name: str) -> bool:

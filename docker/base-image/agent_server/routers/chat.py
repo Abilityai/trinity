@@ -8,7 +8,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
@@ -452,42 +452,3 @@ async def stream_execution_log(execution_id: str):
             "X-Accel-Buffering": "no"
         }
     )
-
-
-# ============================================================================
-# WebSocket Endpoints
-# ============================================================================
-
-@router.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
-    """WebSocket endpoint for streaming chat (internal use)"""
-    await websocket.accept()
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-
-            # Add user message
-            agent_state.add_message("user", message["content"])
-
-            # Send response via runtime adapter
-            runtime = get_runtime()
-            # Use model from message if provided, otherwise use current_model from state
-            effective_model = message.get("model") or agent_state.current_model
-            response_text, execution_log, metadata, raw_messages = await runtime.execute(
-                prompt=message["content"],
-                model=effective_model,
-                continue_session=True,
-                stream=True
-            )
-            agent_state.add_message("assistant", response_text)
-
-            await websocket.send_json({
-                "type": "message",
-                "role": "assistant",
-                "content": response_text,
-                "execution_log": raw_messages,  # Full Claude Code stream-json format
-                "metadata": metadata.model_dump()
-            })
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")

@@ -15,7 +15,6 @@ import logging
 import types
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 
@@ -24,6 +23,7 @@ from dependencies import get_current_user, get_authorized_agent
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -413,7 +413,7 @@ async def _get_voice_system_prompt(agent_name: str) -> str:
     description = None
     if container:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with agent_httpx_client(agent_name, timeout=5.0) as client:
                 resp = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
                 if resp.status_code == 200:
                     info = resp.json()

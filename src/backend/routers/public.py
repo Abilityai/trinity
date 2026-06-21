@@ -29,6 +29,7 @@ from database import (
 from dependencies import get_current_user
 from models import User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
@@ -238,7 +239,7 @@ async def get_public_link_info(token: str, request: Request):
 
     if agent_available:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with agent_httpx_client(agent_name, timeout=5.0) as client:
                 response = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
                 if response.status_code == 200:
                     info = response.json()
@@ -284,7 +285,7 @@ async def get_public_playbooks(token: str, request: Request):
 
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(agent_name, timeout=10.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 return response.json()
@@ -725,7 +726,7 @@ async def get_agent_intro(
 
     # Execute intro prompt via parallel task endpoint
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with agent_httpx_client(agent_name, timeout=120.0) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/task",
                 json={
@@ -992,7 +993,7 @@ async def public_stream_execution(
         """Proxy SSE stream from agent container."""
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with agent_httpx_client(agent_name, timeout=None) as client:
                 async with client.stream("GET", agent_url) as response:
                     if response.status_code != 200:
                         yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"

@@ -28,6 +28,7 @@ from typing import Any, Optional
 import httpx
 
 from database import db
+from services.agent_auth import agent_httpx_client
 from models import ActivityState, ActivityType, TaskExecutionStatus
 from services.activity_service import activity_service
 from services.agent_call_limiter import (
@@ -268,7 +269,7 @@ async def agent_post_with_retry(
     for attempt in range(max_retries):
         try:
             async with acquire_agent_call_slot(agent_name):
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with agent_httpx_client(agent_name, timeout=timeout) as client:
                     response = await client.post(agent_url, json=payload)
                     return response
         except BackendAgentCallBudgetExhausted:
@@ -333,7 +334,7 @@ async def terminate_execution_on_agent(
     agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
 
     try:
-        async with httpx.AsyncClient(timeout=TERMINATE_TIMEOUT) as client:
+        async with agent_httpx_client(agent_name, timeout=TERMINATE_TIMEOUT) as client:
             response = await client.post(agent_url)
 
             if response.status_code < 300:

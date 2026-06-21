@@ -98,8 +98,8 @@ def test_propagate_single_agent_running_injects_and_retemplates(monkeypatch):
     _patch_get_agent_container(monkeypatch, lambda n: _Container("running"))
 
     apply_calls = {}
-    async def _fake_apply(client, base_url, pat, *, add_if_missing):
-        apply_calls.update(pat=pat, add_if_missing=add_if_missing)
+    async def _fake_apply(client, agent_name, base_url, pat, *, add_if_missing):
+        apply_calls.update(agent_name=agent_name, pat=pat, add_if_missing=add_if_missing)
         return "updated"
     monkeypatch.setattr(svc, "_apply_pat_to_env", _fake_apply)
 
@@ -116,7 +116,7 @@ def test_propagate_single_agent_running_injects_and_retemplates(monkeypatch):
     assert res["applied"] is True
     assert res["env_updated"] is True
     assert res["remote_updated"] is True
-    assert apply_calls == {"pat": "ghp_tok", "add_if_missing": True}
+    assert apply_calls == {"agent_name": "a1", "pat": "ghp_tok", "add_if_missing": True}
     assert called == {"agent": "a1", "pat": "ghp_tok", "repo": "org/repo"}
 
 

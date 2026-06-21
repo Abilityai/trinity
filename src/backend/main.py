@@ -360,6 +360,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("OpenTelemetry tracing disabled (set OTEL_ENABLED=1 to enable)")
 
+    # #1159: surface a missing agent-auth master at boot, not per-request. The
+    # backend is fail-closed — derive_agent_token() raises on an empty secret, so
+    # without this warning the first symptom is a 500 on every backend→agent call
+    # (and the WARNING gives the operator a clear, immediate fix). start.sh
+    # auto-generates it; a deploy that bypasses start.sh must set it in .env and
+    # forward it to the backend service (it is, in both compose files).
+    if not os.getenv("AGENT_AUTH_SECRET"):
+        logger.warning(
+            "AGENT_AUTH_SECRET is not set — every backend→agent HTTP call will "
+            "fail with a 500 (#1159, fail-closed). Set it in .env and forward it "
+            "to the backend service (start.sh auto-generates it on first boot)."
+        )
+
 
     if docker_client:
         try:

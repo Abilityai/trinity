@@ -24,10 +24,11 @@ import os
 import json
 import base64
 import logging
-import httpx
 from typing import Dict, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from services.agent_auth import agent_httpx_client
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,7 @@ class CredentialEncryptionService:
 
         files = {}
 
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/credentials/read",
                 params={"paths": ",".join(file_paths)},
@@ -235,7 +236,7 @@ class CredentialEncryptionService:
         Returns:
             Response from agent with written files list
         """
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/credentials/inject",
                 json={"files": files},

@@ -84,6 +84,10 @@ services:
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
+      # Agent auth master (#1159) - backend derives each agent's in-container
+      # :8000 auth token from this. Backend hard-fails on first agent call if
+      # unset, so it MUST be forwarded explicitly (.env alone is inert in prod).
+      - AGENT_AUTH_SECRET=${AGENT_AUTH_SECRET:-}
       # Public access / OAuth callbacks
       - PUBLIC_CHAT_URL=${PUBLIC_CHAT_URL:-}
       - FRONTEND_URL=${FRONTEND_URL:-}

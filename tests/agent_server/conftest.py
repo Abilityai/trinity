@@ -37,11 +37,23 @@ def agent_server_url(api_config, api_client):
 
 
 @pytest.fixture(scope="session")
-def agent_client(agent_server_url):
-    """HTTP client for direct agent server access."""
+def agent_client(agent_server_url, api_config):
+    """HTTP client for direct agent server access.
+
+    #1159: a token-enabled agent (created with AGENT_AUTH_SECRET set) enforces
+    the per-agent X-Trinity-Agent-Token on every non-/health route, so direct
+    access must carry it. Derived from AGENT_AUTH_SECRET in the test env (which
+    must match the running stack). When unset (grace / old image) we send no
+    header — direct access still works because the agent isn't enforcing.
+    """
+    headers = {}
+    if api_config.test_agent_name and os.getenv("AGENT_AUTH_SECRET"):
+        from services.agent_auth import build_agent_auth_headers
+        headers = build_agent_auth_headers(api_config.test_agent_name)
     client = httpx.Client(
         base_url=agent_server_url,
         timeout=httpx.Timeout(60.0, connect=10.0),
+        headers=headers,
     )
     try:
         yield client

@@ -119,6 +119,14 @@ async def rename_agent_endpoint(
 
         # Update container labels (need to recreate for label changes)
         # For now, we'll update just the database and handle labels on next start
+        #
+        # #1159: the running container still carries TRINITY_AGENT_AUTH_TOKEN=
+        # derive(old_name); under the new name that token is stale and would 401
+        # once enforcement is on (Codex #4). No extra work here — the rename
+        # leaves the agent stopped, and the next start_agent_internal recreate is
+        # forced by check_agent_auth_token_env_matches (token mismatch) and
+        # re-injects derive(new_name). Same recreate-on-next-start path the label/
+        # volume changes above already depend on.
 
         # Rename Docker volume
         # Docker doesn't support renaming volumes directly

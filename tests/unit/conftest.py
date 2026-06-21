@@ -19,6 +19,11 @@ import pytest
 os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
 os.environ.setdefault("REDIS_PASSWORD", "test")
 os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+# #1159: every backend→agent HTTP call now derives a per-agent auth token, and
+# the derivation is fail-closed (raises on an empty master). Give unit tests a
+# deterministic master so any test exercising agent_client / helpers / the
+# residual inline callers gets a token instead of a RuntimeError.
+os.environ.setdefault("AGENT_AUTH_SECRET", "0" * 64)
 
 # database.py instantiates `db = DatabaseManager()` at import, which calls
 # init_database() and tries to mkdir(/data). On the host that path is

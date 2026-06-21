@@ -32,6 +32,7 @@ from services.template_service import (
 from services import git_service
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email
 from services.github_service import GitHubService, GitHubError
+from services.agent_auth import derive_agent_token
 from utils.helpers import sanitize_agent_name, utc_now_iso
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -584,6 +585,14 @@ async def create_agent_internal(
         # above (Option B — no master internal secret in agents); the agent
         # heartbeat is gated on both this URL and the MCP key being present.
         env_vars['TRINITY_BACKEND_URL'] = os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000')
+
+    # #1159: per-agent in-container auth token. Derived from the stable master
+    # (AGENT_AUTH_SECRET); the agent middleware verifies it on every inbound
+    # call. Unconditional (NOT gated on the MCP key) so even MCP-less agents are
+    # protected; recomputed identically on recreate (lifecycle.py) and checked
+    # by check_agent_auth_token_env_matches so a rename re-derives under the new
+    # name. Raises if AGENT_AUTH_SECRET is unset — fail-closed, never tokenless.
+    env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(config.name)
 
     if github_repo_for_agent and github_pat_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent
