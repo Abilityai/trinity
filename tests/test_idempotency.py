@@ -660,3 +660,109 @@ class TestPaymentScopeGuard:
         assert await _settle("areq-1") == "settled"
         assert await _settle("areq-2") == "settled"
         assert len(settles) == 2
+
+
+# ---------------------------------------------------------------------------
+# Nevermined settle wiring (#1084) — NeverminedPaymentService.settle_payment_once
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def nvm_service(effect_service, monkeypatch):
+    """Load nevermined_payment_service standalone with the effect-scoped
+    idempotency module (temp DB) injected as `services.idempotency_service`,
+    avoiding the docker-heavy real services/__init__."""
+    services_stub = types.ModuleType("services")
+    services_stub.idempotency_service = effect_service
+    monkeypatch.setitem(sys.modules, "services", services_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)
+
+    path = os.path.join(_backend_path, "services", "nevermined_payment_service.py")
+    spec = importlib.util.spec_from_file_location("_nvm_service_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestNeverminedSettleOnce:
+    def _config(self):
+        return types.SimpleNamespace(nvm_plan_id="plan-1", nvm_environment="sandbox")
+
+    async def test_retried_settle_runs_once(self, nvm_service):
+        svc = nvm_service.NeverminedPaymentService()
+        calls = []
+
+        async def fake_settle(**kwargs):
+            calls.append(kwargs.get("agent_request_id"))
+            return nvm_service.NeverminedPaymentResult(
+                success=True, tx_hash="0xabc", credits_redeemed="1", remaining_balance="9"
+            )
+
+        svc.settle_payment = fake_settle
+        cfg = self._config()
+        kw = dict(config=cfg, nvm_api_key="k", nvm_environment="sandbox",
+                  access_token="t", agent_request_id="areq-1", base_url="")
+
+        r1 = await svc.settle_payment_once(execution_id="exec-1", **kw)
+        # Same agent_request_id, fresh execution id (retried paid chat).
+        r2 = await svc.settle_payment_once(execution_id="exec-2", **kw)
+
+        assert r1.success and r2.success
+        assert r2.tx_hash == "0xabc"           # replayed snapshot
+        assert r2.remaining_balance == "9"
+        assert len(calls) == 1                  # exactly ONE on-chain settle
+
+    async def test_failed_settle_releases_for_retry(self, nvm_service):
+        svc = nvm_service.NeverminedPaymentService()
+        attempts = []
+
+        async def flaky_settle(**kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return nvm_service.NeverminedPaymentResult(success=False, error="timeout")
+            return nvm_service.NeverminedPaymentResult(success=True, tx_hash="0xdef")
+
+        svc.settle_payment = flaky_settle
+        cfg = self._config()
+        kw = dict(config=cfg, nvm_api_key="k", nvm_environment="sandbox",
+                  access_token="t", agent_request_id="areq-2", base_url="")
+
+        r1 = await svc.settle_payment_once(execution_id="e1", **kw)
+        assert not r1.success                   # first settle failed
+        r2 = await svc.settle_payment_once(execution_id="e2", **kw)
+        assert r2.success                       # claim released → retry re-settled
+        assert len(attempts) == 2
+
+    async def test_distinct_payments_settle_separately(self, nvm_service):
+        svc = nvm_service.NeverminedPaymentService()
+        calls = []
+
+        async def fake_settle(**kwargs):
+            calls.append(kwargs.get("agent_request_id"))
+            return nvm_service.NeverminedPaymentResult(success=True, tx_hash="0x1")
+
+        svc.settle_payment = fake_settle
+        cfg = self._config()
+        base = dict(config=cfg, nvm_api_key="k", nvm_environment="sandbox",
+                    access_token="t", base_url="", execution_id="e")
+
+        await svc.settle_payment_once(agent_request_id="areq-A", **base)
+        await svc.settle_payment_once(agent_request_id="areq-B", **base)
+        assert len(calls) == 2                  # distinct tokens → both settle
+
+    async def test_missing_agent_request_id_fail_open(self, nvm_service):
+        """No native token → fail-open (settle proceeds, no dedup persisted)."""
+        svc = nvm_service.NeverminedPaymentService()
+        calls = []
+
+        async def fake_settle(**kwargs):
+            calls.append(1)
+            return nvm_service.NeverminedPaymentResult(success=True, tx_hash="0x2")
+
+        svc.settle_payment = fake_settle
+        cfg = self._config()
+        kw = dict(config=cfg, nvm_api_key="k", nvm_environment="sandbox",
+                  access_token="t", agent_request_id=None, execution_id="e", base_url="")
+
+        await svc.settle_payment_once(**kw)
+        await svc.settle_payment_once(**kw)
+        assert len(calls) == 2                  # no token → both attempts run
