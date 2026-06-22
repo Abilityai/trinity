@@ -297,3 +297,366 @@ class TestServiceDecisions:
         idem_service.fail(d1)
         d2 = idem_service.begin("agent:a", "k1")
         assert d2.replay is False  # reclaimed as new
+
+
+# ---------------------------------------------------------------------------
+# Effect-scoped idempotency (#1084) — per-sink exactly-once-style guard
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def effect_service(idem_ops, monkeypatch):
+    """idempotency_service loaded with a fake `database.db` that supports BOTH
+    the real idempotency ops (temp DB) AND a controllable get_execution(), so
+    the effect-scoped guard (#1084) can resolve+validate executions in-unit.
+
+    Tests register executions via module._test_executions[execution_id] = ns.
+    """
+    executions: dict = {}
+
+    fake_db = types.SimpleNamespace(
+        idempotency_claim=idem_ops.claim,
+        idempotency_attach_execution=idem_ops.attach_execution,
+        idempotency_complete=idem_ops.complete,
+        idempotency_release=idem_ops.release,
+        idempotency_purge_expired=idem_ops.purge_expired,
+        get_execution=lambda eid: executions.get(eid),
+    )
+    fake_database = types.ModuleType("database")
+    fake_database.db = fake_db
+    monkeypatch.setitem(sys.modules, "database", fake_database)
+
+    path = os.path.join(_backend_path, "services", "idempotency_service.py")
+    spec = importlib.util.spec_from_file_location("_idem_service_effect", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module._test_executions = executions
+    return module
+
+
+def _register_execution(svc, execution_id, agent_name, **extra):
+    svc._test_executions[execution_id] = types.SimpleNamespace(
+        agent_name=agent_name,
+        triggered_by=extra.get("triggered_by", "telegram"),
+        source_user_email=extra.get("source_user_email", "u@example.com"),
+    )
+
+
+async def _run_effect(
+    svc,
+    *,
+    execution_id,
+    agent_name,
+    identifying_args,
+    effect_type="message",
+    dedup_label="",
+    body_result=None,
+    body_exc=None,
+    sends=None,
+):
+    """Simulate a sink: enter effect_guard, run the 'send' unless replay."""
+    try:
+        async with svc.effect_guard(
+            effect_type,
+            identifying_args,
+            execution_id=execution_id,
+            agent_name=agent_name,
+            dedup_label=dedup_label,
+        ) as g:
+            if g.replay:
+                return ("replay", g.snapshot)
+            if body_exc is not None:
+                raise body_exc
+            if sends is not None:
+                sends.append(identifying_args)
+            g.snapshot = body_result if body_result is not None else {"ok": True}
+            return ("sent", g.snapshot)
+    except svc.EffectInProgressError as e:
+        return ("in_flight", str(e))
+
+
+class TestEffectScopeAndKey:
+    def test_effect_scope_helper(self, effect_service):
+        assert effect_service.make_effect_scope("exec-1") == "effect:exec-1"
+
+    def test_payment_scope_helper(self, effect_service):
+        assert effect_service.make_payment_scope("areq-9") == "payment:areq-9"
+
+    def test_derive_effect_key_deterministic(self, effect_service):
+        a = effect_service.derive_effect_key(
+            "exec-1", "message", {"recipient": "u@e.com", "channel": "telegram"}
+        )
+        b = effect_service.derive_effect_key(
+            "exec-1", "message", {"recipient": "u@e.com", "channel": "telegram"}
+        )
+        assert a == b
+        assert a.startswith("message:")
+
+    def test_derive_effect_key_arg_order_insensitive(self, effect_service):
+        """Dict identity is canonicalized — key order must not change the key."""
+        a = effect_service.derive_effect_key(
+            "exec-1", "message", {"recipient": "u@e.com", "channel": "telegram"}
+        )
+        b = effect_service.derive_effect_key(
+            "exec-1", "message", {"channel": "telegram", "recipient": "u@e.com"}
+        )
+        assert a == b
+
+    def test_derive_effect_key_dedup_label_distinct(self, effect_service):
+        a = effect_service.derive_effect_key("exec-1", "message", {"r": "x"}, "")
+        b = effect_service.derive_effect_key("exec-1", "message", {"r": "x"}, "second")
+        assert a != b
+
+    def test_derive_effect_key_execution_scoped(self, effect_service):
+        a = effect_service.derive_effect_key("exec-1", "message", {"r": "x"})
+        b = effect_service.derive_effect_key("exec-2", "message", {"r": "x"})
+        assert a != b
+
+    def test_derive_effect_key_recipient_distinct(self, effect_service):
+        a = effect_service.derive_effect_key("exec-1", "message", {"recipient": "a@e.com"})
+        b = effect_service.derive_effect_key("exec-1", "message", {"recipient": "b@e.com"})
+        assert a != b
+
+
+class TestResolveAndValidateExecution:
+    def test_valid_match_returns_execution(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        ex = effect_service.resolve_and_validate_execution("exec-1", "agentA")
+        assert ex is not None
+        assert ex.agent_name == "agentA"
+
+    def test_agent_mismatch_fail_open(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        # The execution belongs to agentA — agentB must NOT be able to claim it.
+        ex = effect_service.resolve_and_validate_execution("exec-1", "agentB")
+        assert ex is None
+
+    def test_missing_execution_fail_open(self, effect_service):
+        ex = effect_service.resolve_and_validate_execution("nope", "agentA")
+        assert ex is None
+
+    def test_none_execution_id_fail_open(self, effect_service):
+        ex = effect_service.resolve_and_validate_execution(None, "agentA")
+        assert ex is None
+
+
+class TestEffectGuard:
+    async def test_success_then_replay_no_second_send(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        outcome1, snap1 = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, body_result={"message_id": "m1"}, sends=sends,
+        )
+        assert outcome1 == "sent"
+        assert snap1 == {"message_id": "m1"}
+
+        # Re-enter the SAME identity → replay, NO second send.
+        outcome2, snap2 = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, body_result={"message_id": "SHOULD_NOT_RUN"}, sends=sends,
+        )
+        assert outcome2 == "replay"
+        assert snap2 == {"message_id": "m1"}
+        assert len(sends) == 1  # exactly one real send
+
+    async def test_different_body_same_identity_one_send(self, effect_service):
+        """CRITICAL (Issue 1): the LLM body is NOT part of the key — a second
+        call with a *different generated body* but the same resolved identity
+        must dedupe to exactly one send."""
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, body_result={"body": "Hello!"}, sends=sends,
+        )
+        # Different body content, same (execution, recipient, channel).
+        outcome2, _ = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, body_result={"body": "Completely different text"}, sends=sends,
+        )
+        assert outcome2 == "replay"
+        assert len(sends) == 1
+
+    async def test_dedup_label_allows_second_intentional_send(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        outcome2, _ = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, dedup_label="reminder", sends=sends,
+        )
+        assert outcome2 == "sent"
+        assert len(sends) == 2  # distinct label → two sends allowed
+
+    async def test_fresh_execution_id_not_deduped(self, effect_service):
+        """A #271-style retry creates a fresh execution_id → distinct scope →
+        the send is allowed again."""
+        _register_execution(effect_service, "exec-1", "agentA")
+        _register_execution(effect_service, "exec-2", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        outcome2, _ = await _run_effect(
+            effect_service, execution_id="exec-2", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome2 == "sent"
+        assert len(sends) == 2
+
+    async def test_exception_releases_for_retry(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+
+        with pytest.raises(ValueError):
+            await _run_effect(
+                effect_service, execution_id="exec-1", agent_name="agentA",
+                identifying_args=args, body_exc=ValueError("boom"),
+            )
+
+        # The failed first attempt released the claim → retry runs the body.
+        sends = []
+        outcome2, _ = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome2 == "sent"
+        assert len(sends) == 1
+
+    async def test_in_flight_replay_raises_not_silent(self, effect_service):
+        """codex #6: an in_flight replay must raise a retryable error, NOT
+        silently return None-as-success (skip the send AND report success)."""
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+
+        # Manually leave an in_flight claim for this exact effect key.
+        scope = effect_service.make_effect_scope("exec-1")
+        key = effect_service.derive_effect_key("exec-1", "message", args, "")
+        effect_service.begin(scope, key)  # claims in_flight, never completed
+
+        outcome, _ = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args,
+        )
+        assert outcome == "in_flight"
+
+    async def test_fail_open_when_execution_absent(self, effect_service):
+        """No execution registered (old image / absent execution_id) → the send
+        proceeds with dedup disabled (fail-open), no exception."""
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        outcome, _ = await _run_effect(
+            effect_service, execution_id="ghost", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome == "sent"
+        assert len(sends) == 1
+        # A second call also proceeds — dedup is disabled, not silently swallowed.
+        outcome2, _ = await _run_effect(
+            effect_service, execution_id="ghost", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome2 == "sent"
+        assert len(sends) == 2
+
+    async def test_agent_mismatch_fail_open_send_proceeds(self, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+        # agentB borrows agentA's execution id → fail-open (no dedup), send runs.
+        outcome, _ = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentB",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome == "sent"
+        assert len(sends) == 1
+
+    async def test_completed_effect_replays_after_aging(self, effect_service, idem_ops):
+        """Issue 2 (long-TTL): a completed effect row outlives the lease window.
+        Age the row 6h (≪ 24h default) — it must still replay, not re-send."""
+        _register_execution(effect_service, "exec-1", "agentA")
+        args = {"recipient": "u@e.com", "channel": "telegram"}
+        sends = []
+
+        await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, body_result={"message_id": "m1"}, sends=sends,
+        )
+
+        # Age the persisted row by 6 hours — still inside the 24h TTL.
+        scope = effect_service.make_effect_scope("exec-1")
+        key = effect_service.derive_effect_key("exec-1", "message", args, "")
+        aged = _iso(datetime.now(timezone.utc) - timedelta(hours=6))
+        with _direct(idem_ops) as conn:
+            conn.execute(
+                "UPDATE idempotency_keys SET created_at=?, updated_at=? "
+                "WHERE scope=? AND idempotency_key=?",
+                (aged, aged, scope, key),
+            )
+            conn.commit()
+
+        outcome2, snap2 = await _run_effect(
+            effect_service, execution_id="exec-1", agent_name="agentA",
+            identifying_args=args, sends=sends,
+        )
+        assert outcome2 == "replay"
+        assert snap2 == {"message_id": "m1"}
+        assert len(sends) == 1
+
+
+class TestPaymentScopeGuard:
+    async def test_payment_replay_one_settle(self, effect_service):
+        """Nevermined: a retried paid chat with the SAME agent_request_id must
+        settle exactly once; the second resolves to a replay."""
+        settles = []
+
+        async def _settle(label):
+            async with effect_service.effect_guard(
+                "nevermined_settle",
+                {"phase": "settle"},
+                payment_request_id="areq-9",
+                execution_id=f"exec-{label}",
+            ) as g:
+                if g.replay:
+                    return ("replay", g.snapshot)
+                settles.append(label)
+                g.snapshot = {"settled": True, "tx": "0xabc"}
+                return ("settled", g.snapshot)
+
+        out1, snap1 = await _settle("1")
+        out2, snap2 = await _settle("2")  # same agent_request_id, fresh exec id
+        assert out1 == "settled"
+        assert out2 == "replay"
+        assert snap2 == {"settled": True, "tx": "0xabc"}
+        assert len(settles) == 1
+
+    async def test_distinct_payment_requests_both_settle(self, effect_service):
+        settles = []
+
+        async def _settle(areq):
+            async with effect_service.effect_guard(
+                "nevermined_settle", {"phase": "settle"},
+                payment_request_id=areq, execution_id="exec-x",
+            ) as g:
+                if g.replay:
+                    return "replay"
+                settles.append(areq)
+                g.snapshot = {"settled": True}
+                return "settled"
+
+        assert await _settle("areq-1") == "settled"
+        assert await _settle("areq-2") == "settled"
+        assert len(settles) == 2
