@@ -459,6 +459,10 @@ class ShareFileMcpRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
     display_name: Optional[str] = Field(default=None, max_length=255)
     expires_in: Optional[int] = None
+    # Effect-scoped idempotency (#1084): a re-run of the same turn sharing the
+    # same file replays the original signed URL instead of minting a new token.
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+    dedup_label: str = Field(default="", max_length=200)
 
 
 class ShareFileResponse(BaseModel):

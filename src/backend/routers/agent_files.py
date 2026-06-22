@@ -1,6 +1,4 @@
 """Agent file management, info, and folder endpoints."""
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -35,6 +33,7 @@ from services.agent_shared_files_service import (
     build_download_url,
     MAX_AGENT_QUOTA_BYTES,
 )
+from services.idempotency_service import EffectInProgressError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -479,13 +478,20 @@ async def share_agent_file(
             detail="Agent-scoped MCP key cannot share files for a different agent.",
         )
 
-    result = await create_share(
-        agent_name=agent_name,
-        filename=body.filename,
-        display_name=body.display_name,
-        expires_in=body.expires_in,
-        created_by=actor_agent or current_user.username,
-    )
+    try:
+        result = await create_share(
+            agent_name=agent_name,
+            filename=body.filename,
+            display_name=body.display_name,
+            expires_in=body.expires_in,
+            created_by=actor_agent or current_user.username,
+            execution_id=body.execution_id,
+            dedup_label=body.dedup_label,
+        )
+    except EffectInProgressError as e:
+        # Concurrent duplicate share for the same (execution, file) is mid-flight
+        # (#1084). Retryable — never a silent skip-and-succeed.
+        raise HTTPException(status_code=409, detail=str(e))
     return ShareFileResponse(**result)
 
 

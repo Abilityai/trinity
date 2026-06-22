@@ -971,3 +971,97 @@ class TestVoipCallGuard:
         await svc.place_outbound_call(to_number="+14155551234", **base)
         await svc.place_outbound_call(to_number="+14155559999", **base)
         assert len(dials) == 2                 # different dial target → distinct key
+
+
+# ---------------------------------------------------------------------------
+# share_file wiring (#1084) — guard on filename + content version
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def shared_files_mod(effect_service, monkeypatch):
+    """Load agent_shared_files_service standalone with stubbed docker/settings
+    deps + the effect idempotency module injected."""
+    eff_db = sys.modules["database"].db
+    eff_db.get_file_sharing_enabled = lambda agent: True
+
+    services_stub = types.ModuleType("services")
+    services_stub.idempotency_service = effect_service
+
+    docker_service_stub = types.ModuleType("services.docker_service")
+    docker_service_stub.get_agent_container = lambda agent: object()
+    docker_utils_stub = types.ModuleType("services.docker_utils")
+
+    async def _fake_archive(container, path):
+        return (iter([]), {})
+
+    docker_utils_stub.container_get_archive = _fake_archive
+    settings_stub = types.ModuleType("services.settings_service")
+    settings_stub.get_public_chat_url = lambda: "https://x"
+
+    services_stub.docker_service = docker_service_stub
+    services_stub.docker_utils = docker_utils_stub
+    services_stub.settings_service = settings_stub
+
+    monkeypatch.setitem(sys.modules, "services", services_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)
+    monkeypatch.setitem(sys.modules, "services.docker_service", docker_service_stub)
+    monkeypatch.setitem(sys.modules, "services.docker_utils", docker_utils_stub)
+    monkeypatch.setitem(sys.modules, "services.settings_service", settings_stub)
+
+    path = os.path.join(_backend_path, "services", "agent_shared_files_service.py")
+    spec = importlib.util.spec_from_file_location("_shared_files_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestShareFileGuard:
+    def _wire(self, mod, monkeypatch, content_by_call=None):
+        finals = []
+
+        async def fake_extract(agent, container_path):
+            data = content_by_call.pop(0) if content_by_call else b"file-bytes-v1"
+            return (data, os.path.basename(container_path))
+
+        def fake_finalize(agent_name, filename, data, basename, size_bytes,
+                          *, display_name, expires_in, created_by):
+            finals.append(filename)
+            tok = f"tok{len(finals)}"
+            return {
+                "file_id": f"id-{len(finals)}",
+                "url": f"https://x/api/files/id-{len(finals)}?sig={tok}",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "size_bytes": size_bytes,
+                "mime_type": "text/csv",
+            }
+
+        monkeypatch.setattr(mod, "extract_from_agent", fake_extract)
+        monkeypatch.setattr(mod, "_finalize_share", fake_finalize)
+        return finals
+
+    async def test_rerun_same_file_replays_url(self, shared_files_mod, effect_service, monkeypatch):
+        _register_execution(effect_service, "exec-1", "agentA")
+        finals = self._wire(shared_files_mod, monkeypatch)
+
+        r1 = await shared_files_mod.create_share("agentA", "report.csv", execution_id="exec-1")
+        r2 = await shared_files_mod.create_share("agentA", "report.csv", execution_id="exec-1")
+        assert r1["url"] == r2["url"]         # same signed URL replayed, not a new token
+        assert len(finals) == 1               # token minted once
+
+    async def test_changed_content_new_share(self, shared_files_mod, effect_service, monkeypatch):
+        _register_execution(effect_service, "exec-1", "agentA")
+        # Same filename, DIFFERENT bytes on the 2nd call → distinct content version.
+        finals = self._wire(
+            shared_files_mod, monkeypatch, content_by_call=[b"v1-bytes", b"v2-bytes"]
+        )
+
+        r1 = await shared_files_mod.create_share("agentA", "report.csv", execution_id="exec-1")
+        r2 = await shared_files_mod.create_share("agentA", "report.csv", execution_id="exec-1")
+        assert r1["url"] != r2["url"]         # changed content → new share
+        assert len(finals) == 2
+
+    async def test_no_execution_id_fail_open(self, shared_files_mod, effect_service, monkeypatch):
+        finals = self._wire(shared_files_mod, monkeypatch)
+        await shared_files_mod.create_share("agentA", "report.csv")
+        await shared_files_mod.create_share("agentA", "report.csv")
+        assert len(finals) == 2               # no execution_id → no dedup
