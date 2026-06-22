@@ -67,12 +67,30 @@ export function createFileTools(
             "Seconds until the link expires. Default 604800 (7 days). " +
               "Minimum 60, maximum 604800."
           ),
+        execution_id: z
+          .string()
+          .optional()
+          .describe(
+            "Your current execution_id — shown in the 'Execution Context' block of your system " +
+              "prompt. Pass it so a re-run of this turn replays the original signed URL instead of " +
+              "minting a new token (effect-scoped idempotency, #1084). Optional: if omitted, a new " +
+              "share is created each time."
+          ),
+        dedup_label: z
+          .string()
+          .optional()
+          .describe(
+            "Optional discriminator to intentionally create TWO distinct shares of the same file " +
+              "in one turn. Default empty → at-most-one share per (filename, content) per turn."
+          ),
       }),
       execute: async (
         params: {
           filename: string;
           display_name?: string;
           expires_in?: number;
+          execution_id?: string;
+          dedup_label?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -106,6 +124,8 @@ export function createFileTools(
             filename: params.filename,
             display_name: params.display_name,
             expires_in: params.expires_in,
+            execution_id: params.execution_id,
+            dedup_label: params.dedup_label,
           });
 
           return JSON.stringify(
