@@ -216,6 +216,17 @@ async def inject_credentials(
                    f"startup files, no path traversal).",
         )
 
+    # #11 review: `.mcp.json` is a structure-validated TEXT config. It must NOT
+    # arrive via the binary (`files_b64`) channel, which would skip the
+    # validate_mcp_config guard below and let an attacker reintroduce the #590
+    # RCE-by-config (a stdio `command` MCP server) through base64.
+    if ".mcp.json" in request_body.files_b64:
+        raise HTTPException(
+            status_code=400,
+            detail=".mcp.json must be injected as text (files), not binary (files_b64), "
+                   "so its content can be validated.",
+        )
+
     # AISEC-C2 / #590 Layer 2 (#598): structure-validate .mcp.json content
     # before forwarding to the agent. Closes the RCE-by-config bypass while
     # restoring the legitimate post-deploy MCP server editing flow.

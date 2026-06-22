@@ -203,6 +203,8 @@ class TestStillBlockedAfterWidening:
         ".claude/evil.pem", ".config/systemd/user/x.key",
         # ssh login / command-exec vectors
         ".ssh/authorized_keys", ".ssh/config", ".ssh/known_hosts", ".ssh/rc",
+        # #11 review: .ssh locked to id_* — even cert-shaped files blocked
+        ".ssh/secret.key", ".ssh/server.pem",
         # git hook / fsmonitor exec
         ".gitconfig", ".git/hooks/pre-commit",
         # on PATH

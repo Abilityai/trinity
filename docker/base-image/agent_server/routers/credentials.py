@@ -49,6 +49,11 @@ def _safe_credential_target(rel_path: str) -> Path:
 def _write_credential_file(rel_path: str, *, text: str = None, b64: str = None) -> str:
     """Policy-checked, traversal-guarded write with parent-dir creation and
     0o600 perms. Exactly one of ``text``/``b64`` is provided."""
+    # #11 review (defense in depth): `.mcp.json` is content-validated on the
+    # backend text path only — never accept it as binary, which would bypass
+    # that guard (#590 RCE-by-config).
+    if b64 is not None and rel_path.rsplit("/", 1)[-1] == ".mcp.json":
+        raise HTTPException(status_code=400, detail=".mcp.json may not be injected as binary")
     target = _safe_credential_target(rel_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if b64 is not None:

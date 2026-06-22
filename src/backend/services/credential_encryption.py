@@ -43,6 +43,29 @@ DEFAULT_CREDENTIAL_FILES = [".env", ".mcp.json"]
 _ARCHIVE_V2_MARKER = "__cred_archive_v2__"
 
 
+def validate_credential_set(files: Dict[str, str], files_b64: Dict[str, str] = None) -> None:
+    """Enforce the curated credential policy + `.mcp.json` content guard over a
+    text/binary credential set (#11 review). Raises ``ValueError`` on violation.
+
+    Used on the IMPORT boundary so the backend re-validates a decrypted archive
+    before writing — the dual-layer (backend + agent-server) the issue mandates,
+    rather than trusting the downstream /inject check alone. The user-facing
+    inject router enforces the same rules inline (HTTP 400)."""
+    from services.credential_paths import disallowed_paths
+    files_b64 = files_b64 or {}
+    bad = disallowed_paths(list(files) + list(files_b64))
+    if bad:
+        raise ValueError(f"Archive contains disallowed credential path(s): {bad}")
+    if ".mcp.json" in files_b64:
+        raise ValueError(".mcp.json may not be binary (content must be validatable)")
+    if ".mcp.json" in files:
+        from services.mcp_validator import validate_mcp_config, McpValidationError
+        try:
+            validate_mcp_config(files[".mcp.json"])
+        except McpValidationError as e:
+            raise ValueError(f"Invalid .mcp.json in archive: {e}")
+
+
 class CredentialsFileNotFoundError(ValueError):
     """Raised by ``import_to_agent`` when ``.credentials.enc`` is absent.
 
@@ -387,6 +410,12 @@ class CredentialEncryptionService:
 
         if not files and not files_b64:
             raise ValueError("Encrypted file contains no credential files")
+
+        # #11 review: enforce the curated policy + .mcp.json content guard on the
+        # IMPORT boundary too (backend layer), not only the agent-server /inject
+        # layer. An archive can only be forged with the server key, but dual-layer
+        # is the issue's invariant — don't rely solely on the downstream check.
+        validate_credential_set(files, files_b64)
 
         # Write decrypted files to agent (text + binary)
         await self.write_agent_credential_files(agent_name, files, files_b64)

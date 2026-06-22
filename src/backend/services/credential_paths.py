@@ -34,7 +34,11 @@ ALLOW_EXACT = {".env", ".credentials.enc", ".mcp.json"}
 # matches one or more whole segments); a pattern with no "/" is matched against
 # the path's BASENAME (so "*.pem" allows a .pem anywhere not under a denied dir).
 ALLOW_GLOBS = [
-    ".config/gcloud/**",   # cloud SDK ADC / service-account JSON
+    # cloud SDK ADC / service-account JSON. NOTE: a workload-identity ADC file
+    # can declare an `executable` credential_source; google-auth only honors it
+    # when GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1 (non-default), so it is
+    # not an injection→exec vector here — but don't set that env var fleet-wide.
+    ".config/gcloud/**",
     ".kube/config",        # kubeconfig
     "*.pem", "*.key", "*.crt", "*.cert", "*.p12", "*.pfx",  # TLS / cert material
     ".ssh/id_*",           # SSH private/public keys (NOT authorized_keys/config)
@@ -96,6 +100,12 @@ def is_allowed_credential_path(path: str) -> bool:
     if any(s in ("", ".", "..") for s in segs):   # empty / "." / traversal
         return False
     if any(_matches(path, d) for d in DENY_GLOBS):  # deny precedence
+        return False
+    # `.ssh/` is high-risk: permit ONLY `id_*` key files — even a file that
+    # would otherwise match `*.pem`/`*.key`. ssh never auto-loads a stray key,
+    # but this keeps the most sensitive dir to exactly the intent ("SSH keys =
+    # id_*") instead of "any cert-shaped file under .ssh" (#11 review).
+    if segs[0] == ".ssh" and not fnmatch.fnmatchcase(segs[-1], "id_*"):
         return False
     if path in ALLOW_EXACT:
         return True

