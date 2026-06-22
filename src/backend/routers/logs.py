@@ -5,31 +5,14 @@ Provides admin-only access to log statistics, retention configuration,
 and manual archival operations.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from typing import Optional
 
-from models import User
+from models import ArchiveRequest, RetentionConfig, User
 from dependencies import get_current_user
 from services.log_archive_service import log_archive_service, LOG_RETENTION_DAYS
 import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/logs", tags=["logs"])
-
-
-# Request/Response Models
-
-class RetentionConfig(BaseModel):
-    """Retention configuration."""
-    retention_days: int = Field(..., ge=1, le=3650, description="Days to retain logs")
-    archive_enabled: bool = Field(..., description="Whether archival is enabled")
-    cleanup_hour: int = Field(..., ge=0, le=23, description="Hour (UTC) to run nightly archival")
-
-
-class ArchiveRequest(BaseModel):
-    """Manual archive request."""
-    retention_days: Optional[int] = Field(None, ge=1, le=3650, description="Override retention days")
-    delete_after_archive: bool = Field(True, description="Delete originals after archiving")
 
 
 # Dependencies
@@ -186,4 +169,3 @@ async def log_service_health(current_user: User = Depends(require_admin)):
         "retention_days": int(os.getenv("LOG_RETENTION_DAYS", "90")),
         "cleanup_hour": int(os.getenv("LOG_CLEANUP_HOUR", "3")),
     }
-

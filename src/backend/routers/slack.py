@@ -15,14 +15,12 @@ Authenticated Endpoints:
 """
 
 import logging
-from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
 
 from database import db
 from dependencies import get_current_user
-from models import User
+from models import SlackEventResponse, User
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
 from services.settings_service import get_slack_signing_secret
@@ -49,12 +47,6 @@ def set_webhook_transport(transport):
 # =========================================================================
 
 public_router = APIRouter(prefix="/api/public/slack", tags=["slack-public"])
-
-
-class SlackEventResponse(BaseModel):
-    """Response to Slack events (always return 200)."""
-    ok: bool = True
-    challenge: Optional[str] = None
 
 
 @public_router.post("/events", response_model=SlackEventResponse)

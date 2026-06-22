@@ -8,11 +8,10 @@ Internal fleet traffic (chat_with_agent MCP tool) bypasses this entirely.
 import base64
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from models import PaidChatRequest
 
 from database import db
 from services.nevermined_payment_service import (
@@ -23,11 +22,6 @@ from services.task_execution_service import get_task_execution_service
 
 router = APIRouter(prefix="/api/paid", tags=["paid"])
 logger = logging.getLogger(__name__)
-
-
-class PaidChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
 
 
 @router.get("/{agent_name}/info")

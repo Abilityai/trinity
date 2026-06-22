@@ -11,11 +11,17 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
-from pydantic import BaseModel, Field, field_validator
 
 from database import db
 from dependencies import get_authorized_agent, get_current_user
-from models import User
+from models import (
+    LoopRunResponse,
+    LoopStatusResponse,
+    StartLoopRequest,
+    StartLoopResponse,
+    StopLoopResponse,
+    User,
+)
 from services.loop_service import get_loop_service
 
 logger = logging.getLogger(__name__)
@@ -25,74 +31,6 @@ logger = logging.getLogger(__name__)
 # main.py only needs one import.
 agent_router = APIRouter(prefix="/api/agents", tags=["loops"])
 loop_router = APIRouter(prefix="/api/loops", tags=["loops"])
-
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-
-MAX_RUNS_LIMIT = 100
-MAX_MESSAGE_LEN = 100_000
-MAX_DELAY_SECONDS = 3600
-MAX_TIMEOUT_PER_RUN = 7200
-MAX_STOP_SIGNAL_LEN = 200
-
-
-class StartLoopRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LEN)
-    max_runs: int = Field(..., ge=1, le=MAX_RUNS_LIMIT)
-    stop_signal: Optional[str] = Field(default=None, max_length=MAX_STOP_SIGNAL_LEN)
-    delay_seconds: int = Field(default=0, ge=0, le=MAX_DELAY_SECONDS)
-    timeout_per_run: Optional[int] = Field(default=None, ge=10, le=MAX_TIMEOUT_PER_RUN)
-    model: Optional[str] = None
-    allowed_tools: Optional[List[str]] = None
-
-    @field_validator("stop_signal")
-    @classmethod
-    def _normalize_stop_signal(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None  # empty after strip → fixed mode
-
-
-class StartLoopResponse(BaseModel):
-    loop_id: str
-    status: str
-    agent_name: str
-    max_runs: int
-
-
-class LoopRunResponse(BaseModel):
-    run_number: int
-    execution_id: Optional[str] = None
-    status: str
-    response_preview: Optional[str] = None
-    cost: Optional[float] = None
-    duration_ms: Optional[int] = None
-    error: Optional[str] = None
-    started_at: str
-    completed_at: Optional[str] = None
-
-
-class LoopStatusResponse(BaseModel):
-    loop_id: str
-    agent_name: str
-    status: str
-    max_runs: int
-    runs_completed: int
-    stop_reason: Optional[str] = None
-    last_response: Optional[str] = None
-    error: Optional[str] = None
-    runs: List[LoopRunResponse]
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-
-
-class StopLoopResponse(BaseModel):
-    loop_id: str
-    status: str  # "stopping" | "already_done"
 
 
 # ---------------------------------------------------------------------------

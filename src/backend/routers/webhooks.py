@@ -21,7 +21,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from models import CONTEXT_MAX_CHARS, WebhookTriggerRequest
 
 from database import db
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -39,28 +39,12 @@ SCHEDULER_URL = os.getenv("SCHEDULER_URL", "http://scheduler:8001")
 WEBHOOK_RATE_LIMIT = int(os.getenv("WEBHOOK_RATE_LIMIT", "10"))
 WEBHOOK_RATE_WINDOW = 60  # seconds
 
-# Max length for the optional context field
-CONTEXT_MAX_CHARS = 4000
-
 # Webhook tokens are secrets.token_urlsafe(32) — exactly 43 chars (CSO OBS-2).
 # Tightened from {20,60}: prior regex was a defense-in-depth early-reject;
 # DB lookup is authoritative either way.
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{43}$")
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
-
-
-class WebhookTriggerRequest(BaseModel):
-    """Optional body for a webhook trigger call."""
-    context: Optional[str] = Field(
-        default=None,
-        description="Additional context appended to the schedule message.",
-        max_length=CONTEXT_MAX_CHARS,
-    )
-    metadata: Optional[dict] = Field(
-        default=None,
-        description="Arbitrary key/value metadata stored on the execution record.",
-    )
 
 
 # ---------------------------------------------------------------------------

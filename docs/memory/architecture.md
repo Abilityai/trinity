@@ -64,10 +64,10 @@
 
 **OpenTelemetry tracing** (RELIABILITY-002): auto-instrumentation for FastAPI/httpx/Redis; `traceparent` propagated through inter-agent calls; OTLP/gRPC export to `trinity-otel-collector:4317`; `OTEL_ENABLED=1`, sampling via `OTEL_SAMPLE_RATE` (default 10%).
 
-**Routers (`routers/`)** — 53 router modules:
+**Routers (`routers/`)** — 63 router modules:
 
 *Core Agent:*
-- `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (642 lines)
+- `agents.py` - Core CRUD, start/stop, logs, stats, queue, activities, terminal (1054 lines)
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
 - `agent_data.py` - Runtime-data export/import (`data_paths`) over the durable home volume (#1169)
@@ -139,7 +139,7 @@
 - `system_agent.py` - System agent management
 - `sessions.py` - Session tab endpoints — see [Session Tab](#session-tab)
 
-**Services (`services/`)** — 37 service modules:
+**Services (`services/`)** — 66 service modules:
 
 *Core:*
 - `docker_service.py` - Docker container management (single point of Docker interaction, Invariant #11)
@@ -800,7 +800,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 13. **MCP Server = Third Surface in Sync** — The MCP server (`src/mcp-server/src/tools/*.ts`) is a TypeScript proxy over the backend API. When adding a backend endpoint for external access, the MCP tool module needs updating too. Three surfaces must stay in sync: backend router, agent server (if internal), MCP tool (if external).
 
-14. **Pydantic Models Centralized in `models.py`** — Request/response models live in `models.py`, not scattered across routers. Keeps the API contract in one place.
+14. **Pydantic Models Centralized in `models.py`** — Request/response models live in `models.py`, not scattered across routers (#654). Keeps the API contract in one place. **Scope:** this invariant governs **router** models — a `class X(BaseModel)` must not be defined under `routers/` (enforced by the static guard `tests/unit/test_models_centralized.py`). Two model homes are **intentionally separate** and out of scope: `db_models.py` (DB-row / persistence models — a distinct layer) and `adapters/base.py` (the ChannelAdapter ABC's `NormalizedMessage`/`ChannelResponse`). One documented exception, allowlisted in the guard: `routers/canary.py::RunCycleRequest` evaluates `INVARIANTS` (from the `canary` library) in a `Field(description=…)` at class-definition time, and the `canary` library imports `TaskExecutionStatus` back from `models` — relocating it would force `models.py` to `from canary import …`, inverting the dependency direction of a module meant to be a low-level leaf everything imports *from*.
 
 15. **API URL Nesting Convention** — Agent-scoped resources nest under `/api/agents/{name}/...`. Platform-wide resources get top-level prefixes (`/api/executions`, `/api/operator-queue`).
 

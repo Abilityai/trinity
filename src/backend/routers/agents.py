@@ -14,16 +14,16 @@ import json
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
-from pydantic import BaseModel
 
 from models import (
     AgentConfig,
     AgentStatus,
-    User,
-    DeployLocalRequest,
     CircuitBreakerConfigUpdate,
+    DeployLocalRequest,
     ExecutionResultEnvelope,
+    HeartbeatPayload,
     TaskExecutionStatus,
+    User,
 )
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
@@ -780,12 +780,6 @@ async def set_circuit_breaker_endpoint(
 # ============================================================================
 # Heartbeat Endpoint (RELIABILITY-004 / #307)
 # ============================================================================
-
-class HeartbeatPayload(BaseModel):
-    """Lightweight liveness payload POSTed by the agent every ~5s."""
-    memory_mb: Optional[float] = None
-    active_executions: Optional[int] = None
-    uptime_s: Optional[float] = None
 
 
 @router.post("/{agent_name}/heartbeat")

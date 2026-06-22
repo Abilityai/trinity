@@ -21,11 +21,19 @@ from typing import Optional, List
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
-from pydantic import BaseModel
 
 from database import db
 from dependencies import get_current_user, OwnedAgentByName
-from models import User
+from models import (
+    TelegramBindingResponse,
+    TelegramConfigureRequest,
+    TelegramGroupConfigResponse,
+    TelegramGroupConfigUpdateRequest,
+    TelegramGroupMessageRequest,
+    TelegramTestRequest,
+    TelegramWebhookResponse,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +58,6 @@ def set_webhook_transport(transport):
 public_router = APIRouter(prefix="/api/telegram", tags=["telegram-public"])
 
 
-class TelegramWebhookResponse(BaseModel):
-    ok: bool = True
-
-
 @public_router.post("/webhook/{webhook_secret}", response_model=TelegramWebhookResponse)
 async def handle_telegram_webhook(webhook_secret: str, request: Request):
     """
@@ -75,48 +79,6 @@ async def handle_telegram_webhook(webhook_secret: str, request: Request):
 # =========================================================================
 
 auth_router = APIRouter(prefix="/api/agents", tags=["telegram"])
-
-
-class TelegramBindingResponse(BaseModel):
-    agent_name: str
-    bot_username: Optional[str] = None
-    bot_id: Optional[str] = None
-    webhook_url: Optional[str] = None
-    bot_link: Optional[str] = None
-    configured: bool = False
-    group_count: int = 0
-    warning: Optional[str] = None
-
-
-class TelegramConfigureRequest(BaseModel):
-    bot_token: str
-
-
-class TelegramTestRequest(BaseModel):
-    chat_id: Optional[str] = None
-    message: str = "Hello from Trinity! Your Telegram bot is configured correctly."
-
-
-class TelegramGroupConfigResponse(BaseModel):
-    id: int
-    chat_id: str
-    chat_title: Optional[str] = None
-    chat_type: str = "group"
-    trigger_mode: str = "mention"
-    welcome_enabled: bool = False
-    welcome_text: Optional[str] = None
-    is_active: bool = True
-
-
-class TelegramGroupConfigUpdateRequest(BaseModel):
-    trigger_mode: Optional[str] = None
-    welcome_enabled: Optional[bool] = None
-    welcome_text: Optional[str] = None
-
-
-class TelegramGroupMessageRequest(BaseModel):
-    """Request model for proactive group messaging (Issue #349)."""
-    message: str
 
 
 @auth_router.get("/{agent_name}/telegram", response_model=TelegramBindingResponse)

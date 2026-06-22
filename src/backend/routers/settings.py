@@ -8,14 +8,25 @@ import logging
 import os
 import re
 import httpx
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from models import User, AgentDefaultResourcesUpdate, AgentDefaultAccessPolicyUpdate
+from models import (
+    AgentDefaultAccessPolicyUpdate,
+    AgentDefaultResourcesUpdate,
+    AgentQuotaUpdate,
+    ApiKeyTest,
+    ApiKeyUpdate,
+    GitHubTemplatesUpdate,
+    McpUrlUpdate,
+    OpsSettingsUpdate,
+    SlackConnectRequest,
+    SlackSettingsUpdate,
+    User,
+)
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -44,17 +55,8 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 # ============================================================================
-# API Keys Management - Helper Functions and Models
+# API Keys Management - Helper Functions
 # ============================================================================
-
-class ApiKeyUpdate(BaseModel):
-    """Request body for updating an API key."""
-    api_key: str
-
-
-class ApiKeyTest(BaseModel):
-    """Request body for testing an API key."""
-    api_key: str
 
 
 # Note: get_anthropic_api_key and get_github_pat are now imported from
@@ -74,11 +76,6 @@ def mask_api_key(key: str) -> str:
 
 # Note: OPS_SETTINGS_DEFAULTS and OPS_SETTINGS_DESCRIPTIONS are now imported from
 # services.settings_service for proper architecture
-
-
-class OpsSettingsUpdate(BaseModel):
-    """Request body for updating ops settings."""
-    settings: Dict[str, str]
 
 
 def require_admin(current_user: User):
@@ -598,13 +595,6 @@ async def get_slack_settings_status(
         raise HTTPException(status_code=500, detail=f"Failed to get Slack settings: {str(e)}")
 
 
-class SlackSettingsUpdate(BaseModel):
-    """Request body for updating Slack settings."""
-    client_id: str = None
-    client_secret: str = None
-    signing_secret: str = None
-
-
 @router.put("/slack")
 async def update_slack_settings(
     body: SlackSettingsUpdate,
@@ -679,12 +669,6 @@ async def delete_slack_settings(
 # ============================================================================
 # Slack Transport Management (Socket Mode / Webhook)
 # ============================================================================
-
-
-class SlackConnectRequest(BaseModel):
-    """Request body for connecting Slack transport."""
-    app_token: Optional[str] = None  # xapp-... for Socket Mode
-    transport_mode: Optional[str] = None  # "socket" or "webhook"
 
 
 @router.get("/slack/status")
@@ -950,17 +934,6 @@ async def remove_email_from_whitelist(
 # GitHub Templates Configuration (TMPL-001)
 # ============================================================================
 
-class GitHubTemplateEntry(BaseModel):
-    """A single GitHub template entry."""
-    github_repo: str
-    display_name: str = ""
-    description: str = ""
-
-
-class GitHubTemplatesUpdate(BaseModel):
-    """Request body for updating GitHub templates."""
-    templates: List[GitHubTemplateEntry]
-
 
 _REPO_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$')
 
@@ -1079,11 +1052,6 @@ async def delete_github_templates(
 MCP_URL_SETTING_KEY = "mcp_external_url"
 
 
-class McpUrlUpdate(BaseModel):
-    """Request body for updating the MCP server URL."""
-    url: str
-
-
 def _get_default_mcp_url(request: Request) -> str:
     """Compute the auto-detected MCP URL from the request hostname."""
     host = request.headers.get("host", "localhost:8080")
@@ -1188,12 +1156,6 @@ async def delete_mcp_url(
 # ============================================================================
 # Agent Quota Settings (QUOTA-001)
 # ============================================================================
-
-class AgentQuotaUpdate(BaseModel):
-    """Request body for updating per-role agent quotas."""
-    max_agents_creator: Optional[str] = None
-    max_agents_operator: Optional[str] = None
-    max_agents_user: Optional[str] = None
 
 
 @router.get("/agent-quotas")
@@ -1668,5 +1630,3 @@ async def reset_ops_settings(
 
 
 # Note: get_ops_setting is now imported from services.settings_service
-
-

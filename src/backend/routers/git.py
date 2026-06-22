@@ -8,11 +8,18 @@ Provides API endpoints for:
 - Pulling from GitHub
 """
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
-from models import User
+from models import (
+    AutoSyncToggle,
+    FreezeSchedulesToggle,
+    GitHubPATRequest,
+    GitInitializeRequest,
+    GitPullRequest,
+    GitSyncRequest,
+    User,
+)
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName
 from services import git_service
@@ -21,27 +28,6 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["git"])
-
-
-class GitSyncRequest(BaseModel):
-    """Request body for git sync operation."""
-    message: Optional[str] = None  # Custom commit message
-    paths: Optional[List[str]] = None  # Specific paths to sync
-    strategy: Optional[str] = "normal"  # "normal", "pull_first", "force_push"
-
-
-class GitPullRequest(BaseModel):
-    """Request body for git pull operation."""
-    strategy: Optional[str] = "clean"  # "clean", "stash_reapply", "force_reset"
-
-
-class GitInitializeRequest(BaseModel):
-    """Request body for git initialization."""
-    repo_owner: str  # GitHub username or organization
-    repo_name: str  # Repository name
-    create_repo: bool = True  # Whether to create the repository if it doesn't exist
-    private: bool = True  # Whether the new repository should be private
-    description: Optional[str] = None  # Repository description
 
 
 @router.get("/{agent_name}/git/status")
@@ -506,11 +492,6 @@ def get_github_pat_for_agent(agent_name: str) -> str:
     return get_github_pat()
 
 
-class GitHubPATRequest(BaseModel):
-    """Request body for setting agent GitHub PAT."""
-    pat: str
-
-
 @router.get("/{agent_name}/github-pat")
 async def get_agent_github_pat_status(
     agent_name: AuthorizedAgentByName,
@@ -692,14 +673,6 @@ async def reset_to_main_preserve_state(
 # ============================================================================
 # Sync health observability (#389)
 # ============================================================================
-
-
-class AutoSyncToggle(BaseModel):
-    enabled: bool
-
-
-class FreezeSchedulesToggle(BaseModel):
-    enabled: bool
 
 
 @router.get("/{agent_name}/git/auto-sync")

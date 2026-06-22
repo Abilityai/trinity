@@ -6,9 +6,8 @@ Admin-only endpoints for listing users and managing their roles.
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
-from models import User
+from models import User, UserRoleUpdate, UpdateMyEmailRequest
 from database import db
 from dependencies import require_admin, get_current_user
 
@@ -19,14 +18,6 @@ VALID_ROLES = {"admin", "creator", "operator", "user"}
 # Permissive email-shape check (mirrors routers/setup.py): one @, a dot in the
 # domain, no spaces. Identity binding only — no verification mail is sent.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
-
-
-class UserRoleUpdate(BaseModel):
-    role: str
-
-
-class UpdateMyEmailRequest(BaseModel):
-    email: str
 
 
 @router.put("/me/email")
