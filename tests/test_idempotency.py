@@ -864,3 +864,110 @@ class TestProactiveSendMessageGuard:
         await svc.send_message("agentA", "a@e.com", "x", channel="telegram", execution_id="exec-1")
         await svc.send_message("agentA", "b@e.com", "x", channel="telegram", execution_id="exec-1")
         assert len(delivers) == 2             # different recipient → distinct key
+
+
+# ---------------------------------------------------------------------------
+# VoIP call_user wiring (#1084) — entry guard on resolved dial target
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def voip_service_mod(effect_service, monkeypatch):
+    """Load voip_service standalone with stubbed config/services + the effect
+    idempotency module injected, avoiding the docker-heavy real services/__init__."""
+    eff_db = sys.modules["database"].db
+    eff_db.get_voip_binding = lambda agent: {"enabled": True, "account_sid": "AC123"}
+
+    config_stub = types.ModuleType("config")
+    config_stub.GEMINI_API_KEY = "test-key"
+    config_stub.REDIS_URL = "redis://x"
+    config_stub.VOIP_CALL_RATE_LIMIT = 5
+    config_stub.VOIP_CALL_RATE_WINDOW = 60
+    config_stub.VOIP_DEFAULT_DAILY_CALL_CAP = 50
+    config_stub.VOIP_ENABLED = True
+    config_stub.VOIP_INTENT_TTL_SECONDS = 300
+    config_stub.VOIP_TICKET_TTL_SECONDS = 180
+    monkeypatch.setitem(sys.modules, "config", config_stub)
+
+    services_stub = types.ModuleType("services")
+    services_stub.idempotency_service = effect_service
+    rate_limiter_stub = types.ModuleType("services.rate_limiter")
+    rate_limiter_stub.enforce = lambda **kw: None
+    services_stub.rate_limiter = rate_limiter_stub
+    ws_ticket_stub = types.ModuleType("services.ws_ticket_service")
+    ws_ticket_stub.mint_ticket = lambda **kw: "ticket"
+    services_stub.ws_ticket_service = ws_ticket_stub
+
+    monkeypatch.setitem(sys.modules, "services", services_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)
+    monkeypatch.setitem(sys.modules, "services.rate_limiter", rate_limiter_stub)
+    monkeypatch.setitem(sys.modules, "services.ws_ticket_service", ws_ticket_stub)
+
+    path = os.path.join(_backend_path, "services", "voip_service.py")
+    spec = importlib.util.spec_from_file_location("_voip_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestVoipCallGuard:
+    def _make_service(self, mod, dials):
+        svc = mod.VoipService()
+
+        async def fake_inner(agent_name, dest, binding, initiator_user_id,
+                             initiator_email, public_url, context, process_transcript):
+            dials.append(dest)
+            return {
+                "call_id": f"voip_{len(dials)}",
+                "status": "ringing",
+                "to_number": dest,
+                "twilio_call_sid": "CA1",
+                "chat_session_id": "cs1",
+            }
+
+        svc._place_call_inner = fake_inner
+        return svc
+
+    async def test_redelivery_same_execution_one_dial(self, voip_service_mod, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        dials = []
+        svc = self._make_service(voip_service_mod, dials)
+        kw = dict(agent_name="agentA", to_number="+14155551234", initiator_user_id=1,
+                  initiator_email="u@e.com", public_url="https://x", execution_id="exec-1")
+
+        r1 = await svc.place_outbound_call(**kw)
+        r2 = await svc.place_outbound_call(**kw)
+        assert r1["call_id"] == "voip_1"
+        assert r2["call_id"] == "voip_1"      # replayed snapshot, no second dial
+        assert len(dials) == 1
+
+    async def test_dedup_label_allows_two_dials(self, voip_service_mod, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        dials = []
+        svc = self._make_service(voip_service_mod, dials)
+        base = dict(agent_name="agentA", to_number="+14155551234", initiator_user_id=1,
+                    initiator_email="u@e.com", public_url="https://x", execution_id="exec-1")
+
+        await svc.place_outbound_call(**base)
+        await svc.place_outbound_call(dedup_label="callback", **base)
+        assert len(dials) == 2
+
+    async def test_no_execution_id_fail_open(self, voip_service_mod, effect_service):
+        dials = []
+        svc = self._make_service(voip_service_mod, dials)
+        kw = dict(agent_name="agentA", to_number="+14155551234", initiator_user_id=1,
+                  initiator_email="u@e.com", public_url="https://x")
+
+        await svc.place_outbound_call(**kw)
+        await svc.place_outbound_call(**kw)
+        assert len(dials) == 2                 # no execution_id → no dedup
+
+    async def test_distinct_numbers_not_deduped(self, voip_service_mod, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        dials = []
+        svc = self._make_service(voip_service_mod, dials)
+        base = dict(agent_name="agentA", initiator_user_id=1, initiator_email="u@e.com",
+                    public_url="https://x", execution_id="exec-1")
+
+        await svc.place_outbound_call(to_number="+14155551234", **base)
+        await svc.place_outbound_call(to_number="+14155559999", **base)
+        assert len(dials) == 2                 # different dial target → distinct key
