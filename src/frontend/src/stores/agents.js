@@ -293,10 +293,10 @@ export const useAgentsStore = defineStore('agents', {
     },
 
     // Simplified Credential System (CRED-002)
-    async injectCredentials(name, files) {
+    async injectCredentials(name, files, filesB64 = {}) {
       const authStore = useAuthStore()
       const response = await axios.post(`/api/agents/${name}/credentials/inject`,
-        { files },
+        { files, files_b64: filesB64 },
         { headers: authStore.authHeader }
       )
       return response.data

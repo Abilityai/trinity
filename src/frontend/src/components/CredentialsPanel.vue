@@ -177,6 +177,46 @@
         </div>
       </div>
 
+      <!-- Upload Credential File (#11 — service-account JSON, certs/keys, SSH) -->
+      <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Upload Credential File</h3>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            For cloud service-account JSON (.config/gcloud/…), TLS certs/keys
+            (*.pem/*.key/*.crt/*.p12/*.pfx), kubeconfig (.kube/config) and SSH keys
+            (.ssh/id_*). Binary files are handled automatically.
+          </p>
+        </div>
+        <div class="p-4 space-y-3">
+          <input
+            type="file"
+            @change="onCredFilePicked"
+            :disabled="agentStatus !== 'running' || uploadLoading"
+            class="block w-full text-sm text-gray-700 dark:text-gray-300"
+          />
+          <input
+            v-model="uploadPath"
+            placeholder="Destination path (e.g. .config/gcloud/sa.json, client.pem, .ssh/id_ed25519)"
+            :disabled="agentStatus !== 'running' || uploadLoading"
+            class="w-full font-mono text-sm border border-gray-300 dark:border-gray-600 rounded-lg p-2 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+          />
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-gray-500 dark:text-gray-400">Written 0600; created on the agent's next sync if git-tracked.</span>
+            <button
+              @click="uploadCredFile"
+              :disabled="agentStatus !== 'running' || uploadLoading || !uploadFile || !uploadPath.trim()"
+              class="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              {{ uploadLoading ? 'Uploading...' : 'Upload' }}
+            </button>
+          </div>
+          <div v-if="uploadResult"
+               :class="['p-3 rounded-lg text-sm', uploadResult.success ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-300']">
+            {{ uploadResult.message }}
+          </div>
+        </div>
+      </div>
+
       <!-- File Editor Modal -->
       <div v-if="editingFile" class="fixed inset-0 z-50 overflow-y-auto">
         <div class="flex items-center justify-center min-h-screen p-4">
@@ -260,6 +300,11 @@ const importing = ref(false)
 const quickInjectText = ref('')
 const quickInjectLoading = ref(false)
 const quickInjectResult = ref(null)
+// #11 — credential file upload (service-account JSON, certs/keys, SSH)
+const uploadFile = ref(null)
+const uploadPath = ref('')
+const uploadLoading = ref(false)
+const uploadResult = ref(null)
 const editingFile = ref(null)
 const editingContent = ref('')
 const savingFile = ref(false)
@@ -401,6 +446,49 @@ const quickInject = async () => {
     }
   } finally {
     quickInjectLoading.value = false
+  }
+}
+
+// #11 — pick a credential file; default the destination path to its name.
+const onCredFilePicked = (e) => {
+  const f = e.target.files && e.target.files[0]
+  uploadFile.value = f || null
+  uploadResult.value = null
+  if (f && !uploadPath.value.trim()) uploadPath.value = f.name
+}
+
+// Read the picked file and inject it: UTF-8-decodable content goes in `files`
+// (text), otherwise base64 in `files_b64` (binary). Server enforces the policy.
+const uploadCredFile = async () => {
+  if (!uploadFile.value || !uploadPath.value.trim()) return
+  uploadLoading.value = true
+  uploadResult.value = null
+  try {
+    const buf = await uploadFile.value.arrayBuffer()
+    const bytes = new Uint8Array(buf)
+    const path = uploadPath.value.trim()
+    let files = {}, filesB64 = {}
+    try {
+      // strict UTF-8 decode — throws on invalid byte sequences (binary)
+      files[path] = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      let bin = ''
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+      filesB64[path] = btoa(bin)
+    }
+    await agentsStore.injectCredentials(props.agentName, files, filesB64)
+    uploadResult.value = { success: true, message: `Uploaded ${path}` }
+    uploadFile.value = null
+    uploadPath.value = ''
+    await loadCredentialStatus()
+    if (showNotification) showNotification('Credential file uploaded', 'success')
+  } catch (err) {
+    uploadResult.value = {
+      success: false,
+      message: err.response?.data?.detail || err.message || 'Upload failed',
+    }
+  } finally {
+    uploadLoading.value = false
   }
 }
 

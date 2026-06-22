@@ -589,10 +589,12 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/agents/{name}/credentials/status` | Check credential files in agent |
-| POST | `/api/agents/{name}/credentials/inject` | Write credential files directly to agent |
+| POST | `/api/agents/{name}/credentials/inject` | Write credential files directly to agent (`files` text + `files_b64` binary) |
 | POST | `/api/agents/{name}/credentials/export` | Export to `.credentials.enc` (AES-256-GCM) |
 | POST | `/api/agents/{name}/credentials/import` | Import from encrypted file |
 | POST | `/api/internal/decrypt-and-inject` | Auto-import on agent startup (internal, no auth) |
+
+**Credential-path policy (#11):** injection accepts a **curated set of credential file types**, not a fixed 3-path list — the policy lives in `services/credential_paths.py` (`is_allowed_credential_path`), vendored **byte-identically** into `docker/base-image/agent_server/credential_paths.py` for the agent-server second layer (Invariant #5; parity test). Allows `.env`/`.credentials.enc`/`.mcp.json` (the last still content-validated, #598) + `.config/gcloud/**`, `.kube/config`, `*.pem`/`*.key`/`*.crt`/`*.cert`/`*.p12`/`*.pfx`, `.ssh/id_*`; deny-list (precedence) blocks anything executed/sourced at startup (shell rc, `CLAUDE.md`/`AGENTS.md`/`.claude/**`, `.mcp.json.template`, `.ssh/authorized_keys`/`config`, `.git*`, `bin/**`) plus `..`/absolute traversal. Binary creds round-trip as base64 (`files_b64`); the `.credentials.enc` archive is a v2 `{files, files_b64}` envelope (legacy flat archives still decrypt) and export captures the **full** injected set via the agent `GET /api/credentials/list`.
 
 ### GitHub PAT & Git (#347, #389, #384)
 | Method | Path | Description |

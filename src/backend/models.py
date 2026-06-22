@@ -386,7 +386,8 @@ class DeployLocalResponse(BaseModel):
 
 class CredentialInjectRequest(BaseModel):
     """Request to inject credential files directly into an agent."""
-    files: Dict[str, str]  # {".env": "KEY=value\n...", ".mcp.json": "{}"}
+    files: Dict[str, str] = {}       # text files: {".env": "KEY=value\n...", ".mcp.json": "{}"}
+    files_b64: Dict[str, str] = {}   # binary files: {path: base64(content)} (#11 — .p12/.pfx/DER)
 
 
 class CredentialInjectResponse(BaseModel):

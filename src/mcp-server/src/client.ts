@@ -383,7 +383,11 @@ export class TrinityClient {
    * @param name - Agent name
    * @param files - Map of file paths to contents (e.g., {".env": "KEY=value"})
    */
-  async injectCredentials(name: string, files: Record<string, string>): Promise<{
+  async injectCredentials(
+    name: string,
+    files: Record<string, string>,
+    filesB64: Record<string, string> = {},
+  ): Promise<{
     status: string;
     files_written: string[];
     message: string;
@@ -395,7 +399,7 @@ export class TrinityClient {
     }>(
       "POST",
       `/api/agents/${encodeURIComponent(name)}/credentials/inject`,
-      { files }
+      { files, files_b64: filesB64 }
     );
   }
 

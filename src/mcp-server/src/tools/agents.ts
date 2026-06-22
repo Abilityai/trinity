@@ -470,24 +470,31 @@ export function createAgentTools(
       description:
         "Inject credential files directly into a running agent's workspace. " +
         "This is the new simplified credential system that writes files directly " +
-        "without Redis or template processing. Supports .env, .mcp.json, and other files. " +
-        "The agent must be running.",
+        "without Redis or template processing. Supports a curated set of credential " +
+        "file types: .env, .mcp.json, cloud service-account JSON (.config/gcloud/**), " +
+        "kubeconfig (.kube/config), TLS/cert material (*.pem/*.key/*.crt/*.p12/*.pfx), " +
+        "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to inject credentials into"),
-        files: z.record(z.string()).describe(
-          'Map of file paths to contents. Example: {".env": "KEY=value\\nSECRET=xxx", ".mcp.json": "{}"}'
+        files: z.record(z.string()).optional().describe(
+          'Map of file paths to TEXT contents. Example: {".env": "KEY=value", ".config/gcloud/sa.json": "{...}"}'
+        ),
+        files_b64: z.record(z.string()).optional().describe(
+          'Map of file paths to BASE64-encoded binary contents (e.g. .p12/.pfx/DER cert material).'
         ),
       }),
       execute: async (
-        { name, files }: { name: string; files: Record<string, string> },
+        { name, files, files_b64 }: { name: string; files?: Record<string, string>; files_b64?: Record<string, string> },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
-        console.log(`[inject_credentials] Injecting ${Object.keys(files).length} file(s) into agent '${name}'`);
+        const textFiles = files || {};
+        const binFiles = files_b64 || {};
+        console.log(`[inject_credentials] Injecting ${Object.keys(textFiles).length + Object.keys(binFiles).length} file(s) into agent '${name}'`);
 
-        const result = await apiClient.injectCredentials(name, files);
+        const result = await apiClient.injectCredentials(name, textFiles, binFiles);
         return JSON.stringify(result, null, 2);
       },
     },

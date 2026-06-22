@@ -44,6 +44,7 @@ class CredentialUpdateRequest(BaseModel):
     credentials: dict  # {"VAR_NAME": "value", ...}
     mcp_config: Optional[str] = None  # Pre-generated .mcp.json content (if provided)
     files: Optional[Dict[str, str]] = None  # File-type credentials: {"path": "content", ...}
+    files_b64: Optional[Dict[str, str]] = None  # Binary file creds: {"path": base64(content)} (#11)
 
 
 # ============================================================================
@@ -260,18 +261,31 @@ class CredentialReadRequest(BaseModel):
 
 class CredentialReadResponse(BaseModel):
     """Response with credential file contents"""
-    files: Dict[str, str]  # {path: content} for files that exist
+    files: Dict[str, str]  # {path: text content} for files that exist
+    files_b64: Dict[str, str] = {}  # {path: base64} for non-UTF-8 (binary) files (#11)
 
 
 class CredentialInjectRequest(BaseModel):
     """Request to inject credential files into workspace"""
-    files: Dict[str, str]  # {path: content} to write
+    files: Dict[str, str] = {}      # {path: text content} to write
+    files_b64: Dict[str, str] = {}  # {path: base64(content)} for binary creds (#11)
 
 
 class CredentialInjectResponse(BaseModel):
     """Response from credential injection"""
     status: str  # "success"
     files_written: List[str]
+
+
+class CredentialListItem(BaseModel):
+    """One discovered credential file (#11 — drives export-captures-all)."""
+    path: str
+    size: int
+    binary: bool
+
+
+class CredentialListResponse(BaseModel):
+    files: List[CredentialListItem]
 
 
 class TokenReloadRequest(BaseModel):

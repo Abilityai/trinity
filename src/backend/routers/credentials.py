@@ -25,22 +25,20 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
 from services.platform_audit_service import platform_audit_service, AuditEventType
+# Curated credential-path policy (#11) — widens the original exact allowlist
+# (#183/#590/#598) to a vetted set of credential file *types* while still
+# blocking anything executed/sourced at startup. Single source of truth, also
+# vendored into the agent image (Invariant #5, byte-identical parity test).
+from services.credential_paths import disallowed_paths
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["credentials"])
 
-# Allowlist of credential file paths that can be injected into agents.
-# Blocks arbitrary file writes (pentest 3.2.6 / #183).
-#
-# `.mcp.json` is allowlisted but its CONTENT is structure-validated by
-# `services.mcp_validator.validate_mcp_config` before the inject is
-# accepted (#598, Layer 2 of AISEC-C2 closure). Bare allowlisting is
-# sufficient for `.env` and `.credentials.enc` because their content is
-# either KEY=VALUE pairs or AES-GCM ciphertext — neither defines
-# executable behavior. `.mcp.json.template` remains BLOCKED because the
-# envsubst flow it feeds doesn't sanitize attacker-controlled JSON.
-ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
+# `.mcp.json` passes the PATH layer but its CONTENT is still structure-validated
+# by `services.mcp_validator.validate_mcp_config` before the inject is accepted
+# (#598, Layer 2 of AISEC-C2 closure). `.mcp.json.template` stays BLOCKED by the
+# policy because the envsubst flow it feeds doesn't sanitize attacker JSON.
 
 
 # ============================================================================
@@ -194,11 +192,18 @@ async def inject_credentials(
             detail=f"Agent is not running (status: {agent_status.status}). Start the agent first."
         )
 
-    if not request_body.files:
+    if not request_body.files and not request_body.files_b64:
         raise HTTPException(status_code=400, detail="No files provided for injection")
 
-    # Validate all file paths against allowlist (pentest 3.2.6 / #183)
-    disallowed = [p for p in request_body.files if p not in ALLOWED_CREDENTIAL_PATHS]
+    # Validate all file paths against the curated policy (#183/#590/#598/#11).
+    # Both the text (`files`) and binary (`files_b64`) maps are gated.
+    overlap = set(request_body.files) & set(request_body.files_b64)
+    if overlap:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Path(s) given as both text and binary: {sorted(overlap)}",
+        )
+    disallowed = disallowed_paths(list(request_body.files) + list(request_body.files_b64))
     if disallowed:
         logger.warning(
             f"Credential injection blocked: disallowed paths {disallowed} "
@@ -206,8 +211,9 @@ async def inject_credentials(
         )
         raise HTTPException(
             status_code=400,
-            detail=f"Disallowed file path(s): {disallowed}. "
-                   f"Allowed: {sorted(ALLOWED_CREDENTIAL_PATHS)}"
+            detail=f"Disallowed credential file path(s): {disallowed}. "
+                   f"Only curated credential file types are permitted (no shell/agent "
+                   f"startup files, no path traversal).",
         )
 
     # AISEC-C2 / #590 Layer 2 (#598): structure-validate .mcp.json content
@@ -235,7 +241,7 @@ async def inject_credentials(
         async with agent_httpx_client(agent_name) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/credentials/inject",
-                json={"files": request_body.files},
+                json={"files": request_body.files, "files_b64": request_body.files_b64},
                 timeout=30.0
             )
 
@@ -265,13 +271,14 @@ async def inject_credentials(
         target_id=agent_name,
         endpoint=str(request.url.path),
         request_id=getattr(request.state, "request_id", None),
-        details={"files": list(request_body.files.keys())},
+        details={"files": list(request_body.files.keys()) + list(request_body.files_b64.keys())},
     )
 
+    all_paths = list(request_body.files.keys()) + list(request_body.files_b64.keys())
     return CredentialInjectResponse(
         status="success",
-        files_written=agent_response.get("files_written", list(request_body.files.keys())),
-        message=f"Injected {len(request_body.files)} credential file(s) to agent {agent_name}"
+        files_written=agent_response.get("files_written", all_paths),
+        message=f"Injected {len(all_paths)} credential file(s) to agent {agent_name}"
     )
 
 
