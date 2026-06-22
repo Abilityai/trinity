@@ -346,7 +346,7 @@ class CredentialEncryptionService:
             file_paths: List of file paths to export
 
         Returns:
-            Path to the encrypted file written
+            (path_to_encrypted_file, number_of_files_captured)
         """
         # Discover the full injected credential set (#11). When the caller
         # doesn't pin paths, ask the agent which allow-policy files exist; fall
@@ -375,7 +375,7 @@ class CredentialEncryptionService:
         total = len(files) + len(files_b64)
         logger.info(f"Exported {total} credential files to .credentials.enc for agent {agent_name}")
 
-        return ".credentials.enc"
+        return ".credentials.enc", total
 
     async def import_to_agent(self, agent_name: str) -> Dict[str, str]:
         """

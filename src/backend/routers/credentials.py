@@ -321,10 +321,9 @@ async def export_credentials(
 
     try:
         encryption_service = get_credential_encryption_service()
-        encrypted_file = await encryption_service.export_to_agent(agent_name)
-
-        # Count files that were read
-        files = await encryption_service.read_agent_credential_files(agent_name)
+        # export_to_agent returns (path, count) — the count is the FULL captured
+        # set (#11), not a stale re-read of just the 2 defaults.
+        encrypted_file, files_exported = await encryption_service.export_to_agent(agent_name)
 
         # SEC-001: audit credential export
         await platform_audit_service.log(
@@ -337,13 +336,13 @@ async def export_credentials(
             target_id=agent_name,
             endpoint=str(request.url.path),
             request_id=getattr(request.state, "request_id", None),
-            details={"files_exported": len(files)},
+            details={"files_exported": files_exported},
         )
 
         return CredentialExportResponse(
             status="success",
             encrypted_file=encrypted_file,
-            files_exported=len(files)
+            files_exported=files_exported
         )
 
     except ValueError as e:

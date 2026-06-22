@@ -209,6 +209,11 @@ class TestStillBlockedAfterWidening:
         ".gitconfig", ".git/hooks/pre-commit",
         # on PATH
         "bin/x", ".local/bin/x",
+        # #11 live test: vendored cert bundles must NOT match the *.pem/*.key
+        # globs (export's /list walk was sweeping certifi's cacert.pem)
+        ".local/lib/python3.13/site-packages/certifi/cacert.pem",
+        "node_modules/foo/test.key", "project/node_modules/x/y.pem",
+        ".venv/lib/cert.pem", ".cache/whatever.crt",
         # traversal / absolute / backslash
         "../escape.pem", "/abs/x.key", ".ssh\\id_rsa",
     ])

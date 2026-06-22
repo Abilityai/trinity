@@ -59,6 +59,12 @@ DENY_GLOBS = [
     ".git/**", ".gitconfig",
     # anything on PATH
     "bin/**", ".local/bin/**",
+    # vendored / dependency / cache trees — keeps the broad cert globs
+    # (*.pem/*.key/*.crt) from matching bundled CA files (e.g. certifi's
+    # cacert.pem) and sweeping them into export's `/list` walk (#11 live test).
+    "node_modules/**", "**/node_modules/**",
+    "site-packages/**", "**/site-packages/**",
+    ".local/**", ".venv/**", "venv/**", ".cache/**", "go/pkg/**",
 ]
 
 
