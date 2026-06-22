@@ -424,6 +424,16 @@ def dispatch_async_eligible(triggered_by: Optional[str]) -> bool:
     triggers reaching ``execute_task`` with no synchronous result consumer
     (``loop``/``fan_out`` read ``result.response``; ``event`` bypasses
     ``execute_task`` entirely). Fail-safe → False; never raises.
+
+    PULL-MODE GATE (#1084): async/pull dispatch introduces at-least-once
+    re-delivery, which would re-emit an agent's outbound side effects (send an
+    email twice, charge a payment twice) on a re-run. Effect-scoped idempotency
+    (effect_guard, services/idempotency_service.py) makes those effects safe per
+    resolved action identity, but turning pull-mode default-ON for any
+    side-effect-bearing agent additionally REQUIRES (a) trusted runtime injection
+    of ``execution_id`` and (b) fail-closed-when-absent — a BLOCKING prerequisite
+    on Epic #1045/#1081, not satisfied here. See
+    docs/memory/feature-flows/effect-idempotency.md.
     """
     try:
         from config import ASYNC_DISPATCH_ELIGIBLE_TRIGGERS, DISPATCH_ASYNC
