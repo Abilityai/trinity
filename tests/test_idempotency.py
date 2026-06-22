@@ -766,3 +766,101 @@ class TestNeverminedSettleOnce:
         await svc.settle_payment_once(**kw)
         await svc.settle_payment_once(**kw)
         assert len(calls) == 2                  # no token → both attempts run
+
+
+# ---------------------------------------------------------------------------
+# Proactive send_message wiring (#1084) — entry guard on resolved recipient+channel
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def proactive_service(effect_service, monkeypatch):
+    """Load proactive_message_service standalone with the effect-scoped
+    idempotency module + a stubbed audit service injected, avoiding the
+    docker-heavy real services/__init__."""
+    eff_db = sys.modules["database"].db
+    eff_db.can_agent_message_email = lambda agent, email: True
+
+    services_stub = types.ModuleType("services")
+    services_stub.idempotency_service = effect_service
+
+    audit_stub = types.ModuleType("services.platform_audit_service")
+
+    class _AuditEventType:
+        PROACTIVE_MESSAGE = "proactive_message"
+
+    class _Audit:
+        async def log(self, **kw):
+            return None
+
+    audit_stub.platform_audit_service = _Audit()
+    audit_stub.AuditEventType = _AuditEventType
+    services_stub.platform_audit_service = audit_stub
+
+    monkeypatch.setitem(sys.modules, "services", services_stub)
+    monkeypatch.setitem(sys.modules, "services.idempotency_service", effect_service)
+    monkeypatch.setitem(sys.modules, "services.platform_audit_service", audit_stub)
+
+    path = os.path.join(_backend_path, "services", "proactive_message_service.py")
+    spec = importlib.util.spec_from_file_location("_proactive_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestProactiveSendMessageGuard:
+    def _make_service(self, mod, delivers):
+        svc = mod.ProactiveMessageService()
+        svc._check_rate_limit = lambda *a, **k: True
+        svc._increment_rate_limit = lambda *a, **k: None
+
+        async def fake_deliver(agent_name, recipient_email, text, channel, reply_to_thread):
+            delivers.append((recipient_email, channel, text))
+            return mod.DeliveryResult(success=True, channel=channel, message_id="m1")
+
+        svc._deliver_via_channel = fake_deliver
+        return svc
+
+    async def test_redelivery_same_execution_one_send(self, proactive_service, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        delivers = []
+        svc = self._make_service(proactive_service, delivers)
+
+        r1 = await svc.send_message(
+            "agentA", "U@Example.com", "Hello", channel="telegram", execution_id="exec-1",
+        )
+        # Re-delivery of the same turn — different generated body, same identity.
+        r2 = await svc.send_message(
+            "agentA", "u@example.com", "Hello AGAIN reworded", channel="telegram", execution_id="exec-1",
+        )
+        assert r1.success and r2.success
+        assert r2.message_id == "m1"          # replayed snapshot
+        assert len(delivers) == 1             # exactly one real delivery
+
+    async def test_dedup_label_allows_two_sends(self, proactive_service, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        delivers = []
+        svc = self._make_service(proactive_service, delivers)
+
+        await svc.send_message("agentA", "u@e.com", "first", channel="telegram", execution_id="exec-1")
+        await svc.send_message(
+            "agentA", "u@e.com", "second", channel="telegram",
+            execution_id="exec-1", dedup_label="reminder",
+        )
+        assert len(delivers) == 2
+
+    async def test_no_execution_id_fail_open(self, proactive_service, effect_service):
+        delivers = []
+        svc = self._make_service(proactive_service, delivers)
+
+        await svc.send_message("agentA", "u@e.com", "x", channel="telegram")
+        await svc.send_message("agentA", "u@e.com", "x", channel="telegram")
+        assert len(delivers) == 2             # no execution_id → no dedup
+
+    async def test_distinct_recipient_not_deduped(self, proactive_service, effect_service):
+        _register_execution(effect_service, "exec-1", "agentA")
+        delivers = []
+        svc = self._make_service(proactive_service, delivers)
+
+        await svc.send_message("agentA", "a@e.com", "x", channel="telegram", execution_id="exec-1")
+        await svc.send_message("agentA", "b@e.com", "x", channel="telegram", execution_id="exec-1")
+        assert len(delivers) == 2             # different recipient → distinct key

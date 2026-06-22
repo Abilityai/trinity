@@ -12,12 +12,11 @@ Key features:
 """
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Optional, Literal
-from enum import Enum
 
 from database import db
+from services import idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -161,6 +160,8 @@ class ProactiveMessageService:
         text: str,
         channel: Literal["auto", "telegram", "slack", "whatsapp", "web"] = "auto",
         reply_to_thread: bool = False,
+        execution_id: Optional[str] = None,
+        dedup_label: str = "",
     ) -> DeliveryResult:
         """
         Send a proactive message to a user.
@@ -171,6 +172,15 @@ class ProactiveMessageService:
             text: Message content
             channel: Target channel or "auto" for automatic selection
             reply_to_thread: Continue in last thread if one exists (channel-dependent)
+            execution_id: The execution this send belongs to (#1084). When the
+                turn it ran in is re-delivered (pull-mode at-least-once), the same
+                resolved (recipient, channel) within the same execution dedupes to
+                exactly one send — the LLM-generated body is NOT part of the key.
+                Fail-open when absent/invalid (old image): the send proceeds.
+            dedup_label: Optional agent-supplied discriminator (#1084) so an agent
+                can intentionally send two distinct messages to the same recipient
+                in one turn. Default "" → at-most-one send per (recipient, channel)
+                per turn.
 
         Returns:
             DeliveryResult with success status and channel used
@@ -182,6 +192,49 @@ class ProactiveMessageService:
             ChannelDeliveryError: Channel delivery failed
         """
         recipient_email = recipient_email.lower()
+
+        # Effect-scoped dedup (#1084): guard at the entry, keyed on the resolved
+        # recipient + channel (never the body). A chunked message is ONE effect —
+        # a mid-chunk crash re-sends the whole message on retry (at-least-once for
+        # chunks, documented in effect-idempotency.md). A concurrent in-flight
+        # duplicate raises EffectInProgressError (retryable, not a silent skip).
+        async with idempotency_service.effect_guard(
+            "message",
+            {"recipient": recipient_email, "channel": channel},
+            execution_id=execution_id,
+            agent_name=agent_name,
+            dedup_label=dedup_label,
+        ) as guard:
+            if guard.replay:
+                snap = guard.snapshot or {}
+                return DeliveryResult(
+                    success=snap.get("success", True),
+                    channel=snap.get("channel", channel),
+                    message_id=snap.get("message_id"),
+                    error=snap.get("error"),
+                )
+            result = await self._send_message_inner(
+                agent_name, recipient_email, text, channel, reply_to_thread
+            )
+            guard.snapshot = {
+                "success": result.success,
+                "channel": result.channel,
+                "message_id": result.message_id,
+                "error": result.error,
+            }
+            return result
+
+    async def _send_message_inner(
+        self,
+        agent_name: str,
+        recipient_email: str,
+        text: str,
+        channel: Literal["auto", "telegram", "slack", "whatsapp", "web"],
+        reply_to_thread: bool,
+    ) -> DeliveryResult:
+        """Auth → rate-limit → channel delivery. Wrapped by send_message's
+        effect guard (#1084), so a success here is recorded for replay and an
+        exception releases the claim for retry."""
         message_preview = text[:100] if text else ""
 
         # 1. Authorization check
