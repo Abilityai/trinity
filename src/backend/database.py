@@ -31,6 +31,7 @@ from db_models import (
     User,
     SessionMessageInsert,
     AgentShare,
+    AgentOperatorAccess,
     AgentShareRequest,
     McpApiKeyCreate,
     McpApiKey,
@@ -467,6 +468,9 @@ class DatabaseManager:
 
     def get_agent_shares(self, agent_name: str):
         return self._agent_ops.get_agent_shares(agent_name)
+
+    def get_agent_operator_access(self, agent_name: str):
+        return self._agent_ops.get_agent_operator_access(agent_name)
 
     def get_shared_agents(self, username: str):
         return self._agent_ops.get_shared_agents(username)

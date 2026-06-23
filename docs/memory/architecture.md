@@ -620,6 +620,7 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library:
 | POST | `/api/agents/{name}/share` | Share agent |
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
 | GET | `/api/agents/{name}/shares` | List shares |
+| GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
 | GET/PUT | `/api/agents/{name}/access-policy` | Cross-channel access policy: `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | Pending access requests |
 | POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares + fire-and-forget approval notification on the requester's originating channel for telegram/slack/whatsapp, #951) or reject |

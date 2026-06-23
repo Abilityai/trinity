@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from models import User
-from database import db, AgentShare, AgentShareRequest
+from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -212,6 +212,23 @@ async def get_agent_shares_endpoint(
 
     shares = db.get_agent_shares(agent_name)
     return shares
+
+
+@router.get("/{agent_name}/access", response_model=list[AgentOperatorAccess])
+async def get_agent_access_endpoint(
+    agent_name: OwnedAgentByName,
+    request: Request
+):
+    """Operator (Trinity-user) access roster for the Access tab (#17).
+
+    Resolves each allow-list email against `users`: resolved → active operator
+    (username/role/last-active), unresolved → pending invite.
+    """
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    return db.get_agent_operator_access(agent_name)
 
 
 # ---------------------------------------------------------------------------
