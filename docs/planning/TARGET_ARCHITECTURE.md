@@ -77,6 +77,11 @@ These rules take precedence over all other considerations. When in doubt, measur
 
 Replaces SQLite as the authoritative store for all durable relational state.
 
+> **SQLite end-of-support: September 1, 2026** (decision #1278). PostgreSQL is the
+> forward path; SQLite stays the zero-config default until then. Operators migrate
+> via `docs/migrations/SQLITE_TO_POSTGRES.md`. The dual-track migration system
+> (#1183) and single-source schema consolidation (#746) carry the transition.
+
 **What lives here:**
 - All current SQLite tables (users, agents, schedules, executions, chat history, audit log, activities, subscriptions, skills, tags, operator queue, sync state)
 - **The per-agent work queue and execution state machine** — `schedule_executions` carrying the lifecycle `queued → claimed → running → terminal`. This single table is the sole owner of both "what is waiting" (lever 1: inbox depth) and "what is running" (the fact the old slot-ZSET/SQL split forced the cleanup+canary machinery to reconcile). The atomic claim (`UPDATE … WHERE id = (SELECT … ORDER BY queued_at LIMIT 1) RETURNING`) is the competing-consumer primitive that lets N agent workers — and N replicas — pull without overbooking.
