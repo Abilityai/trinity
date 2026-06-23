@@ -32,6 +32,13 @@ export const useNetworkStore = defineStore('network', () => {
   const activityRefreshInterval = ref(null) // Interval ID for activity refresh (fallback)
   const websocketHeartbeatInterval = ref(null) // Interval ID for WebSocket keepalive ping
   const runningToggleLoading = ref({}) // Map of agent name -> boolean (loading state for start/stop)
+  // #1266 perceived-performance: initial fleet load can take 20s+ (#1265), so the
+  // Dashboard/timeline render skeletons off these flags instead of looking frozen.
+  // `loading` starts true so the very first paint is a skeleton, not the empty
+  // "No agents" state; `loadError` keeps a failed load distinct from an infinite
+  // skeleton or a real empty fleet.
+  const loading = ref(true)       // true while the initial agents/fleet fetch is in flight
+  const loadError = ref(false)    // true when the last agents fetch failed
   const schedules = ref([]) // Enabled schedules for timeline markers
   // #306 Redis Streams reconnect replay: remember the last event id we saw so
   // a network blip replays missed events instead of dropping them.
@@ -129,6 +136,8 @@ export const useNetworkStore = defineStore('network', () => {
   }
 
   async function fetchAgents() {
+    loading.value = true
+    loadError.value = false
     try {
       const params = {}
       if (filterTags.value.length > 0) {
@@ -144,6 +153,11 @@ export const useNetworkStore = defineStore('network', () => {
       await fetchPermissionEdges()
     } catch (error) {
       console.error('Failed to fetch agents:', error)
+      loadError.value = true
+    } finally {
+      // Always clear loading so a failed/empty load shows its own state, never an
+      // infinite skeleton (#1266).
+      loading.value = false
     }
   }
 
@@ -1663,6 +1677,8 @@ export const useNetworkStore = defineStore('network', () => {
 
   return {
     // State
+    loading,        // #1266 initial-load flag (drives Dashboard/timeline skeletons)
+    loadError,      // #1266 distinct failed-load state
     agents,
     nodes,
     edges,
