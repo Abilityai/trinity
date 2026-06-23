@@ -766,16 +766,9 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 
 ### Enterprise Modules (#847)
 
-Open-core seam: enterprise backend code lives in the private `trinity-enterprise` submodule at `src/backend/enterprise/`; `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds). Each module calls `entitlement_service.register_module("<id>")`; the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide enterprise surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates each endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Enterprise tables migrate via the two-track runner (Invariant #3).
+Open-core seam (generic mechanism only). The public backend exposes an extension point: `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds); each registered module calls `entitlement_service.register_module("<id>")`, and the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide gated surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates an entitled endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Private enterprise tables migrate via the separate two-track runner (Invariant #3).
 
-| Feature id | Module | Surface |
-|------------|--------|---------|
-| `audit` | (#941) | Entitlement only — flips the OSS audit-log dashboard route visible; `/api/audit-log/*` stays OSS |
-| `user_management` | `enterprise/backend/user_management/` (#995) | Org lifecycle: invite (whitelist + email), deactivate/reactivate (over the OSS `users.suspended_at` primitive), per-user activity view (reads OSS `audit_log`). `/api/enterprise/user-management/*`; Settings → User Management UI |
-| `siem` | `enterprise/backend/siem/` (#997) | SIEM log export — ships OSS `audit_log` to a customer SIEM over HTTP/JSON webhook. Private `enterprise_siem_config` (destination + AES-encrypted token + export cursor); Redis-lock-serialised background pusher; at-least-once (cursor advances only on successful POST). `/api/enterprise/siem/*`; no OSS/UI surface |
-| `2fa` | `enterprise/backend/two_factor/` (#5) | Two-factor auth via **TOTP** (RFC 6238; Google Authenticator is one compatible app — chosen over Google-OIDC to avoid a runtime IdP dependency). Private `enterprise_user_2fa` (AES-256-GCM secret + monotonic `last_used_step` replay guard), `enterprise_2fa_recovery_codes` (single-use, SHA-256-hashed), `enterprise_2fa_config` (per-role policy). `/api/enterprise/2fa/*` — self-service enroll/confirm/disable/recovery + admin policy + the `login/*` challenge-completion endpoints. Login seam is edition-agnostic: `services/mfa_gate.py` (no provider in OSS → no-op, fail-open) + `create_mfa_challenge_token`/`decode_mfa_challenge` in `dependencies.py`; on a required second factor the OSS auth routers (`/token`, `/api/auth/email/verify`) return a short-lived challenge token instead of an access token. Settings → Security UI |
-
----
+> The catalog of specific enterprise modules, their private schema, and the commercial rationale are intentionally **not** documented in this public repo — they live in the private `trinity-enterprise` repository (see `docs/memory/ENTERPRISE_DOCS.md` there). Public docs describe the generic seam only.
 
 ## Architectural Invariants
 

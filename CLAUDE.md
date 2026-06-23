@@ -27,6 +27,7 @@ When picking tickets, prefer items carrying the focus `theme-*` label. Theme foc
 - ❌ Auth0 client secrets, OAuth credentials, or service account keys
 - ❌ Private repository references or internal tooling details
 - ❌ Customer names, company-specific configurations, or business data
+- ❌ **Enterprise/paid-feature designs** — the catalog of which capabilities are gated behind the paid tier, their private schema (`enterprise_*` tables), per-module implementation, or the open-core monetization/gating rationale. Public docs describe the **generic open-core seam only** (the entitlement/registry mechanism and how OSS code conditionally registers private modules). Specific enterprise module designs live ONLY in the private `trinity-enterprise` repo (`docs/memory/ENTERPRISE_DOCS.md` there). See the standing rule below; a CI grep-guard (`.github/workflows/enterprise-docs-guard.yml`) flags regressions. (trinity-enterprise#45)
 
 ### Open Source Best Practices
 ✅ **Use placeholders**: `your-domain.com`, `your-api-key`, `user@example.com`
@@ -43,6 +44,14 @@ Before every commit:
 3. Verify no `.env` or config files with real credentials are staged
 4. Check that examples use placeholder values
 5. Confirm commit message doesn't reference internal systems
+
+### Standing Rule: Enterprise Docs Are Private (trinity-enterprise#45)
+
+Enterprise **feature designs, paid-module schema, and the open-core gating/monetization strategy** live ONLY in the private `trinity-enterprise` repo. Public docs (`docs/`, this file) describe the **generic open-core seam only** — that an entitlement/registry mechanism exists and how OSS code conditionally registers private modules — with **no catalog of specific paid features, no `enterprise_*` table DDL, and no per-module implementation detail**.
+
+- New enterprise design → write it in `trinity-enterprise/docs/`, not here.
+- Touching the seam in public docs → describe the mechanism, never enumerate the modules behind it.
+- `.github/workflows/enterprise-docs-guard.yml` greps live public docs for paid-feature/private-schema tokens and fails the build on a hit; keep historical point-in-time docs (`docs/archive/`, `docs/releases/`, `docs/security-reports/`) out of scope (covered by the separate git-history-scrub follow-up).
 
 ---
 

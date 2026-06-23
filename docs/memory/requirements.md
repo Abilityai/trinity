@@ -2456,97 +2456,38 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   Trinity's database.
 ## 35. Enterprise Edition Architecture (#847)
 
-### 34.1 Open-Core Seam — Private Submodule Integration (#847 Phase 0)
+### 35.1 Open-Core Seam — Private Submodule Integration (#847)
 - **Status**: ✅ Implemented (2026-05-21)
-- **GitHub Issue**: #847
-- **Description**: Phase 0 of the enterprise edition split — establishes
-  the seam in the public Trinity backend for loading closed-source
-  compliance modules (SSO, SCIM, SIEM) from a private git submodule
-  at `src/backend/enterprise/` pointing to
-  `Abilityai/trinity-enterprise`. Backend-only private; enterprise
-  Vue components ship in the public OSS bundle and are gated
-  server-side via the `enterprise_features` list. The
-  `EntitlementService` is a registry — empty until
-  `register_enterprise(app)` calls `register_module(feature_id)` for
-  each loaded enterprise module, which only happens when the
-  private submodule is actually mounted. `TRINITY_OSS_ONLY=1` is a
-  hard override for the deny path.
-- **Decision record**: `docs/planning/ENTERPRISE_ARCHITECTURE.md`
-- **Long-form research**: `docs/planning/OSS_ENTERPRISE_SPLIT_RESEARCH.md`
-- **Local-dev guide**: `docs/dev/ENTERPRISE_LOCAL_DEV.md`
-- **Key Features**:
-  - `EntitlementService` (`src/backend/services/entitlement_service.py`)
-    — registry pattern. `register_module(feature_id)` populates a set;
-    `is_entitled()` and `list_entitled_features()` read from it. OSS
-    builds never call `register_module` → empty set → deny everything.
-    `TRINITY_OSS_ONLY=1` is a hard override (denies even when
-    modules ARE registered).
-  - `requires_entitlement(feature_id)` (`src/backend/dependencies.py`)
-    — FastAPI dependency factory mirroring `require_role`. Raises
-    HTTP 403 with the feature_id in the detail string. Lazy-imports
-    the service so tests can swap singletons.
-  - Conditional submodule loader in `src/backend/main.py` —
-    `try: from enterprise.backend import register_enterprise;
-    register_enterprise(app) except ImportError: pass`. OSS-only
-    builds (no submodule) silently no-op with an informational log.
-    The loader calls `entitlement_service.register_module(...)` for
-    each registered feature, which drives feature-flag output.
-  - `/api/settings/feature-flags` extended with
-    `enterprise_features: list[str]` — empty in OSS mode, populated
-    when the private backend submodule is mounted. The OSS frontend
-    reads this to decide what enterprise UI to render.
-  - `.gitmodules` — single submodule at `src/backend/enterprise/`
-    pointing to `Abilityai/trinity-enterprise` via SSH. Backend only.
-  - **Enterprise frontend ships in OSS** at
-    `src/frontend/src/views/enterprise/` — Vue components have no
-    algorithmic IP, the moat is the private backend logic. Same
-    feature-flag pattern as `session_tab_enabled` and
-    `voice_available`. Adding a new enterprise feature = Vue file
-    in OSS + private backend module + `register_module(id)`.
-  - Pinia store `src/frontend/src/stores/enterprise.js` — caches
-    `enterprise_features: list[str]` from `/api/settings/feature-flags`.
-    Exposes `isEntitled(featureId)` + `hasAnyEnterprise` getters.
-  - Static route in `src/frontend/src/router/index.js` for
-    `/enterprise/sso` with `meta.requiresEntitlement: 'sso'`.
-    `beforeEach` guard redirects to `/` when not entitled
-    (defence-in-depth against direct URL visits / bookmarks).
-  - `NavBar.vue` — new `Enterprise` link
-    `v-if="enterpriseStore.isEntitled('sso')"` with a `PRO` badge.
-    Hidden in OSS-only mode and when operator forces
-    `TRINITY_OSS_ONLY=1`.
-  - `docker-compose.yml` env pass-through for `TRINITY_OSS_ONLY`.
-  - CI workflow `.github/workflows/build-without-submodule.yml` —
-    boots the backend with the submodule absent and asserts:
-    `/health` responds, `/api/settings/feature-flags` returns
-    `enterprise_features: []`, `/api/enterprise/sso/providers`
-    returns 404, and the OSS-only log line is emitted. Catches
-    regressions where the conditional import accidentally becomes
-    hard-required.
-- **Private repo (Abilityai/trinity-enterprise) — backend only**:
-  - `backend/__init__.py` — `register_enterprise(app)` mounts
-    routers AND calls `entitlement_service.register_module(id)`
-    per feature.
-  - `backend/sso/router.py` — `/api/enterprise/sso/{providers,login/{id}}`
-    stubs gated by `requires_entitlement("sso")`. `GET /providers`
-    returns the in-process registry (empty by default);
-    `POST /login/{id}` returns 501 "PoC stub" or 404 for unknown id.
-  - `backend/sso/providers.py` — `SSOProvider` ABC (provider_id,
-    display_name, protocol, begin_login) + `StubProvider`.
-  - `pyproject.toml`, `LICENSE` (proprietary), `README.md`.
-- **Out of scope (separate follow-ups)**:
-  - Phase 1: Ed25519-signed license token, verify path, admin
-    License UI, grace + clock-tamper handling.
-  - Phase 2: Extract `audit_log` into the submodule as the first
-    real enterprise module.
-  - Phase 3: Prove the "core-primitive + enterprise-knob" pattern
-    via #834 (recovery API in OSS, license-capped retention in enterprise).
-  - Phase 4: Real SSO/SAML implementation (replaces PoC stubs).
-  - MCP entitlement edge (`GET /api/internal/entitlements` polled by
-    the TypeScript MCP server).
-  - Fixing the repo's license-of-record (currently `NOASSERTION`).
-- **Tunables (env)**:
-  - `TRINITY_OSS_ONLY` (`0`/`1`, default `0`) — force OSS-only mode
-    regardless of submodule presence.
+- **GitHub Issue**: #847 (design + paid-module catalog tracked privately in `trinity-enterprise`)
+- **Description**: A generic extension seam in the public backend for loading
+  closed-source modules from a private git submodule at
+  `src/backend/enterprise/`. The seam is feature-agnostic — it carries **no
+  enumeration of which capabilities are paid**; that catalog and the
+  per-module designs live only in the private `trinity-enterprise` repo.
+- **Key mechanism (public)**:
+  - `EntitlementService` (`src/backend/services/entitlement_service.py`) — a
+    registry. `register_module(feature_id)` populates a set; `is_entitled()` /
+    `list_entitled_features()` read from it. OSS builds never call
+    `register_module` → empty set → deny everything. `TRINITY_OSS_ONLY=1` is a
+    hard override (denies even when modules ARE registered).
+  - `requires_entitlement(feature_id)` (`src/backend/dependencies.py`) — a
+    FastAPI dependency factory mirroring `require_role`; HTTP 403 when not
+    entitled.
+  - Conditional loader in `src/backend/main.py` —
+    `try: from enterprise.backend import register_enterprise; register_enterprise(app) except ImportError: pass`.
+    OSS-only builds (no submodule) silently no-op.
+  - `/api/settings/feature-flags` exposes `enterprise_features: list[str]` —
+    empty in OSS mode, populated when the private submodule is mounted; the OSS
+    frontend reads it to decide which gated surfaces to render (same pattern as
+    `session_tab_enabled` / `voice_available`).
+  - Enterprise Vue components ship in the OSS bundle (no algorithmic IP — the
+    moat is the private backend logic); they are gated purely by the
+    server-driven `enterprise_features` list.
+- **Tunables (env)**: `TRINITY_OSS_ONLY` (`0`/`1`, default `0`) — force
+  OSS-only mode regardless of submodule presence.
+- **Private (not in this repo)**: the specific module catalog, their routers and
+  private schema, the licensing/entitlement enforcement design, and the
+  commercial rationale are documented privately in `trinity-enterprise`.
 
 ---
 

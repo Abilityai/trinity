@@ -111,7 +111,7 @@ dashboard pivots as one unit.
 
 These were deferred to follow-up issues — backend support already exists:
 CSV/JSON export download button, hash-chain verify button, stats tiles
-on the dashboard header, SIEM webhook push (#847 enterprise pillar).
+on the dashboard header, and an external log-export push (an enterprise capability tracked privately in `trinity-enterprise`).
 
 Note: the legacy `/api/audit` router (Process Engine audit) was removed in
 #430 (2026-04-24). The platform audit log at `/api/audit-log` is the only
