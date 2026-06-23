@@ -23,6 +23,10 @@ on:
       - 'docs/**'
       - 'CLAUDE.md'
 
+# Least privilege: the guard only checks out and greps — no writes.
+permissions:
+  contents: read
+
 jobs:
   guard:
     runs-on: ubuntu-latest
