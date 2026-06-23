@@ -933,11 +933,30 @@ async def agent_execution_result(
             raise HTTPException(status_code=413, detail="execution_log too large")
 
     # ---- Build the normalized terminal + apply -----------------------------
-    status = (
-        TaskExecutionStatus.SUCCESS
-        if payload.status == "success"
-        else TaskExecutionStatus.FAILED
+    # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else
+    # (incl. unknown forward-compat values) →FAILED. CANCELLED flows through
+    # apply_result (release_slot=True); the replay gate above already short-
+    # circuits a terminate-wrote-first CANCELLED row, and the reverse race
+    # (callback CANCELLED first) makes the later terminate write a CAS no-op.
+    #
+    # Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
+    # as a clean cancellation even when the agent labels it "cancelled". The
+    # agent side already guards this (result_callback._is_auth_or_rate), but the
+    # callback is the backend trust boundary — a buggy or mixed-version agent
+    # that POSTs status:"cancelled" carrying error_code:"auth" (or an auth/
+    # rate_limit terminal_reason) would otherwise silently dodge the AUTH
+    # dispatch breaker / SUB-003 auto-switch. Mirror the guard so the invariant
+    # ("auth/rate is never cancellation") holds regardless of the caller image.
+    is_auth_or_rate = (
+        payload.error_code == TaskExecutionErrorCode.AUTH.value
+        or payload.terminal_reason in ("auth", "rate_limit")
     )
+    if payload.status == "success":
+        status = TaskExecutionStatus.SUCCESS
+    elif payload.status == "cancelled" and not is_auth_or_rate:
+        status = TaskExecutionStatus.CANCELLED
+    else:
+        status = TaskExecutionStatus.FAILED
     error_code = None
     if payload.error_code:
         try:

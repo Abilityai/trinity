@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 # with comfortable headroom for backend slowness.
 RECENTLY_COMPLETED_TTL_SECONDS = 300  # 5 minutes
 
+# Issue #679: window during which a just-terminated execution is still surfaced
+# as "cancelled by user" to the chat handler / async result callback. Mirrors
+# RECENTLY_COMPLETED_TTL_SECONDS — the marker is best-effort observability (the
+# DB CANCELLED write is the durable authority), so it just needs to comfortably
+# outlast the gap between a SIGINT send and the turn's graceful exit + finalize.
+TERMINATED_TTL_SECONDS = 300  # 5 minutes
+
 
 class ProcessRegistry:
     """
@@ -59,6 +66,12 @@ class ProcessRegistry:
         # read. Capped indirectly by traffic — at agent's ~10 concurrent
         # max with 5 min retention this is a few dozen entries at peak.
         self._recently_completed: Dict[str, float] = {}
+        # Issue #679: execution_id -> unix timestamp when terminate() sent a
+        # kill-signal. Read (not popped) by was_terminated() so the chat handler
+        # and async result callback can label a graceful-exit-0 / SIGKILL→504
+        # turn as "cancelled". Lazy TTL eviction on read; cleared on register()
+        # so a reused execution_id (#678 in-line retry) can't inherit the label.
+        self._terminated: Dict[str, float] = {}
 
     def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None):
         """
@@ -78,6 +91,10 @@ class ProcessRegistry:
             # Initialize log streaming structures
             self._log_subscribers[execution_id] = []
             self._log_buffers[execution_id] = []
+            # Issue #679 (C10): clear any stale cancel marker so an execution_id
+            # reused by the #678 in-line reader-race retry can't inherit the
+            # previous attempt's "cancelled" label.
+            self._terminated.pop(execution_id, None)
             logger.info(f"[ProcessRegistry] Registered execution {execution_id}")
 
     def unregister(self, execution_id: str):
@@ -149,6 +166,15 @@ class ProcessRegistry:
             # grandchildren don't linger holding our pipe FDs.
             logger.info(f"[ProcessRegistry] Sending SIGINT to execution {execution_id} (process group)")
             _signal_process_tree(process, signal.SIGINT, pgid=pgid)
+
+            # Issue #679: record the cancel marker immediately after a successful
+            # SIGINT send — still-running branch only (NOT already_finished /
+            # not_found, handled above; NOT on signal-failure, which raises into
+            # the `except` below and skips this). The send is causally before the
+            # subprocess's graceful exit, so was_terminated() is set before the
+            # chat handler observes execute_headless returning — race-free.
+            with self._lock:
+                self._terminated[execution_id] = time.time()
 
             try:
                 process.wait(timeout=graceful_timeout)
@@ -299,6 +325,22 @@ class ProcessRegistry:
             for eid in expired:
                 del self._recently_completed[eid]
             return list(self._recently_completed.keys())
+
+    def was_terminated(self, execution_id: str) -> bool:
+        """Issue #679: True if terminate() sent a kill-signal for this execution
+        within the last TERMINATED_TTL_SECONDS.
+
+        Read-only — it does NOT consume the marker, so the graceful-exit relabel
+        path and a later SIGKILL→504 check both observe it. Expired entries are
+        dropped lazily here (mirrors list_recently_completed_ids); no separate
+        sweeper needed.
+        """
+        cutoff = time.time() - TERMINATED_TTL_SECONDS
+        with self._lock:
+            expired = [eid for eid, ts in self._terminated.items() if ts < cutoff]
+            for eid in expired:
+                del self._terminated[eid]
+            return execution_id in self._terminated
 
     def cleanup_finished(self) -> int:
         """

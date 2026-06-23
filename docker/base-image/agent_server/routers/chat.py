@@ -157,12 +157,49 @@ async def execute_task(request: ParallelTaskRequest):
             persist_session=bool(request.persist_session),  # Session tab: write JSONL for future --resume
             images=request.images,  # Vision images from channel adapters (#562)
         )
+    except HTTPException as exc:
+        # #679 (F3): a terminated turn that surfaces a non-auth/non-rate terminal
+        # is a user cancel, not a failure. SIGINT→graceful-exit-0 with no output,
+        # or SIGKILL escalation, lands here as a 504 (signal exits) / 502 (empty
+        # result) / 500 — relabel ALL of them to a `cancelled` 200, mirroring the
+        # async result-callback's `_is_auth_or_rate` guard. 503/429/auth and any
+        # unterminated terminal re-raise unchanged (Issue 6/C6) so SUB-003 + the
+        # AUTH dispatch breaker still fire. The label is what matters — the cancel
+        # is non-billable, so we drop metadata (dict detail → empty response).
+        is_cancel = (
+            exc.status_code not in (503, 429)
+            and bool(request.execution_id)
+            and get_process_registry().was_terminated(request.execution_id)
+        )
+        # #679 (F4): a cancel is neutral for the failure counter (never trips the
+        # dispatch breaker); a genuine failure still increments it.
+        agent_state.record_task_finish(success=None if is_cancel else False)
+        if is_cancel:
+            logger.info(f"[Task] Task {request.execution_id} cancelled by user (status {exc.status_code})")
+            return {
+                "response": exc.detail if isinstance(exc.detail, str) else "",
+                "execution_log": [],
+                "metadata": {},
+                "session_id": None,
+                "status": "cancelled",
+                "timestamp": datetime.now().isoformat(),
+            }
+        raise
     except BaseException:
         agent_state.record_task_finish(success=False)
         raise
-    agent_state.record_task_finish(success=True)
 
-    logger.info(f"[Task] Task {session_id} completed successfully")
+    # #679 graceful path: Claude catches SIGINT, emits a final message, and exits
+    # 0 — the return code can't distinguish that from genuine success. Cross-check
+    # the cancel marker, keyed off the backend `execution_id` (NEVER the returned
+    # session_id, which can differ on a resumed/forked turn). Compute BEFORE
+    # record_task_finish so the cancel is recorded neutrally (F4).
+    cancelled = bool(request.execution_id) and get_process_registry().was_terminated(request.execution_id)
+    agent_state.record_task_finish(success=None if cancelled else True)
+    if cancelled:
+        logger.info(f"[Task] Task {request.execution_id} cancelled by user")
+    else:
+        logger.info(f"[Task] Task {session_id} completed successfully")
 
     # raw_messages contains the full Claude Code JSON stream (init, assistant, user, result)
     # This is the complete execution transcript showing thinking, tool calls, and results
@@ -171,6 +208,7 @@ async def execute_task(request: ParallelTaskRequest):
         "execution_log": raw_messages,  # Full JSON transcript from Claude Code
         "metadata": metadata.model_dump(),
         "session_id": session_id,
+        "status": "cancelled" if cancelled else "success",
         "timestamp": datetime.now().isoformat()
     }
 

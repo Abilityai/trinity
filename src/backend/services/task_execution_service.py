@@ -1033,6 +1033,31 @@ class TaskExecutionService:
             response_data = response.json()
             metadata = response_data.get("metadata", {})
 
+            # ---- #679 cancel cross-validation -----------------------------
+            # A cancel-aware agent labels a SIGINT-graceful-exit-0 / SIGKILL→504
+            # turn with status:"cancelled" in its 200 reply. The HTTP return code
+            # alone can't distinguish that from a genuine success, so trust the
+            # label: finalize CANCELLED via the shared applier (never a billable
+            # SUCCESS row — defense-in-depth over the #671 CAS). An old agent
+            # image omits `status` → .get() is None → the SUCCESS path below is
+            # unchanged. release_slot=False: the `finally` owns the sync slot.
+            if response_data.get("status") == "cancelled":
+                cancelled_envelope = TerminalEnvelope(
+                    execution_id=execution_id,
+                    status=TaskExecutionStatus.CANCELLED,
+                    error="Execution cancelled by user",
+                    metadata=metadata,
+                    retry_count=retry_count,
+                    previous_attempt_cost=previous_attempt_cost,
+                )
+                return await self.apply_result(
+                    agent_name,
+                    cancelled_envelope,
+                    activity_id=activity_id,
+                    breaker_enabled=breaker_enabled,
+                    release_slot=False,
+                )
+
             # ---- 5/6/7. Apply the SUCCESS terminal ------------------------
             # The terminal write + side-effects (sanitize, cost rollup, CAS,
             # activity completion, breaker reset) live in apply_result so the
@@ -1410,7 +1435,10 @@ class TaskExecutionService:
         if eid:
             won = db.update_execution_status(
                 execution_id=eid,
-                status=TaskExecutionStatus.FAILED,
+                # #679: honor envelope.status so this non-success applier also
+                # finalizes CANCELLED (and any future non-success terminal). A
+                # no-op for every current caller — all still pass FAILED.
+                status=envelope.status,
                 error=envelope.error,
                 cost=salvage_cost,
                 context_used=salvage_context,
@@ -1436,7 +1464,9 @@ class TaskExecutionService:
 
         return TaskExecutionResult(
             execution_id=eid or "",
-            status=TaskExecutionStatus.FAILED,
+            # #679: mirror the persisted status (CANCELLED for a cancel terminal,
+            # FAILED otherwise) so callers branch on the real outcome.
+            status=envelope.status,
             response="",
             error=envelope.error,
             error_code=envelope.error_code,

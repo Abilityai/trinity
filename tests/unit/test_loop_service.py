@@ -464,6 +464,33 @@ class TestFailure:
         assert loop["runs_completed"] == 2  # second iteration counted, even though it failed
         assert len(ts.calls) == 2
 
+    def test_cancelled_iteration_stops_loop(self, loop_module):
+        """#679: a CANCELLED iteration is non-success — the loop must stop (the
+        else branch finalizes it), never continue treating cancel as success."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(status="cancelled", response="", error="Execution cancelled by user",
+                    error_code=None),
+            _Result(response="should not run"),
+        ]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "failed"       # stops, not treated as success
+        assert loop["stop_reason"] == "error"
+        assert loop["runs_completed"] == 1
+        assert len(ts.calls) == 1               # the 2nd iteration never ran
+
     def test_iteration_exception_aborts_loop(self, loop_module):
         ls, db, ts = loop_module
 
