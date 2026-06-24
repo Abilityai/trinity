@@ -389,6 +389,29 @@ class TestFailurePolicy:
         assert loop["status"] == "completed_with_errors"
         assert loop["failed_runs"] == 1
 
+    def test_continue_mode_applies_delay_after_raised_exception(self, loop_module, monkeypatch):
+        """The exception surface honors delay_seconds too (surface parity)."""
+        ls, db, ts = loop_module
+        sleeps: list = []
+
+        async def _fake_sleep(secs):
+            sleeps.append(secs)
+
+        monkeypatch.setattr(ls.asyncio, "sleep", _fake_sleep)
+        ts.results = [
+            RuntimeError("boom"),       # run 1 raises → delay should still apply
+            _Result(response="ok2"),    # run 2 (last) → no trailing delay
+        ]
+        loop_id = _drive(
+            ls, agent_name="a1", message_template="step {{run}}", max_runs=2,
+            on_failure="continue", max_consecutive_failures=3, delay_seconds=5,
+        )
+        loop = db.get_loop(loop_id)
+        assert len(ts.calls) == 2
+        assert loop["status"] == "completed_with_errors"
+        # Delay applied once — after the raised run 1 (run 2 is last, no delay).
+        assert sleeps == [5]
+
     def test_continue_mode_resets_streak_on_success(self, loop_module):
         """A success resets the consecutive-failure counter (alternating runs)."""
         ls, db, ts = loop_module

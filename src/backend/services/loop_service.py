@@ -262,6 +262,27 @@ class LoopService:
                 )
             return None
 
+        async def _inter_run_delay(run_number: int) -> bool:
+            """Apply the inter-run pause. Returns True if the loop was stopped
+            (sleep cancelled) so the caller can break. Honored on every path
+            that proceeds to the next iteration — success AND tolerated failure
+            (#1167), so continue-mode pacing is consistent across surfaces."""
+            if loop["delay_seconds"] and run_number < loop["max_runs"]:
+                sleep_for = loop["delay_seconds"]
+                # #1156: never sleep past the deadline — cap to the remaining
+                # budget; if it has already passed, skip the sleep so the next
+                # iteration boundary check finalizes deadline_exceeded.
+                if deadline is not None:
+                    remaining = (deadline - datetime.utcnow()).total_seconds()
+                    if remaining <= 0:
+                        return False
+                    sleep_for = min(sleep_for, remaining)
+                try:
+                    await asyncio.sleep(sleep_for)
+                except asyncio.CancelledError:
+                    return True
+            return False
+
         try:
             for run_number in range(1, loop["max_runs"] + 1):
                 # Cooperative stop check BEFORE starting the next iteration.
@@ -344,6 +365,10 @@ class LoopService:
                         f"continuing (on_failure=continue, "
                         f"{consecutive_failures}/{max_consecutive_failures} consecutive)"
                     )
+                    if await _inter_run_delay(run_number):
+                        terminal_status = "stopped"
+                        stop_reason = "user_stopped"
+                        break
                     continue
 
                 elapsed_ms = int(
@@ -470,25 +495,14 @@ class LoopService:
                     )
                     # fall through to the inter-run delay, then next iteration
 
-                # Inter-run delay — also a stop point.
-                if loop["delay_seconds"] and run_number < loop["max_runs"]:
-                    sleep_for = loop["delay_seconds"]
-                    # #1156: never sleep past the deadline — cap the delay to
-                    # the remaining budget; the next boundary check then stops
-                    # the loop with deadline_exceeded.
-                    if deadline is not None:
-                        remaining = (deadline - datetime.utcnow()).total_seconds()
-                        if remaining <= 0:
-                            terminal_status = "stopped"
-                            stop_reason = "deadline_exceeded"
-                            break
-                        sleep_for = min(sleep_for, remaining)
-                    try:
-                        await asyncio.sleep(sleep_for)
-                    except asyncio.CancelledError:
-                        terminal_status = "stopped"
-                        stop_reason = "user_stopped"
-                        break
+                # Inter-run delay — also a stop point (success + tolerated-failure
+                # paths; the exception path applies it inline before `continue`).
+                # The #1156 deadline cap lives inside _inter_run_delay; a passed
+                # deadline is finalized by the next iteration's boundary check.
+                if await _inter_run_delay(run_number):
+                    terminal_status = "stopped"
+                    stop_reason = "user_stopped"
+                    break
 
             # #1167: ran to max_runs (or stop-signal matched) in continue mode
             # with tolerated failures → surface partial success. Only promotes
