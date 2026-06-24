@@ -69,7 +69,7 @@ resources:
   memory: "4g"
 ```
 
-Full schema (credentials, runtime selection, metrics, shared folders): [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md).
+Full schema (credentials, runtime selection, metrics, shared folders): [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md). Rather than author one from scratch, start from a ready-made template — catalog: [config/agent-templates/README.md](config/agent-templates/README.md) (also `GET /api/templates` / `list_templates` over MCP).
 
 **If you are running inside Claude Code** — use the abilities plugins:
 
