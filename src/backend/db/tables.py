@@ -269,10 +269,13 @@ agent_loops = Table(
     Column("max_duration_seconds", Integer),  # #1156 — wall-clock deadline
     Column("max_cost_usd", Float),  # #1155 — per-loop USD cost budget
     Column("no_progress_threshold", Integer),  # #1157 — doom-loop detection (NULL = disabled)
+    Column("on_failure", Text),  # #1167 — failure policy: 'abort' | 'continue'
+    Column("max_consecutive_failures", Integer),  # #1167 — continue-mode circuit breaker
     Column("model", Text),
     Column("allowed_tools", Text),
     Column("status", Text),
     Column("runs_completed", Integer),
+    Column("failed_runs", Integer),
     Column("stop_reason", Text),
     Column("last_response", Text),
     Column("error", Text),

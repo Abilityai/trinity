@@ -1795,6 +1795,9 @@ MAX_STOP_SIGNAL_LEN = 200
 MAX_DURATION_SECONDS = 604_800  # 7 days — hard ceiling on the wall-clock deadline
 
 
+MAX_CONSECUTIVE_FAILURES_LIMIT = 100  # #1167 — cap on the continue-mode circuit breaker
+
+
 class StartLoopRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LEN)
     max_runs: int = Field(..., ge=1, le=MAX_RUNS_LIMIT)
@@ -1815,6 +1818,12 @@ class StartLoopRequest(BaseModel):
     # response fingerprint (SHA-256 of normalized text) is identical. 0 disables;
     # default 3. 1 is nonsensical ("repeated identical" needs ≥2) → rejected.
     no_progress_threshold: Optional[int] = Field(default=3, ge=0)
+    # #1167: failure policy. 'abort' (default) = fail-fast, backward compatible;
+    # 'continue' tolerates failed iterations up to max_consecutive_failures.
+    on_failure: Literal["abort", "continue"] = "abort"
+    max_consecutive_failures: int = Field(
+        default=3, ge=1, le=MAX_CONSECUTIVE_FAILURES_LIMIT
+    )
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1842,6 +1851,7 @@ class StartLoopResponse(BaseModel):
     status: str
     agent_name: str
     max_runs: int
+    on_failure: str = "abort"  # #1167
 
 
 class LoopRunResponse(BaseModel):
@@ -1862,6 +1872,9 @@ class LoopStatusResponse(BaseModel):
     status: str
     max_runs: int
     runs_completed: int
+    failed_runs: int = 0  # #1167
+    on_failure: str = "abort"  # #1167
+    max_consecutive_failures: int = 3  # #1167
     stop_reason: Optional[str] = None
     last_response: Optional[str] = None
     error: Optional[str] = None

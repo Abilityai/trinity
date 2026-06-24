@@ -2038,6 +2038,8 @@ export class TrinityClient {
       max_duration_seconds?: number;
       max_cost_usd?: number;
       no_progress_threshold?: number;
+      on_failure?: "abort" | "continue";
+      max_consecutive_failures?: number;
       model?: string;
       allowed_tools?: string[];
     }
@@ -2046,6 +2048,7 @@ export class TrinityClient {
     status: string;
     agent_name: string;
     max_runs: number;
+    on_failure?: string;
   }> {
     return this.request(
       "POST",

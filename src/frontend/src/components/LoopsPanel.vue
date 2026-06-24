@@ -130,6 +130,31 @@
             />
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Stops after this many identical responses in a row (default 3). Set 0 to disable.</p>
           </div>
+
+          <!-- Failure policy (#1167) -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">On iteration failure</label>
+            <select
+              v-model="form.on_failure"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-action-primary-500"
+            >
+              <option value="abort">Abort — stop the loop (default)</option>
+              <option value="continue">Continue — skip to next run</option>
+            </select>
+          </div>
+
+          <!-- Max consecutive failures (continue mode only) -->
+          <div v-if="form.on_failure === 'continue'">
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Max consecutive failures</label>
+            <input
+              v-model.number="form.max_consecutive_failures"
+              type="number"
+              min="1"
+              max="100"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-action-primary-500"
+            />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Abort the loop as failed after this many failures in a row.</p>
+          </div>
         </div>
 
         <!-- Model -->
@@ -229,10 +254,13 @@
               :class="statusBadgeClass(loop.status)"
             >
               <span v-if="loop.status === 'running'" class="w-1.5 h-1.5 rounded-full bg-current mr-1 animate-pulse"></span>
-              {{ loop.status }}
+              {{ (loop.status || '').replace(/_/g, ' ') }}
             </span>
             <span class="text-sm font-medium text-gray-900 dark:text-white">
               Run {{ loop.runs_completed }} / {{ loop.max_runs }}
+            </span>
+            <span v-if="loop.failed_runs > 0" class="text-xs font-medium text-status-danger-600 dark:text-status-danger-400">
+              · {{ loop.failed_runs }} failed
             </span>
             <span v-if="loop.stop_reason" class="text-xs text-gray-500 dark:text-gray-400 truncate">
               · {{ formatStopReason(loop.stop_reason) }}
@@ -358,6 +386,8 @@ const defaultForm = () => ({
   max_duration_seconds: null,
   max_cost_usd: null,
   no_progress_threshold: 3,
+  on_failure: 'abort',
+  max_consecutive_failures: 3,
   model: '',
   allowed_tools: null,
 })
@@ -417,6 +447,10 @@ async function submit() {
   if (form.no_progress_threshold !== null && form.no_progress_threshold !== undefined && form.no_progress_threshold !== '') {
     payload.no_progress_threshold = form.no_progress_threshold
   }
+  if (form.on_failure === 'continue') {
+    payload.on_failure = 'continue'
+    payload.max_consecutive_failures = form.max_consecutive_failures
+  }
   if (form.model) payload.model = form.model
   if (form.allowed_tools !== null) payload.allowed_tools = form.allowed_tools
 
@@ -439,6 +473,8 @@ function statusBadgeClass(status) {
       return 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'
     case 'completed':
       return 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300'
+    case 'completed_with_errors':
+      return 'bg-status-warning-100 dark:bg-status-warning-900/30 text-status-warning-800 dark:text-status-warning-300'
     case 'failed':
       return 'bg-status-danger-100 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-300'
     case 'stopped':
@@ -464,6 +500,7 @@ function formatStopReason(reason) {
     budget_exhausted: 'budget exhausted',
     no_progress: 'no progress — identical responses',
     error: 'error',
+    max_consecutive_failures: 'too many consecutive failures',
     interrupted: 'interrupted',
   }
   return map[reason] || reason
