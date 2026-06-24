@@ -3415,6 +3415,38 @@ servers (each replica polls + reconciles independently).
 
 ---
 
+## 46. External Client Roster (Access/Sharing redesign — epic #16)
+
+### 46.1 Surface External Channel Clients on the Sharing Tab (#20)
+
+**Description**: The Sharing tab answers "who is actually talking to this agent
+through a channel?" with a read-only **client roster** — external users (no
+Trinity account) who have messaged the agent via a channel. Activity is already
+collected per channel link (`verified_email`, `message_count`, `last_active`)
+but was never surfaced. This is the read surface; per-client controls
+(block/revoke/approve) are a separate follow-up (#21).
+
+- **FR-1 — Aggregated roster endpoint**: `GET /api/agents/{name}/clients`
+  (owner/admin via `OwnedAgentByName`) returns one entry per external client
+  across channels: `channel`, `identity` (channel-native handle/phone),
+  `display_name`, `verified_email`, `message_count`, `last_active`. Sorted by
+  `last_active` descending (never-active rows last).
+- **FR-2 — Channel coverage**: roster v1 covers **Telegram**
+  (`telegram_bindings` → `telegram_chat_links`) and **WhatsApp**
+  (`whatsapp_bindings` → `whatsapp_chat_links`) — the channels that record the
+  full `(verified_email, message_count, last_active)` triple per user. Slack
+  (verifications carry email but no activity counters) and VoIP (call logs) are
+  additive follow-ups; the response model is channel-extensible so they slot in
+  without a contract change.
+- **FR-3 — Read-only**: no write actions in this slice. The roster renders even
+  when the agent container is stopped (DB-sourced). Empty roster renders an
+  explicit empty state, not an error.
+- **FR-4 — Tenant boundary**: the endpoint is scoped to the path agent; the DB
+  join filters by `agent_name` through the channel binding, so a client of
+  another agent never appears.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

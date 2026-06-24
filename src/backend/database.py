@@ -1903,6 +1903,9 @@ class DatabaseManager:
     def increment_telegram_message_count(self, chat_link_id):
         return self._telegram_channel_ops.increment_message_count(chat_link_id)
 
+    def list_telegram_clients_for_agent(self, agent_name):
+        return self._telegram_channel_ops.list_clients_for_agent(agent_name)
+
     def get_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.get_verified_email(binding_id, telegram_user_id)
 
@@ -1995,6 +1998,9 @@ class DatabaseManager:
 
     def increment_whatsapp_message_count(self, chat_link_id):
         return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
+
+    def list_whatsapp_clients_for_agent(self, agent_name):
+        return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
 
     # =========================================================================
     # VoIP Telephony (delegated to db/voip.py) - VOIP-001 (#1056)

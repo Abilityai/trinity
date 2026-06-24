@@ -615,6 +615,23 @@ class SharedFilesList(BaseModel):
     quota_bytes: int
 
 
+class ClientRosterEntry(BaseModel):
+    """One external channel client in the Sharing-tab roster (#20).
+
+    An outside person (no Trinity account) who has messaged the agent through a
+    channel. `identity` is the channel-native handle (Telegram @username or
+    numeric id, WhatsApp phone). `display_name`/`verified_email` are null when
+    unknown; `last_active` is null for a row that has never recorded activity.
+    Channel-extensible: Slack/VoIP slot in without a contract change.
+    """
+    channel: str
+    identity: str
+    display_name: Optional[str] = None
+    verified_email: Optional[str] = None
+    message_count: int = 0
+    last_active: Optional[str] = None
+
+
 class AgentDataImportResponse(BaseModel):
     """Response for POST /api/agents/{name}/data/import (#1169).
 
