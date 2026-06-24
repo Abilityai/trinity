@@ -372,7 +372,6 @@ def test_refuses_when_no_remote_main(tmp_path: Path):
     assert result["error"] == "no_remote_main"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_empty_allowlist_is_safe_noop(tmp_path: Path):
     """Empty allowlist → no files preserved, but reset + commit still run.
 
@@ -393,7 +392,6 @@ def test_empty_allowlist_is_safe_noop(tmp_path: Path):
     assert (worker / "template.conf").read_text() == "v2\n"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_success_preserves_workspace_and_overlays_main(tmp_path: Path):
     """Full happy path: workspace/** survives; template.conf adopts main."""
     worker = _setup_parallel_history(tmp_path)
@@ -418,7 +416,6 @@ def test_success_preserves_workspace_and_overlays_main(tmp_path: Path):
     assert subject == "Adopt main baseline, preserve state"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_success_pushes_with_force_with_lease(tmp_path: Path):
     """Opting in to the push step uses --force-with-lease and updates remote."""
     worker = _setup_parallel_history(tmp_path)

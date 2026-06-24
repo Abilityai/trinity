@@ -25,7 +25,7 @@ mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/nul
 # Initialize from GitHub repository if specified
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"
-    cd /home/developer
+    cd /home/developer || exit 1
 
     # Clone the repository using PAT authentication.
     # TRINITY_GIT_BASE_URL defaults to https://github.com; overridable for
@@ -45,7 +45,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             # We only fetch to update remote refs - no checkout, no branch change
             echo "Repository already exists on persistent volume - skipping clone"
             echo "Running git fetch to sync with remote..."
-            cd /home/developer
+            cd /home/developer || exit 1
             CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
             echo "Current branch: ${CURRENT_BRANCH} (preserved from previous run)"
             # Update remote URL with current PAT (may have changed since last start)
@@ -79,7 +79,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             CLONE_EXIT=$?
             if [ $CLONE_EXIT -eq 0 ]; then
             echo "Repository cloned successfully with git history"
-            cd /home/developer
+            cd /home/developer || exit 1
 
             # Configure git user for commits
             git config user.email "trinity-agent@ability.ai"
@@ -139,6 +139,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
                 echo "ERROR: Failed to clone GitHub repository: ${GITHUB_REPO}"
                 echo "Exit code: ${CLONE_EXIT}"
                 # Sanitize output to avoid leaking PAT in logs
+                # shellcheck disable=SC2001  # regex char-class [^@]; ${//} glob can't express it
                 echo "Clone output: $(echo "${CLONE_OUTPUT}" | sed "s|oauth2:[^@]*@|oauth2:***@|g")"
                 echo "=========================================="
                 echo "Possible causes:"
@@ -178,18 +179,18 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
 
             # Copy all files from the cloned repo to the working directory
             # Using rsync-like behavior with cp
-            cd /tmp/repo-clone
-
-            # Copy everything except .git directory
-            for item in $(ls -A | grep -v "^\.git$"); do
-                echo "Copying ${item}..."
-                cp -r "${item}" /home/developer/ 2>/dev/null || true
-            done
+            # Copy everything except .git directory. Absolute paths via find
+            # -print0 / read -d '' so odd filenames can't word-split (SC2010/SC2045).
+            find /tmp/repo-clone -mindepth 1 -maxdepth 1 ! -name '.git' -print0 |
+                while IFS= read -r -d '' item; do
+                    echo "Copying $(basename "${item}")..."
+                    cp -r "${item}" /home/developer/ 2>/dev/null || true
+                done
 
             # Clean up the clone
             rm -rf /tmp/repo-clone
 
-            cd /home/developer
+            cd /home/developer || exit 1
 
             # Create initialization marker to prevent re-cloning on restart
             touch /home/developer/.trinity-initialized
@@ -199,6 +200,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             echo "=========================================="
             echo "ERROR: Failed to clone GitHub repository: ${GITHUB_REPO}"
             echo "Exit code: ${SHALLOW_EXIT}"
+            # shellcheck disable=SC2001  # regex char-class [^@]; ${//} glob can't express it
             echo "Clone output: $(echo "${SHALLOW_OUTPUT}" | sed "s|oauth2:[^@]*@|oauth2:***@|g")"
             echo "=========================================="
             echo "Possible causes:"
@@ -214,7 +216,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
 # Initialize from local template if specified (fallback)
 elif [ -n "${TEMPLATE_NAME}" ] && [ -d "/template" ]; then
     echo "Initializing agent from local template: ${TEMPLATE_NAME}"
-    cd /home/developer
+    cd /home/developer || exit 1
 
     # Check if workspace is already initialized (persistent volume has files from previous start)
     if [ -f "/home/developer/.trinity-initialized" ]; then
@@ -223,12 +225,12 @@ elif [ -n "${TEMPLATE_NAME}" ] && [ -d "/template" ]; then
         # Copy ALL template files to workspace (including template.yaml - it's a required Trinity file)
         # This ensures custom directories (src/, lib/, docs/, etc.) are included
         echo "Copying template files..."
-        cd /template
-        for item in $(ls -A); do
-            echo "  Copying ${item}..."
-            cp -r "${item}" /home/developer/ 2>/dev/null || true
-        done
-        cd /home/developer
+        find /template -mindepth 1 -maxdepth 1 -print0 |
+            while IFS= read -r -d '' item; do
+                echo "  Copying $(basename "${item}")..."
+                cp -r "${item}" /home/developer/ 2>/dev/null || true
+            done
+        cd /home/developer || exit 1
 
         # Make scripts executable if present
         if [ -d "/home/developer/scripts" ]; then
@@ -249,7 +251,7 @@ fi
 # Copy generated credential files (with real values, generated by backend)
 if [ -d "/generated-creds" ]; then
     echo "Copying generated credential files..."
-    cd /home/developer
+    cd /home/developer || exit 1
 
     # Copy .mcp.json with real credentials
     if [ -f "/generated-creds/.mcp.json" ]; then
@@ -264,7 +266,8 @@ if [ -d "/generated-creds" ]; then
     fi
 
     # Copy any other generated config files (preserving directory structure)
-    for file in $(find /generated-creds -type f ! -name ".mcp.json" ! -name ".env" 2>/dev/null); do
+    find /generated-creds -type f ! -name ".mcp.json" ! -name ".env" -print0 2>/dev/null |
+        while IFS= read -r -d '' file; do
         # Get relative path from /generated-creds
         rel_path="${file#/generated-creds/}"
 
@@ -288,7 +291,8 @@ if [ -d "/generated-creds" ]; then
     # The path structure inside credential-files/ maps to the target path in /home/developer/
     if [ -d "/generated-creds/credential-files" ]; then
         echo "Copying credential files..."
-        for file in $(find /generated-creds/credential-files -type f 2>/dev/null); do
+        find /generated-creds/credential-files -type f -print0 2>/dev/null |
+            while IFS= read -r -d '' file; do
             # Get path relative to credential-files/
             rel_path="${file#/generated-creds/credential-files/}"
             target_dir=$(dirname "$rel_path")
@@ -378,7 +382,8 @@ fi
 # writable layer), so a DB-driven recreate cleanly reverts to the freshly-baked
 # Config.Env token — no marker logic needed.
 if [ -s /var/lib/trinity/oauth-token ]; then
-    export CLAUDE_CODE_OAUTH_TOKEN="$(cat /var/lib/trinity/oauth-token)"
+    CLAUDE_CODE_OAUTH_TOKEN="$(cat /var/lib/trinity/oauth-token)"
+    export CLAUDE_CODE_OAUTH_TOKEN
     echo "Applied rotated subscription token from durable override"
 fi
 
@@ -400,7 +405,7 @@ fi
 # === Auto-Import Encrypted Credentials ===
 # If .credentials.enc exists but .env doesn't, decrypt and inject credentials
 # This enables portable credential storage via git-committed encrypted files
-cd /home/developer
+cd /home/developer || exit 1
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc without .env - attempting auto-import..."
 

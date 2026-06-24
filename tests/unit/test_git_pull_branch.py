@@ -33,8 +33,13 @@ def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
 
 def _init_repo_with_remote(local_dir: str, remote_dir: str) -> None:
     """Initialize a local git repo with a bare remote and an initial commit."""
-    subprocess.run(["git", "init", "--bare"], cwd=remote_dir, capture_output=True, timeout=10)
-    subprocess.run(["git", "init"], cwd=local_dir, capture_output=True, timeout=10)
+    # #1103: force the default branch to `main`. `git init` defaults to `master`
+    # on stock git (no init.defaultBranch), so `git push -u origin main` below
+    # would push a non-existent ref and origin/main would never exist — which is
+    # exactly why _get_pull_branch fell back to the working branch and these
+    # tests failed once the suite actually ran.
+    subprocess.run(["git", "init", "--bare", "-b", "main"], cwd=remote_dir, capture_output=True, timeout=10)
+    subprocess.run(["git", "init", "-b", "main"], cwd=local_dir, capture_output=True, timeout=10)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=local_dir, capture_output=True, timeout=10)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=local_dir, capture_output=True, timeout=10)
     subprocess.run(["git", "remote", "add", "origin", remote_dir], cwd=local_dir, capture_output=True, timeout=10)
@@ -59,7 +64,6 @@ class TestGetPullBranch:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.remote_dir, ignore_errors=True)
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_trinity_branch_returns_main(self):
         """trinity/* branch with origin/main should return 'main'."""
         subprocess.run(
@@ -94,7 +98,6 @@ class TestGetPullBranch:
         result = _get_pull_branch("feature/my-feature", self.home_dir)
         assert result == "feature/my-feature"
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_trinity_branch_deep_nesting(self):
         """trinity/ prefix with multiple path segments should still return main."""
         result = _get_pull_branch("trinity/agent-name/instance-id", self.home_dir)
@@ -115,11 +118,14 @@ class TestGitPullFromMainEndToEnd:
         """Set up a local repo with remote, mimicking a Trinity agent."""
         self._temp_dirs: list[str] = []
 
-        # Create a bare "remote" (like GitHub)
+        # Create a bare "remote" (like GitHub). `-b main` so the clone below
+        # inherits `main` as its default branch instead of stock git's
+        # `master`; otherwise `git push -u origin main` pushes a non-existent
+        # ref and origin/main never exists (#1103).
         self.remote_dir = tempfile.mkdtemp()
         self._temp_dirs.append(self.remote_dir)
         subprocess.run(
-            ["git", "init", "--bare"],
+            ["git", "init", "--bare", "-b", "main"],
             cwd=self.remote_dir,
             capture_output=True, timeout=10
         )
@@ -194,7 +200,6 @@ class TestGitPullFromMainEndToEnd:
             cwd=pusher_dir, capture_output=True, timeout=10
         )
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_detects_upstream_changes_on_main(self):
         """After pushing to main, agent on working branch should see commits behind."""
         self._push_commit_to_main()
@@ -217,7 +222,6 @@ class TestGitPullFromMainEndToEnd:
         behind_count = int(result.stdout.strip())
         assert behind_count == 1, f"Expected 1 commit behind, got {behind_count}"
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_pull_from_main_brings_changes(self):
         """Pulling from origin/main should bring upstream changes into working branch."""
         self._push_commit_to_main()
@@ -258,7 +262,6 @@ class TestGitPullFromMainEndToEnd:
         behind_count = int(result.stdout.strip())
         assert behind_count == 0, "Old behavior should show 0 behind (bug confirmed)"
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_force_reset_to_main(self):
         """Force reset to origin/main should bring working branch to main's state."""
         self._push_commit_to_main()

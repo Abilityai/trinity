@@ -224,7 +224,6 @@ def test_startup_sh_strips_trailing_slash_in_base_url():
     assert out == "https://oauth2:p@gitea.example.com/o/r.git"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_startup_sh_shellcheck_clean():
     """shellcheck must still be happy with startup.sh (skipped if not installed)."""
     if shutil.which("shellcheck") is None:
