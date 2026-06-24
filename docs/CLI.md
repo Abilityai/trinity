@@ -5,6 +5,13 @@ Command-line interface for the Trinity Autonomous Agent Orchestration Platform.
 ## Installation
 
 ```bash
+pip install trinity-cli                 # from PyPI (recommended)
+# or: brew install abilityai/tap/trinity-cli
+```
+
+From a source checkout (development / unreleased changes), install editable instead:
+
+```bash
 pip install -e src/cli/
 ```
 
