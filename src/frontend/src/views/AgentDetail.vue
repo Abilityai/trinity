@@ -89,22 +89,52 @@
               <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
             </div>
 
-            <!-- Chat Tab Content (v-show keeps component mounted so state/polling survives tab switches) -->
-            <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden">
-              <ChatPanel
-                :agent-name="agent.name"
-                :agent-status="agent.status"
-                :resume-session-id="resumeSessionId"
-                :resume-execution-id="resumeExecutionId"
-              />
-            </div>
+            <!-- Chat Tab Content (#1112: unified Chat tab with a Session-mode toggle).
+                 v-show keeps the active surface mounted so state/polling survives tab switches. -->
+            <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
+              <!-- Session-mode toggle — hidden when the Session surface is unavailable
+                   (feature flag off, or Codex runtime without --resume machinery). -->
+              <div
+                v-if="sessionAvailable"
+                class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40"
+              >
+                <span
+                  class="text-xs text-gray-500 dark:text-gray-400"
+                  title="Session mode resumes the same Claude session each turn (--resume), preserving memory, tool-result state, and reasoning across turns. Off = stateless, ephemeral per-turn chat."
+                >Session mode</span>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="effectiveChatMode === 'session'"
+                  @click="toggleChatMode"
+                  :class="[
+                    effectiveChatMode === 'session' ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600',
+                    'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
+                  ]"
+                >
+                  <span
+                    :class="[
+                      effectiveChatMode === 'session' ? 'translate-x-4' : 'translate-x-0',
+                      'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
+                    ]"
+                  />
+                </button>
+              </div>
 
-            <!-- Session Tab Content (SESSION_TAB_2026-04 Phase 3) -->
-            <div v-show="activeTab === 'session'" v-if="sessionsStore.sessionTabEnabled" class="flex-1 overflow-hidden">
-              <SessionPanel
-                :agent-name="agent.name"
-                :agent-status="agent.status"
-              />
+              <div class="flex-1 overflow-hidden">
+                <SessionPanel
+                  v-if="effectiveChatMode === 'session'"
+                  :agent-name="agent.name"
+                  :agent-status="agent.status"
+                />
+                <ChatPanel
+                  v-else
+                  :agent-name="agent.name"
+                  :agent-status="agent.status"
+                  :resume-session-id="resumeSessionId"
+                  :resume-execution-id="resumeExecutionId"
+                />
+              </div>
             </div>
 
             <!-- Dashboard Tab Content -->
@@ -306,17 +336,20 @@ const error = ref('')
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
-const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'session', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
 // Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-const TAB_ALIASES = { guardrails: 'settings' }
+// #1112: the Session tab collapsed into Chat, so ?tab=session resolves to chat
+// (the session-mode toggle, not the tab id, selects the surface).
+const TAB_ALIASES = { guardrails: 'settings', session: 'chat' }
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return DEEP_LINK_TABS.includes(resolved) ? resolved : null
 }
 // Tabs that need a full-viewport flex layout (input pinned to bottom).
-// Chat + Session both render ChatMessages which depends on flex-1 grow.
-const isFullscreenTab = computed(() => activeTab.value === 'chat' || activeTab.value === 'session')
+// #1112: single unified Chat tab (both session and legacy modes render
+// ChatMessages, which depends on flex-1 grow).
+const isFullscreenTab = computed(() => activeTab.value === 'chat')
 const showResourceModal = ref(false)
 const showAvatarModal = ref(false)
 const avatarIdentityPrompt = ref('')
@@ -345,6 +378,30 @@ const tokenStats = ref(null)
 // Resume mode state (EXEC-023)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
 const resumeExecutionId = computed(() => route.query.executionId || null)
+
+// #1112: Chat-tab session-mode toggle. The unified Chat tab renders SessionPanel
+// (--resume continuity) or the legacy ChatPanel (stateless). The user's choice
+// persists per-user via localStorage (one preference across agents), default ON.
+const CHAT_MODE_KEY = 'trinity.chatMode'
+const chatMode = ref(localStorage.getItem(CHAT_MODE_KEY) === 'legacy' ? 'legacy' : 'session')
+// Transient routing override (NOT persisted): execution-resume must land on the
+// legacy ChatPanel, which owns resumeSessionId — without changing the saved pref.
+const routeForcedMode = ref(null)
+// Session surface is available only when the platform flag is on AND the runtime
+// has --resume machinery (Codex does not, #1187).
+const sessionAvailable = computed(
+  () => sessionsStore.sessionTabEnabled && agent.value?.runtime !== 'codex'
+)
+const effectiveChatMode = computed(() => {
+  if (!sessionAvailable.value) return 'legacy'      // feature-flag / codex fallback
+  if (routeForcedMode.value) return routeForcedMode.value
+  return chatMode.value
+})
+function toggleChatMode() {
+  routeForcedMode.value = null                       // user intent overrides routing
+  chatMode.value = effectiveChatMode.value === 'session' ? 'legacy' : 'session'
+  try { localStorage.setItem(CHAT_MODE_KEY, chatMode.value) } catch (e) { /* ignore */ }
+}
 
 // Initialize composables
 const { notification, showNotification } = useNotification()
@@ -651,14 +708,10 @@ const visibleTabs = computed(() => {
     { id: 'chat', label: 'Chat' }
   ]
 
-  // Session tab — SESSION_TAB_2026-04. Sits between Chat and the rest;
-  // gated on the platform feature flag so it's invisible until enabled.
-  // Hidden for runtimes without cached-UUID --resume (Codex, #1187): they lack
-  // the Session tab's resume machinery, so the backend runs stateless turns and
-  // the tab would be misleading. Chat (with continuity) stays available.
-  if (sessionsStore.sessionTabEnabled && agent.value?.runtime !== 'codex') {
-    tabs.push({ id: 'session', label: 'Session' })
-  }
+  // #1112: the Session tab collapsed into the single Chat tab above. The
+  // Session surface is now reached via the Chat tab's "Session mode" toggle
+  // (default ON), gated on the same feature-flag + non-Codex-runtime condition
+  // (see `sessionAvailable`). No separate tab entry.
 
   // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
   if (hasDashboard.value) {
@@ -1074,7 +1127,13 @@ onMounted(async () => {
     if (resolvedTab) {
       activeTab.value = resolvedTab
     }
+    // #1112: a legacy ?tab=session deep-link expresses session-mode intent.
+    if (route.query.tab === 'session') chatMode.value = 'session'
   }
+  // #1112: execution-resume (ExecutionDetail "continue as chat") carries a
+  // claude_session_id the legacy ChatPanel resumes — force legacy for this
+  // landing without persisting the change to the user's saved preference.
+  if (resumeSessionId.value) routeForcedMode.value = 'legacy'
 })
 
 // onActivated fires when component is shown (after being cached by KeepAlive)

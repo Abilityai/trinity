@@ -210,6 +210,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
 - **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
+- **Unified Chat tab (#1112)**: the separate Session tab is collapsed into the single
+  **Chat** tab, which carries a **Session-mode toggle** (default ON, persisted
+  per-user in `localStorage['trinity.chatMode']`). ON → `SessionPanel`; OFF →
+  legacy `ChatPanel`. The toggle is hidden and the tab falls back to legacy when
+  `session_tab_enabled` is off or the runtime lacks `--resume` (Codex) — never
+  zero chat surfaces. `?tab=session` aliases to the Chat tab; execution-resume
+  (`resumeSessionId`) forces legacy for that landing without changing the saved
+  preference. See architecture → Session Tab.
 
 ---
 
