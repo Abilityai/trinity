@@ -115,6 +115,45 @@
       </select>
     </div>
 
+    <!-- Additional Instructions for public & channel chats (#1205) -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Additional instructions <span class="font-normal text-gray-500 dark:text-gray-400">— public &amp; channel chats only</span></h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+        Extra instructions injected into the agent's system prompt for <strong>outside audiences only</strong> — public links, Slack / Telegram / WhatsApp, and paid chat.
+        Use it for persona, scope limits, disclaimers, or guardrails like "you're talking to an external customer, never reveal internal project names."
+      </p>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        Does <em>not</em> affect your own authenticated chats, scheduled runs, loops, or agent-to-agent calls. Leave empty to disable (no behavior change). Voice/VoIP has its own prompt.
+      </p>
+
+      <textarea
+        v-model="publicPrompt"
+        :maxlength="PUBLIC_PROMPT_MAX"
+        rows="5"
+        :disabled="publicPromptLoading"
+        placeholder="e.g. Always answer in the visitor's language. Never mention internal codenames. Add the disclaimer: 'Responses are informational only.'"
+        class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-action-primary-500 disabled:bg-gray-100 dark:disabled:bg-gray-900 font-mono text-sm"
+      ></textarea>
+
+      <div class="mt-2 flex items-center justify-between">
+        <span class="text-xs text-gray-400 dark:text-gray-500">{{ (publicPrompt || '').length }} / {{ PUBLIC_PROMPT_MAX }}</span>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            @click="clearPublicPrompt"
+            :disabled="publicPromptLoading || !publicPrompt"
+            class="px-3 py-1.5 text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50"
+          >Clear</button>
+          <button
+            type="button"
+            @click="savePublicPrompt"
+            :disabled="publicPromptLoading || !publicPromptDirty"
+            class="inline-flex items-center px-4 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 dark:focus:ring-offset-gray-800 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed"
+          >{{ publicPromptLoading ? 'Saving…' : 'Save' }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Channels: compact summary rows (detailed config moves to dialogs in #19) -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
@@ -165,9 +204,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
 import ChannelDisclosure from './ChannelDisclosure.vue'
@@ -195,6 +235,7 @@ const { showNotification } = useNotification()
 
 // VoIP channel visibility (#28) — gated on the platform `voip_available` flag.
 const sessionsStore = useSessionsStore()
+const agentsStore = useAgentsStore()
 sessionsStore.loadFeatureFlags()
 
 const loadAgent = () => {
@@ -217,6 +258,50 @@ const decisionLoading = ref(null)
 // agent with require_email=false is shown by its open_access flag and upgraded
 // to identity-required the next time the operator picks a mode.
 const accessMode = computed(() => (policy.value.open_access ? 'open' : 'restricted'))
+
+// ---------------------------------------------------------------------------
+// Additional instructions for public & channel chats (#1205)
+// ---------------------------------------------------------------------------
+const PUBLIC_PROMPT_MAX = 4000
+const publicPrompt = ref('')
+const publicPromptSaved = ref('')   // last persisted value, for dirty tracking
+const publicPromptLoading = ref(false)
+const publicPromptDirty = computed(
+  () => (publicPrompt.value || '') !== (publicPromptSaved.value || '')
+)
+
+const loadPublicPrompt = async () => {
+  try {
+    const value = await agentsStore.fetchPublicChannelPrompt(props.agentName)
+    publicPrompt.value = value || ''
+    publicPromptSaved.value = value || ''
+  } catch (err) {
+    console.error('Failed to load public instructions:', err)
+  }
+}
+
+const savePublicPrompt = async () => {
+  publicPromptLoading.value = true
+  try {
+    const value = await agentsStore.savePublicChannelPrompt(
+      props.agentName,
+      publicPrompt.value
+    )
+    publicPrompt.value = value || ''
+    publicPromptSaved.value = value || ''
+    showNotification('Additional instructions saved', 'success')
+  } catch (err) {
+    console.error('Failed to save public instructions:', err)
+    showNotification(err.response?.data?.detail || 'Failed to save instructions', 'error')
+  } finally {
+    publicPromptLoading.value = false
+  }
+}
+
+const clearPublicPrompt = async () => {
+  publicPrompt.value = ''
+  await savePublicPrompt()
+}
 
 const loadPolicy = async () => {
   try {
@@ -340,6 +425,6 @@ const setPublicChannelModel = async (value) => {
 
 watch(() => props.agentName, async (name) => {
   if (!name) return
-  await Promise.all([loadPolicy(), loadAccessRequests(), loadPublicChannelModel()])
+  await Promise.all([loadPolicy(), loadAccessRequests(), loadPublicChannelModel(), loadPublicPrompt()])
 }, { immediate: true })
 </script>

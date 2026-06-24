@@ -653,6 +653,26 @@ class AgentCapacityUpdate(BaseModel):
     max_parallel_tasks: int
 
 
+# Max length for the public/channel custom-instructions fragment (#1205).
+PUBLIC_CHANNEL_PROMPT_MAX_LEN = 4000
+
+
+class PublicChannelPrompt(BaseModel):
+    """Per-agent custom instructions for public & channel chats (#1205).
+
+    Response for GET, and the stored value echoed back by PUT. `null`/empty
+    means unset — a strict no-op for the agent's behavior.
+    """
+    public_channel_system_prompt: Optional[str] = None
+
+
+class PublicChannelPromptUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/public-prompt (#1205)."""
+    public_channel_system_prompt: Optional[str] = Field(
+        default=None, max_length=PUBLIC_CHANNEL_PROMPT_MAX_LEN
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fleet Executions (EXEC-022 / Issue #18)
 # ---------------------------------------------------------------------------

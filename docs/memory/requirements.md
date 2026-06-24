@@ -3415,6 +3415,37 @@ servers (each replica polls + reconciles independently).
 
 ---
 
+## 46. Public & Channel Custom Instructions (#1205)
+
+### 46.1 Per-Agent Public-Facing System-Prompt Fragment (#1205)
+
+**Description**: An agent owner can attach extra system-prompt instructions that
+apply **only to public-facing conversations** — public links, channel chats
+(Slack/Telegram/WhatsApp), and x402 paid chat — without changing the agent's
+behavior in their own authenticated chats, scheduled runs, loops, or
+agent-to-agent calls. The text-surface counterpart of `voice_system_prompt`.
+Edited from the Sharing tab.
+
+- **FR-1 — Storage**: `agent_ownership.public_channel_system_prompt TEXT`
+  (versioned migration, Invariant #3). Unset/empty is the default.
+- **FR-2 — API**: owner-only `GET/PUT /api/agents/{name}/public-prompt`
+  mirroring the voice-prompt endpoints; PUT enforces a 4000-char cap;
+  empty/whitespace clears the value.
+- **FR-3 — Injection surfaces**: when set, the fragment is folded into the
+  `caller_prompt` passed to `compose_system_prompt` at exactly three sites —
+  `adapters/message_router.py` (all channels), `routers/public.py` (public chat
+  sync + async), and `routers/paid.py` (x402). It composes with the MEM-001
+  per-user memory block (public fragment first, then memory).
+- **FR-4 — Scope exclusion**: NOT applied to authenticated web Chat/Session
+  tabs, scheduled executions, loops, or agent-to-agent calls — those paths never
+  call the folding helper.
+- **FR-5 — Strict no-op**: an unset value changes nothing for existing agents;
+  a DB lookup failure degrades to the memory block alone (never blocks a chat).
+- **FR-6 — Group chats**: applied to group channels too (group surfaces are
+  public-facing).
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

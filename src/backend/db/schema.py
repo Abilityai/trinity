@@ -92,6 +92,7 @@ TABLES = {
             voice_system_prompt TEXT,
             voice_name TEXT,
             public_channel_model TEXT,
+            public_channel_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,

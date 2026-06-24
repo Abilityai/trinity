@@ -728,6 +728,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
 | GET | `/api/agents/{name}/shares` | List shares |
 | GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
+| GET/PUT | `/api/agents/{name}/public-prompt` | Owner-only per-agent custom instructions (`public_channel_system_prompt`, 4000-char cap) folded into the system prompt for **public-facing surfaces only** — public links, channel router (Slack/Telegram/WhatsApp), x402 paid chat — via `platform_prompt_service.build_public_channel_caller_prompt` (composes with the MEM-001 memory block). NOT applied to authenticated chat, schedules, loops, or a2a. Text counterpart of `voice_system_prompt` (#1205) |
 | GET/PUT | `/api/agents/{name}/access-policy` | Cross-channel access policy: `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | Pending access requests |
 | POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares + fire-and-forget approval notification on the requester's originating channel for telegram/slack/whatsapp, #951) or reject |
@@ -973,6 +974,7 @@ CREATE TABLE agent_ownership (
     voice_system_prompt TEXT,
     voice_name TEXT,                               -- #28: persisted Gemini voice (NULL → 'Kore')
     public_channel_model TEXT,                     -- #894: per-agent model for public channels (NULL → platform default)
+    public_channel_system_prompt TEXT,             -- #1205: public/channel-only custom-instructions fragment
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in

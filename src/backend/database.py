@@ -765,6 +765,11 @@ class DatabaseManager:
 
     def set_voice_name(self, agent_name: str, voice_name):
         return self._agent_ops.set_voice_name(agent_name, voice_name)
+    def get_public_channel_system_prompt(self, agent_name: str):
+        return self._agent_ops.get_public_channel_system_prompt(agent_name)
+
+    def set_public_channel_system_prompt(self, agent_name: str, prompt):
+        return self._agent_ops.set_public_channel_system_prompt(agent_name, prompt)
 
     def get_public_channel_model(self, agent_name: str):
         return self._agent_ops.get_public_channel_model(agent_name)
