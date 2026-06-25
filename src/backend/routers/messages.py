@@ -55,6 +55,7 @@ class SendMessageRequest(BaseModel):
     )
     execution_id: Optional[str] = Field(
         default=None,
+        max_length=200,
         description=(
             "The execution this send belongs to (effect-scoped idempotency, #1084). "
             "A re-delivery of the same turn dedupes to one send per (recipient, channel). "

@@ -1023,20 +1023,20 @@ class TestShareFileGuard:
             data = content_by_call.pop(0) if content_by_call else b"file-bytes-v1"
             return (data, os.path.basename(container_path))
 
-        def fake_finalize(agent_name, filename, data, basename, size_bytes,
-                          *, display_name, expires_in, created_by):
-            finals.append(filename)
+        def fake_persist(agent_name, data, *, basename, display_name,
+                         expires_in, created_by):
+            finals.append(basename)
             tok = f"tok{len(finals)}"
             return {
                 "file_id": f"id-{len(finals)}",
                 "url": f"https://x/api/files/id-{len(finals)}?sig={tok}",
                 "expires_at": "2099-01-01T00:00:00Z",
-                "size_bytes": size_bytes,
+                "size_bytes": len(data),
                 "mime_type": "text/csv",
             }
 
         monkeypatch.setattr(mod, "extract_from_agent", fake_extract)
-        monkeypatch.setattr(mod, "_finalize_share", fake_finalize)
+        monkeypatch.setattr(mod, "_persist_and_register", fake_persist)
         return finals
 
     async def test_rerun_same_file_replays_url(self, shared_files_mod, effect_service, monkeypatch):

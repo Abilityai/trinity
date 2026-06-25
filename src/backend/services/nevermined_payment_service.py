@@ -297,7 +297,21 @@ class NeverminedPaymentService:
                 payment_request_id=agent_request_id,
                 execution_id=execution_id,
             ) as guard:
-                if guard.replay and guard.snapshot is not None:
+                if guard.replay:
+                    # A completed replay is terminal — NEVER re-enter the external
+                    # settle path (that would double-charge). A missing snapshot
+                    # (NULL/unparseable — unreachable in normal flow, but the DB
+                    # contract permits it) still proves the prior settle COMPLETED,
+                    # so report success without a receipt rather than re-settling (#1084 I2).
+                    if guard.snapshot is None:
+                        logger.warning(
+                            "Nevermined settle replay for agent_request_id=%s has no stored "
+                            "snapshot — reporting success without receipt (no re-settle).",
+                            agent_request_id,
+                        )
+                        return NeverminedPaymentResult(
+                            success=True, agent_request_id=agent_request_id
+                        )
                     return NeverminedPaymentResult(**guard.snapshot)
 
                 settle_result = await self.settle_payment(

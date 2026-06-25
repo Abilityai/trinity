@@ -430,7 +430,16 @@ async def create_share(
         agent_name=agent_name,
         dedup_label=dedup_label,
     ) as guard:
-        if guard.replay and guard.snapshot is not None:
+        if guard.replay:
+            # A completed replay is terminal — never re-mint the share. If the
+            # stored snapshot is missing (NULL/unparseable in the row — unreachable
+            # in normal flow, but the DB contract permits it) we cannot rebuild the
+            # signed URL, so surface an error rather than minting a second token (#1084 I2).
+            if guard.snapshot is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Share already created for this execution but its URL is unavailable.",
+                )
             return guard.snapshot
         result = _persist_and_register(
             agent_name,

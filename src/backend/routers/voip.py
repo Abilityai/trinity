@@ -24,7 +24,7 @@ from fastapi import (
     Query,
     status,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import db
 from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
@@ -65,8 +65,8 @@ class VoipCallRequest(BaseModel):
     process_transcript: bool = True
     # Effect-scoped idempotency (#1084): a re-delivery of the same turn replays
     # the original call instead of placing a second PSTN call. Fail-open absent.
-    execution_id: Optional[str] = None
-    dedup_label: str = ""
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+    dedup_label: str = Field(default="", max_length=200)
 
 
 class VoipEnabledRequest(BaseModel):
