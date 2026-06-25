@@ -288,6 +288,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
 import AgentAvatar from '../components/AgentAvatar.vue'
+import { VOICES, DEFAULT_VOICE_NAME } from '../constants/voices'
 // Mermaid renders in-parent (not in a sandboxed iframe): the production CSP
 // (script-src 'self') blocks inline scripts in a srcdoc iframe, and CORP blocks
 // the bundle from the iframe's opaque origin (#979). securityLevel:'strict'
@@ -307,7 +308,9 @@ const agentName = route.params.name
 const voice = useVoiceSession(agentName)
 
 const agent = ref(null)
-const selectedVoice = ref('Kore')
+// Defaults to the persisted per-agent voice once fetchAgent resolves (#28); the
+// user can still override for this session via the picker.
+const selectedVoice = ref(DEFAULT_VOICE_NAME)
 const panelState = ref({ type: 'empty', content: '', title: null, updated_at: null })
 let panelPollTimer = null
 let panelFetching = false
@@ -333,14 +336,8 @@ const imageBlobCache = new Map()  // path → objectURL
 const imageObjectUrl = ref(null)
 const imageError = ref(false)
 
-const VOICES = [
-  { id: 'Kore',    label: 'Kore — Firm' },
-  { id: 'Zephyr',  label: 'Zephyr — Bright' },
-  { id: 'Puck',    label: 'Puck — Upbeat' },
-  { id: 'Aoede',   label: 'Aoede — Breezy' },
-  { id: 'Charon',  label: 'Charon — Informational' },
-  { id: 'Fenrir',  label: 'Fenrir — Excitable' },
-]
+// Voice list is shared with the VoIP settings picker (src/constants/voices.js)
+// so the two can't drift (#28).
 
 // ── Computed ────────────────────────────────────────────────────────────────
 
@@ -591,6 +588,17 @@ async function fetchAgent() {
   } catch (_) {}
 }
 
+// Default the session picker to the agent's persisted voice (#28). Best-effort:
+// a failure leaves the picker on DEFAULT_VOICE_NAME.
+async function fetchPersistedVoice() {
+  try {
+    const r = await axios.get(`/api/agents/${agentName}/voice/name`, {
+      headers: authStore.authHeader,
+    })
+    if (r.data?.voice_name) selectedVoice.value = r.data.voice_name
+  } catch (_) {}
+}
+
 // ── Orb animation ────────────────────────────────────────────────────────────
 // Verbatim from VoiceOverlay.vue — self-contained in this page.
 
@@ -825,6 +833,7 @@ watch(() => voice.status.value, (s) => { targetHueShift = STATE_HUE[s] ?? 0 })
 
 onMounted(async () => {
   await fetchAgent()
+  fetchPersistedVoice()
   currentSprites = buildSprites(0)
   initParticles()
   resizeCanvas()

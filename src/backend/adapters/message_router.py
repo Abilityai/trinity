@@ -436,9 +436,11 @@ class ChannelMessageRouter:
                 images=image_data or None,
             )
 
-            if result.status == "failed":
+            if result.status in ("failed", "cancelled"):
+                # #679: a CANCELLED turn is non-delivery — surface the cancel
+                # notice instead of posting the empty response as if it succeeded.
                 error_msg = result.error or "Unknown error"
-                logger.error(f"[ROUTER:{channel}] Step 9 - task failed: {error_msg}")
+                logger.info(f"[ROUTER:{channel}] Step 9 - task {result.status}: {error_msg}")
                 await adapter.indicate_done(message)
 
                 # Reply with the actual error if available, otherwise generic message

@@ -1,9 +1,10 @@
 # Feature: VoIP Telephony — Outbound Calls over Gemini Live (VOIP-001)
 
-> **Status (2026-06-04)**: Phase 1 (outbound) implemented for #1056. Behind a
-> feature flag that is **OFF by default** (`VOIP_ENABLED`). Inbound (Phase 2)
-> and UI/observability (Phase 3) are not yet built. Real PSTN path is
-> manual-verify (needs a live Twilio voice number).
+> **Status (2026-06-23)**: Phase 1 (outbound) implemented for #1056. Behind a
+> feature flag that is **OFF by default** (`VOIP_ENABLED`). Phase 3 config UI +
+> persisted voice picker added (trinity-enterprise#28, OSS — see below). Inbound
+> (Phase 2) and call cost/duration observability are not yet built. Real PSTN
+> path is manual-verify (needs a live Twilio voice number).
 
 ## Overview
 
@@ -215,6 +216,29 @@ block, so no separate wiring is needed there.
 PSTN barge-in latency and telephone-speech (8kHz μ-law) STT quality are
 unvalidated until real calls happen — Phase 1 logs the barge-in/transcript
 signals so they can be measured on the first live calls.
+
+## Phase 3 — Config UI + persisted voice (trinity-enterprise#28)
+
+Delivered as a plain **OSS** feature (not entitlement-gated — a UI gate over a
+money-spending OSS backend would be cosmetic; gated on the existing
+`voip_available` platform flag instead):
+
+- **Panel**: `src/frontend/src/components/VoipChannelPanel.vue` (modeled on
+  `WhatsAppChannelPanel.vue`), mounted in `SharingPanel.vue` under
+  `v-if="sessionsStore.voipAvailable"` (`stores/sessions.js` now reads
+  `voip_available` from `/api/settings/feature-flags`). Create/update/remove the
+  binding over the existing `GET/PUT/DELETE /api/agents/{name}/voip`; the Auth
+  Token is write-only (never returned).
+- **Enable/disable**: `PUT /api/agents/{name}/voip/enabled` (`{enabled}`,
+  owner-only, 404 when no binding) flips `voip_bindings.enabled` without
+  re-entering credentials. The upsert no longer forces `enabled=1`, so re-saving
+  credentials **preserves** a disabled state (the call path already refuses
+  disabled bindings in `voip_service.py`).
+- **Persisted voice**: new OSS primitive `agent_ownership.voice_name`
+  (default `Kore`) via `GET/PUT /api/agents/{name}/voice/name` (PUT owner-only,
+  validated against `GEMINI_VOICE_NAMES`). `services/voip_service.py` reads it
+  per call instead of the old hardcoded `"Kore"`. See `voice-chat.md`.
+- **Tests**: `tests/unit/test_28_voip_voice_config.py`.
 
 ## Related Flows
 

@@ -185,6 +185,14 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 
+# Per-agent voice selection (#28). Canonical set of Gemini Live prebuilt voices
+# offered by Trinity; the single source of truth shared by the persisted-voice
+# write validation and the read-path fallback (and mirrored by the frontend
+# picker). DEFAULT_VOICE_NAME is the historical hardcoded default and the
+# fallback for an unset or no-longer-valid persisted value.
+DEFAULT_VOICE_NAME = "Kore"
+GEMINI_VOICE_NAMES = ("Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir", "Gacrux")
+
 # Gemini text/audio models (#1130). Hardcoded `gemini-2.0-flash` was retired by
 # Google (404 NOT_FOUND) with no config escape hatch — these env overrides make
 # the next model retirement a config change instead of a code change. Same `or`

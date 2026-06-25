@@ -94,6 +94,7 @@ agent_ownership = Table(
     Column("max_backlog_depth", Integer),
     Column("group_auth_mode", Text),
     Column("voice_system_prompt", Text),
+    Column("voice_name", Text),
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),

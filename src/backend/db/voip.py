@@ -96,7 +96,11 @@ class VoipOperations:
                 "webhook_secret": webhook_secret,
                 "daily_call_cap": cap,
                 "display_name": display_name,
-                "enabled": 1,
+                # NOTE: `enabled` is deliberately NOT in the conflict set_ (#28).
+                # A fresh binding inserts enabled=1; re-saving credentials on an
+                # existing binding must PRESERVE the current enable state so an
+                # owner who disabled VoIP doesn't get it silently re-enabled by
+                # editing the from-number (reviewer H3). Toggle via set_enabled().
                 "updated_at": now,
             },
         )
@@ -185,6 +189,21 @@ class VoipOperations:
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
+
+    def set_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """Flip a binding's enabled flag without touching credentials (#28).
+
+        Returns False when no binding row exists for the agent (caller 404s) so
+        the UI never shows a disabled-but-nonexistent state.
+        """
+        stmt = (
+            update(voip_bindings)
+            .where(voip_bindings.c.agent_name == agent_name)
+            .values(enabled=1 if enabled else 0, updated_at=utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+            return result.rowcount > 0
 
     def delete_binding(self, agent_name: str) -> bool:
         stmt = delete(voip_bindings).where(voip_bindings.c.agent_name == agent_name)

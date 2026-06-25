@@ -210,6 +210,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
 - **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
+- **Unified Chat tab (#1112)**: the separate Session tab is collapsed into the single
+  **Chat** tab, which carries a **Session-mode toggle** (default ON, persisted
+  per-user in `localStorage['trinity.chatMode']`). ON → `SessionPanel`; OFF →
+  legacy `ChatPanel`. The toggle is hidden and the tab falls back to legacy when
+  `session_tab_enabled` is off or the runtime lacks `--resume` (Codex) — never
+  zero chat surfaces. `?tab=session` aliases to the Chat tab; execution-resume
+  (`resumeSessionId`) forces legacy for that landing without changing the saved
+  preference. See architecture → Session Tab.
 
 ---
 
@@ -2840,9 +2848,41 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   Phase 2: Twilio voice webhook + `X-Twilio-Signature` + inbound
   number→agent resolution on the same table; an `inbound_number` column
   is shipped up-front so Phase 2 is additive); opt-in destination
-  allowlist (Phase 2); UI config surface, schedule-action trigger, and
-  call cost/duration observability (Phase 3). Real PSTN path is
-  manual-verify (needs a live Twilio voice number).
+  allowlist (Phase 2); schedule-action trigger and call cost/duration
+  observability (Phase 3). Real PSTN path is manual-verify (needs a live
+  Twilio voice number). (UI config surface delivered separately in §39.2.)
+
+### 39.2 Per-agent VoIP config UI + persisted voice (trinity-enterprise#28)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue trinity-enterprise#28 (the Phase-3 "UI config surface"
+  deferred by #1056)
+- **Description**: A per-agent VoIP config panel in the agent Settings/Sharing
+  tab (`components/VoipChannelPanel.vue`) to create/update/remove the
+  `voip_bindings` row over the existing OSS `GET/PUT/DELETE /api/agents/{name}/voip`
+  endpoints (Twilio Account SID, write-only Auth Token, From number, optional
+  daily call cap), an **enable/disable toggle**, and a **persisted voice picker**.
+- **OSS, not entitlement-gated**: shipped as a plain OSS capability gated purely
+  on the existing `voip_available` platform flag (the frontend reads it via
+  `stores/sessions.js`). No enterprise entitlement, no `register_module`, no
+  `trinity-enterprise` submodule change — a deliberate simplification over the
+  issue's original "entitlement-gated" framing (a UI gate over an OSS,
+  money-spending backend would be cosmetic; gate is the platform flag instead).
+- **Enable/disable toggle**: `PUT /api/agents/{name}/voip/enabled`
+  (`{enabled: bool}`, owner-only, 404 when no binding) flips `voip_bindings.enabled`
+  without re-entering credentials; the call path already refuses disabled
+  bindings. Re-saving credentials via the binding PUT **preserves** the current
+  `enabled` state (the upsert no longer forces `enabled=1`).
+- **Persisted per-agent voice**: new edition-agnostic OSS primitive
+  `agent_ownership.voice_name` (default `Kore`, like `voice_system_prompt`) with
+  `GET/PUT /api/agents/{name}/voice/name` (PUT owner-only, validated against the
+  canonical `GEMINI_VOICE_NAMES`). Replaces the two hardcoded `"Kore"` sites
+  (`routers/voice.py::_get_voice_name`, `services/voip_service.py`), so the chosen
+  voice applies to **both** the in-app voice overlay/workspace and outbound VoIP
+  calls. Resolution precedence at a voice start: per-session request override →
+  persisted `voice_name` → `Kore`; the read path falls back to `Kore` for an
+  unset or no-longer-valid persisted value. The Workspace ephemeral picker
+  defaults to the persisted voice. Dual-track migration (SQLite `db/migrations.py`
+  + Alembic `0004_agent_ownership_voice_name` + `db/schema.py`/`db/tables.py`).
 
 ---
 

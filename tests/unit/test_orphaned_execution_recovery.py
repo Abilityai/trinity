@@ -86,12 +86,17 @@ def _set_agent_registry(execution_ids: list[str]):
 # ── Tests ─────────────────────────────────────────────────────────────────
 @pytest.fixture(autouse=True)
 def _reset_mocks():
-    _mock_db.reset_mock()
-    _mock_capacity.reset_mock()
-    _mock_capacity.release.reset_mock()
-    _mock_capacity.release_if_matches.reset_mock()
-    _mock_docker_svc.reset_mock()
-    _mock_agent_client.reset_mock()
+    # #1103: reset return_value AND side_effect, not just call records. Plain
+    # reset_mock() leaves configured return_value/side_effect in place, so a
+    # side_effect set by one test (e.g. get_agent_container.side_effect in
+    # test_multiple_agents_mixed, or get.side_effect=_AgentClientError) bled into
+    # later tests under random ordering — side_effect wins over return_value, so
+    # the recovery counts came out wrong ("assert 3 == 2"). These tests share
+    # module-level mocks, so the reset must be total.
+    for m in (
+        _mock_db, _mock_capacity, _mock_docker_svc, _mock_agent_client,
+    ):
+        m.reset_mock(return_value=True, side_effect=True)
 
 
 class TestRecoverOrphanedExecutions:
@@ -140,7 +145,6 @@ class TestRecoverOrphanedExecutions:
         assert result["recovered"] == 1
         _mock_capacity.release.assert_awaited_once_with("agent-beta", "exec-2")
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_in_registry_left_alone(self):
         _mock_db.get_running_executions.return_value = [
             _make_execution("exec-3", "agent-gamma")
@@ -155,7 +159,6 @@ class TestRecoverOrphanedExecutions:
         assert result["still_running"] == 1
         _mock_db.mark_execution_failed_by_watchdog.assert_not_called()
 
-    @pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
     def test_multiple_agents_mixed(self):
         _mock_db.get_running_executions.return_value = [
             _make_execution("exec-a", "agent-up"),

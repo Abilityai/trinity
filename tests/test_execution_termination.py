@@ -266,6 +266,91 @@ class TestTerminateRunningExecution:
         task_thread.join(timeout=10)
 
 
+class TestCancelLabeledNotSuccess:
+    """#679: a cancelled /task must finalize CANCELLED — never a billable SUCCESS.
+
+    Claude catches SIGINT, emits a graceful final message, and exits 0, so the
+    HTTP return code alone can't tell a cancel from a real success. This E2E
+    proves the end-to-end label (agent reply status:cancelled → backend cross-
+    validation → CANCELLED row) holds against a real agent container. Runs in
+    /verify-local's agent-exercise stage.
+    """
+
+    @pytest.mark.slow
+    @pytest.mark.requires_agent
+    def test_cancelled_task_row_is_cancelled_not_success(
+        self,
+        api_client: TrinityApiClient,
+        created_agent
+    ):
+        agent_name = created_agent['name']
+        execution_id = None
+
+        def start_task():
+            try:
+                api_client.post(
+                    f"/api/agents/{agent_name}/task",
+                    json={"message": (
+                        "Write an extremely detailed, comprehensive analysis of "
+                        "the entire history of computing, decade by decade, with "
+                        "at least 30 paragraphs. Take your time and be thorough."
+                    )},
+                    timeout=180.0,
+                )
+            except Exception:
+                pass  # interrupted by termination
+
+        task_thread = threading.Thread(target=start_task)
+        task_thread.start()
+
+        # Capture the running execution_id.
+        max_wait = 20
+        start_time = time.time()
+        while time.time() - start_time < max_wait:
+            running = api_client.get(f"/api/agents/{agent_name}/executions/running")
+            if running.status_code == 200:
+                execs = running.json().get("executions", [])
+                if execs:
+                    execution_id = execs[0].get("execution_id")
+                    if execution_id:
+                        break
+            time.sleep(0.3)
+
+        if not execution_id:
+            task_thread.join(timeout=5)
+            pytest.skip("Could not capture execution_id (task finished too fast)")
+
+        # Cancel it.
+        terminate_response = api_client.post(
+            f"/api/agents/{agent_name}/executions/{execution_id}/terminate"
+        )
+        task_thread.join(timeout=30)
+
+        if terminate_response.status_code != 200:
+            pytest.skip("Termination did not succeed")
+        if terminate_response.json().get("status") == "already_finished":
+            # The cancel landed after the turn finished on its own — its genuine
+            # terminal stands (Issue 7). Not the case under test.
+            pytest.skip("Task already finished before cancel landed")
+
+        # Poll the row to a terminal state and assert it's CANCELLED — and
+        # explicitly NOT success (the no-billable-success guarantee, #679).
+        deadline = time.time() + 30
+        status = None
+        while time.time() < deadline:
+            detail = api_client.get(f"/api/agents/{agent_name}/executions/{execution_id}")
+            if detail.status_code == 200:
+                status = detail.json().get("status")
+                if status in ("cancelled", "success", "failed"):
+                    break
+            time.sleep(0.5)
+
+        assert status == "cancelled", (
+            f"A cancelled /task must finalize CANCELLED, got {status!r} "
+            f"(a 'success' here is the #679 charge-on-cancel / false-success bug)"
+        )
+
+
 class TestRunningExecutionDetails:
     """Tests for running execution list details."""
 

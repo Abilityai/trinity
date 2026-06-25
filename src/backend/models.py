@@ -586,16 +586,20 @@ class ExecutionResultEnvelope(BaseModel):
     carries the same shape the synchronous ``/api/task`` response does (cost_usd,
     context_window, token counts, compact_events, session_id).
 
+    ``status`` is free-form ``str`` (not an enum) for forward-compatibility: the
+    backend maps ``success``→SUCCESS, ``cancelled``→CANCELLED (#679), and every
+    other value (incl. an unknown future status) →FAILED.
+
     Field caps bound abuse from a buggy/compromised agent while staying well
     above a legitimate large transcript (the sync path already accepts these):
     enforced in the router after parse so the failure is a clean 413, not a
     Pydantic 422 (the agent's retry logic special-cases status codes).
     """
-    status: str = Field(..., description="'success' or 'failed'")
+    status: str = Field(..., description="'success', 'failed', or 'cancelled'")
     response: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
-    terminal_reason: Optional[str] = None  # completed|max_duration|stall_no_output|auth|empty_result
+    terminal_reason: Optional[str] = None  # completed|max_duration|stall_no_output|auth|empty_result|cancelled
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
@@ -1984,6 +1988,10 @@ class VoipCallRequest(BaseModel):
     to_number: str
     context: Optional[str] = None
     process_transcript: bool = True
+
+
+class VoipEnabledRequest(BaseModel):
+    enabled: bool
 
 
 # =============================================================================

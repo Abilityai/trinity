@@ -4,6 +4,8 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Repository**: https://github.com/abilityai/trinity (PUBLIC)
 
+> **AI agent orienting in this repo?** [AGENTS.md](AGENTS.md) is the authoritative agent entry point — a task router with key facts, exact commands, and a "done when" check per task. This file is the **contributor working agreement** (Rules of Engagement, SDLC, architectural invariants), auto-loaded by Claude Code when you work on the codebase. Read it when your task is "contribute code"; start at `AGENTS.md` for deploy / operate / evaluate.
+
 ---
 
 ## Current Product Focus

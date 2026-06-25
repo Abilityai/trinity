@@ -24,6 +24,16 @@ os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
 # deterministic master so any test exercising agent_client / helpers / the
 # residual inline callers gets a token instead of a RuntimeError.
 os.environ.setdefault("AGENT_AUTH_SECRET", "0" * 64)
+# #1103: tests that run `git commit` in temp repos (git-sync reset/pull paths)
+# fail with "Author identity unknown" on a CI runner that has no global
+# `git config user.email/name`. Provide a process-wide committer identity via
+# the standard git env vars so those commits succeed without each throwaway
+# repo (or the code under test) having to `git config`. Harmless for tests
+# that never invoke git.
+os.environ.setdefault("GIT_AUTHOR_NAME", "Trinity Test")
+os.environ.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
+os.environ.setdefault("GIT_COMMITTER_NAME", "Trinity Test")
+os.environ.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
 
 # database.py instantiates `db = DatabaseManager()` at import, which calls
 # init_database() and tries to mkdir(/data). On the host that path is

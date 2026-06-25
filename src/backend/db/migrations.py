@@ -971,6 +971,22 @@ def _migrate_agent_ownership_voice_prompt(cursor, conn):
     )
     conn.commit()
 
+def _migrate_agent_ownership_voice_name(cursor, conn):
+    """Add voice_name column to agent_ownership (#28).
+
+    Persists the per-agent Gemini Live voice (e.g. 'Kore', 'Puck'). NULL means
+    unset — the getter falls back to DEFAULT_VOICE_NAME ('Kore'), preserving the
+    prior hardcoded behaviour for existing agents.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "voice_name",
+        "ALTER TABLE agent_ownership ADD COLUMN voice_name TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -2564,4 +2580,5 @@ MIGRATIONS = [
     ("operator_queue_cleared_at", _migrate_operator_queue_cleared_at),
     ("activities_created_index", _migrate_activities_created_index),
     ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
+    ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
 ]

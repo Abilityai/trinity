@@ -1,75 +1,75 @@
 <template>
   <div class="p-6 space-y-8">
-    <!-- Framing: identity vs. authorization (Issue #446) -->
-    <div class="rounded-lg bg-action-primary-50 dark:bg-action-primary-900/20 border border-action-primary-100 dark:border-action-primary-900/40 p-4 text-sm text-action-primary-900 dark:text-action-primary-200">
-      Access to this agent has two layers:
-      <ul class="mt-2 list-disc pl-5 space-y-1">
-        <li><strong>Identity proof</strong> — "Require verified email" (below) forces every user to prove who they are via email verification before chatting. It is enforced on web, Slack, and Telegram.</li>
-        <li><strong>Authorization</strong> — "Team Sharing" (below) is the allow-list of emails who skip the owner-approval queue. Everyone else lands in Pending Access Requests until you approve them.</li>
-      </ul>
+    <!-- Framing: Google-Docs-style "share this agent" (trinity-enterprise#18) -->
+    <div>
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Share this agent</h3>
+      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+        Let external clients reach this agent through channels — Slack, Telegram, WhatsApp, voice, and public links.
+        Trinity <strong>operators</strong> (your teammates) are managed on the <span class="font-medium">Access</span> tab.
+      </p>
     </div>
 
-    <!-- Channel Access Policy (Issue #311) -->
+    <!-- External access policy: single Restricted ↔ Open control (#18) -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Identity Proof</h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Require users to prove who they are before chatting, across web, Telegram, and Slack.
-        Identity proof alone does <em>not</em> grant access — see Team Sharing below.
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Who can chat with this agent?</h4>
+
+      <div
+        class="mt-3 inline-flex rounded-lg border border-gray-300 dark:border-gray-600 p-1 bg-gray-100 dark:bg-gray-800"
+        role="group"
+        aria-label="External access policy"
+      >
+        <button
+          type="button"
+          :disabled="policyLoading"
+          :aria-pressed="accessMode === 'restricted'"
+          @click="setAccessMode('restricted')"
+          :class="['flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50',
+            accessMode === 'restricted'
+              ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
+              : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white']"
+        >
+          <span aria-hidden="true">🔒</span> Restricted
+        </button>
+        <button
+          type="button"
+          :disabled="policyLoading"
+          :aria-pressed="accessMode === 'open'"
+          @click="setAccessMode('open')"
+          :class="['flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50',
+            accessMode === 'open'
+              ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
+              : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white']"
+        >
+          <span aria-hidden="true">🌐</span> Open
+        </button>
+      </div>
+
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        <template v-if="accessMode === 'open'">
+          <strong>Open</strong> — anyone with a verified email can chat without approval.
+        </template>
+        <template v-else>
+          <strong>Restricted</strong> — only people you approve can chat. Everyone else lands in Pending requests below.
+        </template>
+        Either way, clients must verify their email first (Telegram users <code>/login</code>; Slack uses workspace email; web requires verification).
       </p>
 
-      <div class="space-y-3">
-        <label class="flex items-start gap-3">
-          <input
-            type="checkbox"
-            class="mt-1"
-            :checked="policy.require_email"
-            :disabled="policyLoading"
-            @change="updatePolicy({ require_email: $event.target.checked })"
-          />
-          <div>
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Require verified email</div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-              Telegram users must <code>/login</code>; Slack uses workspace email; web requires email verification.
-              This only proves who the user is — it does not authorize them to chat. Use Team Sharing or Open access below for authorization.
-            </div>
-          </div>
-        </label>
-
-        <label class="flex items-start gap-3">
-          <input
-            type="checkbox"
-            class="mt-1"
-            :checked="policy.open_access"
-            :disabled="policyLoading"
-            @change="updatePolicy({ open_access: $event.target.checked })"
-          />
-          <div>
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Open access (anyone verified)</div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-              Anyone with a verified email may chat without owner approval.
-              When off, only users in Team Sharing skip the pending-approval queue.
-            </div>
-          </div>
-        </label>
-      </div>
-
-      <!-- Dead-end configuration warning (#446) -->
+      <!-- Dead-end heads-up: Restricted with nobody approved yet (#446) -->
       <div
-        v-if="policy.require_email && !policy.open_access && (!shares || shares.length === 0)"
+        v-if="accessMode === 'restricted' && (!shares || shares.length === 0)"
         class="mt-4 rounded-lg bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800/40 p-3 text-sm text-state-autonomous-900 dark:text-state-autonomous-200"
       >
-        <strong>Heads up:</strong> you've required verified email but haven't shared with anyone or enabled Open access.
-        Every verified user will land in Pending Access Requests and stay locked out until you approve them one by one.
-        Add emails to Team Sharing below, or enable Open access, to let people chat.
+        <strong>Heads up:</strong> access is Restricted and no one's approved yet — every verified client will wait in
+        Pending requests until you approve them. Approve requests below, or switch to <strong>Open</strong>.
       </div>
 
-      <!-- Pending access requests -->
+      <!-- Pending access requests (external clients) -->
       <div v-if="pendingRequests.length > 0" class="mt-6">
         <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
-          Pending access requests ({{ pendingRequests.length }})
+          Pending requests ({{ pendingRequests.length }})
         </h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-          Users who verified their identity but aren't in Team Sharing. Approving moves them into Team Sharing.
+          External clients who verified their identity but aren't approved yet. Approving lets them chat.
         </p>
         <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
           <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between">
@@ -96,154 +96,67 @@
       </div>
     </div>
 
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- Team Sharing Section -->
+    <!-- Channels: compact summary rows (detailed config moves to dialogs in #19) -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Team Sharing <span class="text-sm font-normal text-gray-500 dark:text-gray-400">— allow-list</span></h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-2">
-        Pre-authorize team members by email. They still verify their identity on first chat, but they skip the owner-approval queue.
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        Connect this agent to messaging channels. Expand a row to configure it.
       </p>
-      <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
-        Applies uniformly across web, Slack, and Telegram. Entries are stored lowercase and matched case-insensitively.
-      </p>
+      <div class="space-y-2">
+        <ChannelDisclosure title="Slack" subtitle="@mentions in a Slack channel" icon="💬">
+          <SlackChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-      <!-- Share Form -->
-      <form @submit.prevent="shareWithUser" class="flex items-center space-x-3">
-        <input
-          v-model="shareEmail"
-          type="email"
-          placeholder="user@example.com"
-          :disabled="shareLoading"
-          class="flex-1 max-w-md px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-action-primary-500 disabled:bg-gray-100 dark:disabled:bg-gray-900"
-        />
-        <button
-          type="submit"
-          :disabled="shareLoading || !shareEmail.trim()"
-          class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-action-primary-600 hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 dark:focus:ring-offset-gray-800 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed"
+        <ChannelDisclosure title="Telegram" subtitle="DMs and group chats via a bot" icon="✈️">
+          <TelegramChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+
+        <ChannelDisclosure title="WhatsApp" subtitle="DMs via Twilio" icon="📱">
+          <WhatsAppChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+
+        <ChannelDisclosure
+          v-if="sessionsStore.voipAvailable"
+          title="Voice calls"
+          subtitle="Outbound phone calls via Twilio + Gemini Live"
+          icon="📞"
         >
-          <svg v-if="shareLoading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          {{ shareLoading ? 'Sharing...' : 'Share' }}
-        </button>
-      </form>
-
-      <!-- Share Error/Success Message -->
-      <div v-if="shareMessage" :class="[
-        'mt-3 p-3 rounded-lg text-sm',
-        shareMessage.type === 'success' ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-      ]">
-        {{ shareMessage.text }}
-      </div>
-
-      <!-- Shared Users List -->
-      <div class="mt-4">
-        <div v-if="!shares || shares.length === 0" class="text-center py-6 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
-          <svg class="mx-auto h-10 w-10 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-          </svg>
-          <p class="mt-2 text-sm">Not shared with anyone</p>
-        </div>
-
-        <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-          <li v-for="share in shares" :key="share.id" class="px-4 py-3 flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-              <div class="flex-shrink-0 h-8 w-8 bg-gray-200 dark:bg-gray-700 rounded-full flex items-center justify-center">
-                <span class="text-sm font-medium text-gray-600 dark:text-gray-300">
-                  {{ (share.shared_with_name || share.shared_with_email || '?')[0].toUpperCase() }}
-                </span>
-              </div>
-              <div>
-                <p class="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {{ share.shared_with_name || share.shared_with_email }}
-                </p>
-                <p v-if="share.shared_with_name" class="text-xs text-gray-500 dark:text-gray-400">
-                  {{ share.shared_with_email }}
-                </p>
-              </div>
-            </div>
-            <div class="flex items-center gap-4">
-              <!-- Proactive messaging toggle -->
-              <label class="flex items-center gap-2 cursor-pointer" :title="share.allow_proactive ? 'Agent can send proactive messages' : 'Agent cannot send proactive messages'">
-                <span class="text-xs text-gray-500 dark:text-gray-400">Proactive</span>
-                <button
-                  type="button"
-                  role="switch"
-                  :aria-checked="share.allow_proactive"
-                  @click="toggleProactive(share)"
-                  :disabled="proactiveLoading === share.shared_with_email"
-                  :class="[
-                    share.allow_proactive ? 'bg-action-primary-600' : 'bg-gray-200 dark:bg-gray-600',
-                    'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed'
-                  ]"
-                >
-                  <span
-                    :class="[
-                      share.allow_proactive ? 'translate-x-4' : 'translate-x-0',
-                      'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
-                    ]"
-                  />
-                </button>
-              </label>
-              <button
-                @click="removeShare(share.shared_with_email)"
-                :disabled="unshareLoading === share.shared_with_email"
-                class="text-status-danger-600 dark:text-status-danger-400 hover:text-status-danger-800 dark:hover:text-status-danger-300 text-sm font-medium disabled:opacity-50"
-              >
-                <span v-if="unshareLoading === share.shared_with_email">Removing...</span>
-                <span v-else>Remove</span>
-              </button>
-            </div>
-          </li>
-        </ul>
+          <VoipChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
       </div>
     </div>
 
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+    <!-- Distribution: content/links sharing — not client access (#18 nudge) -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Distribution</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        Share generated files and public chat links. This is about distributing output, not granting client access.
+      </p>
+      <div class="space-y-2">
+        <ChannelDisclosure title="Public links" subtitle="Shareable public chat URLs" icon="🔗">
+          <PublicLinksPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-    <!-- Slack Channel Section -->
-    <SlackChannelPanel :agent-name="agentName" />
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- Telegram Bot Section -->
-    <TelegramChannelPanel :agent-name="agentName" />
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- WhatsApp (Twilio) Section -->
-    <WhatsAppChannelPanel :agent-name="agentName" />
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- File Sharing Section (FILES-001) -->
-    <FileSharingPanel :agent-name="agentName" />
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- Public Links Section -->
-    <PublicLinksPanel :agent-name="agentName" />
+        <ChannelDisclosure title="File sharing" subtitle="Outbound shared files" icon="📂">
+          <FileSharingPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import axios from 'axios'
-import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
-import { useAgentSharing } from '../composables/useAgentSharing'
 import { useNotification } from '../composables'
+import { useSessionsStore } from '../stores/sessions'
+import ChannelDisclosure from './ChannelDisclosure.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
+import VoipChannelPanel from './VoipChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
@@ -259,63 +172,32 @@ const props = defineProps({
 
 const emit = defineEmits(['agent-updated'])
 
-const agentsStore = useAgentsStore()
 const { showNotification } = useNotification()
 
-// Create agent ref for composable
-const agent = ref({ name: props.agentName, shares: props.shares })
+// VoIP channel visibility (#28) — gated on the platform `voip_available` flag.
+const sessionsStore = useSessionsStore()
+sessionsStore.loadFeatureFlags()
 
-// Update agent ref when props change
-watch(() => [props.agentName, props.shares], () => {
-  agent.value = { name: props.agentName, shares: props.shares }
-}, { deep: true })
-
-// Reload agent function for composable
 const loadAgent = () => {
   emit('agent-updated')
 }
 
-const {
-  shareEmail,
-  shareLoading,
-  shareMessage,
-  unshareLoading,
-  shareWithUser,
-  removeShare
-} = useAgentSharing(agent, agentsStore, loadAgent, showNotification)
-
-// Proactive messaging toggle
-const proactiveLoading = ref(null)
-
-const toggleProactive = async (share) => {
-  proactiveLoading.value = share.shared_with_email
-  try {
-    await axios.put(
-      `/api/agents/${props.agentName}/shares/proactive`,
-      { email: share.shared_with_email, allow_proactive: !share.allow_proactive },
-      { headers: authStore.authHeader }
-    )
-    share.allow_proactive = !share.allow_proactive
-    showNotification(
-      share.allow_proactive ? 'Proactive messaging enabled' : 'Proactive messaging disabled',
-      'success'
-    )
-  } catch (err) {
-    console.error('Failed to update proactive setting:', err)
-    showNotification(err.response?.data?.detail || 'Failed to update setting', 'error')
-  } finally {
-    proactiveLoading.value = null
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Access policy + access requests (Issue #311)
+// External access policy + pending requests (Issue #311, reframed by #18)
 // ---------------------------------------------------------------------------
 const authStore = useAuthStore()
 const policy = ref({ require_email: false, open_access: false })
 const policyLoading = ref(false)
 const pendingRequests = ref([])
 const decisionLoading = ref(null)
+
+// The two backend flags collapse into one Restricted ↔ Open control:
+//   Restricted → require_email: true, open_access: false  (approval-gated)
+//   Open       → require_email: true, open_access: true   (anyone verified)
+// Identity proof (require_email) is always on for external sharing — a legacy
+// agent with require_email=false is shown by its open_access flag and upgraded
+// to identity-required the next time the operator picks a mode.
+const accessMode = computed(() => (policy.value.open_access ? 'open' : 'restricted'))
 
 const loadPolicy = async () => {
   try {
@@ -329,10 +211,13 @@ const loadPolicy = async () => {
   }
 }
 
-const updatePolicy = async (changes) => {
+const setAccessMode = async (mode) => {
+  const next = { require_email: true, open_access: mode === 'open' }
+  if (next.require_email === policy.value.require_email && next.open_access === policy.value.open_access) {
+    return
+  }
   policyLoading.value = true
   try {
-    const next = { ...policy.value, ...changes }
     const { data } = await axios.put(
       `/api/agents/${props.agentName}/access-policy`,
       next,

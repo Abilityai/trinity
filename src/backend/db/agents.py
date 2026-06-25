@@ -397,3 +397,36 @@ class AgentOperations(
                 .values(voice_system_prompt=prompt or None)
             )
             return result.rowcount > 0
+
+    # =========================================================================
+    # Voice Name (#28) — persisted per-agent Gemini Live voice
+    # =========================================================================
+
+    def get_voice_name(self, agent_name: str) -> str:
+        """Get the persisted Gemini voice for an agent.
+
+        Falls back to DEFAULT_VOICE_NAME ('Kore') when unset, and ALSO when the
+        persisted value is not in the current GEMINI_VOICE_NAMES set (a voice
+        removed after it was saved) — defense-in-depth so the call path never
+        hands Gemini an unusable voice (#28, reviewer M1).
+        """
+        from config import DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
+
+        stmt = select(agent_ownership.c.voice_name).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        value = row["voice_name"] if row else None
+        return value if value in GEMINI_VOICE_NAMES else DEFAULT_VOICE_NAME
+
+    def set_voice_name(self, agent_name: str, voice_name: Optional[str]) -> bool:
+        """Set the persisted Gemini voice for an agent (None clears it → default)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(voice_name=voice_name or None)
+            )
+            return result.rowcount > 0

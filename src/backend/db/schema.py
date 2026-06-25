@@ -90,6 +90,7 @@ TABLES = {
             max_backlog_depth INTEGER DEFAULT 50,
             group_auth_mode TEXT DEFAULT 'none',
             voice_system_prompt TEXT,
+            voice_name TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,

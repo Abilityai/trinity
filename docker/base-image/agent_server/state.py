@@ -76,14 +76,22 @@ class AgentState:
             self.active_task_count += 1
             self.last_task_at = datetime.now(timezone.utc).isoformat()
 
-    def record_task_finish(self, success: bool) -> None:
-        """Mark an execution as finished. Resets the consecutive-failure
-        counter on success, increments it on failure — this is the signal the
-        dispatch circuit breaker (#526) consumes."""
+    def record_task_finish(self, success: Optional[bool]) -> None:
+        """Mark an execution as finished. Resets the consecutive-failure counter
+        on success, increments it on failure — this is the signal the dispatch
+        circuit breaker (#526) consumes.
+
+        #679 (F4): ``success=None`` is a NEUTRAL finish (a user cancel) — the
+        task still finishes (decrement the active count, stamp last_task_at) but
+        the failure counter is left untouched. A cancel is neither a failure (it
+        must not push a healthy agent toward an open breaker) nor a success (it
+        proves nothing about agent health), so it must not reset OR increment."""
         with self._health_lock:
             if self.active_task_count > 0:
                 self.active_task_count -= 1
             self.last_task_at = datetime.now(timezone.utc).isoformat()
+            if success is None:
+                return
             if success:
                 self.consecutive_failures = 0
             else:

@@ -136,6 +136,51 @@ class SharingMixin:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_agent_share(row) for row in rows]
 
+    def get_agent_operator_access(self, agent_name: str) -> List[dict]:
+        """Operator (Trinity-user) access grants for an agent — the #17 Access tab.
+
+        Resolves each ``agent_sharing`` allow-list email against ``users`` (the
+        grantee, lower-cased on both sides). A resolved row is an **active
+        operator** (username/role/last-active surfaced); an unresolved email is a
+        **pending** invite (allow-listed but no account yet). Drawing this line on
+        the read path is what this issue owns. The strict client-vs-operator split
+        (non-user emails → a dedicated client roster) belongs to the Sharing-side
+        redesign (#18/#20), so all grants stay visible here for now.
+        """
+        stmt = (
+            select(
+                agent_sharing.c.shared_with_email,
+                agent_sharing.c.created_at,
+                agent_sharing.c.allow_proactive,
+                users.c.username,
+                users.c.role,
+                users.c.last_login,
+            )
+            .select_from(
+                agent_sharing.outerjoin(
+                    users,
+                    func.lower(users.c.email)
+                    == func.lower(agent_sharing.c.shared_with_email),
+                )
+            )
+            .where(agent_sharing.c.agent_name == agent_name)
+            .order_by(agent_sharing.c.created_at.desc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        out: List[dict] = []
+        for r in rows:
+            resolved = r["username"] is not None
+            out.append({
+                "email": r["shared_with_email"],
+                "username": r["username"],
+                "role": r["role"],
+                "last_active": r["last_login"],
+                "status": "active" if resolved else "pending",
+                "allow_proactive": bool(r["allow_proactive"]),
+            })
+        return out
+
     def get_shared_agents(self, username: str) -> List[str]:
         """Get all agent names shared with a user (by their email)."""
         user = self._user_ops.get_user_by_username(username)

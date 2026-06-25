@@ -418,6 +418,16 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // #17 Access tab: operator (Trinity-user) roster — allow-list emails resolved
+    // against `users` (active operator vs pending invite).
+    async getAgentAccess(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/access`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // Agent Permissions Actions (Phase 9.10)
     async getAgentPermissions(name) {
       const authStore = useAuthStore()

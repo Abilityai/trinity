@@ -690,6 +690,20 @@
         "agents"
       ],
       "description": "Agent compatibility validation (#668), fixture-driven pure layers: spec catalog consistency (100 checks, unique ids, STATIC registry == spec.STATIC_IDS, AI prompts present, AI severity capped at SOFT, every auto_fixable has a fix) + spec<->docs/agent-validation-spec.md id sync; STATIC checks over good/bad/empty snapshots (missing template/CLAUDE.md, gitignore secret exclusions, blanket .claude/ removal keeping .claude/projects/, hardcoded-secret scan never echoing the value, K-001 ${VAR} documentation, D-003 widget fields, P-006 approval-gate scan); gitignore auto-fix transforms (append/idempotent/CRLF-no-dup/comment-not-matched/G-001 blanket-removal/unknown-raises); AI batching (no-key skip, omitted-check->skipped iterate-expected, redaction strips secrets); build_report orchestration with collect monkeypatched + real tmp-DB persistence (assemble + persist, codex runtime omits claude_only checks, stopped container -> unavailable); collector in-container script executed against a temp ROOT (snapshot shape, .env content never captured, binary flagged, missing->exists:false, huge file truncated)."
+    },
+    {
+      "file": "unit/test_28_voip_voice_config.py",
+      "feature": "trinity-enterprise#28",
+      "added": "2026-06-23",
+      "categories": ["backend", "unit", "database", "voip", "voice"],
+      "description": "Per-agent persisted voice + VoIP enable/disable toggle (#28). db/agents.py get_voice_name/set_voice_name: unset->'Kore' fallback, set/get roundtrip, invalid-persisted-value->default (reviewer M1 read-path validation), clear->default, set-on-missing-agent->False. db/voip.py set_enabled toggle + the create_binding 'preserve enabled on re-PUT' fix (reviewer H3 — re-saving credentials on a disabled binding must not silently re-enable it) + set_enabled on a missing binding returns False (router 404s). config.GEMINI_VOICE_NAMES default + parity guard asserting the frontend src/constants/voices.js VOICE ids and DEFAULT_VOICE_NAME mirror the backend constants (reviewer M2 cross-language drift guard). Runs on db_harness backends (SQLite always, PostgreSQL when TEST_POSTGRES_URL set); no Docker/API/Redis."
+    },
+    {
+      "file": "unit/test_28_voip_voice_endpoints.py",
+      "feature": "trinity-enterprise#28",
+      "added": "2026-06-23",
+      "categories": ["backend", "unit", "api", "voip", "voice"],
+      "description": "HTTP-level tests for the #28 endpoints via FastAPI TestClient with auth deps overridden + db/voip_service stubbed (reviewer I1). PUT /api/agents/{name}/voice/name: owner-gated (403 when the get_owned_agent dep denies), 400 on a voice outside GEMINI_VOICE_NAMES, empty body clears to NULL->default, valid voice persists; GET returns voice_name + available_voices + default_voice. PUT /api/agents/{name}/voip/enabled: owner-gated (403), 404 when no binding (db.set_voip_enabled False), 404 when voip_available off, 200 reflecting new enabled state with no auth_token in the response. Mounts the real routers on minimal apps; no Docker/Redis."
     }
   ]
 }

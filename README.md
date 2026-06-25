@@ -193,6 +193,7 @@ pip install trinity-cli                     # or: brew install abilityai/tap/tri
 
 trinity init                                # connect: instance URL + email code → JWT + MCP key
 cd my-agent/ && trinity deploy .            # package, upload, create + start the agent
+trinity agents list                         # verify: the agent shows status "running"
 trinity chat my-agent "Hello, what can you do?"
 trinity logs my-agent                       # container logs
 trinity health fleet                        # fleet overview

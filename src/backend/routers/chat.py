@@ -1780,7 +1780,9 @@ async def execute_parallel_task(
         # Side effects (collaboration activity, chat session persist) were
         # handled by _run_async_task_with_persistence inside the drain — do
         # NOT repeat them. Just translate failure and build the response.
-        if result.status == "failed":
+        # #679: CANCELLED is non-success — surface it cleanly (503 with the
+        # cancel notice) rather than returning an empty success-shaped body.
+        if result.status in ("failed", "cancelled"):
             if "at capacity" in (result.error or ""):
                 raise HTTPException(
                     status_code=429,
@@ -1836,7 +1838,9 @@ async def execute_parallel_task(
         )
 
     # Handle failure — translate to HTTP errors
-    if result.status == "failed":
+    # #679: CANCELLED is non-success — surface it cleanly rather than returning
+    # an empty success-shaped body (result.error is "Execution cancelled by user").
+    if result.status in ("failed", "cancelled"):
         if "at capacity" in (result.error or ""):
             raise HTTPException(
                 status_code=429,
@@ -2411,8 +2415,12 @@ async def terminate_agent_execution(
             except Exception as e:
                 logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
 
-            # Update database execution record if provided
-            if task_execution_id:
+            # #679 (Issue 7): write CANCELLED only when we actually terminated a
+            # running turn. On `already_finished` the agent's genuine terminal
+            # already stands — the cancel arrived too late — so we leave the real
+            # terminal in place (deterministic; "agent self-report is
+            # authoritative"). Capacity is still force-released above in both cases.
+            if task_execution_id and result.get("status") == "terminated":
                 db.update_execution_status(
                     execution_id=task_execution_id,
                     status=TaskExecutionStatus.CANCELLED,
