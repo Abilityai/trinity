@@ -1,10 +1,25 @@
 """
 Docker service for managing agent containers.
 """
+import logging
+import time
 from typing import List, Optional
 import docker
 from models import AgentStatus
 from utils.helpers import parse_iso_timestamp, utc_now
+
+logger = logging.getLogger(__name__)
+
+# #1131: throttle the "socket access denied" WARN. The denial is a persistent
+# condition (a wrong group_add GID stays wrong until the operator fixes .env),
+# and list_all_agents_fast() is hit by the 5s heartbeat-watch and operator-queue
+# loops, the 30s monitoring loop, and many request handlers — so an unthrottled
+# warn floods Vector (~24+/min indefinitely). Log at most once per window so the
+# failure stays observable without drowning the log stream. Module-level state;
+# the GIL makes the read-modify-write atomic enough that a rare duplicate warn
+# under a race is harmless.
+_SOCKET_WARN_THROTTLE_S = 60.0
+_last_socket_warn_monotonic: Optional[float] = None
 
 
 # Initialize Docker client
@@ -180,7 +195,23 @@ def list_all_agents_fast() -> List[AgentStatus]:
 
         return agents
     except Exception as e:
-        print(f"Error listing agents (fast) from Docker: {e}")
+        # #1131: a denied docker.sock (e.g. wrong group_add GID on macOS Docker
+        # Desktop) raises here; swallowing it silently showed "No agents" in the
+        # UI with nothing in the logs. WARN so the failure is diagnosable — but
+        # throttled (see _SOCKET_WARN_THROTTLE_S) so a persistent denial on this
+        # per-poll hot path doesn't flood the logs. The broad catch can also see
+        # transient daemon restarts / timeouts (which likewise repeat on this hot
+        # path, so the throttle stays universal); the message stays generic rather
+        # than asserting "socket access denied", and carries the exception text —
+        # enough to identify the cause without exc_info.
+        global _last_socket_warn_monotonic
+        now = time.monotonic()
+        if (
+            _last_socket_warn_monotonic is None
+            or now - _last_socket_warn_monotonic >= _SOCKET_WARN_THROTTLE_S
+        ):
+            _last_socket_warn_monotonic = now
+            logger.warning("Failed to list agents from Docker: %s", e)
         return []
 
 
