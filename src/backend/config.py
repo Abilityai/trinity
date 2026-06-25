@@ -191,7 +191,7 @@ VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 # picker). DEFAULT_VOICE_NAME is the historical hardcoded default and the
 # fallback for an unset or no-longer-valid persisted value.
 DEFAULT_VOICE_NAME = "Kore"
-GEMINI_VOICE_NAMES = ("Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir")
+GEMINI_VOICE_NAMES = ("Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir", "Gacrux")
 
 # Gemini text/audio models (#1130). Hardcoded `gemini-2.0-flash` was retired by
 # Google (404 NOT_FOUND) with no config escape hatch — these env overrides make

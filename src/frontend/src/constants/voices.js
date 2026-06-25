@@ -11,6 +11,7 @@ export const VOICES = [
   { id: 'Aoede', label: 'Aoede — Breezy' },
   { id: 'Charon', label: 'Charon — Informational' },
   { id: 'Fenrir', label: 'Fenrir — Excitable' },
+  { id: 'Gacrux', label: 'Gacrux — Mature' },
 ]
 
 export const VOICE_IDS = VOICES.map((v) => v.id)
