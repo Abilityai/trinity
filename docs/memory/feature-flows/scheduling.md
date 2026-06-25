@@ -1364,7 +1364,7 @@ class Schedule(BaseModel):
     model: Optional[str] = None  # Model override (MODEL-001). None = agent default
 ```
 
-**ScheduleUpdateRequest** (`src/backend/routers/schedules.py:76-86`):
+**ScheduleUpdateRequest** (`src/backend/models.py:1574` — centralized per Invariant #14, #654):
 ```python
 class ScheduleUpdateRequest(BaseModel):
     # ... existing fields ...

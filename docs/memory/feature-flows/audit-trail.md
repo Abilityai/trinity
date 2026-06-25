@@ -542,4 +542,4 @@ Run e2e: `cd src/frontend && npm run test:e2e -- audit-dashboard.spec`
 - **Invariant #3** (Schema in schema.py, migrations in migrations.py): both updated together
 - **Invariant #4** (Router registration order): `/stats` before `/{event_id}` in router declaration
 - **Invariant #8** (Auth pattern): every endpoint uses `Depends(require_admin)`
-- **Invariant #15** (Pydantic models centralized): all response models in `routers/audit_log.py` (consistent with other routers that own their response shapes)
+- **Invariant #14** (Pydantic models centralized): all audit response models live in `src/backend/models.py` (`AuditLogEntry`/`AuditLogListResponse`/`AuditLogStatsResponse` at `models.py:947-982`), centralized out of `routers/audit_log.py` per #654
