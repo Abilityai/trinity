@@ -8,19 +8,19 @@
       <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{{ title }}</div>
       <div class="mt-0.5 flex items-center gap-1.5 text-xs">
         <template v-if="loading">
-          <span class="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600 animate-pulse"></span>
+          <span class="inline-block shrink-0 w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600 animate-pulse"></span>
           <span class="text-gray-400 dark:text-gray-500">Checking…</span>
         </template>
         <template v-else-if="status.connected">
           <span
-            class="inline-block w-2 h-2 rounded-full"
+            class="inline-block shrink-0 w-2 h-2 rounded-full"
             :class="status.warn ? 'bg-status-warning-500' : 'bg-status-success-500'"
           ></span>
-          <span class="text-gray-600 dark:text-gray-300 truncate">{{ status.label || 'Connected' }}</span>
-          <span v-if="status.warn" class="text-status-warning-600 dark:text-status-warning-400">· setup needed</span>
+          <span class="min-w-0 truncate text-gray-600 dark:text-gray-300">{{ status.label || 'Connected' }}</span>
+          <span v-if="status.warn" class="shrink-0 text-status-warning-600 dark:text-status-warning-400">· setup needed</span>
         </template>
         <template v-else>
-          <span class="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600"></span>
+          <span class="inline-block shrink-0 w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600"></span>
           <span class="text-gray-400 dark:text-gray-500">Not connected</span>
         </template>
       </div>
@@ -35,10 +35,10 @@
       {{ status.connected ? 'Manage' : 'Configure' }}
     </button>
 
-    <!-- Config dialog: mounted only while open so the closed dialog (and its
-         slotted panel) never participates in this row's flex layout. The
-         channel panel renders inside the modal, untouched. -->
-    <ChannelConfigDialog v-if="dialogOpen" :open="dialogOpen" :title="title" :icon="icon" @close="onDialogClose">
+    <!-- Config dialog: mounted only while open (single gate) so the closed
+         dialog and its slotted panel never participate in this row's flex
+         layout. The channel panel renders inside the modal, untouched. -->
+    <ChannelConfigDialog v-if="dialogOpen" :title="title" :icon="icon" @close="onDialogClose">
       <slot />
     </ChannelConfigDialog>
   </div>

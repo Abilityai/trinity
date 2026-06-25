@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <div v-if="open" class="fixed z-50 inset-0 overflow-y-auto" role="dialog" aria-modal="true" :aria-label="title">
+    <div class="fixed z-50 inset-0 overflow-y-auto" role="dialog" aria-modal="true" :aria-label="title">
       <div class="flex items-end sm:items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:p-0">
         <!-- Backdrop -->
         <div
@@ -44,24 +44,20 @@
 </template>
 
 <script setup>
-import { watch, onUnmounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 
-const props = defineProps({
-  open: { type: Boolean, default: false },
+defineProps({
   title: { type: String, required: true },
   icon: { type: String, default: '' },
 })
 
 const emit = defineEmits(['close'])
 
-// Close on Escape while open. `immediate` so it also binds when the dialog is
-// mounted already-open (parent gates mount with v-if="dialogOpen").
+// The dialog only exists while open (the parent gates mount via
+// v-if="dialogOpen"), so bind Escape-to-close for its whole lifetime.
 const onKey = (e) => {
   if (e.key === 'Escape') emit('close')
 }
-watch(() => props.open, (isOpen) => {
-  if (isOpen) document.addEventListener('keydown', onKey)
-  else document.removeEventListener('keydown', onKey)
-}, { immediate: true })
+onMounted(() => document.addEventListener('keydown', onKey))
 onUnmounted(() => document.removeEventListener('keydown', onKey))
 </script>
