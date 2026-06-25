@@ -96,33 +96,53 @@
       </div>
     </div>
 
-    <!-- Channels: compact summary rows (detailed config moves to dialogs in #19) -->
+    <!-- Channels: compact summary rows; config opens in a dialog (#19) -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-        Connect this agent to messaging channels. Expand a row to configure it.
+        Connect this agent to messaging channels. Use <strong>Configure</strong> to set one up.
       </p>
       <div class="space-y-2">
-        <ChannelDisclosure title="Slack" subtitle="@mentions in a Slack channel" icon="💬">
+        <ChannelConfigRow
+          title="Slack"
+          icon="💬"
+          :agent-name="agentName"
+          :status-url="`/api/agents/${agentName}/slack/channel`"
+          :derive-status="slackStatus"
+        >
           <SlackChannelPanel :agent-name="agentName" />
-        </ChannelDisclosure>
+        </ChannelConfigRow>
 
-        <ChannelDisclosure title="Telegram" subtitle="DMs and group chats via a bot" icon="✈️">
+        <ChannelConfigRow
+          title="Telegram"
+          icon="✈️"
+          :agent-name="agentName"
+          :status-url="`/api/agents/${agentName}/telegram`"
+          :derive-status="telegramStatus"
+        >
           <TelegramChannelPanel :agent-name="agentName" />
-        </ChannelDisclosure>
+        </ChannelConfigRow>
 
-        <ChannelDisclosure title="WhatsApp" subtitle="DMs via Twilio" icon="📱">
+        <ChannelConfigRow
+          title="WhatsApp"
+          icon="📱"
+          :agent-name="agentName"
+          :status-url="`/api/agents/${agentName}/whatsapp`"
+          :derive-status="whatsappStatus"
+        >
           <WhatsAppChannelPanel :agent-name="agentName" />
-        </ChannelDisclosure>
+        </ChannelConfigRow>
 
-        <ChannelDisclosure
+        <ChannelConfigRow
           v-if="sessionsStore.voipAvailable"
           title="Voice calls"
-          subtitle="Outbound phone calls via Twilio + Gemini Live"
           icon="📞"
+          :agent-name="agentName"
+          :status-url="`/api/agents/${agentName}/voip`"
+          :derive-status="voipStatus"
         >
           <VoipChannelPanel :agent-name="agentName" />
-        </ChannelDisclosure>
+        </ChannelConfigRow>
       </div>
     </div>
 
@@ -152,6 +172,7 @@ import { useAuthStore } from '../stores/auth'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
 import ChannelDisclosure from './ChannelDisclosure.vue'
+import ChannelConfigRow from './ChannelConfigRow.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
@@ -181,6 +202,30 @@ sessionsStore.loadFeatureFlags()
 const loadAgent = () => {
   emit('agent-updated')
 }
+
+// ---------------------------------------------------------------------------
+// Channel summary-row status derivations (#19). Each maps a channel's GET
+// response to { connected, label, warn } for the compact row; the full config
+// panel renders in the row's Configure dialog.
+// ---------------------------------------------------------------------------
+const slackStatus = (d) => ({
+  connected: !!d?.bound,
+  label: d?.bound ? `#${d.channel_name}` : '',
+})
+const telegramStatus = (d) => ({
+  connected: !!d?.configured,
+  label: d?.configured && d.bot_username ? `@${d.bot_username}` : '',
+  warn: !!d?.configured && !d?.webhook_url,
+})
+const whatsappStatus = (d) => ({
+  connected: !!d?.configured,
+  label: d?.configured ? (d.from_number || '') : '',
+})
+const voipStatus = (d) => ({
+  connected: !!d?.configured,
+  label: d?.configured ? `${d.from_number || ''}${d.enabled ? '' : ' (disabled)'}` : '',
+  warn: !!d?.configured && !d?.enabled,
+})
 
 // ---------------------------------------------------------------------------
 // External access policy + pending requests (Issue #311, reframed by #18)
