@@ -11,26 +11,32 @@ a SQLite-only schema change merges green yet PG-broken.
 
 Heuristic (documented for the false-positive guard, AC #4):
 
-  A PR that ADDS data-definition (DDL) to any of
-  `src/backend/db/{migrations.py,schema.py,tables.py}` MUST also ADD a net-new
-  file under `src/backend/migrations/versions/`.
+  A PR that registers a NEW SQLite migration carrying schema DDL MUST also ADD
+  a net-new file under `src/backend/migrations/versions/`. Two conjuncts:
 
-  "DDL" = an *added* (`+`), *non-comment* diff line carrying a schema keyword:
-    - SQL DDL (migrations.py / schema.py): CREATE TABLE/INDEX/TRIGGER,
-      ALTER TABLE, ADD/DROP COLUMN, RENAME COLUMN/TO, DROP TABLE/INDEX.
-    - SQLAlchemy DDL (tables.py): Column(/Table(/Index(/UniqueConstraint(/
-      ForeignKey(/PrimaryKeyConstraint(.
+  (1) NEW MIGRATION — an added line in `db/migrations.py` registers a net-new
+      entry in the `MIGRATIONS` list: `("<name>", _migrate_<fn>),`. This is the
+      unambiguous "I'm shipping a schema change" act; runner refactors, lock
+      changes, and table-rebuild helpers do NOT add an entry.
+  (2) DDL — an *added* (`+`), *non-comment* diff line in
+      `db/{migrations,schema,tables}.py` carries a schema keyword:
+        - SQL (migrations.py / schema.py): CREATE TABLE/INDEX/TRIGGER,
+          ALTER TABLE, ADD/DROP COLUMN, RENAME COLUMN/TO, DROP TABLE/INDEX.
+        - SQLAlchemy (tables.py): Column(/Table(/Index(/UniqueConstraint(/
+          ForeignKey(/PrimaryKeyConstraint(.
 
-  Because the signal is a DDL *token on an added line*, it does NOT trip on:
+  Requiring BOTH is what keeps the false-positive rate down — it does NOT trip on:
     - comment / docstring-only edits (comment lines are skipped),
-    - data-only or down migrations (UPDATE/INSERT/DELETE carry no DDL keyword),
-    - edits that only touch an existing migration's body without new DDL.
+    - data-only or down migrations (a new entry, but no DDL keyword),
+    - migration-runner refactors / table REBUILDS that re-emit CREATE TABLE for
+      an *existing* table without registering a new migration (conjunct 1 false).
 
-  A real column/table add always emits `ADD COLUMN` / `CREATE TABLE` (in
-  migrations.py) or a new `Column(`/`Table(` (in tables.py), so it is caught.
-  A schema.py-only DDL edit that forgets the SQLite migration is caught
-  separately (red) by the existing schema-parity pytest, which then forces the
-  migration — and this guard then forces the revision.
+  A real column/table add always registers a new `MIGRATIONS` entry AND emits
+  `ADD COLUMN` / `CREATE TABLE` (migrations.py) or a new `Column(`/`Table(`
+  (tables.py), so it is caught. A schema.py-only DDL edit that forgets the
+  SQLite migration is caught separately (red) by the existing schema-parity
+  pytest, which then forces the migration — and this guard then forces the
+  revision.
 
 Usage:
     check_alembic_parity.py <base_sha> <head_sha>
@@ -76,6 +82,11 @@ _SQL_DDL = re.compile(
 _SQLALCHEMY_DDL = re.compile(
     r"\b(Column|Table|Index|UniqueConstraint|ForeignKey|PrimaryKeyConstraint)\s*\("
 )
+
+# A net-new entry in the `MIGRATIONS = [...]` list in migrations.py:
+#   ("agent_loops_tables", _migrate_agent_loops_tables),
+# Trinity registers every migration here and names the fn `_migrate_*`.
+_MIGRATIONS_ENTRY = re.compile(r"""\(\s*["'][^"']+["']\s*,\s*_migrate_\w+""")
 
 
 def _patterns_for(path: str) -> re.Pattern | None:
@@ -132,6 +143,17 @@ def diff_has_ddl(diff_text: str) -> bool:
     return bool(find_ddl_evidence(diff_text))
 
 
+def added_migration_entries(diff_text: str) -> list[str]:
+    """Net-new `MIGRATIONS` list entries added in db/migrations.py."""
+    entries: list[str] = []
+    for path, content in iter_added_lines(diff_text):
+        if path != "src/backend/db/migrations.py" or _is_comment(content):
+            continue
+        if _MIGRATIONS_ENTRY.search(content):
+            entries.append(content.strip())
+    return entries
+
+
 def added_revision_files(name_status_lines: list[str]) -> list[str]:
     """Net-new (`A`) files under the Alembic versions dir, excluding __init__."""
     found: list[str] = []
@@ -147,9 +169,14 @@ def added_revision_files(name_status_lines: list[str]) -> list[str]:
     return found
 
 
+def is_schema_change(ddl_diff_text: str) -> bool:
+    """A new SQLite migration registering schema DDL (conjuncts 1 AND 2)."""
+    return bool(added_migration_entries(ddl_diff_text)) and diff_has_ddl(ddl_diff_text)
+
+
 def would_block(ddl_diff_text: str, name_status_lines: list[str]) -> bool:
-    """Core decision: DDL added on the SQLite track with no net-new revision."""
-    return diff_has_ddl(ddl_diff_text) and not added_revision_files(name_status_lines)
+    """Core decision: a DDL-bearing new migration with no net-new revision."""
+    return is_schema_change(ddl_diff_text) and not added_revision_files(name_status_lines)
 
 
 def _git(args: list[str]) -> str:
@@ -174,13 +201,26 @@ def main(argv: list[str]) -> int:
         print(f"alembic-parity: git diff failed: {exc.stderr}", file=sys.stderr)
         return 2
 
+    new_migrations = added_migration_entries(ddl_diff)
     evidence = find_ddl_evidence(ddl_diff)
+    if not new_migrations:
+        print(
+            "alembic-parity: no net-new MIGRATIONS entry — runner refactor / rebuild /\n"
+            "non-schema edit, nothing to guard (pass)."
+        )
+        return 0
     if not evidence:
-        print("alembic-parity: no SQLite/MetaData DDL added — nothing to guard (pass).")
+        print(
+            "alembic-parity: new migration is data-only (no DDL keyword) — "
+            "no Alembic revision required (pass)."
+        )
         return 0
 
     revisions = added_revision_files(name_status)
-    print("alembic-parity: DDL change detected in this PR:")
+    print("alembic-parity: new schema migration detected in this PR:")
+    for entry in new_migrations[:10]:
+        print(f"  + {entry}")
+    print("alembic-parity: carrying DDL:")
     for line in evidence[:20]:
         print(f"  • {line}")
     if revisions:

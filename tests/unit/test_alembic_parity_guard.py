@@ -34,6 +34,15 @@ def _diff(path: str, added: list[str]) -> str:
 
 NEW_REVISION = "A\tsrc/backend/migrations/versions/0005_agent_loops_new_cols.py"
 
+# A net-new MIGRATIONS list entry — the "I'm shipping a schema change" signal.
+MIGRATIONS_ENTRY = '    ("agent_loops_new_cols", _migrate_agent_loops_new_cols),'
+
+
+def _migration_diff(ddl_lines: list[str], *, entry: bool = True) -> str:
+    """A migrations.py diff: optional new MIGRATIONS entry + DDL body lines."""
+    added = ([MIGRATIONS_ENTRY] if entry else []) + ddl_lines
+    return _diff("src/backend/db/migrations.py", added)
+
 
 # --- DDL detection: positives -------------------------------------------------
 
@@ -137,13 +146,29 @@ def test_rename_status_with_score_handled():
     assert guard.added_revision_files([line]) == []
 
 
+# --- MIGRATIONS-entry detection (conjunct 1) ----------------------------------
+
+def test_new_migrations_entry_detected():
+    diff = _diff("src/backend/db/migrations.py", [MIGRATIONS_ENTRY])
+    assert guard.added_migration_entries(diff) == [MIGRATIONS_ENTRY.strip()]
+
+
+def test_commented_migrations_entry_not_detected():
+    diff = _diff("src/backend/db/migrations.py", ['    # ("old", _migrate_old),'])
+    assert guard.added_migration_entries(diff) == []
+
+
+def test_entry_in_other_file_not_detected():
+    diff = _diff("src/backend/db/schema.py", ['    ("x", _migrate_x),'])
+    assert guard.added_migration_entries(diff) == []
+
+
 # --- end-to-end decision (acceptance criteria) --------------------------------
 
 def test_sqlite_only_schema_change_blocks():
-    """AC: a SQLite-only schema change FAILS the check."""
-    ddl = _diff(
-        "src/backend/db/migrations.py",
-        ['        cursor.execute("ALTER TABLE agent_loops ADD COLUMN bar TEXT")'],
+    """AC: a SQLite-only schema change (new migration + DDL) FAILS the check."""
+    ddl = _migration_diff(
+        ['        cursor.execute("ALTER TABLE agent_loops ADD COLUMN bar TEXT")']
     )
     name_status = ["M\tsrc/backend/db/migrations.py", "M\tsrc/backend/db/schema.py"]
     assert guard.would_block(ddl, name_status) is True
@@ -151,9 +176,8 @@ def test_sqlite_only_schema_change_blocks():
 
 def test_dual_tracked_change_passes():
     """AC: a properly dual-tracked change PASSES."""
-    ddl = _diff(
-        "src/backend/db/migrations.py",
-        ['        cursor.execute("ALTER TABLE agent_loops ADD COLUMN bar TEXT")'],
+    ddl = _migration_diff(
+        ['        cursor.execute("ALTER TABLE agent_loops ADD COLUMN bar TEXT")']
     )
     name_status = [
         "M\tsrc/backend/db/migrations.py",
@@ -172,12 +196,28 @@ def test_comment_only_change_passes():
 
 
 def test_data_only_migration_passes_without_revision():
-    """AC: data-only migration (no DDL keyword) does not require a revision."""
-    ddl = _diff(
-        "src/backend/db/migrations.py",
-        ['        cursor.execute("DELETE FROM idempotency_keys WHERE created_at < ?")'],
+    """AC: data-only migration (new entry, no DDL keyword) needs no revision."""
+    ddl = _migration_diff(
+        ['        cursor.execute("DELETE FROM idempotency_keys WHERE created_at < ?")']
     )
     name_status = ["M\tsrc/backend/db/migrations.py"]
+    assert guard.would_block(ddl, name_status) is False
+
+
+def test_runner_refactor_with_rebuild_ddl_passes():
+    """Real #1263 class: a migration-runner refactor that re-emits CREATE TABLE
+    for an existing table (table rebuild) but registers NO new MIGRATIONS entry
+    must NOT trip the guard, even though it carries DDL keywords."""
+    ddl = _migration_diff(
+        [
+            "            CREATE TABLE agent_sharing_new (",
+            '        cursor.execute(f"ALTER TABLE {new} RENAME TO {table}")',
+            '                "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",',
+        ],
+        entry=False,  # the refactor adds no new MIGRATIONS entry
+    )
+    name_status = ["M\tsrc/backend/db/migrations.py"]
+    assert guard.is_schema_change(ddl) is False
     assert guard.would_block(ddl, name_status) is False
 
 
