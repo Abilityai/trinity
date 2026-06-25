@@ -39,6 +39,8 @@ Per-agent memory and CPU limits, enforced at the container level (Linux cgroups)
 
 **Fleet-wide defaults (admin):** the default CPU and memory for *new* agent containers are set platform-wide via `GET`/`PUT /api/settings/agent-defaults/resources` (admin-only; CPU 1/2/4/8/16, memory 1g--32g). Changes apply to new containers only -- restart existing agents to pick up new defaults.
 
+**Scratch space (`/tmp`):** each agent's `/tmp` is a RAM-backed tmpfs, hardened `noexec,nosuid`. Its size is operator-configurable via the `AGENT_TMP_SIZE` environment variable on the backend (default `512m`; accepts `<int>m`/`<int>g`); the `noexec,nosuid` flags are fixed. Because the tmpfs counts against the agent's memory limit and blocks execution, heavy build/scratch work (pip and npm installs, compiling extensions) is redirected to a disk-backed `TMPDIR` at `/home/developer/.tmp` on the home volume. The `/tmp` size is applied at container create, so a changed `AGENT_TMP_SIZE` is picked up on recreate, not a plain restart.
+
 ### Execution Timeout
 
 Configurable time limit for agent executions.

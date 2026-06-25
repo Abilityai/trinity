@@ -2,6 +2,8 @@
 
 Explicit permission model controlling which agents can communicate with which. Restrictive by default -- no agent can call another without explicit permission.
 
+> 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## How It Works
 
 ![Agent Permissions tab showing the agent collaboration list with Allow All / Allow None controls](../images/agent-permissions-tab.png)

@@ -89,6 +89,21 @@ async def register_subscription(
         )
 
         logger.info(f"Registered subscription '{request.name}' by {current_user.username}")
+
+        # #1089 (F1): a re-register (upsert) is a key rollover — fan a best-effort
+        # hot-reload out to every running agent on this subscription so they pick
+        # up the new token without a recreate. Swallowed on failure: the fan-out
+        # must never fail the registration. (No-op on first registration — no
+        # agents are assigned yet.)
+        try:
+            from services.subscription_auto_switch import reload_subscription_for_all_agents
+            await reload_subscription_for_all_agents(subscription.id)
+        except Exception as e:
+            logger.error(
+                f"[#1089] key-rollover hot-reload fan-out failed for "
+                f"subscription '{request.name}': {e}"
+            )
+
         return subscription
 
     except HTTPException:
@@ -228,9 +243,15 @@ async def assign_subscription_to_agent(
     """
     Assign a subscription to an agent.
 
-    Owner access required. If the agent is running, it will be restarted
-    so the container is recreated with `CLAUDE_CODE_OAUTH_TOKEN` env var
-    and `ANTHROPIC_API_KEY` removed.
+    Owner access required. The token is applied to a running agent based on the
+    kind of change (#1089):
+      - sub → sub swap: hot-reloaded in place via /api/credentials/reload-token,
+        so in-flight turns survive (no container recreate);
+      - none/api-key → subscription (an auth-MODE change): the container is
+        recreated so `ANTHROPIC_API_KEY` is dropped and `CLAUDE_CODE_OAUTH_TOKEN`
+        is baked into Config.Env.
+    Both run under the #799 per-agent switch lock so a manual reassignment can't
+    interleave with a concurrent auto-switch on the same agent.
     """
     # Owner or admin only — shared users must not mutate subscription assignments
     if not db.can_user_share_agent(current_user.username, agent_name):
@@ -242,42 +263,66 @@ async def assign_subscription_to_agent(
         raise HTTPException(status_code=404, detail=f"Subscription '{subscription_name}' not found")
 
     try:
-        db.assign_subscription_to_agent(agent_name, subscription.id)
-
-        logger.info(
-            f"Assigned subscription '{subscription_name}' to agent '{agent_name}' "
-            f"by {current_user.username}"
+        from services.subscription_auto_switch import (
+            agent_switch_lock,
+            _hot_reload_subscription_token,
         )
 
-        # If agent is running, restart it so the container is recreated
-        # with CLAUDE_CODE_OAUTH_TOKEN env var and without ANTHROPIC_API_KEY
-        from services.docker_service import get_agent_container, get_agent_status_from_container
-        from services.docker_utils import container_stop
-        from services.agent_service import start_agent_internal
+        # #799/#1089: serialize the assign + apply window per agent so a manual
+        # reassignment can't interleave with a concurrent auto-switch.
+        async with await agent_switch_lock(agent_name):
+            # #1089: snapshot the agent's CURRENT subscription under the lock,
+            # before reassigning, so a concurrent auto-switch can't change it
+            # between the read and the assign (TOCTOU). A sub→sub swap
+            # (old_sub_id is not None) hot-reloads the token in place; an
+            # auth-mode change (old_sub_id is None) still needs the container
+            # recreated.
+            old_sub_id = db.get_agent_subscription_id(agent_name)
+            db.assign_subscription_to_agent(agent_name, subscription.id)
 
-        container = get_agent_container(agent_name)
-        restart_result = None
-        injection_result = None
+            logger.info(
+                f"Assigned subscription '{subscription_name}' to agent '{agent_name}' "
+                f"by {current_user.username}"
+            )
 
-        if container:
-            agent_status = get_agent_status_from_container(container)
-            if agent_status.status == "running":
-                try:
-                    await container_stop(container)
-                    await start_agent_internal(agent_name)
-                    restart_result = "success"
-                    injection_result = {"status": "success"}
-                    logger.info(
-                        f"Restarted agent '{agent_name}' to apply subscription token"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to restart agent '{agent_name}' for subscription: {e}")
-                    restart_result = f"failed: {e}"
-                    injection_result = {"status": "failed", "error": str(e)}
+            restart_result = None
+            injection_result = None
+
+            if old_sub_id is not None:
+                # sub → sub: hot-reload the token without recreating the container.
+                # The helper itself short-circuits ("not_running"/"no_container")
+                # for stopped agents and falls back to a recreate on 404 / transport
+                # failure / missing token.
+                restart_result = await _hot_reload_subscription_token(agent_name)
+                injection_result = {"status": restart_result}
             else:
-                injection_result = {"status": "agent_not_running"}
-        else:
-            injection_result = {"status": "agent_not_running"}
+                # none/api-key → subscription: an auth-MODE change still requires a
+                # recreate so ANTHROPIC_API_KEY is dropped and the OAuth token is
+                # baked into Config.Env.
+                from services.docker_service import get_agent_container, get_agent_status_from_container
+                from services.docker_utils import container_stop
+                from services.agent_service import start_agent_internal
+
+                container = get_agent_container(agent_name)
+                if container:
+                    agent_status = get_agent_status_from_container(container)
+                    if agent_status.status == "running":
+                        try:
+                            await container_stop(container)
+                            await start_agent_internal(agent_name)
+                            restart_result = "success"
+                            injection_result = {"status": "success"}
+                            logger.info(
+                                f"Restarted agent '{agent_name}' to apply subscription token"
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to restart agent '{agent_name}' for subscription: {e}")
+                            restart_result = f"failed: {e}"
+                            injection_result = {"status": "failed", "error": str(e)}
+                    else:
+                        injection_result = {"status": "agent_not_running"}
+                else:
+                    injection_result = {"status": "agent_not_running"}
 
         return {
             "success": True,

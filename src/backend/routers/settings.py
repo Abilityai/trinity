@@ -128,7 +128,7 @@ async def get_public_feature_flags(
     Auth required (any role) — these flags reveal nothing sensitive but we
     still keep them out of the unauthenticated surface.
     """
-    from config import GEMINI_API_KEY, VOICE_ENABLED, VOIP_ENABLED
+    from config import GEMINI_API_KEY, VOICE_ENABLED, VOIP_ENABLED, MCP_AGENT_CHAT_PULL_ENABLED
     from services.entitlement_service import entitlement_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     return {
@@ -138,6 +138,11 @@ async def get_public_feature_flags(
         # VoIP telephony (VOIP-001, #1056) — default OFF, mirrors workspace_available.
         # Also requires a per-agent voip_bindings row to actually function.
         "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
+        # Pull-pilot routing for agent→agent MCP chat (#946) — default OFF.
+        # Observability-only here: the routing gate is the MCP server's own read
+        # of the same env var. Lets an operator confirm, via the API, whether the
+        # treatment window is active during the soak. NOT a UI surface.
+        "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
         "platform_default_model": settings_service.get_platform_default_model(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
@@ -1263,8 +1268,11 @@ async def update_agent_quotas(
 # Agent Default Resources (RES-001)
 # ============================================================================
 
-VALID_CPU_VALUES = ["1", "2", "4", "8", "16"]
-VALID_MEMORY_VALUES = ["1g", "2g", "4g", "8g", "16g", "32g"]
+# Canonical allowed values live in the container-spec module so the admin
+# defaults endpoint and the agent create/recreate paths can't drift (#1197).
+from services.agent_service.capabilities import VALID_CPU, VALID_MEMORY
+VALID_CPU_VALUES = list(VALID_CPU)
+VALID_MEMORY_VALUES = list(VALID_MEMORY)
 
 
 @router.get("/agent-defaults/resources")

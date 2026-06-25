@@ -5,6 +5,12 @@ import router from './router'
 import App from './App.vue'
 import './style.css'
 import { useAuthStore } from './stores/auth'
+import { installConsoleBuffer } from './utils/consoleBuffer'
+
+// #1116: capture recent console errors/warnings from the very start so the
+// in-app bug reporter can attach them (scrubbed) to a report. Runs before the
+// app mounts so early boot errors are caught too.
+installConsoleBuffer()
 
 const app = createApp(App)
 const pinia = createPinia()

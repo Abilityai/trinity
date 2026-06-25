@@ -2,6 +2,8 @@
 
 Use the **abilities** plugins to create, develop, and deploy agents to Trinity — all from your terminal.
 
+> 📺 **Watch:** [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [From Zero to Deployed](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Prerequisites
 
 - **Claude Code** installed — `npm install -g @anthropic-ai/claude-code`

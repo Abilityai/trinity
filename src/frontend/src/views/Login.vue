@@ -198,10 +198,16 @@
 
           <form @submit.prevent="handleAdminLogin" class="space-y-4">
             <div>
-              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Username</label>
-              <div class="mt-1 block w-full px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-100 dark:bg-gray-700/50 text-gray-600 dark:text-gray-400">
-                admin
-              </div>
+              <label for="adminIdentifier" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Username or email</label>
+              <input
+                id="adminIdentifier"
+                v-model="adminIdentifier"
+                type="text"
+                required
+                autocomplete="username"
+                class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
+                placeholder="admin or you@company.com"
+              />
             </div>
 
             <div>
@@ -248,7 +254,9 @@ import QrCode from '../components/QrCode.vue'
 const router = useRouter()
 const authStore = useAuthStore()
 
-// Local state for admin login form
+// Local state for admin login form. #82 Phase 1: the admin may sign in with the
+// email they registered at setup (or in Settings) instead of the fixed 'admin'.
+const adminIdentifier = ref('admin')
 const password = ref('')
 const loginLoading = ref(false)
 const loadingMessage = ref('Checking authentication...')
@@ -373,12 +381,13 @@ onMounted(async () => {
   }
 })
 
-// Handle admin login (username fixed as 'admin')
+// Handle admin login (username 'admin' OR the admin's registered email — #82 Phase 1)
 const handleAdminLogin = async () => {
   loginLoading.value = true
   authStore.clearError()
 
-  const success = await authStore.loginWithCredentials('admin', password.value)
+  const identifier = (adminIdentifier.value || 'admin').trim()
+  const success = await authStore.loginWithCredentials(identifier, password.value)
   if (success) {
     router.push('/')
   }

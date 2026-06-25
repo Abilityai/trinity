@@ -4,15 +4,21 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 
 > **Detailed documentation index: [docs/user-docs/README.md](docs/user-docs/README.md)** — guides, agent management, credentials, automation, operations, integrations, and the full API reference live there.
 
+## Using this file
+
+**This is the authoritative entry point for AI agents.** If you are an autonomous agent that just landed in this repository or connected to a Trinity instance, start here. The other root files serve different readers — [`README.md`](README.md) is for humans evaluating Trinity; [`CLAUDE.md`](CLAUDE.md) is the **contributor working agreement** (Rules of Engagement, SDLC, architectural invariants) that Claude Code auto-loads when you edit this codebase. Read `CLAUDE.md` only when your task is "contribute code"; for everything else, this file is the map.
+
+**How to traverse it:** find your task in [Route by task](#route-by-task) → jump to that section → run the commands → stop at the **Done when** signal. Each task is *zero-to-value*: the shortest path from landing to a confirmed useful result, ending in one check you can run to prove you got there. If a step is ambiguous or a link is dead, that is a bug — report it on the [issue tracker](https://github.com/abilityai/trinity/issues).
+
 ## Route by task
 
-| Your task | Path |
-|-----------|------|
-| Deploy yourself (or another agent) to a Trinity instance | [Deploy an agent](#deploy-an-agent-to-trinity) |
-| Stand up a new Trinity instance | [Stand up an instance](#stand-up-a-trinity-instance) |
-| Operate an existing instance (chat, schedules, fleet ops) | [Operate over MCP](#operate-a-trinity-instance-over-mcp) |
-| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) |
-| Contribute to Trinity's codebase | [Work on this repository](#work-on-this-repository) — Claude Code also auto-loads [CLAUDE.md](CLAUDE.md) |
+| Your task | Go to | Done when |
+|-----------|-------|-----------|
+| Deploy yourself (or another agent) to a Trinity instance | [Deploy an agent](#deploy-an-agent-to-trinity) | `trinity agents list` (or `GET /api/agents`) shows the agent `running` |
+| Stand up a new Trinity instance | [Stand up an instance](#stand-up-a-trinity-instance) | `curl /health` → `{"status": "healthy"}` |
+| Operate an existing instance (chat, schedules, fleet ops) | [Operate over MCP](#operate-a-trinity-instance-over-mcp) | an MCP tool call (e.g. `list_agents`) returns results over your API key |
+| Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) | you can state what Trinity is, how to run it, and its license |
+| Contribute to Trinity's codebase | [Work on this repository](#work-on-this-repository) — Claude Code also auto-loads [CLAUDE.md](CLAUDE.md) | tests pass and a PR is open against `dev` |
 
 ## Key facts
 
@@ -50,6 +56,8 @@ Manual install and production deployment: [docs/user-docs/guides/deploying-trini
 
 ## Deploy an agent to Trinity
 
+**Prerequisite:** a running Trinity instance to deploy to — if you don't have one, [Stand up an instance](#stand-up-a-trinity-instance) first (`trinity deploy` against no instance fails with a connection error).
+
 An agent is a directory with `CLAUDE.md` + `template.yaml`. Minimal `template.yaml`:
 
 ```yaml
@@ -61,7 +69,7 @@ resources:
   memory: "4g"
 ```
 
-Full schema (credentials, runtime selection, metrics, shared folders): [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md).
+Full schema (credentials, runtime selection, metrics, shared folders): [docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md](docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md). Rather than author one from scratch, start from a ready-made template — catalog: [config/agent-templates/README.md](config/agent-templates/README.md) (also `GET /api/templates` / `list_templates` over MCP).
 
 **If you are running inside Claude Code** — use the abilities plugins:
 
@@ -83,9 +91,11 @@ trinity init                          # instance URL + email code → JWT + MCP 
 cd my-agent/ && trinity deploy .      # package, upload, create + start the container
 ```
 
-**Verify:** `trinity agents list` shows the agent with status `running`, or:
+**Done when** `trinity agents list` shows the agent with status `running` (uses the key from `trinity init` — no extra token needed). Equivalent raw-API check, deriving a token first:
 
 ```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
+  -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r .access_token)
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ```
 

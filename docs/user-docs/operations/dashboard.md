@@ -2,6 +2,8 @@
 
 The main Dashboard at `/` provides a real-time agent network graph and timeline view for monitoring all agents and their activities.
 
+> 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
+
 ## How It Works
 
 ### Graph View (default)

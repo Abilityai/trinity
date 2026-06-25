@@ -2,6 +2,8 @@
 
 A quick tour of the web UI — dashboard, agent management, chat, and day-to-day operations.
 
+> 📺 **Watch:** [Trinity Platform Demo — full UI walkthrough](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## Logging In
 
 - **Admin login** — Enter username `admin` and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted) or the one chosen at signup (cloud). There is no first-visit password wizard.

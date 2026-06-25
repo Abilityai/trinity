@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from services.agent_auth import build_agent_auth_headers
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload, container_stats
 from utils.helpers import iso_cutoff
@@ -183,7 +184,7 @@ async def _fetch_single_agent_context(
     # the container is reachable at `agent-{name}:8000` via Docker DNS.
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/chat/session"
-        response = await client.get(agent_url)
+        response = await client.get(agent_url, headers=build_agent_auth_headers(agent_name))
         if response.status_code == 200:
             session_data = response.json()
             stats["contextPercent"] = session_data.get("context_percent", 0)

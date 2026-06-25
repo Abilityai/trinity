@@ -77,6 +77,11 @@ These rules take precedence over all other considerations. When in doubt, measur
 
 Replaces SQLite as the authoritative store for all durable relational state.
 
+> **SQLite end-of-support: September 1, 2026** (decision #1278). PostgreSQL is the
+> forward path; SQLite stays the zero-config default until then. Operators migrate
+> via `docs/migrations/SQLITE_TO_POSTGRES.md`. The dual-track migration system
+> (#1183) and single-source schema consolidation (#746) carry the transition.
+
 **What lives here:**
 - All current SQLite tables (users, agents, schedules, executions, chat history, audit log, activities, subscriptions, skills, tags, operator queue, sync state)
 - **The per-agent work queue and execution state machine** — `schedule_executions` carrying the lifecycle `queued → claimed → running → terminal`. This single table is the sole owner of both "what is waiting" (lever 1: inbox depth) and "what is running" (the fact the old slot-ZSET/SQL split forced the cleanup+canary machinery to reconcile). The atomic claim (`UPDATE … WHERE id = (SELECT … ORDER BY queued_at LIMIT 1) RETURNING`) is the competing-consumer primitive that lets N agent workers — and N replicas — pull without overbooking.
@@ -275,7 +280,7 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 
 **Post-execution hooks**: companion to the existing pre-check hook. `~/.trinity/post-check` runs after every task completion (language-agnostic, shebang-selected). Enables custom alerting, output validation, or state transitions defined by the agent template.
 
-**Credential rotation via hot-reload, not recreate**: rotating an agent's token (subscription auto-switch, key rollover) goes through the existing `/api/credentials/update` hot-reload endpoint and does **not** recreate the container. "Rotate a credential" and "kill every in-flight turn" must stop being the same operation (#1037) — container recreate is reserved for image/template changes, where the pre-recreate "stop pulling, finish in-flight" handshake applies. This removes the credential↔execution collision class structurally instead of recovering from it after the fact.
+**Credential rotation via hot-reload, not recreate** ✅ *Implemented (#1089, 2026-06-13)*: rotating an agent's subscription token (auto-switch, manual sub→sub reassignment, key rollover) goes through a dedicated agent-server `POST /api/credentials/reload-token` endpoint and does **not** recreate the container. (A new surgical endpoint, not the existing `/api/credentials/update` — the latter destructively rewrites `.env`/`.mcp.json`; the token is an env-only credential.) "Rotate a credential" and "kill every in-flight turn" are no longer the same operation (#1037) — container recreate is reserved for image/template/auth-**mode** changes, where the pre-recreate "stop pulling, finish in-flight" handshake applies. A writable-layer durable override (`/var/lib/trinity/oauth-token`, read by `startup.sh`) keeps a rotation across a plain restart; recreate self-reconciles to the DB token (fresh layer wipes the override). This removes the credential↔execution collision class structurally instead of recovering from it after the fact. See architecture.md §"Subscription Token Rotation via Hot-Reload".
 
 ---
 
@@ -475,7 +480,7 @@ These decisions are already correct and should not be revisited without strong e
 
 These are architectural decisions not yet resolved. They should be answered before the relevant components are built. Each has a tracking issue.
 
-1. **Message-envelope payload schema** (issue #945): The envelope fields are defined; the `payload` schema for each `kind` is not. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract must be pinned before the pull pilot (#946). In particular the `reply` payload must pin the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the pre-work: `ParallelTaskRequest` has 15 fields today, and the envelope cannot fit honestly until those are demoted to session/agent state or quarantined.
+1. **Message-envelope payload schema** (issue #945) — *Resolved (postcard written): see [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md).* The envelope fields are defined; the `payload` schema for each `kind` is now pinned in the postcard. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract is pinned before the pull pilot (#946). In particular the `reply` payload pins the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope and the postcard. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the *physical-enforcement* pre-work: `ParallelTaskRequest` has 15 fields today, and the envelope cannot replace that shape as a wire format until those are demoted to session/agent state or quarantined (the postcard is the documented contract; the pilot rides the existing reconstruction shape).
 
 2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. **Sequencing constraint added by the pull model:** the queue, the atomic claim, the result-write, and the lease-renewal all converge on one DB; at 200 agents that is exactly where SQLite's single-writer lock becomes the ceiling — *before* agent count does. PostgreSQL must therefore land **before** the pull queue carries the full fleet at scale (or no later than the "capacity becomes physical" phase), not after. #300 covers the SQLAlchemy Core abstraction step; a detailed cutover plan is still required before the migration ticket is opened.
 
@@ -507,7 +512,7 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | ├─ Pilot: route MCP `chat_with_agent` through the agent queue | #946 |
 | ├─ Cleanup pyramid → single lease-reaper | #429 |
 | └─ PostgreSQL migration (sequence **before** the queue carries the fleet) | #300 |
-| Message-envelope payload schema (gates the pilot #946) | #945 |
+| Message-envelope payload schema (gates the pilot #946) — postcard written (`ACTOR_MODEL_POSTCARD.md`) | #945 |
 | Idempotency keys at trigger boundaries (shipped) | #525 |
 | Per-agent dispatch circuit breaker — repurposed gate→alert under pull (shipped) | #526 |
 | Agent heartbeat push — repurposed gate→alert under pull | #307 |
@@ -517,6 +522,24 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | Workflow-scoped capability tokens | #948 |
 
 See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these.
+
+---
+
+## Incubating Directions (Not Yet Decided)
+
+Forward-looking directions captured for evaluation — **not** committed architecture and **not**
+on the current critical path. They incubate in the private tracker until a build/defer/reject
+decision is made.
+
+- **Goal-directed control surface** — make Trinity an optional *environment* for goal-seeking
+  agents: a first-class **Objective** + **policies**, a **roster** of recruitable agents, and
+  **externally-measured evaluations** (Trinity scores the work; the agent does not grade itself),
+  closed by an agent-owned optimization loop. Framed as the capstone over the Semantic Health
+  Score, GuardAgent (#947), collaborator injection (#171), A2A Agent Cards (#737), and the
+  `systems` grouping. Strictly bounded by CLAUDE.md §8 ("Trinity ≠ DAG engine"): Trinity provides
+  the objective, the eval/scoreboard, the roster, and the levers; the *optimization loop and peer
+  dispatch live in a manager agent*, never in backend transition logic. Naturally sequenced
+  **after** the pull migration + PostgreSQL (#300). Incubating in `abilityai/trinity-enterprise#27`.
 
 ---
 

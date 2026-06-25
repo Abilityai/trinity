@@ -2,6 +2,8 @@
 
 Connect agents to Telegram bots. Supports direct messages, group chats, @mentions, and reply threading.
 
+> 📺 **Watch:** [Build an AI Recruiter Agent — Telegram bot setup](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **1:1 Mapping** -- Each agent has its own dedicated Telegram bot. Bots cannot be shared across agents.

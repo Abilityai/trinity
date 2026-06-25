@@ -35,9 +35,23 @@ def verify_password(plain_password: str, stored_password: str) -> bool:
 
 
 def authenticate_user(username: str, password: str):
-    """Authenticate a user by username and password."""
+    """Authenticate a user by username — or, for the admin, registered email.
+
+    #82 Phase 1: the admin may sign in with the email they registered at
+    first-run setup (or via Settings) instead of the fixed 'admin' username.
+    When the identifier looks like an email and no username matches, we fall
+    back to an email lookup. This is safe for password auth because only an
+    account that actually has a password hash can pass `verify_password` below —
+    email-code-only users have none, so they can never authenticate this way
+    even if matched by email.
+    """
     user = db.get_user_by_username(username)
+    if not user and username and "@" in username:
+        user = db.get_user_by_email(username.strip().lower())
     if not user:
+        return False
+    if not user.get("password"):
+        # No password hash (email-code-only account) — never password-authenticate.
         return False
     if not verify_password(password, user["password"]):
         return False

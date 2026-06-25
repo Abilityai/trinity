@@ -2,6 +2,8 @@
 
 The Trinity Ops Agent is a Claude Code agent for operating a Trinity instance — health checks, log tailing, restarts, updates, rollbacks, diagnostics, and agent management — all from a single `.env` pointed at any server.
 
+> 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [all videos](../../videos.md)
+
 ## When to Use
 
 Use the ops agent instead of raw Docker commands for day-to-day Trinity operations. It codifies production runbook knowledge into repeatable skills that improve over time as new versions are published.

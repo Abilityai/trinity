@@ -2,6 +2,8 @@
 
 The abilities marketplace is a curated collection of Claude Code plugins covering the full agent lifecycle — from scaffolding and onboarding to deployment, scheduling, and ongoing operations.
 
+> 📺 **Watch:** [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [Building Agents — Playbooks, Plugins, Deployment](https://youtu.be/MDxRZBikf70) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Plugin marketplace** — A registry of versioned plugin packages hosted at `github.com/abilityai/abilities`. Claude Code's `/plugin marketplace add` command connects to it.

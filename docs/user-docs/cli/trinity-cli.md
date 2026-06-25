@@ -2,6 +2,8 @@
 
 Command-line interface for managing Trinity agents from your terminal. Provides the same capabilities as the MCP server but invoked via shell commands.
 
+> 📺 **Watch:** [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Installation
 
 ```bash

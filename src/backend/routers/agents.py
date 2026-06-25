@@ -11,9 +11,7 @@ Related routers (same /api/agents prefix):
 - agent_ssh.py     — SSH access
 """
 import json
-import docker
 import logging
-from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
 from pydantic import BaseModel
@@ -30,16 +28,13 @@ from models import (
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
 from services.docker_service import (
-    docker_client,
     get_agent_container,
     get_agent_by_name,
 )
 from services.docker_utils import (
-    container_stop, container_remove, container_reload,
-    volume_get, volume_remove
+    container_stop, container_remove,
 )
-from services import git_service
-from services.image_generation_prompts import AVATAR_EMOTIONS
+from services import heartbeat_service
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -49,14 +44,8 @@ from services.platform_audit_service import (
 from services.agent_service import (
     # Helpers - re-exported for external modules
     get_accessible_agents,
-    get_agents_by_prefix,
-    get_next_version_name,
-    get_latest_version,
-    check_shared_folder_mounts_match,
-    check_api_key_env_matches,
     # Lifecycle
     start_agent_internal,
-    recreate_container_with_updated_config,
     # CRUD
     create_agent_internal as _create_agent_internal,
     # Deploy
@@ -944,11 +933,30 @@ async def agent_execution_result(
             raise HTTPException(status_code=413, detail="execution_log too large")
 
     # ---- Build the normalized terminal + apply -----------------------------
-    status = (
-        TaskExecutionStatus.SUCCESS
-        if payload.status == "success"
-        else TaskExecutionStatus.FAILED
+    # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else
+    # (incl. unknown forward-compat values) →FAILED. CANCELLED flows through
+    # apply_result (release_slot=True); the replay gate above already short-
+    # circuits a terminate-wrote-first CANCELLED row, and the reverse race
+    # (callback CANCELLED first) makes the later terminate write a CAS no-op.
+    #
+    # Finding 2 (CSO 2026-06-22): an auth/rate terminal must NOT be reclassified
+    # as a clean cancellation even when the agent labels it "cancelled". The
+    # agent side already guards this (result_callback._is_auth_or_rate), but the
+    # callback is the backend trust boundary — a buggy or mixed-version agent
+    # that POSTs status:"cancelled" carrying error_code:"auth" (or an auth/
+    # rate_limit terminal_reason) would otherwise silently dodge the AUTH
+    # dispatch breaker / SUB-003 auto-switch. Mirror the guard so the invariant
+    # ("auth/rate is never cancellation") holds regardless of the caller image.
+    is_auth_or_rate = (
+        payload.error_code == TaskExecutionErrorCode.AUTH.value
+        or payload.terminal_reason in ("auth", "rate_limit")
     )
+    if payload.status == "success":
+        status = TaskExecutionStatus.SUCCESS
+    elif payload.status == "cancelled" and not is_auth_or_rate:
+        status = TaskExecutionStatus.CANCELLED
+    else:
+        status = TaskExecutionStatus.FAILED
     error_code = None
     if payload.error_code:
         try:

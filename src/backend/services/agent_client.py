@@ -34,6 +34,7 @@ from redis_breaker_util import (
     get_breaker_redis,
     reset_breaker_redis_client,
 )
+from services.agent_auth import merge_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -775,6 +776,10 @@ class AgentClient:
             )
 
         timeout = timeout or self.DEFAULT_TIMEOUT
+        # #1159: stamp the per-agent auth token. merge_auth_headers overrides any
+        # caller-supplied X-Trinity-Agent-Token (case-insensitively) so a stale
+        # or forged value can never slip past the agent middleware.
+        kwargs["headers"] = merge_auth_headers(self.agent_name, kwargs.get("headers"))
         client, is_pooled = _acquire_client(self.base_url)
 
         try:

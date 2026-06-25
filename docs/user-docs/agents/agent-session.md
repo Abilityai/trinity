@@ -2,6 +2,8 @@
 
 The Session tab in Agent Detail is a `--resume`-default chat surface that lives alongside the existing Chat tab. Each new message reattaches to the same Claude Code session, so the agent retains tool-result memory, mid-skill state, and reasoning state across turns — strictly more capable than Chat's stateless text-replay model.
 
+> 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Session** -- A conversation thread with a Claude Code working memory attached. The visible message log is stored separately from the working memory and survives Reset.

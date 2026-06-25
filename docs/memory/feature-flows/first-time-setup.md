@@ -115,12 +115,22 @@ export function clearSetupCache() {
 #### SetupPassword Component
 **File**: `src/frontend/src/views/SetupPassword.vue`
 
+A welcoming, **single-screen first-run page** (trinity-enterprise#49): a dark,
+branded hero with an animated **orbiting fleet constellation** (the Trinity mark
+at the core, agent nodes orbiting on three rings) on the left, and the setup form
+on the right (stacks to one column on mobile; the constellation freezes to a
+static composition under `prefers-reduced-motion`).
+
 **Key Features**:
-- **Setup Token field** — required, instructions point to `docker compose logs backend`
-- Password + Confirm Password fields with visibility toggle
-- Password strength indicator (Weak/Fair/Good/Strong/Excellent)
-- Client-side validation: token non-empty, min 8 chars, passwords must match
-- Submits `setup_token`, `password`, `confirm_password` to `/api/setup/admin-password`
+- **No setup-token field** — removed in #49 (the old log-copied token is gone).
+- **Admin email — required** (becomes the sign-in identity), validated client-side
+  against the same shape regex as the backend.
+- Password + Confirm Password fields with visibility toggle.
+- Password strength indicator + per-requirement checklist + match indicator.
+- Optional **Company / organization** field and **updates opt-in** checkbox.
+- Field order: **email → password (+confirm) → company → updates opt-in**.
+- Submits `{email, password, confirm_password, company, consent_updates}` to
+  `POST /api/setup/admin-password` (no `setup_token`).
 
 ```javascript
 // Submit handler
@@ -132,24 +142,22 @@ async function handleSubmit() {
 
   try {
     await axios.post('/api/setup/admin-password', {
-      setup_token: setupToken.value,
+      email: email.value.trim(),
       password: password.value,
-      confirm_password: confirmPassword.value
+      confirm_password: confirmPassword.value,
+      company: company.value.trim() || null,
+      consent_updates: consentUpdates.value,
     })
 
     clearSetupCache()
     router.push('/login')
   } catch (e) {
     if (e.response?.status === 403) {
-      const detail = e.response?.data?.detail || ''
-      if (detail.toLowerCase().includes('token')) {
-        error.value = 'Invalid setup token. Check server logs for the correct token.'
-      } else {
-        error.value = 'Setup has already been completed.'
-        setTimeout(() => router.push('/login'), 2000)
-      }
+      // Setup already completed — endpoint self-disabled; go to login.
+      error.value = 'Setup has already been completed.'
+      setTimeout(() => router.push('/login'), 2000)
     } else {
-      error.value = e.response?.data?.detail || 'Failed to set password. Please try again.'
+      error.value = e.response?.data?.detail || 'Failed to create the admin account. Please try again.'
     }
   } finally {
     loading.value = false
@@ -157,11 +165,14 @@ async function handleSubmit() {
 }
 ```
 
-**Validation Logic**:
+**Validation Logic** (email required; full OWASP password requirements, not just length):
 ```javascript
-const isValid = computed(() => {
-  return setupToken.value.length > 0 && password.value.length >= 8 && passwordsMatch.value
-})
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s.]+$/
+const isValid = computed(() =>
+  EMAIL_RE.test(email.value.trim()) &&
+  passwordRequirements.value.every(r => r.met) &&
+  passwordsMatch.value
+)
 ```
 
 ### Backend Layer
@@ -176,63 +187,52 @@ from routers.setup import router as setup_router
 app.include_router(setup_router)
 ```
 
-**Setup Token** (shared across workers via Redis, #1165):
-```python
-# Each worker has a candidate; the first to boot wins the SETNX claim and all
-# workers read the single winner. Validation reads it live, so a token issued on
-# one worker validates on any worker (prod runs uvicorn --workers 2).
-_SETUP_TOKEN_KEY = "trinity:setup:token"
-_candidate_token: str = secrets.token_urlsafe(24)
+**Setup token — REMOVED (trinity-enterprise#49):** the earlier flow required a
+one-time token (shared across uvicorn workers via Redis, #1165) copied from the
+server logs into the wizard, to guard the first-run window against admin hijack
+(SEC #177). It has been removed to streamline the common self-hosted, single-
+operator bring-up. Consequences:
+- No `setup_token` field on the request, no `ensure_setup_token`/`clear_setup_token`
+  machinery, and **no Redis dependency for setup** (the admin write goes straight
+  to SQLite). The `_get_redis`/`_candidate_token`/`_SETUP_TOKEN_KEY` code is gone.
+- The startup token-emission block in `main.py` is replaced by a plain
+  "first-time setup required" log line (still `logger.warning`, preserving the
+  #858 flush guarantee — see below).
+- The tradeoff is an explicit **operator responsibility**: an internet-reachable
+  instance must be kept behind a tunnel/VPN until setup completes
+  (`docs/DEPLOYMENT.md` → Security Recommendations). The endpoint still
+  self-disables after the first success, so the exposure is the pre-setup window
+  only.
 
-def ensure_setup_token():
-    """Idempotently ensure a shared token exists in Redis; return it (or None if
-    Redis is unreachable). The issuing worker prints it to the logs exactly once."""
-    r = _get_redis()
-    if r is None:
-        return None  # setup blocked until Redis recovers — never a per-worker fallback
-    issued = r.set(_SETUP_TOKEN_KEY, _candidate_token, nx=True)  # first-writer-wins
-    token = r.get(_SETUP_TOKEN_KEY)
-    if issued:
-        logger.warning("TRINITY FIRST-TIME SETUP REQUIRED\nSetup token: %s\n...", token)
-    return token
-```
-
-> **Why Redis, not a module global (#1165):** prod runs `uvicorn --workers 2`.
-> A per-process `secrets.token_urlsafe(24)` differs per worker, so the operator
-> copies one worker's token but `POST /api/setup/admin-password` load-balances
-> and 403s ~50% of the time on the other worker. The shared Redis token (read
-> live at validation time) removes the per-worker drift entirely. When Redis is
-> unreachable, setup is **blocked** (`setup_available: false` + 503), not
-> silently degraded to a per-worker token.
-
-**Startup Token Emission** (in `main.py` lifespan handler, immediately after
+**Startup first-run signal** (in `main.py` lifespan handler, immediately after
 `setup_logging()`):
 ```python
 if _db.get_setting_value('setup_completed', 'false') != 'true':
-    # ensure_setup_token() claims the shared token and prints it (once, on the
-    # issuing worker). If Redis is down, the next GET /api/setup/status reissues
-    # once it recovers — no restart needed.
-    if _ensure_setup_token() is None:
-        logger.error("FIRST-TIME SETUP REQUIRED but Redis unreachable — setup blocked.")
+    logger.warning(
+        "TRINITY FIRST-TIME SETUP REQUIRED — open the Trinity UI to create the "
+        "admin account. On an internet-reachable instance, keep it behind a "
+        "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
+    )
 ```
 
 > **Why `logger.warning`, not `print` (#858):** the lifespan runs under uvicorn with
 > stdout connected to a Docker log pipe (not a TTY). Without `ENV PYTHONUNBUFFERED=1`
-> in `docker/backend/Dockerfile`, CPython block-buffers `print()` (~8KB) and the token
-> never reaches `docker logs` — deadlocking fresh installs. The logging `StreamHandler`
-> flushes after every record, so the token is delivered regardless, and it now flows
-> through the structured JSON logger / Vector. The token is emitted *before* the
-> event-bus and audit-write startup so a hang there can't suppress it. `PYTHONUNBUFFERED=1`
-> (parity with `docker/scheduler/Dockerfile`) is the belt-and-suspenders fix for every
-> remaining `print()`.
+> in `docker/backend/Dockerfile`, CPython block-buffers `print()` (~8KB) and the line
+> never reaches `docker logs`. The logging `StreamHandler` flushes after every record,
+> so the signal is delivered regardless and flows through the structured JSON logger / Vector.
 
 **Request Model**:
 ```python
 class SetAdminPasswordRequest(BaseModel):
-    """Request body for setting admin password."""
-    password: str
-    confirm_password: str
-    setup_token: str  # Must match token printed in server logs at startup
+    """Request body for creating the admin account at first-time setup."""
+    password: str = Field(..., max_length=128)
+    confirm_password: str = Field(..., max_length=128)
+    email: str = Field(..., max_length=254)        # REQUIRED — admin sign-in identity (#49)
+    company: Optional[str] = Field(None, max_length=200)   # optional operator profile
+    name: Optional[str] = Field(None, max_length=200)
+    role: Optional[str] = Field(None, max_length=200)
+    use_case: Optional[str] = Field(None, max_length=500)
+    consent_updates: bool = False                  # opt-in to hosted intake
 ```
 
 #### GET /api/setup/status
@@ -243,62 +243,59 @@ async def get_setup_status():
     Check if initial setup is complete. No auth required.
 
     Returns:
-        - setup_completed: Whether the admin password has been set
-        - setup_available: False while pending if Redis (token store) is down (#1165)
+        - setup_completed: Whether the admin account has been created
+        - setup_available: Always true now the Redis-backed setup token is gone
+          (#49); kept for backward compatibility with older frontends.
     """
     setup_completed = db.get_setting_value('setup_completed', 'false') == 'true'
-    setup_available = True
-    if not setup_completed:
-        setup_available = ensure_setup_token() is not None  # probes Redis + self-heals
-    return {
-        "setup_completed": setup_completed,
-        "setup_available": setup_available,
-    }
+    return {"setup_completed": setup_completed, "setup_available": True}
 ```
 
 #### POST /api/setup/admin-password
 ```python
 @router.post("/admin-password")
-async def set_admin_password(data: SetAdminPasswordRequest, request: Request):
+async def set_admin_password(data, request, background_tasks):
     """
-    Set admin password on first launch. No auth required, only works once.
-    Requires the setup token printed to server logs at startup (prevents installation hijack).
+    Create the admin account on first launch. No auth required, only works once.
+    No setup token (#49) — on an internet-reachable instance the operator restricts
+    network access (tunnel/VPN) until setup completes (docs/DEPLOYMENT.md → Security).
     """
     # 1. Check setup not already completed
     if db.get_setting_value('setup_completed', 'false') == 'true':
         raise HTTPException(status_code=403, detail="Setup already completed...")
 
-    # 2. Resolve the shared token; 503 if Redis is unreachable (don't fall back
-    #    to a per-worker token — that is the #1165 bug).
-    shared_token = ensure_setup_token()
-    if shared_token is None:
-        raise HTTPException(status_code=503, detail="Setup temporarily unavailable: Redis unreachable.")
+    # 2. Validate password complexity (OWASP ASVS 2.1) — generic message on this
+    #    unauthenticated endpoint (don't reveal which rule failed)
+    if validate_password_strength(data.password):
+        raise HTTPException(status_code=400, detail=PASSWORD_REQUIREMENTS_MESSAGE)
 
-    # 3. Validate setup token (constant-time compare to guard against timing attacks)
-    if not secrets.compare_digest(data.setup_token, shared_token):
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid setup token. Check server logs for the setup token printed at startup."
-        )
-
-    # 3. Validate password length
-    if len(data.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-
-    # 4. Validate passwords match
+    # 3. Validate passwords match
     if data.password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
 
-    # 5. Hash password with bcrypt
-    hashed_password = hash_password(data.password)
+    # 4. Email is REQUIRED (#49) — validate shape before any write (missing → 422
+    #    at the model layer; blank/typo → 400 here, so setup never half-completes)
+    normalized_email = (data.email or "").strip().lower()
+    if not normalized_email or not _EMAIL_RE.match(normalized_email):
+        raise HTTPException(status_code=400, detail="A valid admin email is required")
 
-    # 6. Update admin user's password (creates user if doesn't exist)
-    db.update_user_password('admin', hashed_password)
+    # 5. Hash + upsert admin password; bind the email as the sign-in identity
+    db.update_user_password('admin', hash_password(data.password))
+    try:
+        db.update_user('admin', {"email": normalized_email})
+        email_registered = True
+    except Exception:           # never block setup on a profile write
+        email_registered = False
 
-    # 7. Mark setup as completed
+    # 6. Mark setup completed
     db.set_setting('setup_completed', 'true')
 
-    return {"success": True}
+    # 7. Operator intake (trinity-enterprise#38): only on affirmative consent,
+    #    scheduled as a BackgroundTask so it runs after the response
+    if data.consent_updates:
+        background_tasks.add_task(submit_operator_intake, email=normalized_email, ...)
+
+    return {"success": True, "email_registered": email_registered}
 ```
 
 #### Password Hashing
@@ -692,10 +689,9 @@ env_vars = {
 | Error Case | HTTP Status | Message | Handling |
 |------------|-------------|---------|----------|
 | Setup already completed | 403 | "Setup already completed" | Frontend redirects to /login after 2s |
-| Invalid setup token | 403 | "Invalid setup token. Check server logs..." | Frontend shows error, stays on form |
-| Redis unreachable (#1165) | 503 | "Setup temporarily unavailable: ... cannot reach Redis" | Frontend shows "waiting for Redis" panel + polls |
-| Missing setup_token field | 422 | Pydantic validation error | Form prevents submission |
-| Password too short | 400 | "Password must be at least 8 characters" | Form validation |
+| Missing required field (email/password) | 422 | Pydantic validation error | Form prevents submission (email + password required) |
+| Email missing/blank/invalid shape | 400 | "A valid admin email is required" | Form validation (email required, #49) |
+| Password fails complexity | 400 | "Password does not meet requirements: ..." | Form validation (full OWASP ASVS 2.1 checklist) |
 | Passwords don't match | 400 | "Passwords do not match" | Form validation |
 | Invalid API key format | 400 | "Invalid API key format. Keys start with 'sk-ant-'" | Inline error |
 | API key invalid | N/A | `{valid: false, error: "..."}` | Test result display |
@@ -710,7 +706,7 @@ env_vars = {
    - Bcrypt hashing with auto-configured work factor
    - **No plaintext fallback (M-003)**: Plaintext password comparison removed as of 2026-02-23. All passwords must be bcrypt hashed.
    - Invalid hash formats are rejected (returns authentication failure)
-   - Minimum 8 character requirement
+   - Full OWASP ASVS 2.1 complexity (12+ chars, upper/lower/digit/special, not common) via `validate_password_strength()`
    - Setup endpoint only works ONCE
 
 2. **API Key Security**:
@@ -719,12 +715,18 @@ env_vars = {
    - Admin-only access to all API key endpoints
    - Fallback to environment variable if not in settings
 
-3. **Setup Endpoint Protection** (SEC #177):
-   - No network auth required (must work on fresh install)
-   - **Shared setup token (#1165)**: Generated via `secrets.token_urlsafe(24)`, stored in Redis (first-writer-wins) so all uvicorn workers share one value, printed ONLY to server logs. An attacker without local server access cannot complete setup. When Redis is down, setup is blocked (503) rather than degraded to a per-worker token.
-   - Constant-time token comparison (`secrets.compare_digest`) prevents timing attacks
-   - Self-disabling after first use via `setup_completed` flag
-   - Audit logged even on blocked attempts
+3. **Setup Endpoint Protection** (SEC #177 → revised by trinity-enterprise#49):
+   - No network auth required (must work on fresh install).
+   - **Setup token removed (#49)**: the earlier single-use token (Redis-shared, #1165;
+     constant-time compared) that guarded the first-run window against admin hijack is
+     **gone**, to streamline self-hosted bring-up. **Accepted tradeoff**: the unauthenticated
+     `/api/setup/admin-password` has no proof-of-control, so anyone reaching the URL before
+     setup completes can claim the admin account.
+   - **Operator responsibility**: deploy an internet-reachable instance behind a tunnel/VPN
+     (or otherwise restrict network access) until setup completes — documented in
+     `docs/DEPLOYMENT.md` → Security Recommendations. On localhost / trusted LAN this is a non-issue.
+   - **Self-disabling** after first use via the `setup_completed` flag — the exposure is the
+     pre-setup window only; after that, all auth is enforced.
 
 4. **Login Block**:
    - Login endpoint returns 403 with `setup_required` until admin password set
@@ -747,40 +749,39 @@ env_vars = {
    DELETE FROM system_settings WHERE key = 'setup_completed';
    ```
 
-2. **Restart the backend** and check logs for the setup token:
+2. **Restart the backend** and check logs for the first-run signal:
    ```bash
-   docker compose logs backend | grep "Setup token"
+   docker compose logs backend | grep "FIRST-TIME SETUP"
    ```
-   - **Expected**: a structured JSON log line whose `message` contains
-     `Setup token: <token>` (emitted at `WARNING` level since #858).
-   - **Prod (#1165)**: production runs uvicorn with `--workers 2`, but the token is
-     shared via Redis (first-writer-wins), so exactly **one** worker logs the token
-     and it validates regardless of which worker handles the request. If Redis is
-     down, no token is logged and the setup UI shows "waiting for Redis"; the token
-     is issued automatically once Redis recovers (no restart needed).
+   - **Expected**: a structured JSON log line `TRINITY FIRST-TIME SETUP REQUIRED — open
+     the Trinity UI to create the admin account...` (emitted at `WARNING` level for the
+     #858 flush guarantee). **No setup token** is printed (#49).
 
 3. **Visit any page** (e.g., `http://localhost/`)
    - **Expected**: Redirect to `/setup`
-   - **Verify**: URL shows `/setup`, setup form displays token field + password fields
+   - **Verify**: the welcome page shows the orbiting fleet constellation + a form with
+     **Admin email (required)**, password, confirm, company (optional), updates opt-in —
+     and **no setup-token field**.
 
-4. **Enter wrong setup token**, valid passwords
-   - **Expected**: 403 error, "Invalid setup token" message shown
+4. **Leave email blank** (or enter a malformed email), valid matching password
+   - **Expected**: Submit disabled (client-side); the API rejects with 422 (missing) /
+     400 ("A valid admin email is required") if forced.
 
-5. **Enter correct token from logs, try weak password** (less than 8 chars)
-   - **Expected**: Submit button disabled (client-side validation)
+5. **Valid email, weak password** (fails the 12-char / complexity checklist)
+   - **Expected**: Submit button disabled (the requirements checklist shows unmet items).
 
-6. **Enter correct token, mismatched passwords**
-   - **Expected**: "Passwords do not match" indicator, submit disabled
+6. **Valid email, mismatched passwords**
+   - **Expected**: "Passwords do not match" indicator, submit disabled.
 
-7. **Enter correct token, valid matching password** (8+ chars)
-   - **Expected**: Submit enabled — click "Set Password & Continue"
+7. **Valid email, strong matching password**
+   - **Expected**: Submit enabled — click "Create admin account & continue".
 
 8. **After successful setup**
    - **Expected**: Redirect to `/login`
-   - **Verify**: Can log in with `admin` / new password
+   - **Verify**: Can log in with the **email + password** (or `admin` + password).
 
 9. **Try accessing /setup again**
-   - **Expected**: Redirect to `/login` (setup already done)
+   - **Expected**: Redirect to `/login` (setup already done; the endpoint 403s).
 
 **Flow 2: API Key Configuration**
 
@@ -828,6 +829,90 @@ UPDATE users SET password_hash = 'changeme' WHERE username = 'admin';
 
 ---
 
+## Flow 3: Operator Profile — Intake + Admin Email Login (trinity-enterprise#38, #82)
+
+First-run setup additionally captures an **optional operator profile** that does
+two jobs at once from a single email field: it becomes the admin's **sign-in
+identity**, and (on explicit consent) it's submitted to a **hosted intake**.
+
+### Why no verification email at setup
+
+A fresh install has **no email provider** configured (no Resend key), so a
+verification code cannot be delivered during setup. The design works *around*
+that rather than blocking on it:
+
+- The email is **bound** to the admin account, not verified by a code. The
+  operator can immediately sign in with **email + password** (or still with
+  `admin` + password).
+- The hosted intake is a plain HTTPS POST to a Cloudflare Worker — it does **not**
+  use the email provider, so it works offline-of-email too.
+- The code-based second factor (email OTP after password) is **Phase 2**, gated
+  on a configured provider and the existing `mfa_gate` seam (#5/#388) — not built
+  here.
+
+### Frontend
+
+- **`views/SetupPassword.vue`** — a **required Admin email** (sign-in identity)
+  plus an optional **Company** field and an **unchecked-by-default** consent
+  checkbox: *"Occasionally email me important security & product updates."* Since
+  email is always present, the consent box is freely toggleable. Submits
+  `{email, password, confirm_password, company, consent_updates}` to
+  `POST /api/setup/admin-password` (no `setup_token` since #49).
+- **`views/Login.vue`** — the admin form's fixed `admin` label becomes an
+  editable **"Username or email"** field (default `admin`), routed through the
+  unchanged `authStore.loginWithCredentials(identifier, password)`.
+- **`views/Settings.vue`** (General tab, admin) — **Admin sign-in email** card:
+  existing-admin transition. `PUT /api/users/me/email` → refresh profile.
+
+### Backend
+
+- **`POST /api/setup/admin-password`** (`routers/setup.py`) — validates the email
+  shape *before any write* (typo → clean 400, setup not half-completed); binds it
+  via `db.update_user('admin', {'email': …})`; returns `{success, email_registered}`.
+  On `consent_updates && email`, schedules `submit_operator_intake(...)` as a
+  **`BackgroundTasks`** job so it runs *after* the response — never delaying or
+  breaking setup.
+- **`services/operator_intake_service.py`** — fire-and-forget `httpx` POST (5s).
+  Guards: disabled via `OPERATOR_INTAKE_ENABLED=false` / `DO_NOT_TRACK`; **at-most-
+  once** via the `operator_intake_submitted` marker claimed *before* the POST;
+  no-op without an email. Owns the stable `installation_id` (random UUID in
+  `system_settings`, the #758 telemetry seed). Never raises; never logs the email.
+- **`dependencies.authenticate_user`** — resolves the identifier by username, then
+  by email when it looks like one and no username matched. The password check
+  still runs, so only an account *with* a password hash (the admin) authenticates
+  — email-code-only users (no password) never can.
+- **`PUT /api/users/me/email`** (`routers/users.py`) — own-account scoped; 409 if
+  the email belongs to another account; no verification email.
+
+### Hosted intake endpoint (out-of-repo Cloudflare Worker)
+
+Reuses #1116's intake app on the stable `https://intake.abilityai.dev` domain —
+**one added endpoint**, `POST /v1/operator-intake` (sibling to `/v1/report-bug`).
+The Worker lives outside this repo (`trinity-ops-agent/`, alongside the bug
+intake). `intake.abilityai.dev` is already CSP-allowed (`connect-src`, #1116), so
+no CSP change is needed. Versioned contract:
+
+```
+POST https://intake.abilityai.dev/v1/operator-intake
+{ installation_id, email, company?, name?, role?, use_case?,
+  consent: "security_and_product_updates", trinity_version, submitted_at }
+→ Worker: rate-limit + dedupe by installation_id → add to the security/product
+  updates list (server-held creds) → 2xx. Backend treats any response as
+  best-effort and never retries (at-most-once).
+```
+
+### Config
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `OPERATOR_INTAKE_ENABLED` | `true` | `false` (or `DO_NOT_TRACK=1`) disables the outbound submission entirely (box still shows, nothing leaves) |
+| `OPERATOR_INTAKE_URL` | `https://intake.abilityai.dev/v1/operator-intake` | Repoint to self-host the intake |
+
+### Status
+- Operator Intake + Admin Email Login (Phase 1): **Working** (Implemented 2026-06-22)
+
+---
+
 ## Related Flows
 
 ### Upstream
@@ -849,3 +934,5 @@ UPDATE users SET password_hash = 'changeme' WHERE username = 'admin';
 | 2026-01-23 | Line number verification | Updated all line numbers to match current codebase. Verified: setup.py endpoints (22-34, 37-81), auth.py login blocks (20-22, 49-78, 153-158, 210-215), dependencies.py password hashing (15-37), db/users.py upsert (129-162), db/settings.py (49-83), router/index.js guards (165-220, 242-245), SetupPassword.vue (166-176, 205-207, 209-236). Added documentation for email auth login blocking and password strength validation. |
 | 2026-02-23 | Security Fix M-003 | Removed plaintext password fallback from `verify_password()` in dependencies.py:24-34. All passwords must now be bcrypt hashed. Invalid hash formats are rejected. Updated Password Hashing section and Security Considerations. |
 | 2026-03-26 | Security Fix SEC #177 | Added single-use setup token to prevent installation hijack. Token generated via `secrets.token_urlsafe(24)` at startup, printed to server logs, required in `POST /api/setup/admin-password`. Frontend adds setup token field with instructions to check `docker compose logs backend`. Constant-time comparison guards against timing attacks. |
+| 2026-06-22 | Operator profile — intake + admin email login (trinity-enterprise#38, #82) | Added Flow 3. Optional email/company + unchecked-by-default consent at setup; email binds as admin sign-in identity (login with email + password — **no verification email**, fresh installs have no Resend key); opt-in once-per-install fire-and-forget POST to a new `/v1/operator-intake` endpoint on #1116's Cloudflare intake app. New `services/operator_intake_service.py` (+ `installation_id`), `authenticate_user` email resolution, `PUT /api/users/me/email` + Settings card for existing-admin transition, `OPERATOR_INTAKE_ENABLED`/`OPERATOR_INTAKE_URL`. |
+| 2026-06-23 | Streamlined setup wizard (trinity-enterprise#49) | **Removed the setup token** (and all `ensure_setup_token`/`clear_setup_token`/Redis machinery + the `main.py` startup emission — setup no longer depends on Redis), **made admin email required** (sign-in identity; missing → 422, blank/invalid → 400 before any write), reordered to email → password (+confirm) → company → updates opt-in, and rebuilt `SetupPassword.vue` as a welcoming single-screen first-run page with an animated **orbiting fleet constellation** (dark hero, `prefers-reduced-motion` aware). Security tradeoff of token removal accepted + documented as operator responsibility (deploy behind a tunnel/VPN until setup completes) in `docs/DEPLOYMENT.md` → Security Recommendations. Removed `tests/unit/test_1165_setup_token_shared.py`; updated `tests/test_setup.py` + `tests/unit/test_setup_operator_profile.py`. |

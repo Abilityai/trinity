@@ -44,6 +44,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 from routers.auth import router as auth_router
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
 from routers.agent_config import router as agent_config_router
+from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
@@ -68,12 +69,13 @@ from routers.ops import router as ops_router
 from routers.public_links import router as public_links_router, set_websocket_manager as set_public_links_ws_manager
 from routers.public import router as public_router
 from routers.files import router as files_router  # FILES-001 — outbound file downloads
-from routers.setup import router as setup_router, ensure_setup_token as _ensure_setup_token
+from routers.setup import router as setup_router
 from routers.telemetry import router as telemetry_router
 from routers.logs import router as logs_router
 from routers.agent_dashboard import router as agent_dashboard_router
 from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.canary import router as canary_router  # CANARY-001 / Issue #411
+from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router
 from routers.tags import router as tags_router
@@ -315,25 +317,20 @@ async def lifespan(app: FastAPI):
     # Set up structured JSON logging (captured by Vector)
     setup_logging()
 
-    # Emit the first-time setup token as early as possible (SEC #177) — before any
-    # other startup step that could hang and suppress it. Only someone with access to
-    # server logs can read this token and complete setup, preventing installation
-    # hijack by unauthenticated remote attackers. Use logger.warning (not print): the
-    # logging StreamHandler flushes after every record, whereas print() is
-    # block-buffered to the Docker pipe without PYTHONUNBUFFERED=1 and the token is
-    # silently lost from `docker logs` (#858).
+    # Signal first-time setup as early as possible — before any other startup step
+    # that could hang and suppress it. The setup-token guard was removed in
+    # trinity-enterprise#49 (no token to print); the operator just opens the UI to
+    # create the admin account. Use logger.warning (not print): the logging
+    # StreamHandler flushes after every record, whereas print() is block-buffered
+    # to the Docker pipe without PYTHONUNBUFFERED=1 and is silently lost from
+    # `docker logs` (#858).
     from database import db as _db
     if _db.get_setting_value('setup_completed', 'false') != 'true':
-        # ensure_setup_token() claims the shared cross-worker token and prints it
-        # to the logs itself (exactly once, on the issuing worker — #1165). When
-        # Redis is unreachable no token is issued and setup is blocked; the next
-        # GET /api/setup/status reissues+prints once Redis recovers, so no
-        # restart is needed. logger (not print) keeps the #858 flush guarantee.
-        if _ensure_setup_token() is None:
-            logger.error(
-                "TRINITY FIRST-TIME SETUP REQUIRED but Redis is unreachable — no "
-                "setup token issued yet. Setup is blocked until Redis is reachable."
-            )
+        logger.warning(
+            "TRINITY FIRST-TIME SETUP REQUIRED — open the Trinity UI to create the "
+            "admin account. On an internet-reachable instance, keep it behind a "
+            "tunnel/VPN until setup completes (docs/DEPLOYMENT.md → Security)."
+        )
 
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
     # Must start before the WebSocket endpoints begin accepting clients so the
@@ -359,6 +356,19 @@ async def lifespan(app: FastAPI):
         logger.info(f"OpenTelemetry tracing enabled (sample rate: {sample_rate * 100:.0f}%)")
     else:
         logger.info("OpenTelemetry tracing disabled (set OTEL_ENABLED=1 to enable)")
+
+    # #1159: surface a missing agent-auth master at boot, not per-request. The
+    # backend is fail-closed — derive_agent_token() raises on an empty secret, so
+    # without this warning the first symptom is a 500 on every backend→agent call
+    # (and the WARNING gives the operator a clear, immediate fix). start.sh
+    # auto-generates it; a deploy that bypasses start.sh must set it in .env and
+    # forward it to the backend service (it is, in both compose files).
+    if not os.getenv("AGENT_AUTH_SECRET"):
+        logger.warning(
+            "AGENT_AUTH_SECRET is not set — every backend→agent HTTP call will "
+            "fail with a 500 (#1159, fail-closed). Set it in .env and forward it "
+            "to the backend service (start.sh auto-generates it on first boot)."
+        )
 
 
     if docker_client:
@@ -610,7 +620,7 @@ async def lifespan(app: FastAPI):
         from services.settings_service import settings_service
         public_url = settings_service.get_setting("public_chat_url", "")
         if public_url:
-            bindings = db.get_all_telegram_bindings()
+            bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
                 try:
                     await register_webhook(binding["agent_name"], public_url)
@@ -647,7 +657,7 @@ async def lifespan(app: FastAPI):
         public_url = _settings_svc.get_setting("public_chat_url", "")
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
-            bindings = db.get_all_whatsapp_bindings()
+            bindings = _db.get_all_whatsapp_bindings()
             logger.info(f"WhatsApp transport ready ({len(bindings)} binding(s); webhook URLs refreshed)")
         else:
             logger.info("WhatsApp transport ready (no public URL — webhook URLs not computed)")
@@ -863,6 +873,7 @@ async def add_security_headers(request: Request, call_next):
 app.include_router(auth_router)
 app.include_router(agents_router)
 app.include_router(agent_config_router)
+app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
@@ -893,6 +904,7 @@ app.include_router(logs_router)
 app.include_router(agent_dashboard_router)
 app.include_router(audit_log_router)  # SEC-001 / #20: Platform audit log (Phase 1)
 app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
+app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
 app.include_router(tags_router)  # Agent Tags (ORG-001)

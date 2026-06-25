@@ -137,6 +137,13 @@ RUN mkdir -p /workspace /data /logs && \
 RUN mkdir -p /tmp/secure && \
     chmod 1777 /tmp/secure
 
+# #1089: writable-layer dir for the subscription-token hot-reload override
+# (/var/lib/trinity/oauth-token). Owned by the agent (UID 1000) so the
+# agent-server process can write it; on the writable layer (NOT /home/developer)
+# so it survives a plain stop+start but is wiped on recreate.
+RUN mkdir -p /var/lib/trinity && \
+    chown developer:developer /var/lib/trinity
+
 USER developer
 
 CMD ["/app/startup.sh"]

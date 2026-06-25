@@ -534,3 +534,249 @@ class TestSingleEventThreshold:
         )
         assert result is None
         assert svc._spy_calls == []
+
+
+# =============================================================================
+# #1089: hot-reload subscription token (rotate without recreating the container)
+# =============================================================================
+#
+# `_hot_reload_subscription_token` pushes the agent's current DB subscription
+# token to the running container via POST /api/credentials/reload-token, so the
+# NEXT claude subprocess uses the new token while in-flight turns keep their
+# already-inherited old token and finish. It falls back to the full
+# `_restart_agent` path (today's behavior) on:
+#   - transport failure (AgentClientError / AgentNotReachableError),
+#   - HTTP >= 400 (a 404 means an old base image without the endpoint), or
+#   - no resolvable token.
+# Early-returns `no_container` / `not_running` exactly like `_restart_agent`.
+
+import asyncio  # noqa: E402  (used by the hot-reload + key-rollover tests below)
+import types as _types  # noqa: E402  (module-level helpers for the tests below)
+from unittest.mock import AsyncMock  # noqa: E402
+
+
+def _docker_stub(*, container: object = object(), status: str = "running"):
+    """Fake `services.docker_service` exposing the two helper lookups."""
+    mod = _types.ModuleType("services.docker_service")
+    mod.get_agent_container = lambda name: container
+    _status = _types.SimpleNamespace(status=status)
+    mod.get_agent_status_from_container = lambda c: _status
+    return mod
+
+
+class _StubAgentClientError(Exception):
+    pass
+
+
+class _StubAgentNotReachableError(_StubAgentClientError):
+    pass
+
+
+def _agent_client_stub(*, post):
+    """Fake `services.agent_client`. `post` is bound to `client.post`
+    (an AsyncMock or coroutine fn). `AgentClientError` is the base the helper
+    catches; `AgentNotReachableError` subclasses it (transport-failure case)."""
+    mod = _types.ModuleType("services.agent_client")
+    mod.AgentClientError = _StubAgentClientError
+    mod.AgentNotReachableError = _StubAgentNotReachableError
+    client = _types.SimpleNamespace(post=post)
+    mod.get_agent_client = lambda name: client
+    return mod
+
+
+class TestHotReloadSwitch:
+    """#1089 — the auto-switch path hot-reloads the token instead of recreating
+    the container; it falls back to restart on 404 / transport error / no token,
+    and short-circuits when the agent isn't a running container."""
+
+    @pytest.fixture
+    def auto_switch(self, monkeypatch):
+        import importlib
+
+        stub_db = _install_database_stub()
+        # Token resolution defaults: agent on sub-a, sub-a token present.
+        stub_db.get_agent_subscription_id.return_value = "sub-a"
+        stub_db.get_subscription_token.return_value = "sk-ant-oat01-new-token"
+
+        import services.subscription_auto_switch as mod
+        importlib.reload(mod)
+
+        # Spy the fallback so we can assert when it IS / IS NOT taken.
+        restart_calls: list[str] = []
+
+        async def _restart_spy(agent_name):
+            restart_calls.append(agent_name)
+            return "restarted_fallback"
+
+        monkeypatch.setattr(mod, "_restart_agent", _restart_spy)
+        mod._restart_calls = restart_calls  # type: ignore[attr-defined]
+        mod._stub_db = stub_db  # type: ignore[attr-defined]
+        return mod
+
+    @pytest.mark.asyncio
+    async def test_happy_path_posts_reload_token_no_recreate(self, auto_switch, monkeypatch):
+        post = AsyncMock(return_value=_types.SimpleNamespace(status_code=200))
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "hot_reloaded"
+        assert auto_switch._restart_calls == []  # NO container recreate — in-flight turns survive
+        post.assert_awaited_once()
+        args, kwargs = post.call_args
+        assert args[0] == "/api/credentials/reload-token"
+        assert kwargs["json"] == {"token": "sk-ant-oat01-new-token", "remove_api_key": False}
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_restart_on_404(self, auto_switch, monkeypatch):
+        """404 = old base image without the endpoint → restart fallback."""
+        post = AsyncMock(return_value=_types.SimpleNamespace(status_code=404))
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "restarted_fallback"
+        assert auto_switch._restart_calls == ["agent-x"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_restart_on_transport_error(self, auto_switch, monkeypatch):
+        post = AsyncMock(side_effect=_StubAgentNotReachableError("connection refused"))
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "restarted_fallback"
+        assert auto_switch._restart_calls == ["agent-x"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_restart_when_no_token(self, auto_switch, monkeypatch):
+        auto_switch._stub_db.get_subscription_token.return_value = None
+        post = AsyncMock()
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "restarted_fallback"
+        assert auto_switch._restart_calls == ["agent-x"]
+        post.assert_not_awaited()  # never reached the POST
+
+    @pytest.mark.asyncio
+    async def test_no_container_short_circuits(self, auto_switch, monkeypatch):
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub(container=None))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "no_container"
+        assert auto_switch._restart_calls == []
+
+    @pytest.mark.asyncio
+    async def test_not_running_short_circuits(self, auto_switch, monkeypatch):
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub(status="stopped"))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "not_running"
+        assert auto_switch._restart_calls == []
+
+    @pytest.mark.asyncio
+    async def test_perform_auto_switch_hot_reloads_not_restarts(self, auto_switch, monkeypatch):
+        """The auto-switch wire-in: `_perform_auto_switch` routes through the
+        hot-reload helper, so `restart_result == "hot_reloaded"` and the
+        recreate path (`_restart_agent`) is never taken."""
+        # Stub the heavy local-import targets in `_perform_auto_switch`.
+        act_mod = _types.ModuleType("services.activity_service")
+        act_svc = MagicMock()
+        act_svc.track_activity = AsyncMock(return_value="act-1")
+        act_svc.complete_activity = AsyncMock(return_value=None)
+        act_mod.activity_service = act_svc
+        monkeypatch.setitem(sys.modules, "services.activity_service", act_mod)
+
+        models_mod = _types.ModuleType("models")
+        models_mod.ActivityType = _types.SimpleNamespace(SCHEDULE_END="schedule_end")
+        models_mod.ActivityState = _types.SimpleNamespace(COMPLETED="completed", FAILED="failed")
+        monkeypatch.setitem(sys.modules, "models", models_mod)
+
+        hot_calls: list[str] = []
+
+        async def _hot_spy(agent_name):
+            hot_calls.append(agent_name)
+            return "hot_reloaded"
+
+        monkeypatch.setattr(auto_switch, "_hot_reload_subscription_token", _hot_spy)
+
+        new_sub = MagicMock()
+        new_sub.id = "sub-b"
+        new_sub.name = "sub-B"
+
+        result = await auto_switch._perform_auto_switch(
+            agent_name="agent-x",
+            old_subscription_id="sub-a",
+            old_subscription_name="sub-A",
+            new_subscription=new_sub,
+            failure_kind="rate_limit",
+            event_count=1,
+        )
+
+        assert result["switched"] is True
+        assert result["restart_result"] == "hot_reloaded"
+        assert hot_calls == ["agent-x"]  # hot-reload used
+        assert auto_switch._restart_calls == []  # recreate path NOT taken
+
+
+class TestKeyRolloverFanOut:
+    """#1089 (F1) — re-registering a subscription's token fans a best-effort
+    hot-reload out to every running agent on that subscription. One agent's
+    failure must not abort the fan-out nor block the others."""
+
+    @pytest.fixture
+    def auto_switch(self, monkeypatch):
+        import importlib
+
+        stub_db = _install_database_stub()
+        import services.subscription_auto_switch as mod
+        importlib.reload(mod)
+        mod._stub_db = stub_db  # type: ignore[attr-defined]
+        return mod
+
+    @pytest.mark.asyncio
+    async def test_fan_out_attempts_every_agent_despite_one_failure(self, auto_switch, monkeypatch):
+        auto_switch._stub_db.get_agents_by_subscription.return_value = ["a1", "a2", "a3"]
+
+        seen: list[str] = []
+
+        async def _hot(name):
+            seen.append(name)
+            if name == "a2":
+                raise RuntimeError("boom")
+            return "hot_reloaded"
+
+        monkeypatch.setattr(auto_switch, "_hot_reload_subscription_token", _hot)
+
+        async def _lock(name):
+            return asyncio.Lock()
+
+        monkeypatch.setattr(auto_switch, "agent_switch_lock", _lock)
+
+        results = await auto_switch.reload_subscription_for_all_agents("sub-a")
+
+        assert seen == ["a1", "a2", "a3"]  # all attempted, fan-out not aborted
+        assert results["a1"] == "hot_reloaded"
+        assert results["a3"] == "hot_reloaded"
+        assert results["a2"].startswith("failed:")
+
+    @pytest.mark.asyncio
+    async def test_fan_out_no_agents_is_noop(self, auto_switch, monkeypatch):
+        auto_switch._stub_db.get_agents_by_subscription.return_value = []
+
+        async def _hot(name):
+            raise AssertionError("must not be called when no agents are assigned")
+
+        monkeypatch.setattr(auto_switch, "_hot_reload_subscription_token", _hot)
+
+        results = await auto_switch.reload_subscription_for_all_agents("sub-a")
+
+        assert results == {}

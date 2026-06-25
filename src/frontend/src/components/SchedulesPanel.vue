@@ -328,6 +328,39 @@
               </span>
             </div>
 
+            <!-- #1115: inline per-schedule performance (last 7d). Compact
+                 mini-stats from the shared aggregate — not a chart/modal. -->
+            <div
+              v-if="perfBySchedule[schedule.id]"
+              class="flex items-center flex-wrap gap-x-3 gap-y-1 mt-2 text-xs"
+            >
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
+                <span class="text-gray-400 dark:text-gray-500">7d success</span>
+                <span :class="['font-semibold', successRateClass(perfBySchedule[schedule.id].success_rate)]">
+                  {{ fmtSuccessRate(perfBySchedule[schedule.id].success_rate) }}
+                </span>
+              </span>
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
+                <span class="text-gray-400 dark:text-gray-500">avg</span>
+                <span class="font-mono text-gray-700 dark:text-gray-200">{{ fmtPerfDuration(perfBySchedule[schedule.id].avg_duration_ms) }}</span>
+              </span>
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60">
+                <span class="font-mono text-gray-700 dark:text-gray-200">{{ perfBySchedule[schedule.id].total_executions }}</span>
+                <span class="text-gray-400 dark:text-gray-500">runs</span>
+              </span>
+              <span
+                v-if="perfBySchedule[schedule.id].last_run_status"
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60"
+                :title="`Last run: ${perfBySchedule[schedule.id].last_run_status}`"
+              >
+                <span
+                  class="w-1.5 h-1.5 rounded-full"
+                  :class="perfBySchedule[schedule.id].last_run_status === 'success' ? 'bg-status-success-500' : (perfBySchedule[schedule.id].last_run_status === 'running' || perfBySchedule[schedule.id].last_run_status === 'queued' ? 'bg-action-primary-500' : 'bg-status-danger-500')"
+                ></span>
+                <span class="text-gray-500 dark:text-gray-400 capitalize">{{ perfBySchedule[schedule.id].last_run_status }}</span>
+              </span>
+            </div>
+
             <div class="mt-2 p-2 bg-gray-50 dark:bg-gray-800/50 rounded text-xs text-gray-600 dark:text-gray-400 font-mono max-h-16 overflow-hidden">
               {{ schedule.message.substring(0, 150) }}{{ schedule.message.length > 150 ? '...' : '' }}
             </div>
@@ -619,6 +652,7 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
 import { useAuthStore } from '../stores/auth'
+import { useExecutionsStore } from '../stores/executions'
 
 // Platform default model fetched from /api/settings/feature-flags (#831)
 const platformDefaultModel = ref('')
@@ -635,6 +669,13 @@ const props = defineProps({
 })
 
 const authStore = useAuthStore()
+const executionsStore = useExecutionsStore()
+
+// #1115: inline per-schedule stats. Same single aggregate the Overview uses
+// (cached in the executions store) — no per-row fetches. 7d window matches the
+// Overview default so the cache is shared.
+const PERF_WINDOW = '7d'
+const perfBySchedule = ref({}) // schedule_id -> rollup row
 
 // State
 const schedules = ref([])
@@ -766,6 +807,37 @@ async function loadSchedules() {
   } finally {
     loading.value = false
   }
+  loadPerf()
+}
+
+// #1115: fetch the per-schedule rollups (one call, store-cached) and index
+// by schedule_id for inline row stats. Best-effort — failure leaves rows
+// without stats, never blocks the list.
+async function loadPerf() {
+  try {
+    const summary = await executionsStore.fetchSchedulesSummary(props.agentName, PERF_WINDOW)
+    const map = {}
+    for (const row of summary?.schedules || []) map[row.schedule_id] = row
+    perfBySchedule.value = map
+  } catch (e) {
+    console.error('Failed to load schedule performance:', e)
+  }
+}
+
+function fmtSuccessRate(rate) {
+  return rate == null ? '—' : `${Math.round(rate * 100)}%`
+}
+function successRateClass(rate) {
+  if (rate == null) return 'text-gray-400 dark:text-gray-500'
+  if (rate >= 0.9) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 0.5) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
+}
+function fmtPerfDuration(ms) {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms / 60000)}m`
 }
 
 // Save schedule (create or update)

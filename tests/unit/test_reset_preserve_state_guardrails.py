@@ -372,7 +372,6 @@ def test_refuses_when_no_remote_main(tmp_path: Path):
     assert result["error"] == "no_remote_main"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_empty_allowlist_is_safe_noop(tmp_path: Path):
     """Empty allowlist → no files preserved, but reset + commit still run.
 
@@ -393,7 +392,6 @@ def test_empty_allowlist_is_safe_noop(tmp_path: Path):
     assert (worker / "template.conf").read_text() == "v2\n"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_success_preserves_workspace_and_overlays_main(tmp_path: Path):
     """Full happy path: workspace/** survives; template.conf adopts main."""
     worker = _setup_parallel_history(tmp_path)
@@ -418,7 +416,6 @@ def test_success_preserves_workspace_and_overlays_main(tmp_path: Path):
     assert subject == "Adopt main baseline, preserve state"
 
 
-@pytest.mark.skip(reason="pre-existing failure unmasked by #300 collection-abort fix; tracked in #1103")
 def test_success_pushes_with_force_with_lease(tmp_path: Path):
     """Opting in to the push step uses --force-with-lease and updates remote."""
     worker = _setup_parallel_history(tmp_path)
@@ -497,11 +494,11 @@ async def test_backend_refuses_when_agent_busy():
         {"id": "x", "activity_type": "chat_start"}
     ]
 
-    with patch.object(gs, "httpx") as httpx_mod:
+    with patch.object(gs, "agent_httpx_client") as mock_client_factory:
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "agent_busy"
-    httpx_mod.AsyncClient.assert_not_called()
+    mock_client_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -526,7 +523,7 @@ async def test_backend_proxies_when_idle():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["commit_sha"] == "abc1234"
@@ -552,7 +549,7 @@ async def test_backend_surfaces_agent_server_conflict_header():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "no_remote_main"
@@ -574,7 +571,7 @@ async def test_backend_surfaces_unexpected_status_as_proxy_failed():
     async_cm.__aenter__.return_value = mock_client
     async_cm.__aexit__.return_value = None
 
-    with patch.object(gs.httpx, "AsyncClient", return_value=async_cm):
+    with patch.object(gs, "agent_httpx_client", return_value=async_cm):
         result = await gs.reset_to_main_preserve_state("alice")
 
     assert result["error"] == "proxy_failed"

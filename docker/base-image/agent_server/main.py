@@ -11,8 +11,8 @@ import os
 import logging
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
+from .middleware.auth import AgentAuthMiddleware
 from .routers import (
     chat_router,
     activity_router,
@@ -43,14 +43,13 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# CORS - only needed for internal Docker network communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Backend communicates via internal network
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# #1159: per-agent inbound auth. Every backend→agent call carries a derived
+# X-Trinity-Agent-Token; this middleware enforces it on all routes except the
+# Docker /health probe and OPTIONS preflight, with a grace path (empty token
+# env → allow) for the non-breaking rollout. CORSMiddleware was removed: the
+# agent server is internal-only (Docker network), never hit by a browser, so
+# allow_origins=["*"] + allow_credentials=True was pure attack surface.
+app.add_middleware(AgentAuthMiddleware)
 
 # Include all routers
 app.include_router(info_router)  # Root and health endpoints

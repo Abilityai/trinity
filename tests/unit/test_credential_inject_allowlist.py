@@ -13,19 +13,19 @@ Path-level history:
 - #590 (2026-04-30) — removed .mcp.json + .mcp.json.template (AISEC-C2 RCE)
 - #598 (Layer 2)    — re-allowed .mcp.json (gated by structure validation
                        at the content layer); .mcp.json.template stays out
+- #11               — widened to curated credential file TYPES (cloud SA JSON,
+                       PEM/key/cert, SSH id_*); deny-list keeps startup/exec
+                       paths out. Policy now lives in services/credential_paths.
 
-Module: src/backend/routers/credentials.py
+Module: src/backend/services/credential_paths.py
 """
 
 import pytest
 
-# Inline mirror of the path allowlist in src/backend/routers/credentials.py
-ALLOWED_CREDENTIAL_PATHS = {".env", ".credentials.enc", ".mcp.json"}
-
-
-def validate_credential_paths(files: dict) -> list:
-    """Return list of disallowed paths. Empty list means all paths are valid."""
-    return [p for p in files if p not in ALLOWED_CREDENTIAL_PATHS]
+# Exercise the REAL curated policy (#11) — single source of truth, also
+# vendored byte-identically into the agent image (see parity test). Aliased so
+# the existing assertions below run unchanged against the real implementation.
+from services.credential_paths import disallowed_paths as validate_credential_paths
 
 
 # ---- Tests: Allowed paths ----
@@ -168,3 +168,54 @@ class TestEdgeCases:
     def test_null_byte_in_path(self):
         disallowed = validate_credential_paths({".env\x00.txt": "KEY=val"})
         assert len(disallowed) == 1
+
+
+# ---- Tests: newly-allowed credential TYPES (#11) ----
+
+class TestNewlyAllowedTypes:
+    """The curated widening — these MUST now be accepted."""
+
+    @pytest.mark.parametrize("path", [
+        ".config/gcloud/application_default_credentials.json",
+        ".config/gcloud/legacy_credentials/x/adc.json",
+        ".kube/config",
+        "client.pem", "certs/server.crt", "tls/private.key",
+        "intermediate.cert", "bundle.p12", "store.pfx",
+        ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_rsa.pub",
+    ])
+    def test_allowed(self, path):
+        assert validate_credential_paths({path: "x"}) == []
+
+
+# ---- Tests: dangerous paths the widening must STILL block (#11) ----
+
+class TestStillBlockedAfterWidening:
+    """Deny-list precedence: even paths that look cert-ish must stay blocked
+    when they enable code execution or startup/login hijack."""
+
+    @pytest.mark.parametrize("path", [
+        # shell startup
+        ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zshenv",
+        ".config/fish/config.fish",
+        # agent / AI config
+        "CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".mcp.json.template",
+        # a cert-looking file under a denied dir → deny precedence wins
+        ".claude/evil.pem", ".config/systemd/user/x.key",
+        # ssh login / command-exec vectors
+        ".ssh/authorized_keys", ".ssh/config", ".ssh/known_hosts", ".ssh/rc",
+        # #11 review: .ssh locked to id_* — even cert-shaped files blocked
+        ".ssh/secret.key", ".ssh/server.pem",
+        # git hook / fsmonitor exec
+        ".gitconfig", ".git/hooks/pre-commit",
+        # on PATH
+        "bin/x", ".local/bin/x",
+        # #11 live test: vendored cert bundles must NOT match the *.pem/*.key
+        # globs (export's /list walk was sweeping certifi's cacert.pem)
+        ".local/lib/python3.13/site-packages/certifi/cacert.pem",
+        "node_modules/foo/test.key", "project/node_modules/x/y.pem",
+        ".venv/lib/cert.pem", ".cache/whatever.crt",
+        # traversal / absolute / backslash
+        "../escape.pem", "/abs/x.key", ".ssh\\id_rsa",
+    ])
+    def test_blocked(self, path):
+        assert validate_credential_paths({path: "x"}) == [path]

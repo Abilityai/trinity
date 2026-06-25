@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 from services.agent_service import (
@@ -69,7 +70,7 @@ async def get_agent_playbooks_endpoint(
 
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(agent_name, timeout=10.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 return response.json()
@@ -119,7 +120,7 @@ async def get_agent_info_endpoint(
 
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/template/info"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(agent_name, timeout=10.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 data = response.json()

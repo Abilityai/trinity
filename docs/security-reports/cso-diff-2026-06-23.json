@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "date": "2026-06-23",
+  "mode": "diff",
+  "scope": "feature/49-streamline-setup-wizard vs merge-base 6515d40c",
+  "issue": "trinity-enterprise#49",
+  "phases_run": [0, 1, 2, 5, 9, 12, 13, 14],
+  "attack_surface": {
+    "unauthenticated_endpoints_touched": ["GET /api/setup/status", "POST /api/setup/admin-password"],
+    "new_unauthenticated_endpoints": 0,
+    "secrets_introduced": 0,
+    "secrets_removed_from_logs": 1
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "HIGH",
+      "confidence": 10,
+      "status": "VERIFIED",
+      "disposition": "ACCEPTED_DOCUMENTED",
+      "category": "A01 Broken Access Control / A04 Insecure Design",
+      "phase": 5,
+      "file": "src/backend/routers/setup.py",
+      "title": "Pre-setup admin-account hijack window — setup token removed",
+      "description": "POST /api/setup/admin-password is unauthenticated and, with the setup token removed (trinity-enterprise#49), has no proof-of-control during the pre-setup window. A remote attacker reaching the endpoint before the operator completes setup can create the admin account with attacker-controlled credentials.",
+      "exploit_scenario": "Internet-reachable host, setup not yet completed -> attacker POSTs valid email+password to /api/setup/admin-password -> admin created for attacker, setup_completed=true, operator locked out, attacker holds full admin.",
+      "impact": "Full administrative control of the instance during the pre-setup window on an internet-reachable deployment.",
+      "mitigations": [
+        "Documented operator responsibility to network-restrict (tunnel/VPN) until setup completes (docs/DEPLOYMENT.md Security Recommendations, setup.py docstrings, main.py startup log, architecture.md, requirements.md)",
+        "Endpoint self-disables after first success (setup_completed gate) — exposure limited to pre-setup window",
+        "Non-issue on localhost / trusted LAN"
+      ],
+      "decision_rationale": "Operator explicitly chose 'accept + document' over the localhost-skip and host-marker alternatives to remove first-run friction for the common self-hosted single-operator case.",
+      "residual_risk_options": [
+        "Auto-skip token only for loopback/RFC1918, keep for public IPs",
+        "Replace token with a host marker file (proof-of-control)"
+      ]
+    }
+  ],
+  "supply_chain_summary": {"deps_changed": false},
+  "filter_stats": {"raw_candidates": 1, "after_confidence_gate": 1, "false_positives_dropped": ["CSS mask-image lines matched secret regex"]},
+  "totals": {"critical": 0, "high": 1, "high_accepted": 1, "medium": 0, "low": 0, "blocking": 0},
+  "trend": {"prior_report": "cso-diff-2026-06-21.md", "overlap": "none", "new": ["F1"], "resolved": []}
+}

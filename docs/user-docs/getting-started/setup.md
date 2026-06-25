@@ -2,6 +2,8 @@
 
 Install Trinity, create your admin account, and start managing agents in minutes.
 
+> 📺 **Watch:** [I Built a DevOps Agent That Deploys Other Agents](https://youtu.be/8RozanPd14Y) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Admin Account** -- The primary account with full platform access, authenticated by username and password. Created automatically from `ADMIN_PASSWORD` in `.env`.
@@ -31,7 +33,7 @@ Install Trinity, create your admin account, and start managing agents in minutes
    # Edit .env and set ADMIN_PASSWORD to a strong password (min 12 chars)
    ```
 
-   The `admin` account is created automatically from this value on first start. If you leave it blank, a one-time setup token is printed to the backend logs — paste it into the setup wizard that appears on first visit.
+   The `admin` account is created automatically from this value on first start. If you leave it blank, a one-time setup token is printed to the backend logs (`docker compose logs backend | grep "Setup token"`) — paste it into the setup wizard that appears on first visit. The token is shared across backend workers, so the single value printed in the logs always works regardless of how many workers are running. If the setup wizard shows a "waiting for Redis" state, the token store is temporarily unreachable; setup resumes automatically once Redis recovers, with no restart needed.
 
 3. Start all services:
 

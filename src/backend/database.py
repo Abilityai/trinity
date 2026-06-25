@@ -31,6 +31,7 @@ from db_models import (
     User,
     SessionMessageInsert,
     AgentShare,
+    AgentOperatorAccess,
     AgentShareRequest,
     McpApiKeyCreate,
     McpApiKey,
@@ -136,6 +137,7 @@ from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
+from db.compatibility import CompatibilityOperations
 from db.sync_state import SyncStateOperations
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
@@ -353,6 +355,7 @@ class DatabaseManager:
         self._access_request_ops = AccessRequestOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
+        self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -465,6 +468,9 @@ class DatabaseManager:
 
     def get_agent_shares(self, agent_name: str):
         return self._agent_ops.get_agent_shares(agent_name)
+
+    def get_agent_operator_access(self, agent_name: str):
+        return self._agent_ops.get_agent_operator_access(agent_name)
 
     def get_shared_agents(self, username: str):
         return self._agent_ops.get_shared_agents(username)
@@ -597,6 +603,12 @@ class DatabaseManager:
 
     def set_read_only_mode(self, agent_name: str, enabled: bool, config: dict = None):
         return self._agent_ops.set_read_only_mode(agent_name, enabled, config)
+
+    def get_full_capabilities(self, agent_name: str) -> bool:
+        return self._agent_ops.get_full_capabilities(agent_name)
+
+    def set_full_capabilities(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_full_capabilities(agent_name, enabled)
 
     # =========================================================================
     # Agent Guardrails (GUARD-001)
@@ -732,6 +744,12 @@ class DatabaseManager:
 
     def set_voice_system_prompt(self, agent_name: str, prompt: str):
         return self._agent_ops.set_voice_system_prompt(agent_name, prompt)
+
+    def get_voice_name(self, agent_name: str):
+        return self._agent_ops.get_voice_name(agent_name)
+
+    def set_voice_name(self, agent_name: str, voice_name):
+        return self._agent_ops.set_voice_name(agent_name, voice_name)
 
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
@@ -1677,6 +1695,9 @@ class DatabaseManager:
     def get_agent_analytics(self, agent_name: str, hours: int):
         return self._schedule_ops.get_agent_analytics(agent_name, hours)
 
+    def get_agent_schedules_summary(self, agent_name: str, hours: int):
+        return self._schedule_ops.get_agent_schedules_summary(agent_name, hours)
+
     def get_agent_token_stats(self, agent_name: str):
         return self._schedule_ops.get_agent_token_stats(agent_name)
 
@@ -1949,6 +1970,9 @@ class DatabaseManager:
     def delete_voip_binding(self, agent_name):
         return self._voip_ops.delete_binding(agent_name)
 
+    def set_voip_enabled(self, agent_name, enabled):
+        return self._voip_ops.set_enabled(agent_name, enabled)
+
     def create_voip_call_log(self, call_id, agent_name, to_number, chat_session_id=None,
                             initiated_by_user_id=None, initiated_by_email=None,
                             direction="outbound"):
@@ -2218,6 +2242,22 @@ class DatabaseManager:
     def get_canary_stats(self, start_time: str = None, end_time: str = None):
         """Aggregate canary violation counts by invariant_id and severity."""
         return self._canary_ops.stats_by_invariant(start_time=start_time, end_time=end_time)
+
+    # =========================================================================
+    # Agent compatibility results (#668 — delegated to db/compatibility.py)
+    # =========================================================================
+
+    def upsert_compatibility_result(self, agent_name: str, **kwargs):
+        """Upsert the latest compatibility snapshot for an agent. See CompatibilityOperations."""
+        return self._compatibility_ops.upsert_result(agent_name, **kwargs)
+
+    def get_compatibility_result(self, agent_name: str):
+        """Fetch the latest persisted compatibility report for an agent (or None)."""
+        return self._compatibility_ops.get_result(agent_name)
+
+    def count_agents_with_hard_compatibility_findings(self) -> int:
+        """Fleet aggregation: number of agents with ≥1 HARD compatibility finding."""
+        return self._compatibility_ops.count_agents_with_hard_findings()
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)

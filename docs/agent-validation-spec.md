@@ -110,6 +110,11 @@
 | I-003 | SOFT | AI | Composability | If the agent produces data for downstream consumers, an output schema or format is documented |
 | I-004 | SOFT | AI | Composability | Agent has a clear "interface" — what goes in, what comes out — not just a description of what it does |
 | I-005 | INFO | STATIC | Composability | `~/.trinity/post-check` exists if the agent declares output contracts (validates own output before delivery) |
+| DP-001 | HARD | STATIC | Runtime Data | Every `data_paths` entry in `template.yaml` resolves under `data/` (relative to `/home/developer`) — no `../`, no absolute paths, no escape from the data root |
+| DP-002 | HARD | STATIC | Runtime Data | If `data_paths` is declared, the `data/` root is excluded in `.gitignore` (Trinity appends it at creation; a template that ships `.gitignore` should pre-include it) |
+| DP-003 | SOFT | STATIC | Runtime Data | `data_paths` entries do not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state` (those are managed separately) |
+| DP-004 | SOFT | STATIC | Runtime Data | If `data_paths` is declared, the agent is NOT replica-safe — its runtime data is instance-local and must travel via export/import, not template clone (feeds #927) |
+| DP-005 | INFO | STATIC | Runtime Data | `~/.trinity/pre-snapshot` (if present) is executable and has a valid shebang (PR2 SQLite-quiesce hook; A-004 analog) |
 
 ---
 
@@ -559,6 +564,32 @@ If the agent documents an output format or schema (detected by presence of `sche
 
 ---
 
+### Category: Runtime Data Paths (#1169)
+
+`data_paths` in `template.yaml` declares the agent's runtime data (SQLite DBs, datasets) that live under `/home/developer/data` on the already-durable home volume — kept out of git, but exportable/importable for portability. These checks fire only when `data_paths` is declared (it is opt-in).
+
+**DP-001** — `data_paths` entries resolve under `data/`  
+Severity: HARD | Type: STATIC  
+Each entry, after normalization, must stay under the `data/` root (relative to `/home/developer`). Reject absolute paths, `../` traversal, or any entry that escapes the data root. The export/import primitive only captures and restores `data/**`, so an out-of-root declaration is silently never snapshotted.
+
+**DP-002** — `data/` root is gitignored  
+Severity: HARD | Type: STATIC  
+Trinity appends `data/` (and each declared entry) to the agent's `.gitignore` at creation, but a template shipping its own `.gitignore` should pre-include `data/`. Without it, runtime data risks being committed on the first auto-sync.
+
+**DP-003** — `data_paths` don't overlap managed paths  
+Severity: SOFT | Type: STATIC  
+Entries must not overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state`. Those surfaces are materialized and managed separately; overlapping declarations create ambiguous ownership and double-handling.
+
+**DP-004** — `data_paths` ⇒ not replica-safe  
+Severity: SOFT | Type: STATIC  
+A `data_paths` declaration means the agent carries instance-local runtime state. Such an agent cannot be replicated by cloning its template alone — its data must travel via `data/export` → `data/import`. Flag for replica-safety tooling (#927).
+
+**DP-005** — `.trinity/pre-snapshot` is executable with a shebang  
+Severity: INFO | Type: STATIC  
+If present (the PR2 SQLite-quiesce hook that stages a consistent `.backup` copy before snapshot), verify a `#!` shebang on line 1 — `docker exec` fails to run it otherwise. Analogous to A-004 for `pre-check`.
+
+---
+
 ## Severity Summary
 
 | Severity | Meaning | Effect on Deployment |
@@ -594,7 +625,33 @@ All other checks require manual intervention.
 
 ## Implementation Notes
 
-- Checks in this spec map to the validation service at `src/backend/services/compatibility_service.py` (to be created per issue #668)
-- AI-evaluated checks call the Claude API with the relevant file contents; results include a confidence score and explanation
-- The full check list is versioned here; bump this file when adding/removing checks
-- Check IDs are stable — do not renumber existing checks; append new ones
+- Checks in this spec map to the validation service package at `src/backend/services/compatibility/` (`spec.py` is the single source of truth; `collector.py`, `static_checks.py`, `ai_checks.py`, `fixes.py`) — issue #668.
+- AI-evaluated checks call the Claude API (`claude-haiku-4-5`) with the relevant file contents, batched by category; results include a confidence score and explanation.
+- The full check list is versioned here; bump this file when adding/removing checks. A unit test (`tests/unit/test_compatibility_checks.py::TestSpecDocSync`) asserts the check-id set here matches `spec.py` exactly, so the two can't drift.
+- Check IDs are stable — do not renumber existing checks; append new ones.
+
+### Implementation deviations (#668)
+
+The shipped validator differs from the `Type` column above in a few principled,
+test-locked ways:
+
+- **AI severity is capped at SOFT.** An LLM verdict is non-deterministic, so an
+  AI check never drives the HARD count. The catalog keeps each check's declared
+  severity; the report downgrades any `AI` + `HARD` check (only **C-002**) to
+  SOFT at emit time. HARD remains reserved for deterministic STATIC checks.
+- **P-006 is implemented STATIC** (doc marks it AI). The check has literal
+  approval-gate patterns to scan and is HARD, so it must not depend on an
+  optional API key; it scans the command files referenced by `template.yaml`
+  schedules (the actual autonomous path).
+- **F-007, A-001, X-007 are implemented STATIC** (doc marks them AI or hybrid).
+  The determinable signal is a deterministic file/pattern check (system-package
+  references; schedule message starts with `/`; scheduled command exists).
+- **Runtime-aware.** Claude-specific checks (`CLAUDE.md` content, `.claude/`
+  skills/commands) are **omitted** for non-Claude runtimes (Codex/Gemini, #1187)
+  so those agents aren't flagged with false HARDs.
+- **Persistence (departs from the issue's "no DB table" note).** The latest
+  report per agent is persisted in `agent_compatibility_results` (one row,
+  upserted) so AI verdicts show on every Overview load without re-spending
+  tokens, and the fleet can aggregate "N agents have HARD findings". STATIC
+  checks recompute live on each read; persisted AI verdicts are merged in until
+  a re-run.

@@ -30,12 +30,13 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 import httpx
 from fastapi import HTTPException
 
 from ..state import agent_state
+from .process_registry import get_process_registry
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,33 @@ def _envelope_from_http_exception(exc: HTTPException) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# #679 cancel relabel
+# ---------------------------------------------------------------------------
+def _cancelled_override(envelope: Dict) -> Dict:
+    """Relabel a terminal envelope as a user cancel (#679).
+
+    Keeps whatever response/metadata/session_id/execution_log the turn produced
+    (Claude emits a graceful final message on SIGINT) and drops ``error_code`` so
+    the backend doesn't treat the cancel as an agent failure. The backend maps
+    ``status:"cancelled"`` → ``CANCELLED`` (never a billable success)."""
+    overridden = dict(envelope)
+    overridden["status"] = "cancelled"
+    overridden["terminal_reason"] = "cancelled"
+    overridden["error_code"] = None
+    return overridden
+
+
+def _is_auth_or_rate(envelope: Dict) -> bool:
+    """Issue 6 / C6: an auth (503) or rate-limit (429) terminal must NOT be
+    relabelled cancelled even if the execution was terminated — the backend's
+    AUTH dispatch breaker / SUB-003 still need to record it on the async path."""
+    return (
+        envelope.get("error_code") == "auth"
+        or envelope.get("terminal_reason") in ("auth", "rate_limit")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Delivery
 # ---------------------------------------------------------------------------
 async def _deliver(
@@ -253,12 +281,12 @@ async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_mono
             images=request.images,
         )
         envelope = _success_envelope(response_text, raw_messages, metadata, session_id)
-        agent_state.record_task_finish(success=True)
+        finish_success: Optional[bool] = True
     except HTTPException as exc:
-        agent_state.record_task_finish(success=False)
+        finish_success = False
         envelope = _envelope_from_http_exception(exc)
     except BaseException as exc:  # noqa: BLE001 — any failure must still report a terminal
-        agent_state.record_task_finish(success=False)
+        finish_success = False
         envelope = {
             "status": "failed",
             "error": str(exc)[:500] or type(exc).__name__,
@@ -266,6 +294,26 @@ async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_mono
             "terminal_reason": "error",
             "metadata": {},
         }
+
+    # #679: a graceful exit-0 OR a SIGKILL→504 for a turn the operator cancelled
+    # must be relabelled `cancelled` so the backend writes CANCELLED — never a
+    # billable success, never a breaker-counting failure. Auth/rate envelopes are
+    # excluded (C6) so the AUTH dispatch breaker + SUB-003 still record on async.
+    if (
+        execution_id
+        and get_process_registry().was_terminated(execution_id)
+        and not _is_auth_or_rate(envelope)
+    ):
+        envelope = _cancelled_override(envelope)
+        # #679 (F4) parity with the sync path: a cancel is NEUTRAL for the
+        # consecutive_failures health counter — never trips or resets the
+        # dispatch breaker (#526). Recorded after the relabel decision so the
+        # graceful-cancel (was True) and the 504/502-cancel (was False) agree.
+        finish_success = None
+
+    # Recorded once, after the cancel decision, so the health counter matches the
+    # final terminal label.
+    agent_state.record_task_finish(success=finish_success)
 
     _persist(execution_id, {"agent_name": agent_name, "envelope": envelope})
 

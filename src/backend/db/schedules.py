@@ -67,6 +67,31 @@ def _bucket_for_trigger(trigger: Optional[str]) -> str:
     return _TRIGGER_BUCKETS.get(trigger or "", _OTHER_BUCKET)
 
 
+# #1115: max chars for the per-schedule "command" label derived from a
+# schedule's message (the Overview/Schedules-tab scorecard headline).
+_SCHEDULE_LABEL_MAX = 80
+
+
+def _schedule_command_label(message: Optional[str]) -> str:
+    """Short headline for a schedule's scorecard, derived from its message.
+
+    Uses the first non-empty line (the command/intent, e.g. ``/do-something``),
+    collapsed and truncated. Empty when the message is blank — the frontend
+    falls back to the schedule name.
+    """
+    if not message:
+        return ""
+    for line in message.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return (
+                stripped[: _SCHEDULE_LABEL_MAX - 1] + "…"
+                if len(stripped) > _SCHEDULE_LABEL_MAX
+                else stripped
+            )
+    return ""
+
+
 # #73: chunk size for scoped `IN (...)` lookups. SQLite caps host parameters at
 # SQLITE_MAX_VARIABLE_NUMBER (999 before SQLite 3.32). Keep a safe margin below
 # that so a large accessible-agent set can't blow the limit. Read as a module
@@ -1884,6 +1909,160 @@ class ScheduleOperations:
             "timeline": timeline,
             "sampled": sampled,
             "sample_size": sample_size,
+        }
+
+    def get_agent_schedules_summary(self, agent_name: str, hours: int) -> Dict:
+        """Per-schedule performance rollups for an agent over a window (#1115).
+
+        ONE row per non-deleted schedule (zero-run schedules included, with
+        zeros), so both the Overview "Schedules performance" section and the
+        Schedules-tab inline stats render from a single call — no N per-schedule
+        round-trips. The #868 deep view stays the drill-in target.
+
+        Per schedule: terminal **success_rate** (success / (success + failed
+        [incl. ``error``]); ``None`` when zero terminal runs so the UI shows
+        ``—`` not a false 0%), **avg_duration_ms** (NULL-skipping AVG),
+        **cost_total**, **context_avg** (NULL-skipping), **tool_call_total**,
+        and last-run outcome. Read-only / DB-sourced (renders when stopped).
+
+        Tool-call totals are parsed from the newest ``_PERCENTILE_ROWSET_CAP``
+        rows agent-wide (matches the #868 sampling discipline); ``tool_calls_
+        sampled`` flags when that cap was hit. Window uses ``iso_cutoff``
+        (Invariant #16).
+        """
+        cutoff = iso_cutoff(hours)
+        cap = _PERCENTILE_ROWSET_CAP
+        FAILED_STATES = (TaskExecutionStatus.FAILED, "error")
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Schedules (non-deleted) — the authoritative row set so a
+            # zero-run schedule still appears.
+            cursor.execute(
+                """
+                SELECT id, name, message, cron_expression, enabled
+                FROM agent_schedules
+                WHERE agent_name = ? AND deleted_at IS NULL
+                ORDER BY created_at ASC
+                """,
+                (agent_name,),
+            )
+            schedule_rows = cursor.fetchall()
+
+            # One grouped aggregate for every schedule's executions in window.
+            cursor.execute(
+                """
+                SELECT
+                    schedule_id,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+                    SUM(COALESCE(cost, 0)) AS cost_total,
+                    AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) AS avg_duration_ms,
+                    AVG(CASE WHEN context_used IS NOT NULL THEN context_used END) AS context_avg
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ?
+                GROUP BY schedule_id
+                """,
+                (agent_name, cutoff),
+            )
+            agg_by_sched = {r["schedule_id"]: r for r in cursor.fetchall()}
+
+            # Last-run outcome per schedule. SQLite's bare-column-with-MAX
+            # rule returns the row holding the max started_at.
+            cursor.execute(
+                """
+                SELECT schedule_id, MAX(started_at) AS last_run_at, status AS last_status
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ?
+                GROUP BY schedule_id
+                """,
+                (agent_name, cutoff),
+            )
+            last_by_sched = {r["schedule_id"]: r for r in cursor.fetchall()}
+
+            # Tool-call totals — bounded JSON parse over newest rows agent-wide
+            # (cap + 1 to detect sampling), attributed back per schedule.
+            cursor.execute(
+                """
+                SELECT schedule_id, tool_calls
+                FROM schedule_executions
+                WHERE agent_name = ? AND started_at > ? AND tool_calls IS NOT NULL
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (agent_name, cutoff, cap + 1),
+            )
+            tool_rows = cursor.fetchall()
+
+        tool_calls_sampled = len(tool_rows) > cap
+        tool_total_by_sched: Dict[str, int] = defaultdict(int)
+        for row in tool_rows[:cap]:
+            raw = row["tool_calls"]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(parsed, list):
+                continue
+            for entry in parsed:
+                if isinstance(entry, dict) and (entry.get("name") or entry.get("tool")):
+                    tool_total_by_sched[row["schedule_id"]] += 1
+
+        schedules: List[Dict] = []
+        for s in schedule_rows:
+            sid = s["id"]
+            agg = agg_by_sched.get(sid)
+            last = last_by_sched.get(sid)
+
+            if agg:
+                total = int(agg["total"] or 0)
+                success_count = int(agg["success_count"] or 0)
+                failed_count = int(agg["failed_count"] or 0)
+                cancelled_count = int(agg["cancelled_count"] or 0)
+                cost_total = round(float(agg["cost_total"] or 0.0), 4)
+                avg_duration_ms = (
+                    int(agg["avg_duration_ms"]) if agg["avg_duration_ms"] is not None else None
+                )
+                context_avg = (
+                    int(agg["context_avg"]) if agg["context_avg"] is not None else None
+                )
+            else:
+                total = success_count = failed_count = cancelled_count = 0
+                cost_total = 0.0
+                avg_duration_ms = context_avg = None
+
+            terminal = success_count + failed_count
+            success_rate = round(success_count / terminal, 4) if terminal else None
+
+            schedules.append({
+                "schedule_id": sid,
+                "name": s["name"],
+                "command": _schedule_command_label(s["message"]),
+                "cron_expression": s["cron_expression"],
+                "enabled": bool(s["enabled"]),
+                "total_executions": total,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "cancelled_count": cancelled_count,
+                "success_rate": success_rate,
+                "avg_duration_ms": avg_duration_ms,
+                "cost_total": cost_total,
+                "context_avg": context_avg,
+                "tool_call_total": tool_total_by_sched.get(sid, 0),
+                "last_run_at": last["last_run_at"] if last else None,
+                "last_run_status": last["last_status"] if last else None,
+            })
+
+        return {
+            "window_hours": hours,
+            "schedule_count": len(schedules),
+            "tool_calls_sampled": tool_calls_sampled,
+            "schedules": schedules,
         }
 
     def get_agent_analytics(self, agent_name: str, hours: int) -> Dict:

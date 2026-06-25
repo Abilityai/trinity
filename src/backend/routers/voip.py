@@ -65,6 +65,10 @@ class VoipCallRequest(BaseModel):
     process_transcript: bool = True
 
 
+class VoipEnabledRequest(BaseModel):
+    enabled: bool
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _require_enabled():
@@ -139,6 +143,33 @@ async def configure_voip_binding(
         created_by=str(current_user.id) if current_user else None,
     )
     logger.info(f"VoIP binding configured for agent={agent_name} sid={account_sid[:8]}...")
+    return VoipBindingResponse(
+        agent_name=agent_name,
+        configured=True,
+        account_sid=binding["account_sid"],
+        from_number=binding["from_number"],
+        daily_call_cap=binding.get("daily_call_cap"),
+        display_name=binding.get("display_name"),
+        enabled=binding.get("enabled"),
+    )
+
+
+@auth_router.put("/{agent_name}/voip/enabled", response_model=VoipBindingResponse)
+async def set_voip_enabled(
+    agent_name: OwnedAgentByName,
+    config: VoipEnabledRequest,
+):
+    """Enable/disable an agent's VoIP without re-entering credentials (owner-only, #28).
+
+    The call path already refuses disabled bindings (voip_service); this flips the
+    `enabled` flag in place. 404 when no binding exists so the UI never shows a
+    disabled-but-nonexistent state.
+    """
+    _require_enabled()
+    updated = db.set_voip_enabled(agent_name, config.enabled)
+    if not updated:
+        raise HTTPException(status_code=404, detail="No VoIP binding configured for this agent")
+    binding = db.get_voip_binding(agent_name)
     return VoipBindingResponse(
         agent_name=agent_name,
         configured=True,

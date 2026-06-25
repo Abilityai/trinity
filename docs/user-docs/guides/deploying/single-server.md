@@ -108,6 +108,14 @@ Create the directory before starting:
 mkdir -p /srv/trinity-data
 ```
 
+### Database backend
+
+Trinity stores all platform state in **SQLite** by default, in `trinity.db` under your `TRINITY_DATA_PATH` bind mount (`/data/trinity.db` inside the container). This is the only database backend you need to configure — the steps above are complete as written.
+
+On every backend boot, a versioned migration runner brings the SQLite schema up to date. The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque.
+
+A PostgreSQL backend is being introduced as the next step in this work, with Postgres migrations handled by Alembic instead of the SQLite runner. **It is not yet a user-selectable backend** — there is no supported environment variable to point a deployment at Postgres today. The migration-runner safety work above is the groundwork that makes that switch possible; until it lands, run on the default SQLite backend.
+
 ## 3. Build the Base Agent Image
 
 ```bash

@@ -199,15 +199,24 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             },
         )
 
-    if exec_result.status == "failed":
-        # Don't settle — caller keeps credits
+    if exec_result.status in ("failed", "cancelled"):
+        # Don't settle — caller keeps credits. #679: a CANCELLED turn must NOT
+        # settle either — settling on cancel is the charge-on-cancel money bug.
+        is_cancelled = exec_result.status == "cancelled"
         return JSONResponse(
             status_code=200,
             content={
                 "response": exec_result.response,
                 "execution_id": exec_result.execution_id,
-                "status": "failed",
-                "payment": {"settled": False, "reason": "Execution failed — no charge"},
+                "status": "cancelled" if is_cancelled else "failed",
+                "payment": {
+                    "settled": False,
+                    "reason": (
+                        "Execution cancelled — no charge"
+                        if is_cancelled
+                        else "Execution failed — no charge"
+                    ),
+                },
             },
         )
 

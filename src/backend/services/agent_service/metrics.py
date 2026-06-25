@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from models import User
 from database import db
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 
@@ -63,7 +64,7 @@ async def get_agent_metrics_logic(
     # Agent is running - fetch metrics from agent's internal API
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/metrics"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(agent_name, timeout=10.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 data = response.json()

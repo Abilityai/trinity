@@ -4,7 +4,11 @@
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.6.0](whats-new/v0.6.0.md))
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.6.1](whats-new/v0.6.1.md))
+
+## Watch
+
+- [Video Library](videos.md) — workshops, demos, and deep-dives, newest first
 
 ## Guides
 
@@ -23,8 +27,11 @@
 ## Agents
 
 - [Creating Agents](agents/creating-agents.md) — Templates, GitHub repos, from scratch
+- [Agent Runtimes](agents/agent-runtimes.md) — Claude Code, OpenAI Codex, Gemini CLI
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
+- [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — Chat interface, voice, streaming, history
+- [Agent Session](agents/agent-session.md) — Resumable Claude session with full context
 - [Agent Terminal](agents/agent-terminal.md) — Web terminal, SSH access, mode switching
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation

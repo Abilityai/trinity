@@ -210,6 +210,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
 - **Default**: ON (`session_tab_enabled` flag flipped to True for GA on 2026-05-04, PR #652)
 - **Spec**: `docs/planning/SESSION_TAB_2026-04.md`
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
+- **Unified Chat tab (#1112)**: the separate Session tab is collapsed into the single
+  **Chat** tab, which carries a **Session-mode toggle** (default ON, persisted
+  per-user in `localStorage['trinity.chatMode']`). ON → `SessionPanel`; OFF →
+  legacy `ChatPanel`. The toggle is hidden and the tab falls back to legacy when
+  `session_tab_enabled` is off or the runtime lacks `--resume` (Codex) — never
+  zero chat surfaces. `?tab=session` aliases to the Chat tab; execution-resume
+  (`resumeSessionId`) forces legacy for that landing without changing the saved
+  preference. See architecture → Session Tab.
 
 ---
 
@@ -1165,12 +1173,14 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
 - **Phase 2 (deferred)**:
   - `#311` unified access control: `/login <email>` command flow, verified-email gate, `access_requests` pipeline (schema columns `verified_email`/`verified_at` shipped up-front so Phase 2 is application-only)
+- **Phase 3 (partial)**:
+  - **Outbound media attachments (shipped — #1315)**: `WhatsAppAdapter.send_response` delivers `ChannelResponse.files` as Twilio `MediaUrl` attachments — one message per file (WhatsApp permits a single media per message), text sent first. Each file is persisted to FILES-001 storage via `create_share_from_bytes` and handed to Twilio as its public `?sig=` URL (Twilio fetches it server-side). Gated on the per-agent `file_sharing_enabled` toggle. Short 1h share TTL (the cleanup-service reaper purges expired shares). Graceful text-link fallback when `public_chat_url` is unset/non-HTTPS, the MIME is unsupported, or the file exceeds WhatsApp caps (image/audio/video ≈5 MB, documents ≈16 MB) — never silently dropped.
 - **Phase 3 (deferred)**:
   - SMS on the same Twilio binding (drop `whatsapp:` prefix)
   - Message templates for outbound-first conversations outside the 24h customer-service window (Twilio Content Builder)
   - Interactive buttons and list messages (Twilio Content API)
   - Voice-note transcription (Whisper API)
-  - Outbound file sharing
+  - Promoting FILES-001 share URLs already present in `response.text` to `MediaUrl` (#1315 option b)
 - **Out of scope**:
   - WhatsApp group chats — not supported by Twilio's WhatsApp API
   - Meta Cloud API direct integration — future alternative; not this PR
@@ -1246,9 +1256,9 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Anonymous sessions have the same memory capability as email-verified sessions.
 
 ### 15.2 First-Time Setup
-- **Status**: ✅ Implemented (2025-12-23)
-- **Description**: Admin password wizard on fresh install
-- **Key Features**: Bcrypt hashing, API key configuration in Settings
+- **Status**: ✅ Implemented (2025-12-23; streamlined trinity-enterprise#49, 2026-06-23)
+- **Description**: Admin-account wizard on fresh install — a welcoming, animated single-screen first-run page (orbiting fleet constellation)
+- **Key Features**: Bcrypt hashing, API key configuration in Settings. **Streamlined (#49)**: the log-copied **setup token was removed** (no token field); **admin email is required** (becomes the sign-in identity) with field order email → password (+confirm) → company → updates opt-in. Security tradeoff of token removal is an explicit operator responsibility (deploy behind a tunnel/VPN until setup completes) — see `docs/DEPLOYMENT.md` → Security Recommendations
 - **Flow**: `docs/memory/feature-flows/first-time-setup.md`
 
 ### 15.3 Per-Agent API Key Control
@@ -1560,6 +1570,7 @@ All subsections 18.1–18.10 were deleted with the code. Flow docs archived at `
   - `src/backend/routers/chat.py` - 429 interception hooks
   - `src/frontend/src/views/Settings.vue` - Toggle UI
 - **Negative markers on `is_auth_failure` (#904, 2026-05-21)**: substring match on `AUTH_INDICATORS` now short-circuits to False when the error message also contains an unambiguous signal-kill / OOM / timeout marker (`sigkill`, `sigterm`, `sigint`, `exit code -9`, `exit code 137`, `exit code 143`, `out of memory`, `oom`, `memory cgroup`, `terminated by`, `killed by`). Prevents the SUB-003 trigger from firing on cgroup OOM kills whose detail string happens to contain a word like "token" or "authentication" via downstream wrapping. The same exclusion list lives in `src/scheduler/service.py:_is_auth_failure` to keep the two surfaces from drifting (see §10.4.1).
+- **Hot-reload, not recreate (#1089, 2026-06-13)**: the auto-switch no longer recreates the container — `_perform_auto_switch` hot-reloads the new token in place so in-flight turns on the agent survive. See §20.6.
 
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
@@ -1579,6 +1590,32 @@ All subsections 18.1–18.10 were deleted with the code. Flow docs archived at `
   - `src/backend/routers/chat.py` - Subscription ID capture at execution time
   - `src/backend/db/chat.py` - Session creation with subscription_id
   - `src/frontend/src/views/Settings.vue` - Usage display (if applicable)
+
+### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
+- **Status**: ✅ Implemented (2026-06-13)
+- **GitHub Issue**: #1089
+- **Extends**: SUB-002 / SUB-003
+- **Priority**: HIGH (`theme-reliability`)
+- **Builds on**: #799 (per-agent `agent_switch_lock`)
+- **Description**: Rotating an agent's subscription token used to **recreate the container**, making "rotate a credential" and "kill every in-flight turn" the same operation (#1037 collateral kills — one 429 on a shared subscription would auto-switch and destroy every parallel execution). Token rotation now goes through a surgical hot-reload of the running container; recreate is reserved for image/template/auth-**mode** changes. This removes the credential↔execution collision class structurally (TARGET_ARCHITECTURE §Agent Runtime).
+- **Mechanism**: the agent server spawns Claude via `subprocess.Popen(..., env={**os.environ, ...})` and authenticates purely from the `CLAUDE_CODE_OAUTH_TOKEN` env var (no `.credentials.json` write); it is a single uvicorn worker. Mutating the agent-server process `os.environ["CLAUDE_CODE_OAUTH_TOKEN"]` makes the **next** Claude subprocess use the new token; **in-flight** subprocesses keep their already-inherited old token and finish.
+- **Rotation paths converted to hot-reload**:
+  1. **Auto-switch** (SUB-003): `_perform_auto_switch` hot-reloads instead of `_restart_agent` (runs inside the #799 `agent_switch_lock`).
+  2. **Manual reassignment** (`PUT /api/subscriptions/agents/{name}`): a sub→sub swap hot-reloads under the lock; an auth-**mode** change (none/api-key → subscription) still recreates so `ANTHROPIC_API_KEY` is dropped and the OAuth token is baked into `Config.Env`.
+  3. **Key rollover** (`POST /api/subscriptions` upsert): re-registering a subscription's token fans a best-effort hot-reload out to every running agent on that subscription (one agent's failure never fails the upsert nor blocks the others).
+- **Key Features**:
+  - Agent-server endpoint `POST /api/credentials/reload-token` (`{token, remove_api_key}`) — mutates `os.environ` + persists the token to the writable-layer override; does **not** rewrite `.env`/`.mcp.json` or re-inject Trinity MCP.
+  - **Durable override (F2)**: the token is written to `/var/lib/trinity/oauth-token` (0600), deliberately **not** under `/home/developer` (the persisted workspace volume). `startup.sh` exports it before launching the agent server, so a plain fleet restart (`ops.py` raw stop+start, which bypasses `start_agent_internal`) keeps the rotated token. **Self-reconciling by Docker semantics**: the writable layer survives `stop`→`start` but is wiped on recreate (fresh layer), so a DB-driven recreate re-bakes `Config.Env` (DB token) and the stale override is gone — no marker logic.
+  - **Back-compat fallback**: running containers on an older base image return **404** for the endpoint → the backend falls back to `_restart_agent` (identical to pre-#1089 behavior). Per #1037, recreate stays out of scope; the fallback inherits whatever #1037 lands. An agent only gains the endpoint once recreated onto a rebuilt base image (no automatic fleet-wide adoption).
+- **Backend helpers** (`services/subscription_auto_switch.py`): `_hot_reload_subscription_token(agent_name)` (POST + restart fallback on 404/transport/no-token; `no_container`/`not_running` short-circuits) and `reload_subscription_for_all_agents(subscription_id)` (key-rollover fan-out under the lock).
+- **Files**:
+  - `docker/base-image/agent_server/routers/credentials.py` - `reload-token` endpoint + writable-layer override write
+  - `docker/base-image/agent_server/models.py` - `TokenReloadRequest`/`TokenReloadResponse`
+  - `docker/base-image/Dockerfile` - `mkdir+chown /var/lib/trinity` (Invariant #17 non-root)
+  - `docker/base-image/startup.sh` - export override token before agent-server launch
+  - `src/backend/services/subscription_auto_switch.py` - hot-reload helper + fan-out + auto-switch wire-in
+  - `src/backend/routers/subscriptions.py` - manual sub→sub under lock + key-rollover fan-out
+- **Known limitations**: cross-worker race on the process-local `agent_switch_lock` (prod `--workers 2`) is flagged for #1166/#799 (escalate to Redis `SETNX`); a bulk `delete_subscription` still leaves the deleted token live until next start (pre-existing, out of scope). Both self-heal via the durable override / `check_api_key_env_matches` reconciliation.
 
 ---
 
@@ -2429,97 +2466,38 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   Trinity's database.
 ## 35. Enterprise Edition Architecture (#847)
 
-### 34.1 Open-Core Seam — Private Submodule Integration (#847 Phase 0)
+### 35.1 Open-Core Seam — Private Submodule Integration (#847)
 - **Status**: ✅ Implemented (2026-05-21)
-- **GitHub Issue**: #847
-- **Description**: Phase 0 of the enterprise edition split — establishes
-  the seam in the public Trinity backend for loading closed-source
-  compliance modules (SSO, SCIM, SIEM) from a private git submodule
-  at `src/backend/enterprise/` pointing to
-  `Abilityai/trinity-enterprise`. Backend-only private; enterprise
-  Vue components ship in the public OSS bundle and are gated
-  server-side via the `enterprise_features` list. The
-  `EntitlementService` is a registry — empty until
-  `register_enterprise(app)` calls `register_module(feature_id)` for
-  each loaded enterprise module, which only happens when the
-  private submodule is actually mounted. `TRINITY_OSS_ONLY=1` is a
-  hard override for the deny path.
-- **Decision record**: `docs/planning/ENTERPRISE_ARCHITECTURE.md`
-- **Long-form research**: `docs/planning/OSS_ENTERPRISE_SPLIT_RESEARCH.md`
-- **Local-dev guide**: `docs/dev/ENTERPRISE_LOCAL_DEV.md`
-- **Key Features**:
-  - `EntitlementService` (`src/backend/services/entitlement_service.py`)
-    — registry pattern. `register_module(feature_id)` populates a set;
-    `is_entitled()` and `list_entitled_features()` read from it. OSS
-    builds never call `register_module` → empty set → deny everything.
-    `TRINITY_OSS_ONLY=1` is a hard override (denies even when
-    modules ARE registered).
-  - `requires_entitlement(feature_id)` (`src/backend/dependencies.py`)
-    — FastAPI dependency factory mirroring `require_role`. Raises
-    HTTP 403 with the feature_id in the detail string. Lazy-imports
-    the service so tests can swap singletons.
-  - Conditional submodule loader in `src/backend/main.py` —
-    `try: from enterprise.backend import register_enterprise;
-    register_enterprise(app) except ImportError: pass`. OSS-only
-    builds (no submodule) silently no-op with an informational log.
-    The loader calls `entitlement_service.register_module(...)` for
-    each registered feature, which drives feature-flag output.
-  - `/api/settings/feature-flags` extended with
-    `enterprise_features: list[str]` — empty in OSS mode, populated
-    when the private backend submodule is mounted. The OSS frontend
-    reads this to decide what enterprise UI to render.
-  - `.gitmodules` — single submodule at `src/backend/enterprise/`
-    pointing to `Abilityai/trinity-enterprise` via SSH. Backend only.
-  - **Enterprise frontend ships in OSS** at
-    `src/frontend/src/views/enterprise/` — Vue components have no
-    algorithmic IP, the moat is the private backend logic. Same
-    feature-flag pattern as `session_tab_enabled` and
-    `voice_available`. Adding a new enterprise feature = Vue file
-    in OSS + private backend module + `register_module(id)`.
-  - Pinia store `src/frontend/src/stores/enterprise.js` — caches
-    `enterprise_features: list[str]` from `/api/settings/feature-flags`.
-    Exposes `isEntitled(featureId)` + `hasAnyEnterprise` getters.
-  - Static route in `src/frontend/src/router/index.js` for
-    `/enterprise/sso` with `meta.requiresEntitlement: 'sso'`.
-    `beforeEach` guard redirects to `/` when not entitled
-    (defence-in-depth against direct URL visits / bookmarks).
-  - `NavBar.vue` — new `Enterprise` link
-    `v-if="enterpriseStore.isEntitled('sso')"` with a `PRO` badge.
-    Hidden in OSS-only mode and when operator forces
-    `TRINITY_OSS_ONLY=1`.
-  - `docker-compose.yml` env pass-through for `TRINITY_OSS_ONLY`.
-  - CI workflow `.github/workflows/build-without-submodule.yml` —
-    boots the backend with the submodule absent and asserts:
-    `/health` responds, `/api/settings/feature-flags` returns
-    `enterprise_features: []`, `/api/enterprise/sso/providers`
-    returns 404, and the OSS-only log line is emitted. Catches
-    regressions where the conditional import accidentally becomes
-    hard-required.
-- **Private repo (Abilityai/trinity-enterprise) — backend only**:
-  - `backend/__init__.py` — `register_enterprise(app)` mounts
-    routers AND calls `entitlement_service.register_module(id)`
-    per feature.
-  - `backend/sso/router.py` — `/api/enterprise/sso/{providers,login/{id}}`
-    stubs gated by `requires_entitlement("sso")`. `GET /providers`
-    returns the in-process registry (empty by default);
-    `POST /login/{id}` returns 501 "PoC stub" or 404 for unknown id.
-  - `backend/sso/providers.py` — `SSOProvider` ABC (provider_id,
-    display_name, protocol, begin_login) + `StubProvider`.
-  - `pyproject.toml`, `LICENSE` (proprietary), `README.md`.
-- **Out of scope (separate follow-ups)**:
-  - Phase 1: Ed25519-signed license token, verify path, admin
-    License UI, grace + clock-tamper handling.
-  - Phase 2: Extract `audit_log` into the submodule as the first
-    real enterprise module.
-  - Phase 3: Prove the "core-primitive + enterprise-knob" pattern
-    via #834 (recovery API in OSS, license-capped retention in enterprise).
-  - Phase 4: Real SSO/SAML implementation (replaces PoC stubs).
-  - MCP entitlement edge (`GET /api/internal/entitlements` polled by
-    the TypeScript MCP server).
-  - Fixing the repo's license-of-record (currently `NOASSERTION`).
-- **Tunables (env)**:
-  - `TRINITY_OSS_ONLY` (`0`/`1`, default `0`) — force OSS-only mode
-    regardless of submodule presence.
+- **GitHub Issue**: #847 (design + paid-module catalog tracked privately in `trinity-enterprise`)
+- **Description**: A generic extension seam in the public backend for loading
+  closed-source modules from a private git submodule at
+  `src/backend/enterprise/`. The seam is feature-agnostic — it carries **no
+  enumeration of which capabilities are paid**; that catalog and the
+  per-module designs live only in the private `trinity-enterprise` repo.
+- **Key mechanism (public)**:
+  - `EntitlementService` (`src/backend/services/entitlement_service.py`) — a
+    registry. `register_module(feature_id)` populates a set; `is_entitled()` /
+    `list_entitled_features()` read from it. OSS builds never call
+    `register_module` → empty set → deny everything. `TRINITY_OSS_ONLY=1` is a
+    hard override (denies even when modules ARE registered).
+  - `requires_entitlement(feature_id)` (`src/backend/dependencies.py`) — a
+    FastAPI dependency factory mirroring `require_role`; HTTP 403 when not
+    entitled.
+  - Conditional loader in `src/backend/main.py` —
+    `try: from enterprise.backend import register_enterprise; register_enterprise(app) except ImportError: pass`.
+    OSS-only builds (no submodule) silently no-op.
+  - `/api/settings/feature-flags` exposes `enterprise_features: list[str]` —
+    empty in OSS mode, populated when the private submodule is mounted; the OSS
+    frontend reads it to decide which gated surfaces to render (same pattern as
+    `session_tab_enabled` / `voice_available`).
+  - Enterprise Vue components ship in the OSS bundle (no algorithmic IP — the
+    moat is the private backend logic); they are gated purely by the
+    server-driven `enterprise_features` list.
+- **Tunables (env)**: `TRINITY_OSS_ONLY` (`0`/`1`, default `0`) — force
+  OSS-only mode regardless of submodule presence.
+- **Private (not in this repo)**: the specific module catalog, their routers and
+  private schema, the licensing/entitlement enforcement design, and the
+  commercial rationale are documented privately in `trinity-enterprise`.
 
 ---
 
@@ -2870,9 +2848,41 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   Phase 2: Twilio voice webhook + `X-Twilio-Signature` + inbound
   number→agent resolution on the same table; an `inbound_number` column
   is shipped up-front so Phase 2 is additive); opt-in destination
-  allowlist (Phase 2); UI config surface, schedule-action trigger, and
-  call cost/duration observability (Phase 3). Real PSTN path is
-  manual-verify (needs a live Twilio voice number).
+  allowlist (Phase 2); schedule-action trigger and call cost/duration
+  observability (Phase 3). Real PSTN path is manual-verify (needs a live
+  Twilio voice number). (UI config surface delivered separately in §39.2.)
+
+### 39.2 Per-agent VoIP config UI + persisted voice (trinity-enterprise#28)
+- **Status**: 🚧 In Progress
+- **Implements**: Issue trinity-enterprise#28 (the Phase-3 "UI config surface"
+  deferred by #1056)
+- **Description**: A per-agent VoIP config panel in the agent Settings/Sharing
+  tab (`components/VoipChannelPanel.vue`) to create/update/remove the
+  `voip_bindings` row over the existing OSS `GET/PUT/DELETE /api/agents/{name}/voip`
+  endpoints (Twilio Account SID, write-only Auth Token, From number, optional
+  daily call cap), an **enable/disable toggle**, and a **persisted voice picker**.
+- **OSS, not entitlement-gated**: shipped as a plain OSS capability gated purely
+  on the existing `voip_available` platform flag (the frontend reads it via
+  `stores/sessions.js`). No enterprise entitlement, no `register_module`, no
+  `trinity-enterprise` submodule change — a deliberate simplification over the
+  issue's original "entitlement-gated" framing (a UI gate over an OSS,
+  money-spending backend would be cosmetic; gate is the platform flag instead).
+- **Enable/disable toggle**: `PUT /api/agents/{name}/voip/enabled`
+  (`{enabled: bool}`, owner-only, 404 when no binding) flips `voip_bindings.enabled`
+  without re-entering credentials; the call path already refuses disabled
+  bindings. Re-saving credentials via the binding PUT **preserves** the current
+  `enabled` state (the upsert no longer forces `enabled=1`).
+- **Persisted per-agent voice**: new edition-agnostic OSS primitive
+  `agent_ownership.voice_name` (default `Kore`, like `voice_system_prompt`) with
+  `GET/PUT /api/agents/{name}/voice/name` (PUT owner-only, validated against the
+  canonical `GEMINI_VOICE_NAMES`). Replaces the two hardcoded `"Kore"` sites
+  (`routers/voice.py::_get_voice_name`, `services/voip_service.py`), so the chosen
+  voice applies to **both** the in-app voice overlay/workspace and outbound VoIP
+  calls. Resolution precedence at a voice start: per-session request override →
+  persisted `voice_name` → `Kore`; the read path falls back to `Kore` for an
+  unset or no-longer-valid persisted value. The Workspace ephemeral picker
+  defaults to the persisted voice. Dual-track migration (SQLite `db/migrations.py`
+  + Alembic `0004_agent_ownership_voice_name` + `db/schema.py`/`db/tables.py`).
 
 ---
 
@@ -2926,6 +2936,188 @@ cached-UUID resume for Codex; backend reading `ExecutionMetadata.error_code`
 directly; Codex SSE streaming; vision/images; a post-creation runtime-switch
 endpoint. See the [Harness Authoring Guide](harness-authoring-guide.md) for adding
 a fourth runtime.
+
+---
+
+## 41. Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
+
+### 41.1 Declared Data Paths over the Existing Home Volume (#1169 — PR1)
+
+Agents accumulate runtime data (SQLite DBs, datasets) that can't live in the
+git-synced template repo (bloat) yet must survive container lifecycle events and
+be portable to another Trinity instance. The agent home directory
+(`/home/developer`) is **already** a persistent named Docker volume
+(`agent-{name}-workspace`) that survives recreate, image upgrade, template
+re-pull, and subscription auto-switch — so data dropped under
+`/home/developer/data` is already durable today. This feature therefore reduces
+to a **declaration** (`data_paths`) plus a real **snapshot/export/import**
+capability over that existing volume — **no separate volume, no platform schema
+change** (snapshots are filesystem artifacts; audit rides the existing
+`audit_log`). Schema-free by design, to stay decoupled from the in-flight
+SQLite→PostgreSQL migration (#1183).
+
+**Functional requirements:**
+- **FR-1 — Declaration:** a template may declare `data_paths:` (a list of globs
+  under `data/`) in `template.yaml`. At creation, the backend materializes
+  `~/.trinity/data-paths.yaml` inside the agent (quoted-heredoc write, glob-safe),
+  mirroring the S4 persistent-state pattern. Opt-in — default `[]` (no file, no
+  side effects when undeclared).
+- **FR-2 — Durability:** declared data lives under `/home/developer/data` on the
+  existing persistent home volume; no new volume is created. (Met by reuse.)
+- **FR-3 — Gitignore:** when `data_paths` is non-empty, the declared paths and the
+  `data/` root are appended to the **agent's own** `.gitignore` (idempotent
+  `grep -qxF` merge) so runtime data is never committed. The fleet-wide ignore
+  list is untouched.
+- **FR-4 — On-demand export:** `POST /api/agents/{name}/data/export` (owner/admin)
+  streams a tar of `/home/developer/data` (via `get_archive`, no workspace mount)
+  to a temp file under `/data`, then returns it as a `StreamingResponse`. A
+  configurable size cap (`AGENT_DATA_EXPORT_MAX_BYTES`) returns **413** on
+  overflow. The tar embeds a self-describing **manifest** (`data-paths.yaml` +
+  agent/version metadata). Accepts `Idempotency-Key` (Invariant #18); audited as
+  `data_export`.
+- **FR-5 — On-demand import/restore:** `POST /api/agents/{name}/data/import`
+  (owner/admin) restores an uploaded tar into `/home/developer/data` via the
+  existing agent-server `POST /api/agent-server/restore` primitive, whose
+  `restore_from_tar` enforces the `data/**` allowlist and rejects absolute / `..`
+  traversal. Audited as `data_import`.
+- **FR-6 — Concurrency:** export and import are serialized per agent by a Redis
+  operation lock (409 on contention).
+- **FR-7 — Portability (MCP):** `export_agent_data` / `import_agent_data` MCP tools
+  expose the capability so "move an agent" = template URL + `.credentials.enc` +
+  data tar.
+
+**Non-functional:** export never loads the full dataset into memory (stream →
+temp → stream); the temp file is removed after the response is sent
+(`BackgroundTask`). System agents are out of scope (no public/shared volumes;
+`.trinity` is reset on their reset path).
+
+**Out of scope (PR2 / follow-ups):** scheduled background snapshots,
+`~/.trinity/pre-snapshot` SQLite-quiesce hook (`sqlite3 .backup` staging copy to
+eliminate the hook-vs-tar race), snapshot retention, and the rename/purge
+snapshot-dir cascade — all deferred to PR2. The pre-existing
+home/public/shared **volume leak-on-purge** + **strand-on-rename** is a separate
+fleet-wide bug filed independently.
+## 42. Agent Compatibility Validation (#668)
+
+### 42.1 Server-Side Compatibility Checks with Auto-Fix (#668)
+
+**Description**: Agents deployed to Trinity that don't follow Trinity
+best-practices (no playbooks, missing YAML, `.claude/` excluded from
+`.gitignore`, no `template.yaml`) fail silently at runtime in ways that are hard
+to diagnose. Trinity runs **server-side compatibility checks** against a running
+agent's workspace and surfaces actionable recommendations — **without blocking
+deployment**. Canonical check list: **`docs/agent-validation-spec.md`** (100
+checks, 11 categories), the single source of truth kept in lockstep with
+`services/compatibility/spec.py` by a sync test.
+
+- **FR-1 — Surface**: results render in the Agent Detail **Overview tab**
+  (`components/CompatibilityPanel.vue`, reusing the "needs attention" idiom —
+  count hidden when clean, expandable to the full grouped checklist) and via the
+  MCP tool `get_agent_compatibility_report`. Re-runnable on demand. Non-blocking.
+- **FR-2 — Severity**: each check is **HARD** (will likely break Trinity),
+  **SOFT** (best practice), or **INFO**, with `pass`/`fail`/`skipped` status.
+  HARD is reserved for deterministic STATIC checks; **AI-evaluated checks are
+  capped at SOFT** (an LLM verdict never drives the HARD count).
+- **FR-3 — Check types**: `[STATIC]` deterministic file/pattern analysis (run
+  always, free); `[AI]` LLM-evaluated quality judgments (Claude Haiku, batched by
+  category, persisted so they show on every load; `include_ai` forces a re-run).
+- **FR-4 — Collection**: ONE `docker exec` runs an in-container Python script
+  that emits a single JSON workspace snapshot (per-file binary/size/truncation
+  handling, secret-bearing files existence-only); pure check functions evaluate
+  the snapshot (unit-testable, no Docker). Stopped/unreadable container → a
+  degraded `unavailable` report (showing the last persisted result), never a 500.
+- **FR-5 — Auto-fix**: the 10 gitignore-related checks are auto-fixable via
+  `POST /api/agents/{name}/compatibility/fix` (owner/admin); the fix edits the
+  in-container `.gitignore` only (atomic write, per-agent Redis lock) and is
+  **uncommitted until the agent's next git sync** (no auto-commit).
+- **FR-6 — Runtime-aware**: Claude-specific checks (`CLAUDE.md`, `.claude/`
+  skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
+- **FR-7 — Reuse/consolidate**: builds on the #950/#982 deploy-local logic
+  (`_is_platform_injected`, the `${VAR}`/`.env.example` parsing) for the
+  C-001/C-002 and K-001/K-002 overlaps, and on `git_service._GITIGNORE_PATTERNS`
+  + `_detect_git_dir` for the fixes.
+
+**API**: `GET /api/agents/{name}/compatibility?include_ai=` (read; STATIC live +
+persisted AI), `POST /api/agents/{name}/compatibility/fix` (owner/admin).
+**MCP**: `get_agent_compatibility_report(agent_name, include_ai?)`.
+
+**Persistence decision (departs from the issue's "no DB table" note).** The
+original issue specified transient results with no table. Implementation **adds
+`agent_compatibility_results`** (latest-snapshot-per-agent, dual-track SQLite +
+Alembic) because AI verdicts are **not** cheaply recomputable (they cost API
+calls): persistence lets AI findings show on every Overview load without
+re-spending tokens, unlocks fleet aggregation ("N agents have HARD findings"),
+and enables cheap post-fix re-checks. STATIC checks still recompute live each
+read; persisted AI verdicts merge in until a re-run. History/trend retention is a
+fast-follow (latest-only for now).
+
+**Out of scope (fast-follow)**: broken-agent **boot** triage (a stopped/failing
+container can't be exec'd — this validates *running* agents); AI-verdict trend
+history; the forward-looking template-level checks (#927 replica-safety, #1084
+side-effect profile).
+
+---
+
+## 43. First-Run Operator Profile — Intake + Admin Email Login (trinity-enterprise#38, #82)
+
+### 43.1 Operator Intake at First-Run Setup (trinity-enterprise#38)
+
+**Description**: At first-run setup (the admin-creation step), the operator may
+provide their **email + company** (plus optional name/role/use-case) and **opt
+in** to "occasionally receive important security & product updates." On that
+affirmative consent, the details are submitted **once** to an Ability.ai-operated
+hosted intake endpoint — a sibling endpoint on the same Cloudflare-fronted intake
+app as #1116's in-app bug reporter (`/v1/report-bug` → `/v1/operator-intake`).
+This is **identifiable, explicit opt-in contact capture**, distinct from the
+anonymous usage telemetry tracked separately (#758 / trinity-enterprise#12).
+
+- **FR-1 — Capture & consent**: **required `email`** (the admin sign-in identity,
+  trinity-enterprise#49) plus optional `company`/`name`/`role`/`use_case` on
+  `POST /api/setup/admin-password`; an **affirmative, unchecked-by-default**
+  consent checkbox (`consent_updates`). Declining the updates opt-in (or skipping
+  the optional profile fields) never blocks completing setup; only the email and
+  password are mandatory. The form shows exactly what is sent and to whom.
+- **FR-2 — Hosted intake, no email needed**: the submission is a fire-and-forget
+  HTTPS POST (`services/operator_intake_service.py`, `httpx`, 5s) — it does **not**
+  use the email provider, so it works on a fresh install with no Resend key. A
+  blocked/failed/air-gapped POST never delays or breaks setup.
+- **FR-3 — At-most-once**: a server-side `operator_intake_submitted` marker in
+  `system_settings` is claimed **before** the POST, so restarts / re-runs /
+  concurrent workers never double-submit. A stable random `installation_id`
+  (also in `system_settings`, the seed for future #758 telemetry) correlates the
+  submission.
+- **FR-4 — Off switch**: `OPERATOR_INTAKE_ENABLED=false` (or the cross-tool
+  `DO_NOT_TRACK=1`) fully disables the outbound submission for air-gapped /
+  privacy-strict installs — the consent box still appears, nothing leaves the box.
+  `OPERATOR_INTAKE_URL` repoints the endpoint (self-host). Consent fires only on
+  `consent_updates && email`.
+
+### 43.2 Admin Email Login — Phase 1 (#82)
+
+**Description**: The email captured at setup becomes the admin's **sign-in
+identity** — the operator can log in with **email + password** instead of the
+fixed `admin` username. **No verification email is sent**: a fresh install has no
+email provider configured, so the email is simply *bound* to the admin account
+(not verified via a code). The code-based second factor (email OTP after
+password) is **Phase 2**, gated on a configured email provider and the existing
+`mfa_gate`/`SecondFactorProvider` seam (#5/#388) — out of scope here.
+
+- **FR-1 — Resolve by username OR email**: `dependencies.authenticate_user`
+  resolves the identifier by username, then (when it looks like an email and no
+  username matches) by email. The password check still runs, so only an account
+  with a password hash (the admin) can authenticate — email-code-only users
+  (no password) never can.
+- **FR-2 — Setup binding**: `POST /api/setup/admin-password` **requires** the email
+  (missing → 422 at the model layer; blank/typo → 400, validated before any write
+  so setup never half-completes) and binds it to the admin via
+  `db.update_user('admin', {'email': …})`. Login UI exposes an editable
+  "Username or email" field (default `admin`). The setup token (#1165/SEC #177) is
+  removed (trinity-enterprise#49) — no token field, no Redis dependency for setup.
+- **FR-3 — Existing-admin transition**: an admin created before #82 (stored email
+  = placeholder `admin`) registers a real email via `PUT /api/users/me/email`
+  (own-account scoped; 409 if the email belongs to another account), surfaced as
+  an **Admin sign-in email** card in Settings → General. No verification email is
+  sent; existing `admin`+password login keeps working until/unless an email is set.
 
 ---
 

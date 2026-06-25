@@ -1,7 +1,7 @@
 # WhatsApp Integration via Twilio (WHATSAPP-001)
 
-**Issues**: #299 (Phase 1), #467 (Phase 2)
-**Status**: Phase 2 — unified access control wired (#311)
+**Issues**: #299 (Phase 1), #467 (Phase 2), #1315 (Phase 3 — outbound media)
+**Status**: Phase 3 partial — outbound media attachments shipped (#1315)
 **Extends**: SLACK-002 `ChannelAdapter` abstraction
 
 Adds WhatsApp as a per-agent channel via Twilio's Programmable Messaging API.
@@ -31,10 +31,18 @@ no platform-level Twilio account required.
 - Markdown → WhatsApp-native syntax conversion in `send_response` so agent
   markdown (`**bold**`, `[text](url)`) renders correctly
 
+### In scope (Phase 3 — #1315, outbound media, shipped)
+- Outbound media attachments: `WhatsAppAdapter.send_response` delivers
+  `ChannelResponse.files` as Twilio `MediaUrl` (one message per file), reusing
+  FILES-001 storage to mint a public `?sig=` URL Twilio fetches server-side.
+  Gated on `file_sharing_enabled`; text-link fallback when undeliverable as
+  media. See *Flow: Outbound media attachments* below.
+
 ### Deferred
-- **Phase 3** — SMS on the same Twilio binding, WhatsApp Business templates
-  (for outbound-first messaging outside 24h window), interactive buttons,
-  voice-note transcription
+- **Phase 3 (remaining)** — SMS on the same Twilio binding, WhatsApp Business
+  templates (for outbound-first messaging outside 24h window), interactive
+  buttons, voice-note transcription, and promoting FILES-001 share URLs already
+  present in `response.text` to `MediaUrl` (#1315 option b)
 - **Out of scope** — WhatsApp group chats (Twilio's WhatsApp API does not
   support them)
 
@@ -63,6 +71,7 @@ no platform-level Twilio account required.
 | Settings back-fill | `src/backend/routers/settings.py` (piggybacks on `public_chat_url` save) |
 | UI panel | `src/frontend/src/components/WhatsAppChannelPanel.vue` |
 | UI mount | `src/frontend/src/components/SharingPanel.vue` |
+| Outbound media (#1315) | `src/backend/services/agent_shared_files_service.py::create_share_from_bytes` (FILES-001 reuse) |
 | New dependency | `twilio==9.10.5` (in `docker/backend/Dockerfile`) |
 
 ## Flow: Inbound WhatsApp message
@@ -179,6 +188,64 @@ correctly. Conversions:
 
 Implemented as a pure static method on `WhatsAppAdapter`; also exposed via
 `format_response` for non-send callsites (e.g. proactive delivery).
+
+## Flow: Outbound media attachments (#1315)
+
+Agents can attach files to a reply. `ChannelMessageRouter._extract_outbound_files`
+already pulls large fenced code blocks (csv/json/etc., ≤500 KB each, ≤2 MB total,
+≤5 files) out of the response text into `ChannelResponse.files` (`OutboundFile`,
+bytes in memory). WhatsApp delivers them as Twilio `MediaUrl` attachments.
+
+Twilio fetches a `MediaUrl` **server-side from the public internet** — it cannot
+upload bytes the way Slack does. So each file is persisted to FILES-001 storage
+and its public `?sig=` download URL is handed to Twilio.
+
+```
+WhatsAppAdapter.send_response(channel_id, response)
+        │
+        ▼
+_prepare_outbound_media(agent_name, response.files)   ← per-file isolated
+   gate: db.get_file_sharing_enabled(agent_name)       (off → text-only + WARN)
+   for each OutboundFile:
+     create_share_from_bytes(agent_name, f.content,    ← FILES-001 reuse
+         display_name=f.filename, expires_in=3600,      (1h TTL; reaper purges)
+         created_by=agent_name)  → {url, mime_type, size_bytes}
+       · HTTPException/any error → WARN + skip (never aborts text or siblings)
+     classify:
+       · url not https://         → text-link fallback (public_chat_url unset)
+       · mime unsupported          → text-link fallback
+       · size > WhatsApp cap       → text-link fallback
+       · else                      → MediaUrl
+   → (media_urls, fallback_links)
+        │
+        ▼
+body = markdown(agent_text) + "\n\n" + fallback links (verbatim, NOT markdownized)
+   1. send text body first (chunked) — survives total media failure
+   2. one _send_message(..., media_url=...) per file  (WhatsApp = 1 media/msg)
+```
+
+Key decisions (#1315):
+- **Why FILES-001 + URL, not direct upload**: Twilio's WhatsApp send only accepts
+  a publicly-fetchable `MediaUrl`. The unauthenticated `/api/files/{id}?sig=`
+  endpoint (192-bit token, constant-time compare, `attachment` + `nosniff`) is
+  exactly that. `create_share_from_bytes` is the bytes-input twin of
+  `create_share`; both share `_persist_and_register` (MIME-blocklist → quota →
+  disk-check → persist → DB → URL).
+- **Short 1h TTL** (`_OUTBOUND_MEDIA_EXPIRES_IN`): Twilio fetches the URL within
+  seconds; the cleanup-service reaper (`_sweep_shared_files`) purges expired
+  shares, so the public link doesn't linger. NOT revoke-after-send — Twilio's
+  fetch is async *after* the POST 2xx, so revoking on the ack would race it.
+- **Caps** (`_outbound_media_cap_for_mime`): image/audio/video ≈5 MB, documents
+  (`text/*` + json/xml/pdf/yaml/sql/js) ≈16 MB; `application/octet-stream` /
+  unknown → undeliverable → text link. Classified on the *detected* MIME (the
+  download endpoint serves `Content-Type: mime_type`, which Twilio reads to
+  render the media), not the code-fence `language` hint.
+- **`file_sharing_enabled` gate**: outbound media reuses the same public storage
+  + quota as the `share_file` MCP tool, so it honors the same per-agent toggle.
+  Off → files are not delivered as media (the `(see attached: …)` placeholder
+  text remains) + WARN.
+- **Idempotency**: none added — `twilio_webhook` dedups inbound by `MessageSid`
+  before dispatch, so `send_response` (and each mint) runs exactly once.
 
 ## Flow: Proactive messaging (`_deliver_whatsapp`)
 

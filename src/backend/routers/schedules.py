@@ -8,7 +8,7 @@ defined BEFORE dynamic routes like /{name}/schedules to avoid FastAPI matching
 "scheduler" as an agent name.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
@@ -17,12 +17,15 @@ import os
 import logging
 import httpx
 
-from models import User, ScheduleAnalyticsResponse
+from models import User, ScheduleAnalyticsResponse, AgentSchedulesSummaryResponse
 from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 _ANALYTICS_VALID_WINDOWS = frozenset({24, 168, 720})  # #868
+# #1115: Overview/Schedules-tab scorecard windows → hours (matches the #1107
+# Overview selector: 7 / 14 / 30 days).
+_SUMMARY_WINDOW_HOURS = {"7d": 168, "14d": 336, "30d": 720}
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +342,34 @@ async def get_schedule_analytics(
             detail="Schedule not found",
         )
     return ScheduleAnalyticsResponse(**analytics)
+
+
+@router.get(
+    "/{name}/schedules/analytics-summary",
+    response_model=AgentSchedulesSummaryResponse,
+)
+async def get_agent_schedules_summary(
+    name: AuthorizedAgent,
+    window: str = Query("7d", description="One of 7d, 14d, 30d"),
+):
+    """Per-schedule performance rollups for the agent over a window (#1115).
+
+    ONE compact row per non-deleted schedule — consumed by BOTH the Overview
+    "Schedules performance" section and the Schedules-tab inline stats from a
+    single call (no N per-schedule round-trips). Zero-run schedules are
+    included. Read-only / DB-sourced (renders when the agent is stopped). The
+    #868 per-schedule deep view stays the drill-in target.
+
+    NOTE: declared BEFORE `/{name}/schedules/{schedule_id}` so the literal
+    `analytics-summary` segment isn't captured as a schedule_id (Invariant #4).
+    """
+    hours = _SUMMARY_WINDOW_HOURS.get(window)
+    if hours is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"window must be one of {sorted(_SUMMARY_WINDOW_HOURS)}",
+        )
+    return AgentSchedulesSummaryResponse(**db.get_agent_schedules_summary(name, hours))
 
 
 @router.get("/{name}/schedules/{schedule_id}", response_model=ScheduleResponse)

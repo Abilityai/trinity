@@ -90,6 +90,7 @@ TABLES = {
             max_backlog_depth INTEGER DEFAULT 50,
             group_auth_mode TEXT DEFAULT 'none',
             voice_system_prompt TEXT,
+            voice_name TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,
@@ -1149,6 +1150,29 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (scope, idempotency_key)
+        )
+    """,
+    # -------------------------------------------------------------------------
+    # Agent compatibility results (#668)
+    # -------------------------------------------------------------------------
+    # Latest-snapshot-per-agent compatibility report (one row, upserted by
+    # agent_name). STATIC checks are recomputed live on each read; the persisted
+    # AI verdicts are merged in so AI findings show on every Overview load
+    # without re-spending tokens. `checks_json` is the full last report's check
+    # list. NOTE: this table is a deliberate departure from the issue's original
+    # "no DB table" note — see services/compatibility/.
+    "agent_compatibility_results": """
+        CREATE TABLE IF NOT EXISTS agent_compatibility_results (
+            agent_name TEXT PRIMARY KEY,
+            overall_status TEXT NOT NULL,
+            checks_json TEXT NOT NULL,
+            hard_count INTEGER NOT NULL DEFAULT 0,
+            soft_count INTEGER NOT NULL DEFAULT 0,
+            info_count INTEGER NOT NULL DEFAULT 0,
+            container_running INTEGER NOT NULL DEFAULT 0,
+            ai_ran_at TEXT,
+            static_ran_at TEXT,
+            updated_at TEXT NOT NULL
         )
     """,
 }

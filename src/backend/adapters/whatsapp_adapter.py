@@ -18,6 +18,7 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
+from fastapi import HTTPException
 
 from database import db
 from adapters.base import (
@@ -25,8 +26,11 @@ from adapters.base import (
     ChannelResponse,
     FileAttachment,
     NormalizedMessage,
+    OutboundFile,
 )
+from services.agent_shared_files_service import create_share_from_bytes
 from services.email_service import EmailService
+from services.settings_service import get_public_chat_url
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,54 @@ _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES = (".twilio.com",)
 
 # Pending-login TTL (matches verification-code expiry)
 _PENDING_LOGIN_TTL = 600  # 10 minutes
+
+# Outbound media (#1315): files are persisted to FILES-001 storage and handed to
+# Twilio as a public `?sig=` MediaUrl, which Twilio fetches server-side within
+# seconds of the send. A short TTL keeps the public link alive just long enough
+# for that fetch (+ Twilio retries) — the cleanup service reaps expired shares,
+# so the blob doesn't linger. NOT revoke-after-send: Twilio fetches the URL
+# *asynchronously* after the POST 2xx, so revoking on the API ack would race it.
+_OUTBOUND_MEDIA_EXPIRES_IN = 3600  # 1 hour
+
+# Twilio WhatsApp outbound media byte caps (per Twilio docs): image/audio/video
+# ≈5 MB, documents ≈16 MB. Outbound files today are text artifacts (documents,
+# ≤500 KB each via message_router caps), so the document cap is the operative
+# one; the media caps are defensive for future binary attachments.
+_WA_MEDIA_CAP_BYTES = 5 * 1024 * 1024
+_WA_DOC_CAP_BYTES = 16 * 1024 * 1024
+
+# MIME types deliverable as WhatsApp *documents* beyond the broad `text/*` match.
+_WA_DOC_MIME_ALLOWLIST = frozenset({
+    "application/json",
+    "application/xml",
+    "application/pdf",
+    "application/x-yaml",
+    "application/yaml",
+    "application/sql",
+    "application/javascript",
+    "application/x-ndjson",
+})
+
+
+def _outbound_media_cap_for_mime(mime: str) -> Optional[int]:
+    """Return the WhatsApp outbound byte cap for a MIME type, or None if the type
+    is not deliverable as media.
+
+    image/audio/video → 5 MB; documents (``text/*`` + a small allowlist of
+    structured types) → 16 MB. ``application/octet-stream`` / unknown is treated
+    as undeliverable (Twilio would reject it) → caller falls back to a text link.
+    """
+    mime = (mime or "").lower().split(";")[0].strip()
+    if not mime or mime == "application/octet-stream":
+        return None
+    top = mime.split("/")[0]
+    if top in ("image", "audio", "video"):
+        return _WA_MEDIA_CAP_BYTES
+    if top == "text":
+        return _WA_DOC_CAP_BYTES
+    if mime in _WA_DOC_MIME_ALLOWLIST:
+        return _WA_DOC_CAP_BYTES
+    return None
 
 
 def _get_pending_login_key(binding_id: int, user_id: str) -> str:
@@ -239,7 +291,15 @@ class WhatsAppAdapter(ChannelAdapter):
         response: ChannelResponse,
         thread_id: Optional[str] = None,
     ) -> None:
-        """Send a WhatsApp message via Twilio REST API."""
+        """Send a WhatsApp message via Twilio REST API.
+
+        Outbound files (``ChannelResponse.files``, #1315) are persisted to
+        FILES-001 storage and delivered as Twilio ``MediaUrl`` attachments — one
+        message per file (WhatsApp permits a single media per message). Text is
+        always sent *first* so the reply survives even if every media send fails;
+        files that can't be delivered as media (no public URL / unsupported MIME /
+        oversized) degrade to a download link appended to the text body.
+        """
         composite = response.metadata.get("bot_token") or ""
         agent_name = response.metadata.get("agent_name", "")
 
@@ -256,24 +316,138 @@ class WhatsAppAdapter(ChannelAdapter):
             logger.error("[WHATSAPP] No binding for agent=%s when sending response", agent_name)
             return
 
-        text = response.text or ""
-        if not text.strip():
+        # Persist + classify outbound files (per-file isolated; never raises).
+        media_urls, fallback_links = self._prepare_outbound_media(agent_name, response.files)
+
+        # Build the text body: convert the agent's markdown FIRST, then append any
+        # download links verbatim. Links must NOT pass through markdown conversion
+        # — a `__` in a `?sig=` token (base64url alphabet) would be mis-rendered as
+        # *bold* and corrupt the URL.
+        body_parts: List[str] = []
+        agent_text = response.text or ""
+        if agent_text.strip():
+            body_parts.append(self._markdown_to_whatsapp(agent_text))
+        if fallback_links:
+            body_parts.append("\n".join(f"📎 {name}: {url}" for name, url in fallback_links))
+        body = "\n\n".join(body_parts).strip()
+
+        if not body and not media_urls:
             return
 
-        # Agents emit standard markdown; WhatsApp uses its own syntax.
-        text = self._markdown_to_whatsapp(text)
+        if body:
+            for chunk in self._split_message(body):
+                await self._send_message(
+                    account_sid=account_sid,
+                    auth_token=auth_token,
+                    from_number=binding["from_number"],
+                    messaging_service_sid=binding.get("messaging_service_sid"),
+                    to_number=channel_id,
+                    body=chunk,
+                )
 
-        chunks = self._split_message(text)
-
-        for chunk in chunks:
-            await self._send_message(
+        # One media message per file — WhatsApp allows only a single media per message.
+        for media_url in media_urls:
+            result = await self._send_message(
                 account_sid=account_sid,
                 auth_token=auth_token,
                 from_number=binding["from_number"],
                 messaging_service_sid=binding.get("messaging_service_sid"),
                 to_number=channel_id,
-                body=chunk,
+                body="",
+                media_url=media_url,
             )
+            if result is None:
+                logger.warning(
+                    "[WHATSAPP] outbound media message rejected by Twilio (to=%s) — "
+                    "likely outside the 24h session window (63016) or unsupported media",
+                    _mask_phone(channel_id),
+                )
+
+    def _prepare_outbound_media(
+        self, agent_name: str, files: List["OutboundFile"]
+    ) -> tuple:
+        """Persist each outbound file to FILES-001 storage and classify it for
+        delivery.
+
+        Returns ``(media_urls, fallback_links)`` where ``media_urls`` are absolute
+        HTTPS ``?sig=`` URLs to send as Twilio ``MediaUrl`` and ``fallback_links``
+        are ``(filename, url)`` pairs to append to the text body (no public URL /
+        unsupported MIME / oversized).
+
+        Per-file isolation: a rejected or failed file (quota/disk/MIME-blocked,
+        ``HTTPException``, or any error) is logged and skipped — it never aborts
+        the text reply or its sibling files (#1315).
+        """
+        media_urls: List[str] = []
+        fallback_links: List[tuple] = []
+        if not files:
+            return media_urls, fallback_links
+
+        # Outbound media reuses FILES-001 public storage — gate on the same
+        # per-agent toggle. Off → text-only delivery (placeholder text remains).
+        if not db.get_file_sharing_enabled(agent_name):
+            logger.warning(
+                "[WHATSAPP] file sharing disabled for agent=%s; %d outbound file(s) not delivered as media",
+                agent_name, len(files),
+            )
+            return media_urls, fallback_links
+
+        for f in files:
+            try:
+                share = create_share_from_bytes(
+                    agent_name,
+                    f.content,
+                    display_name=f.filename,
+                    expires_in=_OUTBOUND_MEDIA_EXPIRES_IN,
+                    created_by=agent_name,
+                )
+            except HTTPException as e:
+                logger.warning(
+                    "[WHATSAPP] outbound file '%s' rejected (%s); skipping",
+                    f.filename, getattr(e, "detail", e),
+                )
+                continue
+            except Exception as e:
+                logger.warning(
+                    "[WHATSAPP] outbound file '%s' persist failed: %s; skipping",
+                    f.filename, e,
+                )
+                continue
+
+            url = share.get("url") or ""
+            mime = share.get("mime_type") or "application/octet-stream"
+            size = share.get("size_bytes") or 0
+
+            # Twilio fetches the MediaUrl from the public internet — a relative or
+            # non-HTTPS URL (public_chat_url unset) is unreachable. Degrade to a link.
+            if not url.lower().startswith("https://"):
+                logger.warning(
+                    "[WHATSAPP] public_chat_url not configured for HTTPS fetch; "
+                    "delivering '%s' as a text link instead of media",
+                    f.filename,
+                )
+                fallback_links.append((f.filename, url))
+                continue
+
+            cap = _outbound_media_cap_for_mime(mime)
+            if cap is None:
+                logger.warning(
+                    "[WHATSAPP] unsupported outbound media type '%s' for '%s'; delivering as text link",
+                    mime, f.filename,
+                )
+                fallback_links.append((f.filename, url))
+                continue
+            if size > cap:
+                logger.warning(
+                    "[WHATSAPP] outbound file '%s' (%d bytes, %s) exceeds WhatsApp cap %d; delivering as text link",
+                    f.filename, size, mime, cap,
+                )
+                fallback_links.append((f.filename, url))
+                continue
+
+            media_urls.append(url)
+
+        return media_urls, fallback_links
 
     def format_response(self, text: str) -> str:
         """Expose markdown conversion for non-send code paths (e.g. proactive)."""
@@ -514,17 +688,22 @@ class WhatsAppAdapter(ChannelAdapter):
         messaging_service_sid: Optional[str],
         to_number: str,
         body: str,
+        media_url: Optional[str] = None,
     ) -> Optional[dict]:
         """POST a single message to Twilio's Messages endpoint.
 
         Prefers MessagingServiceSid if configured (handles sender selection
-        server-side); falls back to explicit From.
+        server-side); falls back to explicit From. When ``media_url`` is set the
+        message carries a WhatsApp attachment (Twilio fetches the URL
+        server-side); ``Body`` is omitted when empty so a media-only message is
+        valid (#1315).
         """
         url = f"{TWILIO_API_BASE}/2010-04-01/Accounts/{account_sid}/Messages.json"
-        data = {
-            "To": to_number,
-            "Body": body,
-        }
+        data = {"To": to_number}
+        if body:
+            data["Body"] = body
+        if media_url:
+            data["MediaUrl"] = media_url
         if messaging_service_sid:
             data["MessagingServiceSid"] = messaging_service_sid
         else:

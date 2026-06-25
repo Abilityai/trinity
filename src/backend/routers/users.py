@@ -3,20 +3,61 @@ User management routes for the Trinity backend.
 
 Admin-only endpoints for listing users and managing their roles.
 """
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from models import User
 from database import db
-from dependencies import require_admin
+from dependencies import require_admin, get_current_user
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 VALID_ROLES = {"admin", "creator", "operator", "user"}
 
+# Permissive email-shape check (mirrors routers/setup.py): one @, a dot in the
+# domain, no spaces. Identity binding only — no verification mail is sent.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
+
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class UpdateMyEmailRequest(BaseModel):
+    email: str
+
+
+@router.put("/me/email")
+async def update_my_email(
+    body: UpdateMyEmailRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Bind a sign-in email to the current account (#82 Phase 1 transition).
+
+    The migration path for an existing admin created before #82 — whose stored
+    email is still the placeholder 'admin' — to register a real email and then
+    sign in with email + password, exactly like a fresh install captures at
+    first run. No verification mail is sent; binding the identity is independent
+    of whether an email provider is configured.
+    """
+    email = (body.email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    # Don't let one account claim another account's sign-in identity.
+    existing = db.get_user_by_email(email)
+    if existing and existing.get("username") != current_user.username:
+        raise HTTPException(
+            status_code=409,
+            detail="That email is already associated with another account",
+        )
+
+    updated = db.update_user(current_user.username, {"email": email})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"success": True, "email": email}
 
 
 @router.get("")

@@ -293,10 +293,10 @@ export const useAgentsStore = defineStore('agents', {
     },
 
     // Simplified Credential System (CRED-002)
-    async injectCredentials(name, files) {
+    async injectCredentials(name, files, filesB64 = {}) {
       const authStore = useAuthStore()
       const response = await axios.post(`/api/agents/${name}/credentials/inject`,
-        { files },
+        { files, files_b64: filesB64 },
         { headers: authStore.authHeader }
       )
       return response.data
@@ -352,6 +352,30 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // #668 — agent compatibility report. STATIC checks recompute live; pass
+    // includeAi=true to force a fresh (cost-incurring) AI evaluation, otherwise
+    // the last persisted AI verdicts are returned. The Overview panel fetches
+    // STATIC-only first (instant), then AI.
+    async getCompatibility(name, { includeAi = false } = {}) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/compatibility`, {
+        params: { include_ai: includeAi },
+        headers: authStore.authHeader,
+      })
+      return response.data
+    },
+
+    // #668 — apply an auto-fix for a correctable (gitignore) check. Owner/admin.
+    async fixCompatibilityIssue(name, checkId) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/compatibility/fix`,
+        { check_id: checkId },
+        { headers: authStore.authHeader },
+      )
+      return response.data
+    },
+
     async getAgentModel(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/model`, {
@@ -389,6 +413,16 @@ export const useAgentsStore = defineStore('agents', {
     async getAgentShares(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/shares`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // #17 Access tab: operator (Trinity-user) roster — allow-list emails resolved
+    // against `users` (active operator vs pending invite).
+    async getAgentAccess(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/access`, {
         headers: authStore.authHeader
       })
       return response.data

@@ -238,9 +238,36 @@ my-agent/
 │   ├── images/                    # Generated images
 │   └── exports/                   # Data exports, large files
 │
+├── data/                          # Runtime data — SQLite DBs, datasets (NOT COMMITTED; see data_paths)
+│
 ├── scripts/                       # Helper scripts (optional)
 └── resources/                     # Static resources (optional)
 ```
+
+---
+
+## Runtime Data (`data_paths`) — #1169
+
+If your agent accumulates **runtime data** — a SQLite database, a scraped dataset, an embeddings index — put it under **`data/`** (i.e. `/home/developer/data/...` inside the container) and declare it in `template.yaml`:
+
+```yaml
+data_paths:
+  - data/**            # everything under data/
+  # or be specific:
+  # - data/app.sqlite
+  # - data/datasets/**
+```
+
+Why this matters:
+
+- **It's already durable.** `/home/developer` is a persistent Docker volume that survives container restarts, recreation, image upgrades, and template re-pulls (`git reset --hard`). You do **not** need a separate volume.
+- **It stays out of git.** When you declare `data_paths`, Trinity appends `data/` to your agent's `.gitignore` at creation, so runtime data is never committed (no repo bloat, no accidental data leak). A template shipping its own `.gitignore` should pre-include `data/`.
+- **It's portable.** The owner can export the data as a tar and import it into another agent/instance:
+  - `POST /api/agents/{name}/data/export` — download a tar of `data/` (or `?format=base64` for small data inline).
+  - `POST /api/agents/{name}/data/import` — restore a tar back into `data/` (only `data/**` entries are written; path traversal is rejected).
+  - MCP tools `export_agent_data` / `import_agent_data` carry the tar as base64 for small datasets.
+
+Keep `data_paths` entries **under `data/`** — entries that escape the data root (absolute paths, `../`) are never snapshotted. Don't overlap `.trinity/`, `.claude/`, `.env`, `.mcp.json`, `git.commit_paths`, or `persistent_state` — those are managed separately. (Validation checks `DP-001..DP-005` enforce this.)
 
 ---
 

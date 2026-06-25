@@ -271,11 +271,13 @@ class ValidationService:
         """
         raw_response = result.response or ""
 
-        # Check for execution failure
-        if result.status == "failed":
+        # Check for execution failure. #679: a CANCELLED validation turn never
+        # actually validated anything — treat it as a non-success ERROR, not an
+        # empty response to be parsed as a validation verdict.
+        if result.status in ("failed", "cancelled"):
             return ValidationResult(
                 status=ValidationStatus.ERROR,
-                summary=f"Validation execution failed: {result.error or 'Unknown error'}",
+                summary=f"Validation execution {result.status}: {result.error or 'Unknown error'}",
                 items=[],
                 raw_response=raw_response,
             )

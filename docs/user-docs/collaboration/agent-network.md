@@ -2,6 +2,8 @@
 
 Agents communicate with each other via Trinity's MCP server, enabling orchestrator-worker patterns, delegation chains, and multi-agent systems.
 
+> 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [How We Automate Our Own Ops & Marketing](https://youtu.be/DDhSdwJ1sx8) *(Mar 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 **Agent-to-Agent Communication** -- Agents call each other through Trinity MCP tools using agent-scoped API keys. The `chat_with_agent` MCP tool sends a message to another agent and returns the response.
@@ -11,6 +13,8 @@ Agents communicate with each other via Trinity's MCP server, enabling orchestrat
 **Collaboration Dashboard** -- A real-time visual graph on the Dashboard showing agents as nodes and communication as animated edges. Built with Vue Flow.
 
 **DAG Visualization** -- The network graph shows agent relationships with live activity indicators, success rate bars, and context usage.
+
+**Pull-Pilot Routing (experimental)** -- An alternative routing path for agent-to-agent `chat_with_agent` calls, behind a default-OFF flag (`MCP_AGENT_CHAT_PULL_ENABLED`). When enabled, a sequential agent-to-agent call is dispatched through Trinity's durable async task path instead of a held synchronous call: the caller gets an immediate receipt with an `execution_id` and polls `get_execution_result(id)` for the result. This is an opt-in proof-of-concept for pull/work-stealing coordination. It does not change human chat, parallel calls, or self-calls. Leave it off unless you are piloting it.
 
 ## How It Works
 

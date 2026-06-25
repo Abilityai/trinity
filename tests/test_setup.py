@@ -51,6 +51,15 @@ class TestSetupStatus:
         data = response.json()
         assert isinstance(data["setup_completed"], bool)
 
+    def test_setup_status_reports_available(self, unauthenticated_client: TrinityApiClient):
+        """setup_available stays true (back-compat) now the Redis token is gone (#49)."""
+        response = unauthenticated_client.get("/api/setup/status", auth=False)
+
+        assert_status(response, 200)
+        data = response.json()
+        # Field kept for older frontends; the token/Redis gate was removed in #49.
+        assert data.get("setup_available", True) is True
+
 
 class TestSetupAdminPassword:
     """Tests for POST /api/setup/admin-password endpoint.
@@ -68,13 +77,14 @@ class TestSetupAdminPassword:
         if not status_data.get("setup_completed"):
             pytest.skip("Setup not completed - cannot test blocked state")
 
-        # Try to set password again - should be blocked (include setup_token to pass Pydantic validation)
+        # Try to set password again — should be blocked. No setup token anymore
+        # (trinity-enterprise#49); email is now required.
         response = unauthenticated_client.post(
             "/api/setup/admin-password",
             json={
-                "setup_token": "any-token-setup-is-already-done",
-                "password": "newpassword123",
-                "confirm_password": "newpassword123"
+                "email": "admin@example.com",
+                "password": "V@lidP4ssword!123",
+                "confirm_password": "V@lidP4ssword!123"
             },
             auth=False
         )
@@ -83,30 +93,27 @@ class TestSetupAdminPassword:
         data = response.json()
         assert "already completed" in data.get("detail", "").lower() or "setup" in data.get("detail", "").lower()
 
-    def test_invalid_setup_token_rejected(self, unauthenticated_client: TrinityApiClient):
-        """POST /api/setup/admin-password rejects requests with an invalid setup token."""
+    def test_missing_email_rejected(self, unauthenticated_client: TrinityApiClient):
+        """POST /api/setup/admin-password rejects a missing admin email (now required, #49)."""
         # First check if setup is completed
         status_response = unauthenticated_client.get("/api/setup/status", auth=False)
         status_data = status_response.json()
 
         if status_data.get("setup_completed"):
-            pytest.skip("Setup already completed - cannot test token validation")
+            pytest.skip("Setup already completed - cannot test email validation")
 
-        # Try with a wrong token but otherwise valid request
+        # Otherwise-valid request but no email — required field is missing.
         response = unauthenticated_client.post(
             "/api/setup/admin-password",
             json={
-                "setup_token": "invalid-token-that-will-not-match",
                 "password": "V@lidP4ssword!123",
                 "confirm_password": "V@lidP4ssword!123"
             },
             auth=False
         )
 
-        # Should reject with 403 (invalid token)
-        assert_status(response, 403)
-        data = response.json()
-        assert "token" in data.get("detail", "").lower()
+        # Missing required field → 422 (Pydantic); a blank/typo'd email → 400.
+        assert_status_in(response, [400, 422])
 
     def test_password_validation_missing_fields(self, unauthenticated_client: TrinityApiClient):
         """POST /api/setup/admin-password rejects missing required fields."""
@@ -117,7 +124,7 @@ class TestSetupAdminPassword:
         if status_data.get("setup_completed"):
             pytest.skip("Setup already completed - cannot test validation")
 
-        # Try with empty body - missing all required fields (password, confirm_password, setup_token)
+        # Try with empty body - missing all required fields (email, password, confirm_password)
         response = unauthenticated_client.post(
             "/api/setup/admin-password",
             json={},

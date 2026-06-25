@@ -179,6 +179,27 @@ class TestFeatureFlagsEndpoint:
             "workspace_available should default to False unless explicitly enabled"
         )
 
+    def test_feature_flags_includes_mcp_agent_chat_pull_enabled(self):
+        """feature-flags must expose mcp_agent_chat_pull_enabled (#946 observability)."""
+        headers = get_auth_headers()
+        resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "mcp_agent_chat_pull_enabled" in data, (
+            "feature-flags response missing 'mcp_agent_chat_pull_enabled' key"
+        )
+        assert isinstance(data["mcp_agent_chat_pull_enabled"], bool)
+
+    def test_mcp_agent_chat_pull_enabled_false_by_default(self):
+        """The #946 pull pilot must default OFF unless MCP_AGENT_CHAT_PULL_ENABLED is set."""
+        headers = get_auth_headers()
+        resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mcp_agent_chat_pull_enabled"] is False, (
+            "mcp_agent_chat_pull_enabled should default to False (pilot is opt-in)"
+        )
+
 
 class TestPlatformDefaultModelSetting:
     """Admin can read/write platform_default_model via /api/settings/{key}."""

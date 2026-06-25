@@ -27,6 +27,13 @@ from typing import Optional
 from database import db
 from db_models import NotificationCreate
 
+# Re-export the shared SUB-003 auth-class classifier (#1088) so existing
+# consumers (routers/chat.py, services/task_execution_service.py) and their
+# test patch targets keep importing `is_auth_failure` from this module
+# unchanged. The redundant alias makes this an explicit re-export (recognised
+# by ruff F401 + mypy --no-implicit-reexport).
+from services.failure_classifier import is_auth_failure as is_auth_failure
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,58 +84,6 @@ def _reset_locks_for_test() -> None:
     global _AGENT_SWITCH_LOCKS_GUARD
     _AGENT_SWITCH_LOCKS.clear()
     _AGENT_SWITCH_LOCKS_GUARD = None
-
-
-# Substrings that indicate an auth-class subscription failure. Mirrors the
-# scheduler's classification at `src/scheduler/service.py` (which now imports
-# this same list to keep the two surfaces from drifting).
-AUTH_INDICATORS = [
-    "credit balance",
-    "unauthorized",
-    "authentication",
-    "credentials",
-    "forbidden",
-    "401",
-    "403",
-    "oauth",
-    "token expired",
-    "not authenticated",
-]
-
-# #904: unambiguous signal-kill / OOM / timeout markers. When the error
-# message contains any of these we short-circuit `is_auth_failure` to
-# False even if an AUTH_INDICATOR also happens to match — a SIGKILL is
-# evidence the subprocess died from outside, not from a real auth
-# response on the wire, and triggering SUB-003 burns the 2h skip-list
-# slot for the alternative subscription without fixing anything.
-NON_AUTH_KILL_MARKERS = [
-    "sigkill",
-    "sigterm",
-    "sigint",
-    "exit code -9",
-    "exit code -15",
-    "exit code -2",
-    "exit code 137",   # 128 + 9 (shell-encoded SIGKILL)
-    "exit code 143",   # 128 + 15 (shell-encoded SIGTERM)
-    "exit code 130",   # 128 + 2 (shell-encoded SIGINT)
-    "terminated by",
-    "killed by",
-    "out of memory",
-    "oom",
-    "memory cgroup",
-]
-
-
-def is_auth_failure(error_message: str) -> bool:
-    """Return True if `error_message` contains any AUTH_INDICATORS substring
-    AND does not also contain an unambiguous signal-kill / OOM / timeout
-    marker (#904)."""
-    if not error_message:
-        return False
-    error_lower = error_message.lower()
-    if any(marker in error_lower for marker in NON_AUTH_KILL_MARKERS):
-        return False
-    return any(ind in error_lower for ind in AUTH_INDICATORS)
 
 
 async def handle_subscription_failure(
@@ -270,8 +225,11 @@ async def _perform_auto_switch(
     # utils/helpers.py, issue #476) and the 24h cleanup in
     # services/cleanup_service.py removes them from disk.
 
-    # Restart agent container to apply new subscription token
-    restart_result = await _restart_agent(agent_name)
+    # Rotate the subscription token on the running container via hot-reload so
+    # in-flight turns survive the switch (#1089). Falls back to a full restart on
+    # a 404 (old base image without the endpoint), transport failure, or when no
+    # token is resolvable — identical to the previous recreate behavior.
+    restart_result = await _hot_reload_subscription_token(agent_name)
 
     # Log activity event
     from services.activity_service import activity_service
@@ -355,3 +313,98 @@ async def _restart_agent(agent_name: str) -> str:
     except Exception as e:
         logger.error(f"[SUB-003] Failed to restart agent '{agent_name}': {e}")
         return f"failed: {e}"
+
+
+async def _hot_reload_subscription_token(agent_name: str) -> str:
+    """Push the agent's current DB subscription token to the running container
+    via ``POST /api/credentials/reload-token`` (#1089).
+
+    The agent server mutates its own ``os.environ["CLAUDE_CODE_OAUTH_TOKEN"]``,
+    so the NEXT claude subprocess uses the rotated token while in-flight turns
+    keep their already-inherited old token and finish — "rotate a credential"
+    is no longer the same operation as "kill every running turn".
+
+    Falls back to the full ``_restart_agent`` recreate path (today's behavior,
+    no regression) on:
+      - a 404 — an old base image that predates the endpoint,
+      - any transport / circuit failure (``AgentClientError`` family), or
+      - no resolvable token for the agent's current subscription.
+    Returns ``"no_container"`` / ``"not_running"`` when the agent is not a
+    running container, mirroring ``_restart_agent``.
+    """
+    try:
+        from services.docker_service import (
+            get_agent_container,
+            get_agent_status_from_container,
+        )
+        from services.agent_client import get_agent_client, AgentClientError
+
+        container = get_agent_container(agent_name)
+        if not container:
+            return "no_container"
+        if get_agent_status_from_container(container).status != "running":
+            return "not_running"
+
+        sub_id = db.get_agent_subscription_id(agent_name)
+        token = db.get_subscription_token(sub_id) if sub_id else None
+        if not token:
+            # No token to push (e.g. assignment cleared mid-flight). Fall back to
+            # the recreate path, which re-bakes Config.Env from the DB.
+            return await _restart_agent(agent_name)
+
+        client = get_agent_client(agent_name)
+        try:
+            # remove_api_key=False is intentional: subscription-backed agents never
+            # carry ANTHROPIC_API_KEY in env (popped at create time, lifecycle.py).
+            # The param is kept for a future mode-change-via-hot-reload caller.
+            resp = await client.post(
+                "/api/credentials/reload-token",
+                json={"token": token, "remove_api_key": False},
+                timeout=10.0,
+            )
+        except AgentClientError as e:
+            logger.warning(
+                f"[SUB-003] hot-reload transport failure for '{agent_name}': {e}; "
+                f"falling back to restart"
+            )
+            return await _restart_agent(agent_name)
+
+        if resp.status_code >= 400:  # 404 = old base image without the endpoint
+            logger.info(
+                f"[SUB-003] hot-reload returned HTTP {resp.status_code} for "
+                f"'{agent_name}'; falling back to restart"
+            )
+            return await _restart_agent(agent_name)
+
+        logger.info(f"[SUB-003] Hot-reloaded subscription token for '{agent_name}' (no recreate)")
+        return "hot_reloaded"
+    except Exception as e:
+        logger.error(
+            f"[SUB-003] hot-reload error for '{agent_name}': {e}; falling back to restart"
+        )
+        return await _restart_agent(agent_name)
+
+
+async def reload_subscription_for_all_agents(subscription_id: str) -> dict[str, str]:
+    """Hot-reload the subscription token on every running agent assigned to
+    `subscription_id` (#1089 key rollover — re-registering a subscription's
+    token via the `/api/subscriptions` upsert).
+
+    Best-effort per agent, each under the #799 per-agent switch lock so a
+    rollout can't interleave with a concurrent auto-switch: a failure on one
+    agent is logged and does NOT abort the fan-out or block the others. Stopped
+    agents are skipped by the helper (`not_running`) — they pick up the new
+    token on next start (Config.Env is re-baked from the DB on recreate).
+    Returns ``{agent_name: result}`` for observability.
+    """
+    results: dict[str, str] = {}
+    for agent_name in db.get_agents_by_subscription(subscription_id):
+        try:
+            async with await agent_switch_lock(agent_name):
+                results[agent_name] = await _hot_reload_subscription_token(agent_name)
+        except Exception as e:
+            logger.error(
+                f"[SUB-003] key-rollover hot-reload failed for '{agent_name}': {e}"
+            )
+            results[agent_name] = f"failed: {e}"
+    return results

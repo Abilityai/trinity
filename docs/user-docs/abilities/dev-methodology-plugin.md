@@ -2,6 +2,8 @@
 
 Documentation-driven development methodology for any codebase. Enforces a structured cycle: context loading, development, testing, documentation, and PR validation.
 
+> 📺 **Watch:** [3 AI Agents Run My Entire Software Development Pipeline](https://youtu.be/zCDFDhewFkk) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Installation
 
 ```bash

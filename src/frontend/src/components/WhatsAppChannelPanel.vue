@@ -84,7 +84,7 @@
       <!-- Ops prerequisite notice -->
       <div class="p-3 rounded-lg text-xs bg-state-autonomous-50 dark:bg-state-autonomous-900/30 text-state-autonomous-800 dark:text-state-autonomous-200">
         <strong>Deployment prerequisite:</strong> Cloudflare Tunnel ingress must route
-        <code class="font-mono">/api/whatsapp/webhook/*</code> to the frontend service.
+        <code class="font-mono">/api/whatsapp/webhook/*</code> to the <strong>backend</strong> service (<code class="font-mono">http://backend:8000</code>).
         See <em>docs/requirements/PUBLIC_EXTERNAL_ACCESS_SETUP.md</em>.
       </div>
 

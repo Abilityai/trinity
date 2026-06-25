@@ -443,6 +443,25 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 
 ---
 
+## Persisted per-agent voice (trinity-enterprise#28)
+
+The Gemini voice was historically hardcoded to `"Kore"` (`routers/voice.py::_get_voice_name`).
+It is now a persisted per-agent setting, `agent_ownership.voice_name` (default `Kore`,
+an edition-agnostic OSS primitive like `voice_system_prompt`):
+
+- `GET/PUT /api/agents/{name}/voice/name` — GET returns the persisted voice plus
+  `available_voices`/`default_voice`; PUT is owner-only and validates against the
+  canonical `GEMINI_VOICE_NAMES` (`config.py`), shared with the frontend picker
+  list (`src/constants/voices.js`) and drift-guarded by a unit test.
+- **Resolution at session start** (`voice_start`): per-session request override
+  (`VoiceStartRequest.voice_name`) → persisted `voice_name` → `Kore`. The read
+  path (`db.get_voice_name`) falls back to `Kore` for an unset or no-longer-valid
+  persisted value.
+- The **Workspace** ephemeral picker (`AgentWorkspace.vue`) now defaults its
+  selection to the persisted voice; the picker list is the shared
+  `src/constants/voices.js` module. The persisted voice also drives outbound VoIP
+  calls — see `voip-telephony.md`.
+
 ## Related Documentation
 
 - [Authenticated Chat Tab](./authenticated-chat-tab.md) — Existing chat implementation

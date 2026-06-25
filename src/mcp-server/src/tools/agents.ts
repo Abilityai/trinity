@@ -145,6 +145,62 @@ export function createAgentTools(
     },
 
     // ========================================================================
+    // get_agent_compatibility_report - Trinity-compatibility validation (#668)
+    // ========================================================================
+    getAgentCompatibilityReport: {
+      name: "get_agent_compatibility_report",
+      description:
+        "Run Trinity-compatibility validation on an agent's workspace and return the report. " +
+        "Checks ~100 best-practice rules across file structure, security/secret hygiene, " +
+        "template.yaml, CLAUDE.md quality, credentials, git config, skills, autonomy, dashboard, " +
+        "cross-file consistency, and composability. Each result is HARD (will likely break Trinity), " +
+        "SOFT (best practice), or INFO, with PASS/FAIL/SKIPPED status. Deterministic STATIC checks " +
+        "run live; AI-evaluated checks read file contents (returns the last result unless include_ai=true). " +
+        "Non-blocking and advisory. Access control: agents can only report on agents they may call.",
+      parameters: z.object({
+        agent_name: z.string().describe("The name of the agent to validate"),
+        include_ai: z
+          .boolean()
+          .optional()
+          .describe("Force a fresh AI evaluation (default true); false returns the last persisted AI verdicts"),
+      }),
+      execute: async (
+        { agent_name, include_ai }: { agent_name: string; include_ai?: boolean },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        // Access control for agent-scoped keys (mirror get_agent_info).
+        if (authContext?.scope === "agent" && authContext?.agentName) {
+          const callerAgentName = authContext.agentName;
+          if (agent_name !== callerAgentName) {
+            const permittedAgents = await apiClient.getPermittedAgents(callerAgentName);
+            if (!permittedAgents.includes(agent_name)) {
+              return JSON.stringify({
+                success: false,
+                error: "Access denied",
+                reason: `Agent '${callerAgentName}' does not have permission to access '${agent_name}'`,
+              }, null, 2);
+            }
+          }
+        }
+
+        try {
+          const report = await apiClient.getAgentCompatibilityReport(
+            agent_name,
+            include_ai !== false
+          );
+          return JSON.stringify({ success: true, ...report }, null, 2);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[get_agent_compatibility_report] Error: ${errorMessage}`);
+          return JSON.stringify({ success: false, error: errorMessage }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
     // create_agent - Create a new agent
     // ========================================================================
     createAgent: {
@@ -414,24 +470,31 @@ export function createAgentTools(
       description:
         "Inject credential files directly into a running agent's workspace. " +
         "This is the new simplified credential system that writes files directly " +
-        "without Redis or template processing. Supports .env, .mcp.json, and other files. " +
-        "The agent must be running.",
+        "without Redis or template processing. Supports a curated set of credential " +
+        "file types: .env, .mcp.json, cloud service-account JSON (.config/gcloud/**), " +
+        "kubeconfig (.kube/config), TLS/cert material (*.pem/*.key/*.crt/*.p12/*.pfx), " +
+        "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to inject credentials into"),
-        files: z.record(z.string()).describe(
-          'Map of file paths to contents. Example: {".env": "KEY=value\\nSECRET=xxx", ".mcp.json": "{}"}'
+        files: z.record(z.string()).optional().describe(
+          'Map of file paths to TEXT contents. Example: {".env": "KEY=value", ".config/gcloud/sa.json": "{...}"}'
+        ),
+        files_b64: z.record(z.string()).optional().describe(
+          'Map of file paths to BASE64-encoded binary contents (e.g. .p12/.pfx/DER cert material).'
         ),
       }),
       execute: async (
-        { name, files }: { name: string; files: Record<string, string> },
+        { name, files, files_b64 }: { name: string; files?: Record<string, string>; files_b64?: Record<string, string> },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
-        console.log(`[inject_credentials] Injecting ${Object.keys(files).length} file(s) into agent '${name}'`);
+        const textFiles = files || {};
+        const binFiles = files_b64 || {};
+        console.log(`[inject_credentials] Injecting ${Object.keys(textFiles).length + Object.keys(binFiles).length} file(s) into agent '${name}'`);
 
-        const result = await apiClient.injectCredentials(name, files);
+        const result = await apiClient.injectCredentials(name, textFiles, binFiles);
         return JSON.stringify(result, null, 2);
       },
     },
@@ -483,6 +546,63 @@ export function createAgentTools(
         console.log(`[import_credentials] Importing credentials into agent '${name}'`);
 
         const result = await apiClient.importCredentials(name);
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // export_agent_data - Export an agent's runtime data (#1169)
+    // ========================================================================
+    exportAgentData: {
+      name: "export_agent_data",
+      description:
+        "Export an agent's runtime data (the /home/developer/data directory: SQLite DBs, " +
+        "datasets) as a base64-encoded tar with an embedded manifest. Together with the " +
+        "template URL and .credentials.enc, this is the portable artifact for moving an " +
+        "agent to another Trinity instance (pair with import_agent_data). " +
+        "INLINE LIMIT: only small datasets fit this MCP response (a few MB); larger data " +
+        "must use the streaming download endpoint POST /api/agents/{name}/data/export. " +
+        "Owner/admin only; the agent must be running.",
+      parameters: z.object({
+        name: z.string().describe("The name of the agent to export data from"),
+      }),
+      execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        console.log(`[export_agent_data] Exporting data from agent '${name}'`);
+
+        const result = await apiClient.exportAgentData(name);
+        return JSON.stringify(result, null, 2);
+      },
+    },
+
+    // ========================================================================
+    // import_agent_data - Restore runtime data into an agent (#1169)
+    // ========================================================================
+    importAgentData: {
+      name: "import_agent_data",
+      description:
+        "Restore runtime data into an agent's /home/developer/data directory from a " +
+        "base64-encoded tar (typically produced by export_agent_data). The backend enforces " +
+        "the data/** allowlist and rejects path traversal, so only data/ entries are written. " +
+        "Owner/admin only; the agent must be running.",
+      parameters: z.object({
+        name: z.string().describe("The name of the agent to restore data into"),
+        tar_base64: z
+          .string()
+          .describe("base64-encoded tar of the data directory, from export_agent_data"),
+      }),
+      execute: async (
+        { name, tar_base64 }: { name: string; tar_base64: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        console.log(`[import_agent_data] Restoring data into agent '${name}'`);
+
+        const result = await apiClient.importAgentData(name, tar_base64);
         return JSON.stringify(result, null, 2);
       },
     },

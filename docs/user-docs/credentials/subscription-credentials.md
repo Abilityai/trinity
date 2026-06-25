@@ -2,11 +2,13 @@
 
 Share Claude Max/Pro subscription tokens across multiple agents, with automatic assignment, health monitoring, and auto-switch on rate limits.
 
+> 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Subscription** -- A Claude Max or Pro subscription token registered with Trinity. Stored encrypted (AES-256-GCM). Injected as an environment variable to assigned agents.
 - **Round-Robin Assignment** -- New agents automatically get a subscription assigned. The subscription with the fewest agents is selected first, with alphabetical tie-break.
-- **Auto-Switch (SUB-003)** -- When an agent hits repeated rate-limit (429) errors, Trinity automatically switches it to a different subscription.
+- **Auto-Switch (SUB-003)** -- When an agent hits a rate-limit (429) or auth-class failure, Trinity automatically switches it to a different subscription. The new token is applied via a **hot-reload** of the running container -- no container recreate -- so in-flight executions keep running. Default ON; toggle it off in the Subscriptions section of Settings.
 
 ## How It Works
 
@@ -54,7 +56,8 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 ## Limitations
 
 - Requires `CREDENTIAL_ENCRYPTION_KEY` in `.env`. Without it, subscription features are unavailable.
-- Auto-switch depends on rate-limit detection. If an agent does not surface 429 errors through standard logging, auto-switch will not trigger.
+- Auto-switch depends on failure detection. If an agent does not surface 429 or auth-class errors through standard logging, auto-switch will not trigger.
+- Hot-reload applies the new token to the **next** Claude subprocess; turns already in flight finish on the previous token. On older agent base images that lack the hot-reload endpoint, the switch falls back to recreating the container (which drops in-flight executions).
 - Round-robin assignment considers only agent count, not agent activity or usage volume.
 
 ## See Also

@@ -2,6 +2,8 @@
 
 Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical tracking, and sparkline charts.
 
+> 📺 **Watch:** [Why Every AI Agent Needs a GitHub Repo — dashboards](https://youtu.be/R4nNHf6ywEs) *(Apr 2026)* · [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **dashboard.yaml** -- A YAML file in the agent's workspace defining custom widgets. The agent writes and updates this file to control what appears on its Dashboard tab.

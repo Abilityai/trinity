@@ -24,10 +24,11 @@ import os
 import json
 import base64
 import logging
-import httpx
 from typing import Dict, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from services.agent_auth import agent_httpx_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,33 @@ ENCRYPTION_KEY_ENV = "CREDENTIAL_ENCRYPTION_KEY"
 
 # Default credential files to look for
 DEFAULT_CREDENTIAL_FILES = [".env", ".mcp.json"]
+
+# Marker on the inner JSON of a v2 (binary-capable) `.credentials.enc` archive
+# (#11). Absent ⇒ legacy flat `{path: text}` archive.
+_ARCHIVE_V2_MARKER = "__cred_archive_v2__"
+
+
+def validate_credential_set(files: Dict[str, str], files_b64: Dict[str, str] = None) -> None:
+    """Enforce the curated credential policy + `.mcp.json` content guard over a
+    text/binary credential set (#11 review). Raises ``ValueError`` on violation.
+
+    Used on the IMPORT boundary so the backend re-validates a decrypted archive
+    before writing — the dual-layer (backend + agent-server) the issue mandates,
+    rather than trusting the downstream /inject check alone. The user-facing
+    inject router enforces the same rules inline (HTTP 400)."""
+    from services.credential_paths import disallowed_paths
+    files_b64 = files_b64 or {}
+    bad = disallowed_paths(list(files) + list(files_b64))
+    if bad:
+        raise ValueError(f"Archive contains disallowed credential path(s): {bad}")
+    if ".mcp.json" in files_b64:
+        raise ValueError(".mcp.json may not be binary (content must be validatable)")
+    if ".mcp.json" in files:
+        from services.mcp_validator import validate_mcp_config, McpValidationError
+        try:
+            validate_mcp_config(files[".mcp.json"])
+        except McpValidationError as e:
+            raise ValueError(f"Invalid .mcp.json in archive: {e}")
 
 
 class CredentialsFileNotFoundError(ValueError):
@@ -182,6 +210,26 @@ class CredentialEncryptionService:
 
         return files
 
+    # ------------------------------------------------------------------
+    # Binary-aware archive (#11). `encrypt`/`decrypt` above stay flat
+    # `{path: text}` (back-compat: SIEM/2FA/SSO single-secret callers + legacy
+    # `.credentials.enc` files). These wrap a v2 inner structure carrying both
+    # text and base64 binary, reusing the SAME AES-GCM envelope.
+    # ------------------------------------------------------------------
+
+    def encrypt_files(self, files: Dict[str, str], files_b64: Dict[str, str] = None) -> str:
+        """Encrypt a text+binary credential set into a v2 `.credentials.enc`."""
+        inner = {_ARCHIVE_V2_MARKER: 1, "files": files or {}, "files_b64": files_b64 or {}}
+        return self.encrypt(inner)
+
+    def decrypt_files(self, encrypted: str):
+        """Return ``(files, files_b64)``. Reads v2 archives AND legacy flat
+        `{path: text}` archives (which carry no binary)."""
+        data = self.decrypt(encrypted)
+        if isinstance(data, dict) and data.get(_ARCHIVE_V2_MARKER):
+            return data.get("files", {}), data.get("files_b64", {})
+        return data, {}
+
     async def read_agent_credential_files(
         self,
         agent_name: str,
@@ -202,7 +250,7 @@ class CredentialEncryptionService:
 
         files = {}
 
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/credentials/read",
                 params={"paths": ",".join(file_paths)},
@@ -220,25 +268,59 @@ class CredentialEncryptionService:
 
         return files
 
+    async def read_agent_credential_files_split(self, agent_name: str, file_paths: list):
+        """Read ``file_paths`` from the agent, returning ``(files, files_b64)`` —
+        text in ``files``, non-UTF-8 (binary) creds base64 in ``files_b64`` (#11)."""
+        async with agent_httpx_client(agent_name) as client:
+            response = await client.get(
+                f"http://agent-{agent_name}:8000/api/credentials/read",
+                params={"paths": ",".join(file_paths)},
+                timeout=30.0,
+            )
+            if response.status_code != 200:
+                logger.warning(f"Failed to read credentials from agent {agent_name}: {response.status_code}")
+                return {}, {}
+            data = response.json()
+            return data.get("files", {}), data.get("files_b64", {})
+
+    async def list_agent_credential_files(self, agent_name: str):
+        """Return the list of allow-policy credential paths present in the agent
+        (via the agent `/api/credentials/list`). Empty list on older images that
+        lack the endpoint, so callers fall back to DEFAULT_CREDENTIAL_FILES (#11)."""
+        try:
+            async with agent_httpx_client(agent_name) as client:
+                response = await client.get(
+                    f"http://agent-{agent_name}:8000/api/credentials/list",
+                    timeout=30.0,
+                )
+                if response.status_code != 200:
+                    return []
+                return [item["path"] for item in response.json().get("files", [])]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"credentials/list unavailable for {agent_name}: {e}")
+            return []
+
     async def write_agent_credential_files(
         self,
         agent_name: str,
-        files: Dict[str, str]
+        files: Dict[str, str],
+        files_b64: Dict[str, str] = None,
     ) -> Dict[str, any]:
         """
         Write credential files to a running agent.
 
         Args:
             agent_name: Name of the agent
-            files: Dict mapping file paths to contents
+            files: Dict mapping file paths to text contents
+            files_b64: Dict mapping file paths to base64 binary contents (#11)
 
         Returns:
             Response from agent with written files list
         """
-        async with httpx.AsyncClient() as client:
+        async with agent_httpx_client(agent_name) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/credentials/inject",
-                json={"files": files},
+                json={"files": files, "files_b64": files_b64 or {}},
                 timeout=30.0
             )
 
@@ -264,16 +346,25 @@ class CredentialEncryptionService:
             file_paths: List of file paths to export
 
         Returns:
-            Path to the encrypted file written
+            (path_to_encrypted_file, number_of_files_captured)
         """
-        # Read credential files from agent
-        files = await self.read_agent_credential_files(agent_name, file_paths)
+        # Discover the full injected credential set (#11). When the caller
+        # doesn't pin paths, ask the agent which allow-policy files exist; fall
+        # back to the legacy 2-file default on older images without /list.
+        if file_paths is None:
+            discovered = await self.list_agent_credential_files(agent_name)
+            file_paths = discovered or DEFAULT_CREDENTIAL_FILES
+        # Never fold a prior archive into the new one.
+        file_paths = [p for p in file_paths if p != ".credentials.enc"]
 
-        if not files:
+        # Read split into text + binary
+        files, files_b64 = await self.read_agent_credential_files_split(agent_name, file_paths)
+
+        if not files and not files_b64:
             raise ValueError("No credential files found to export")
 
-        # Encrypt
-        encrypted = self.encrypt(files)
+        # Encrypt the full set (binary-capable v2 archive)
+        encrypted = self.encrypt_files(files, files_b64)
 
         # Write .credentials.enc to agent workspace
         await self.write_agent_credential_files(
@@ -281,9 +372,10 @@ class CredentialEncryptionService:
             {".credentials.enc": encrypted}
         )
 
-        logger.info(f"Exported {len(files)} credential files to .credentials.enc for agent {agent_name}")
+        total = len(files) + len(files_b64)
+        logger.info(f"Exported {total} credential files to .credentials.enc for agent {agent_name}")
 
-        return ".credentials.enc"
+        return ".credentials.enc", total
 
     async def import_to_agent(self, agent_name: str) -> Dict[str, str]:
         """
@@ -313,18 +405,25 @@ class CredentialEncryptionService:
                 "No .credentials.enc file found in agent workspace"
             )
 
-        # Decrypt
-        credential_files = self.decrypt(encrypted)
+        # Decrypt (handles v2 binary archives AND legacy flat archives)
+        files, files_b64 = self.decrypt_files(encrypted)
 
-        if not credential_files:
+        if not files and not files_b64:
             raise ValueError("Encrypted file contains no credential files")
 
-        # Write decrypted files to agent
-        await self.write_agent_credential_files(agent_name, credential_files)
+        # #11 review: enforce the curated policy + .mcp.json content guard on the
+        # IMPORT boundary too (backend layer), not only the agent-server /inject
+        # layer. An archive can only be forged with the server key, but dual-layer
+        # is the issue's invariant — don't rely solely on the downstream check.
+        validate_credential_set(files, files_b64)
 
-        logger.info(f"Imported {len(credential_files)} credential files from .credentials.enc for agent {agent_name}")
+        # Write decrypted files to agent (text + binary)
+        await self.write_agent_credential_files(agent_name, files, files_b64)
 
-        return credential_files
+        total = len(files) + len(files_b64)
+        logger.info(f"Imported {total} credential files from .credentials.enc for agent {agent_name}")
+
+        return {**files, **files_b64}
 
 
 # Singleton instance

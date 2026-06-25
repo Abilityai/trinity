@@ -2,9 +2,11 @@
 
 Trinity is an autonomous agent orchestration and infrastructure platform — sovereign infrastructure for deploying, orchestrating, and governing fleets of autonomous AI agents on your own hardware.
 
+> 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed runtimes (Python 3.11, Node.js 20, Go 1.21, Claude Code). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.11, Node.js 20, Go 1.21) and a pluggable agent runtime: Claude Code, OpenAI Codex, or Gemini CLI (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
@@ -77,7 +79,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ### Platform Capabilities
 
 - Create agents from GitHub templates or local directories
-- Multi-runtime support: Claude Code, Gemini CLI
+- Multi-runtime support: Claude Code, OpenAI Codex, Gemini CLI (see [Agent Runtimes](../agents/agent-runtimes.md))
 - Credential management with encryption and hot-reload
 - Agent-to-agent collaboration via MCP tool calls
 - Cron-based scheduling with execution history and per-schedule timeouts

@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from dependencies import AuthorizedAgentByName
 from services.a2a_card_service import generate_a2a_card
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ async def _fetch_template_data(agent_name: str, container) -> dict:
 
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/template/info"
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with agent_httpx_client(agent_name, timeout=5.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 data = response.json()

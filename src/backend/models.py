@@ -386,7 +386,8 @@ class DeployLocalResponse(BaseModel):
 
 class CredentialInjectRequest(BaseModel):
     """Request to inject credential files directly into an agent."""
-    files: Dict[str, str]  # {".env": "KEY=value\n...", ".mcp.json": "{}"}
+    files: Dict[str, str] = {}       # text files: {".env": "KEY=value\n...", ".mcp.json": "{}"}
+    files_b64: Dict[str, str] = {}   # binary files: {path: base64(content)} (#11 — .p12/.pfx/DER)
 
 
 class CredentialInjectResponse(BaseModel):
@@ -490,6 +491,19 @@ class SharedFilesList(BaseModel):
     quota_bytes: int
 
 
+class AgentDataImportResponse(BaseModel):
+    """Response for POST /api/agents/{name}/data/import (#1169).
+
+    `restored`/`skipped` come straight from the agent-server restore
+    primitive (`restore_from_tar`); `skipped` entries fell outside the
+    `data/**` allowlist or tripped a path-traversal guard.
+    """
+    agent_name: str
+    restored: List[str]
+    skipped: List[str]
+    bytes_received: int
+
+
 class AgentDefaultResourcesUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/resources (RES-001)."""
     cpu: Optional[str] = None
@@ -570,16 +584,20 @@ class ExecutionResultEnvelope(BaseModel):
     carries the same shape the synchronous ``/api/task`` response does (cost_usd,
     context_window, token counts, compact_events, session_id).
 
+    ``status`` is free-form ``str`` (not an enum) for forward-compatibility: the
+    backend maps ``success``→SUCCESS, ``cancelled``→CANCELLED (#679), and every
+    other value (incl. an unknown future status) →FAILED.
+
     Field caps bound abuse from a buggy/compromised agent while staying well
     above a legitimate large transcript (the sync path already accepts these):
     enforced in the router after parse so the failure is a clean 413, not a
     Pydantic 422 (the agent's retry logic special-cases status codes).
     """
-    status: str = Field(..., description="'success' or 'failed'")
+    status: str = Field(..., description="'success', 'failed', or 'cancelled'")
     response: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
-    terminal_reason: Optional[str] = None  # completed|max_duration|stall_no_output|auth|empty_result
+    terminal_reason: Optional[str] = None  # completed|max_duration|stall_no_output|auth|empty_result|cancelled
     metadata: Optional[Dict] = None
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
@@ -749,3 +767,114 @@ class AgentAnalyticsResponse(BaseModel):
     timeline: List[AgentAnalyticsTimelinePoint] = []
     sampled: bool = False
     sample_size: int = 0
+
+
+class ScheduleSummaryRow(BaseModel):
+    """One per-schedule performance rollup (#1115).
+
+    `success_rate` is terminal-based (success / (success + failed [incl.
+    `error`])) and `None` when there were zero terminal runs in the window —
+    the UI renders `—`, not a false 0%. `avg_duration_ms` / `context_avg` are
+    `None` when nothing measurable ran. A zero-run schedule still appears
+    (all counts 0, rates `None`).
+    """
+    schedule_id: str
+    name: str
+    command: str = ""
+    cron_expression: str
+    enabled: bool
+    total_executions: int
+    success_count: int
+    failed_count: int
+    cancelled_count: int
+    success_rate: Optional[float] = None
+    avg_duration_ms: Optional[int] = None
+    cost_total: float
+    context_avg: Optional[int] = None
+    tool_call_total: int
+    last_run_at: Optional[str] = None
+    last_run_status: Optional[str] = None
+
+
+class AgentSchedulesSummaryResponse(BaseModel):
+    """Response envelope for GET /api/agents/{name}/schedules/analytics-summary (#1115).
+
+    One compact rollup row per non-deleted schedule for the window — consumed
+    by BOTH the Overview "Schedules performance" section and the Schedules-tab
+    inline stats from a single call (no N per-schedule round-trips).
+    `tool_calls_sampled` flags when the agent-wide tool-call parse pool was
+    capped. UTC window via `iso_cutoff`.
+    """
+    window_hours: int
+    schedule_count: int
+    tool_calls_sampled: bool = False
+    schedules: List[ScheduleSummaryRow] = []
+
+
+# =============================================================================
+# Agent Compatibility Validation (#668)
+# =============================================================================
+
+class CompatibilityCheck(BaseModel):
+    """Result of a single compatibility check (one row from the spec catalog).
+
+    `status` is the check outcome: "pass" (compliant), "fail" (issue found), or
+    "skipped" (not evaluated — e.g. AI checks with no API key, or a check that
+    doesn't apply to this agent's runtime). `severity` is the catalog severity
+    (hard | soft | info); AI-evaluated checks are capped at SOFT since their
+    verdict is non-deterministic (HARD is reserved for deterministic STATIC
+    checks). `detail` carries safe, redacted specifics (line numbers, patterns)
+    — never a secret value.
+    """
+    check_id: str  # "F-001", "S-003", "C-002", ...
+    category: str  # human-readable category name
+    severity: str  # "hard" | "soft" | "info"
+    type: str  # "static" | "ai"
+    status: str  # "pass" | "fail" | "skipped"
+    message: str
+    auto_fixable: bool = False
+    explanation: Optional[str] = None  # AI rationale / extra context (markdown)
+    confidence: Optional[float] = None  # AI confidence 0..1 (None for STATIC)
+    detail: Optional[Dict] = None  # redacted specifics (location, pattern)
+    skip_reason: Optional[str] = None  # why a check was skipped
+
+
+class CompatibilityReport(BaseModel):
+    """Aggregate compatibility report for one agent (#668).
+
+    `overall_status`: "compatible" (no hard/soft failures), "issues" (≥1
+    hard/soft failure), or "unavailable" (couldn't read the workspace — e.g.
+    agent stopped, collector failure). `container_running` distinguishes the
+    degraded-stopped case from a genuine clean result. `ai_ran_at` is the
+    timestamp of the last AI evaluation (None if never run) so the UI can show
+    staleness and a re-run affordance.
+    """
+    agent_name: str
+    container_running: bool
+    overall_status: str  # "compatible" | "issues" | "unavailable"
+    runtime: Optional[str] = None  # agent runtime (claude | gemini | codex)
+    checks: List[CompatibilityCheck] = []
+    hard_count: int = 0
+    soft_count: int = 0
+    info_count: int = 0
+    ai_ran_at: Optional[str] = None
+    static_ran_at: Optional[str] = None
+    message: Optional[str] = None  # human note for the unavailable case
+
+
+class CompatibilityFixRequest(BaseModel):
+    """Request to auto-fix a single correctable compatibility check (#668)."""
+    check_id: str
+
+
+class CompatibilityFixResponse(BaseModel):
+    """Result of an auto-fix attempt (#668).
+
+    `uncommitted` is always true on success: the fix edits the in-container
+    `.gitignore` only — committing/pushing is the agent's own git-sync job, so
+    the change is not yet on GitHub until the next sync.
+    """
+    check_id: str
+    fixed: bool
+    message: str
+    uncommitted: bool = True

@@ -2,6 +2,8 @@
 
 The official agent development toolkit for Claude Code. Curated plugins covering the full agent lifecycle — from scaffolding and onboarding to deployment, scheduling, and ongoing operations.
 
+> 📺 **Watch:** [Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Quick Start
 
 ```bash

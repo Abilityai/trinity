@@ -2,6 +2,8 @@
 
 Create and interact with a Trinity agent using the Web UI, API, or MCP tools.
 
+> 📺 **Watch:** [Build an AI Recruiter Agent — zero to deployed](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
+
 ## How It Works
 
 1. Open http://localhost and log in as admin.

@@ -2,6 +2,8 @@
 
 AI-generated avatars for agents using reference images, emotion variants, and default generation.
 
+> 📺 **Watch:** [Trinity Platform Demo — avatar generation](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## Features
 
 - **Reference Image** -- Upload a reference image and the avatar is generated in that style.

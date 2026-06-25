@@ -241,8 +241,18 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
 
 ## Security Recommendations
 
-1. **Never expose Redis externally** - Keep it internal only
-2. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
-3. **Use email whitelist** - Restrict access to approved email addresses only
-4. **Regular backups** - Automate database backups
-5. **Keep Docker updated** - Regular security patches
+1. **Protect the first-run setup window** — first-time setup (`/setup` → create the
+   admin account) is **unauthenticated by design** so it works on a fresh install,
+   and it carries **no setup token** (removed in trinity-enterprise#49 to keep
+   self-hosted bring-up frictionless). The endpoint self-disables the moment the
+   admin account is created, but until then **anyone who can reach the URL can
+   claim the admin account**. On an instance reachable by anyone other than you
+   before setup completes (a public IP, a shared network), **keep it behind a
+   tunnel/VPN or otherwise network-restricted until you have created the admin
+   account.** On localhost / a trusted LAN this is a non-issue. After setup, login
+   is fully authenticated and the window is closed.
+2. **Never expose Redis externally** - Keep it internal only
+3. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
+4. **Use email whitelist** - Restrict access to approved email addresses only
+5. **Regular backups** - Automate database backups
+6. **Keep Docker updated** - Regular security patches

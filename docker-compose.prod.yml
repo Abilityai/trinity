@@ -45,6 +45,10 @@ services:
       # prod (the #1039 packaging-gap class).
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      # Agent auth master (#1159) - backend derives each agent's in-container
+      # :8000 auth token from this; .env alone is inert in prod, so forward it
+      # explicitly. Backend hard-fails on first agent call if unset.
+      - AGENT_AUTH_SECRET=${AGENT_AUTH_SECRET:-}
       - EMAIL_PROVIDER=${EMAIL_PROVIDER:-resend}
       - RESEND_API_KEY=${RESEND_API_KEY:-}
       - SMTP_FROM=${SMTP_FROM:-noreply@trinity.example.com}
@@ -86,6 +90,12 @@ services:
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
+      # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
+      # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}
@@ -182,9 +192,18 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+      # #1230: relaxed so the probe tolerates transient load without hiding a
+      # real outage. With only 2 uvicorn workers, scheduled-batch windows make
+      # them GIL-contended; a /health probe then waits out the old 10s timeout,
+      # and 3 consecutive aborts flipped the container to `unhealthy` even
+      # though /health served 200s throughout (false negative). Any consumer of
+      # Docker health (autoheal, depends_on: service_healthy, LB drain) could
+      # act on that and restart the backend mid-batch, orphaning in-flight
+      # executions. Higher timeout + start_period + retries absorb the spike;
+      # a genuine outage (all probes fail) still trips after ~5 intervals.
+      timeout: 30s
+      retries: 5
+      start_period: 60s
 
   frontend:
     build:
@@ -391,6 +410,9 @@ services:
       # Fail-loud at compose render rather than silently use a well-known fallback (issue #692).
       - "TRINITY_PASSWORD=${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}"
       - MCP_REQUIRE_API_KEY=${MCP_REQUIRE_API_KEY:-true}
+      # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
+      # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
+      - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
       # INTERNAL_API_SECRET (SEC-001) — shared secret for POST /api/internal/audit
       # so MCP tool-call audit reaches the backend. Mirrors docker-compose.yml;
       # without it audit.ts (postAudit) early-returns and ALL MCP tool-call audit

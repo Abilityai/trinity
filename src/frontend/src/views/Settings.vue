@@ -46,6 +46,59 @@
           <TwoFactorPanel v-if="activeTab === 'security'" />
 
           <!-- Platform Section -->
+          <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
+               real email so they can sign in with email + password, matching
+               what a fresh install captures at first-run setup. -->
+          <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg mb-6">
+            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+              <h2 class="text-lg font-medium text-gray-900 dark:text-white">Admin sign-in email</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Sign in with this email and your password instead of the <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code> username. No verification email is sent.
+              </p>
+            </div>
+            <div class="px-6 py-4">
+              <label for="admin-email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
+              <div class="mt-1 flex gap-2">
+                <input
+                  type="email"
+                  id="admin-email"
+                  v-model="adminEmailInput"
+                  :placeholder="adminEmailCurrent || 'you@company.com'"
+                  :disabled="savingAdminEmail"
+                  class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                />
+                <button
+                  @click="saveAdminEmail"
+                  :disabled="!adminEmailInput || savingAdminEmail"
+                  class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg v-if="savingAdminEmail" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Save
+                </button>
+              </div>
+              <div class="mt-2 flex items-center text-sm">
+                <template v-if="adminEmailSaveSuccess">
+                  <svg class="h-4 w-4 text-status-success-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span class="text-status-success-600 dark:text-status-success-400">Saved — you can now sign in with this email</span>
+                </template>
+                <template v-else-if="adminEmailError">
+                  <span class="text-status-danger-600 dark:text-status-danger-400">{{ adminEmailError }}</span>
+                </template>
+                <template v-else-if="adminEmailCurrent">
+                  <span class="text-gray-500 dark:text-gray-400">Current: {{ adminEmailCurrent }}</span>
+                </template>
+                <template v-else>
+                  <span class="text-state-autonomous-600 dark:text-state-autonomous-400">No email set — you currently sign in as <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">admin</code></span>
+                </template>
+              </div>
+            </div>
+          </div>
+
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Platform</h2>
@@ -2108,6 +2161,18 @@ const originalPrompt = ref('')
 const publicUrl = ref('')
 const publicUrlCurrent = ref('')
 
+// Admin sign-in email (#82 Phase 1) — existing-admin migration to email login.
+const adminEmailInput = ref('')
+const savingAdminEmail = ref(false)
+const adminEmailSaveSuccess = ref(false)
+const adminEmailError = ref('')
+// Only a real email (with @) counts as "set"; the legacy admin row stores the
+// placeholder 'admin' until one is registered.
+const adminEmailCurrent = computed(() => {
+  const e = authStore.user?.email || ''
+  return e.includes('@') ? e : ''
+})
+
 // Platform default model (#831)
 const platformDefaultModelValue = ref('claude-sonnet-4-6')
 const savingPlatformDefaultModel = ref(false)
@@ -2539,6 +2604,26 @@ async function loadPublicUrl() {
     publicUrlCurrent.value = value || ''
   } catch (e) {
     console.error('Failed to load public URL:', e)
+  }
+}
+
+async function saveAdminEmail() {
+  const email = (adminEmailInput.value || '').trim()
+  if (!email) return
+  savingAdminEmail.value = true
+  adminEmailSaveSuccess.value = false
+  adminEmailError.value = ''
+  try {
+    await axios.put('/api/users/me/email', { email }, { headers: authStore.authHeader })
+    // Refresh so the displayed "current" email updates immediately.
+    await authStore.fetchUserProfile()
+    adminEmailInput.value = ''
+    adminEmailSaveSuccess.value = true
+    setTimeout(() => { adminEmailSaveSuccess.value = false }, 4000)
+  } catch (e) {
+    adminEmailError.value = e?.response?.data?.detail || 'Failed to save email'
+  } finally {
+    savingAdminEmail.value = false
   }
 }
 

@@ -4,6 +4,8 @@ Run the same task against one agent repeatedly, in order, with a bounded run cou
 
 Loops are the sequential counterpart to [Fan-Out](fan-out.md) (parallel batch) and a single chat turn (one-shot).
 
+> 📺 **Watch:** [Build Autonomous Loops for Your AI Agents](https://youtu.be/q3YvFYtuhec) *(Jun 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Loop** — A server-managed sequence of up to `max_runs` task executions against one agent. Iterations run strictly one at a time, in order.

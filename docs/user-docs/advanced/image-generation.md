@@ -2,6 +2,8 @@
 
 Platform image generation via a two-step Gemini pipeline: prompt refinement then image generation.
 
+> 📺 **Watch:** [I Let AI Agents Build My Entire Webinar](https://youtu.be/WBVbg_bwc_g) *(Dec 2025)* · [all videos](../videos.md)
+
 ## How It Works
 
 1. Submit an image generation request via API.

@@ -60,6 +60,22 @@ class AgentShare(BaseModel):
     allow_proactive: bool = False  # Can agent send proactive messages to this user
 
 
+class AgentOperatorAccess(BaseModel):
+    """A Trinity operator (user) with access to an agent — #17 Access tab.
+
+    Built by resolving an ``agent_sharing`` allow-list email against ``users``:
+    ``status='active'`` when it resolves to an account (``username``/``role``/
+    ``last_active`` populated), ``status='pending'`` for an allow-listed email
+    with no account yet.
+    """
+    email: str
+    username: Optional[str] = None
+    role: Optional[str] = None
+    last_active: Optional[str] = None  # ISO-Z last_login; None until first login
+    status: str                        # 'active' | 'pending'
+    allow_proactive: bool = False
+
+
 class AgentShareRequest(BaseModel):
     email: str  # Email of user to share with
 

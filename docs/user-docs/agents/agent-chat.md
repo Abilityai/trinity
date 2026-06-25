@@ -2,6 +2,8 @@
 
 The Chat tab in Agent Detail provides a bubble UI for conversing with agents, with persistent history and real-time status updates.
 
+> 📺 **Watch:** [I Gave My AI Three Years of My Notes — Then Interviewed It (voice chat)](https://youtu.be/xflQTzarEBQ) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Chat Session** -- A conversation thread stored in the database. Each agent can have multiple sessions.

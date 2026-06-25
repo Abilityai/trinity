@@ -151,6 +151,10 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         "persistent_state": metadata.get(
             "persistent_state", list(DEFAULT_PERSISTENT_STATE)
         ),
+        # Surface `data_paths` (#1169) so crud.py can materialize
+        # `.trinity/data-paths.yaml` + the per-agent .gitignore at creation.
+        # Opt-in — defaults to an empty list when the template omits the key.
+        "data_paths": metadata.get("data_paths", []),
     }
 
 
@@ -209,6 +213,8 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         # frontend can preview them without a second round-trip.
         "capabilities": data.get("capabilities", []),
         "use_cases": data.get("use_cases", []),
+        # Opt-in runtime-data declaration (#1169); defaults to empty.
+        "data_paths": data.get("data_paths", []),
     }
 
 

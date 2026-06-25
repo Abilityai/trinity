@@ -2,6 +2,8 @@
 
 Create new Claude Code agents with domain-specific wizards. Each wizard is a domain expert that asks the right questions and builds a fully configured, Trinity-compatible agent.
 
+> 📺 **Watch:** [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [all videos](../videos.md)
+
 ## Installation
 
 ```bash

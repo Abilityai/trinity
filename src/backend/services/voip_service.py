@@ -200,7 +200,10 @@ class VoipService:
             "user_id": initiator_user_id,
             "user_email": initiator_email,
             "system_prompt": system_prompt,
-            "voice_name": "Kore",
+            # Persisted per-agent voice (#28); falls back to 'Kore' inside the
+            # accessor. Always set here so twilio_media_stream's intent.get(...,
+            # "Kore") fallback is dead code, not a silent override (reviewer C2).
+            "voice_name": db.get_voice_name(agent_name),
             "to_number": dest,
             "process_transcript": bool(process_transcript),
         }

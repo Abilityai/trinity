@@ -294,22 +294,8 @@ def check_disk_space(needed_bytes: int, *, root: str = "/data", min_free: int = 
         )
 
 
-async def create_share(
-    agent_name: str,
-    filename: str,
-    *,
-    display_name: Optional[str] = None,
-    expires_in: Optional[int] = None,
-    created_by: Optional[str] = None,
-) -> dict:
-    """
-    End-to-end: extract → validate → persist → DB insert → return URL payload.
-    """
-    # --- flag gate ---
-    if not db.get_file_sharing_enabled(agent_name):
-        raise HTTPException(status_code=403, detail="FEATURE_DISABLED: file sharing is not enabled for this agent")
-
-    # --- expiration ---
+def _validate_expires_in(expires_in: Optional[int]) -> int:
+    """Normalise + bounds-check the requested share lifetime."""
     if expires_in is None:
         expires_in = DEFAULT_EXPIRES_IN
     if expires_in < MIN_EXPIRES_IN or expires_in > MAX_EXPIRES_IN:
@@ -317,12 +303,28 @@ async def create_share(
             status_code=400,
             detail=f"INVALID_EXPIRATION: expires_in must be between {MIN_EXPIRES_IN} and {MAX_EXPIRES_IN}",
         )
+    return expires_in
 
-    # --- path ---
-    container_path = validate_publish_path(filename)
 
-    # --- extract ---
-    data, basename = await extract_from_agent(agent_name, container_path)
+def _persist_and_register(
+    agent_name: str,
+    data: bytes,
+    *,
+    basename: str,
+    display_name: Optional[str],
+    expires_in: int,
+    created_by: Optional[str],
+) -> dict:
+    """
+    Shared tail of the share pipeline: MIME-detect → blocklist → quota →
+    disk-check → persist to disk → DB insert → mint URL.
+
+    Operates on in-memory bytes that have *already* been obtained. The two
+    public entry points differ only in where ``data`` comes from:
+    ``create_share`` extracts it from the agent container; ``create_share_from_bytes``
+    receives it from the caller (e.g. outbound channel media, #1315). Keeping the
+    DB-failure cleanup (``os.unlink``) here means both paths get it for free.
+    """
     size_bytes = len(data)
 
     # --- MIME ---
@@ -383,3 +385,74 @@ async def create_share(
         "size_bytes": size_bytes,
         "mime_type": mime_type,
     }
+
+
+async def create_share(
+    agent_name: str,
+    filename: str,
+    *,
+    display_name: Optional[str] = None,
+    expires_in: Optional[int] = None,
+    created_by: Optional[str] = None,
+) -> dict:
+    """
+    End-to-end: extract → validate → persist → DB insert → return URL payload.
+    """
+    # --- flag gate ---
+    if not db.get_file_sharing_enabled(agent_name):
+        raise HTTPException(status_code=403, detail="FEATURE_DISABLED: file sharing is not enabled for this agent")
+
+    # --- expiration ---
+    expires_in = _validate_expires_in(expires_in)
+
+    # --- path ---
+    container_path = validate_publish_path(filename)
+
+    # --- extract ---
+    data, basename = await extract_from_agent(agent_name, container_path)
+
+    return _persist_and_register(
+        agent_name,
+        data,
+        basename=basename,
+        display_name=display_name,
+        expires_in=expires_in,
+        created_by=created_by,
+    )
+
+
+def create_share_from_bytes(
+    agent_name: str,
+    data: bytes,
+    *,
+    display_name: str,
+    expires_in: Optional[int] = None,
+    created_by: Optional[str] = None,
+) -> dict:
+    """
+    Persist already-in-memory bytes as a public share and mint a download URL —
+    the outbound-channel-media counterpart to ``create_share`` (#1315).
+
+    Same MIME-blocklist / quota / disk / DB pipeline as ``create_share``; the
+    bytes come from the caller (e.g. ``ChannelResponse.files`` artifacts) rather
+    than being extracted from the agent container. Used by channels like WhatsApp
+    that deliver media by URL (Twilio fetches the public ``?sig=`` URL
+    server-side) instead of uploading bytes directly.
+
+    Raises ``HTTPException`` (403 gate / 400 expiry / 413 quota / 507 disk /
+    400 MIME-blocked) exactly like ``create_share`` — callers must isolate it so
+    one rejected file never aborts a whole response.
+    """
+    if not db.get_file_sharing_enabled(agent_name):
+        raise HTTPException(status_code=403, detail="FEATURE_DISABLED: file sharing is not enabled for this agent")
+
+    expires_in = _validate_expires_in(expires_in)
+
+    return _persist_and_register(
+        agent_name,
+        data,
+        basename=display_name,
+        display_name=display_name,
+        expires_in=expires_in,
+        created_by=created_by,
+    )

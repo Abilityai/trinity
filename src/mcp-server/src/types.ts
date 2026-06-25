@@ -309,3 +309,33 @@ export interface OperatorQueueListResponse {
   items: OperatorQueueItem[];
   count: number;
 }
+
+// Agent compatibility validation (#668)
+
+export interface CompatibilityCheck {
+  check_id: string;
+  category: string;
+  severity: string; // "hard" | "soft" | "info"
+  type: string; // "static" | "ai"
+  status: string; // "pass" | "fail" | "skipped"
+  message: string;
+  auto_fixable: boolean;
+  explanation?: string | null;
+  confidence?: number | null;
+  detail?: Record<string, unknown> | null;
+  skip_reason?: string | null;
+}
+
+export interface CompatibilityReport {
+  agent_name: string;
+  container_running: boolean;
+  overall_status: string; // "compatible" | "issues" | "unavailable"
+  runtime?: string | null;
+  checks: CompatibilityCheck[];
+  hard_count: number;
+  soft_count: number;
+  info_count: number;
+  ai_ran_at?: string | null;
+  static_ran_at?: string | null;
+  message?: string | null;
+}

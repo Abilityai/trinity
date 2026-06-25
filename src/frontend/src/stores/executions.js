@@ -32,6 +32,14 @@ export const useExecutionsStore = defineStore('executions', () => {
   const analyticsCache = ref({})
   const analyticsLoading = ref(false)
 
+  // --- per-schedule performance rollups (#1115) ---
+  // One compact call per (agent, window), cached + shared by the Overview
+  // "Schedules performance" section AND the Schedules-tab inline stats — so
+  // neither surface issues N per-schedule round-trips. Same fetch-once
+  // discipline as analytics above. Keyed `${name}:${window}`.
+  const schedulesSummaryCache = ref({})
+  const schedulesSummaryLoading = ref(false)
+
   // --- getters ---
   const hasActiveFilters = computed(() =>
     filters.value.agent ||
@@ -127,6 +135,25 @@ export const useExecutionsStore = defineStore('executions', () => {
     }
   }
 
+  // Per-schedule performance summary (#1115). Cached per (agent, window);
+  // returns the cached payload unless `force` or first fetch. One call backs
+  // both the Overview section and the Schedules-tab inline stats.
+  async function fetchSchedulesSummary(name, window = '7d', { force = false } = {}) {
+    const key = `${name}:${window}`
+    if (!force && schedulesSummaryCache.value[key]) return schedulesSummaryCache.value[key]
+    schedulesSummaryLoading.value = true
+    try {
+      const res = await axios.get(
+        `/api/agents/${encodeURIComponent(name)}/schedules/analytics-summary`,
+        { params: { window }, headers: authStore.authHeader }
+      )
+      schedulesSummaryCache.value = { ...schedulesSummaryCache.value, [key]: res.data }
+      return res.data
+    } finally {
+      schedulesSummaryLoading.value = false
+    }
+  }
+
   function setFilter(key, value) {
     filters.value[key] = value
     refresh()
@@ -178,6 +205,9 @@ export const useExecutionsStore = defineStore('executions', () => {
     analyticsCache,
     analyticsLoading,
     fetchAgentAnalytics,
+    schedulesSummaryCache,
+    schedulesSummaryLoading,
+    fetchSchedulesSummary,
     fetchExecutions,
     fetchStats,
     loadMore,

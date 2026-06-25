@@ -15,11 +15,11 @@ import logging
 import threading
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
-import httpx
 
 from models import User
 from database import db
 from dependencies import get_current_user, decode_token
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, docker_client
 from services.docker_utils import (
     container_reload, container_stop, container_start,
@@ -79,7 +79,7 @@ async def get_system_agent_status(
     if status == "running":
         try:
             agent_url = f"http://agent-{SYSTEM_AGENT_NAME}:8000/api/health"
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with agent_httpx_client(SYSTEM_AGENT_NAME, timeout=5.0) as client:
                 response = await client.get(agent_url)
                 if response.status_code == 200:
                     result["health"] = response.json()

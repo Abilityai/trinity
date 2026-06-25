@@ -1,0 +1,54 @@
+# Enterprise-docs disclosure guard (trinity-enterprise#45)
+#
+# Fails the build if a public doc reintroduces enterprise/paid-feature
+# specifics: named paid features (SIEM/SCIM/...), private `enterprise_*`
+# table/schema identifiers, or per-module internals. Public docs may describe
+# the GENERIC open-core seam only (entitlement registry + conditional module
+# registration) — never the catalog of which capabilities are paid.
+#
+# Out of scope by design: point-in-time historical records
+# (docs/archive/**, docs/releases/**, docs/security-reports/**) — those are
+# covered by the separate git-history-scrub follow-up, not this forward guard.
+name: enterprise-docs-guard
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'CLAUDE.md'
+      - '.github/workflows/enterprise-docs-guard.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'docs/**'
+      - 'CLAUDE.md'
+
+# Least privilege: the guard only checks out and greps — no writes.
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan live public docs for enterprise disclosure
+        run: |
+          set -uo pipefail
+          # Genuinely-private identifiers: named paid features + private schema +
+          # per-module paths. Word-boundaried where the token is also a common word.
+          PATTERN='\bSIEM\b|\bSCIM\b|enterprise_siem|enterprise_user_2fa|enterprise_2fa|enterprise_sso|two_factor|2fa_recovery_codes'
+          # Live docs only — exclude historical/point-in-time trees and this guard.
+          HITS=$(grep -rniE "$PATTERN" docs/ CLAUDE.md \
+                   --exclude-dir=archive \
+                   --exclude-dir=releases \
+                   --exclude-dir=security-reports \
+                   2>/dev/null || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::Enterprise/paid-feature detail found in public docs (trinity-enterprise#45)."
+            echo "Public docs describe the generic open-core seam only. Move specifics to trinity-enterprise/docs/."
+            echo "--------------------------------------------------------------------"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "OK — no enterprise/paid-feature disclosure in live public docs."

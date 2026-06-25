@@ -187,6 +187,32 @@ def _attempt_empty_result_recovery(
     return (status_code, body)
 
 
+def _timeout_504_detail(
+    ctx: "HeadlessRunContext",
+    message: str,
+    termination_reason: str,
+    stalled_tool: Optional[str] = None,
+) -> Dict:
+    """Structured 504 body for an agent-side timeout kill (#1094, #1201).
+
+    Carries the telemetry accumulated before the kill (cost / context / tool
+    calls) under ``metadata`` — the same sanitized
+    ``ExecutionMetadata.model_dump()`` shape the #678 empty-result body uses —
+    so the backend's HTTPError salvage (`task_execution_service.py` HTTPError
+    branch) persists cost/context onto the timed-out FAILED row instead of
+    writing it bare. ``termination_reason`` ("max_duration" | "stall_no_output")
+    and the timeout-failure semantics are unchanged.
+    """
+    detail: Dict = {
+        "message": message,
+        "termination_reason": termination_reason,
+        "metadata": sanitize_dict(ctx.metadata.model_dump()),
+    }
+    if stalled_tool is not None:
+        detail["stalled_tool"] = stalled_tool
+    return detail
+
+
 @dataclass
 class HeadlessRunContext:
     """State carrier for the headless execution lifecycle.
@@ -1132,10 +1158,11 @@ async def execute_headless_task(
                 # termination_reason see budget timeouts from either path.
                 raise HTTPException(
                     status_code=504,
-                    detail={
-                        "message": f"Task execution timed out after {ctx.effective_timeout} seconds",
-                        "termination_reason": "max_duration",
-                    },
+                    detail=_timeout_504_detail(
+                        ctx,
+                        f"Task execution timed out after {ctx.effective_timeout} seconds",
+                        "max_duration",
+                    ),
                 )
             except subprocess.TimeoutExpired:
                 # Inner process.wait() bounded out; tree has already been killed.
@@ -1151,22 +1178,24 @@ async def execute_headless_task(
                     )
                     raise HTTPException(
                         status_code=504,
-                        detail={
-                            "message": (
+                        detail=_timeout_504_detail(
+                            ctx,
+                            (
                                 f"Killed: tool '{ctx.stalled_tool}' produced no output "
                                 f"for {_STALL_LIMIT_S:.0f}s (stall watchdog)"
                             ),
-                            "termination_reason": "stall_no_output",
-                            "stalled_tool": ctx.stalled_tool,
-                        },
+                            "stall_no_output",
+                            stalled_tool=ctx.stalled_tool,
+                        ),
                     )
                 logger.error(f"[Headless Task] Task {ctx.task_session_id} timed out after {ctx.effective_timeout}s")
                 raise HTTPException(
                     status_code=504,
-                    detail={
-                        "message": f"Task execution timed out after {ctx.effective_timeout} seconds",
-                        "termination_reason": "max_duration",
-                    },
+                    detail=_timeout_504_detail(
+                        ctx,
+                        f"Task execution timed out after {ctx.effective_timeout} seconds",
+                        "max_duration",
+                    ),
                 )
             except RuntimeError as e:
                 # Permission mode validation failure — fast-fail with actionable error

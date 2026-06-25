@@ -2,6 +2,8 @@
 
 Connect, deploy, operate, and sync agents on the Trinity platform. Six skills covering the complete lifecycle — from first connection to running remote loops and provisioning new instances.
 
+> 📺 **Watch:** [Build Autonomous Loops for Your AI Agents](https://youtu.be/q3YvFYtuhec) *(Jun 2026)* · [all videos](../videos.md)
+
 ## Installation
 
 ```bash

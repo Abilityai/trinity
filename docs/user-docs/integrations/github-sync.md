@@ -2,6 +2,8 @@
 
 Keep agents in sync with GitHub (or self-hosted Git) repositories using two modes: Source mode (pull-only, default) and Working Branch mode (bidirectional).
 
+> 📺 **Watch:** [Why Every AI Agent Needs a GitHub Repo](https://youtu.be/R4nNHf6ywEs) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Source Mode** (default): Pull-only. The agent pulls from the repo but never pushes. Used for deploying agent code from a canonical source.

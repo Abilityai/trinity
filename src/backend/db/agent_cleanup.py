@@ -145,6 +145,9 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_sync_state",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_skills",                 "agent_name",        Policy.CASCADE),
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
+    # #668 — latest compatibility snapshot (transient/recomputable): wipe on
+    # delete, re-key on rename via this registry.
+    AgentRef("agent_compatibility_results",  "agent_name",        Policy.CASCADE),
 
     # --- Monitoring / dashboards -------------------------------------------
     AgentRef("agent_health_checks",          "agent_name",        Policy.CASCADE),

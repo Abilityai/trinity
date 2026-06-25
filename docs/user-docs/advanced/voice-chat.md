@@ -2,6 +2,8 @@
 
 Real-time voice conversations with agents via Gemini 2.5 Flash Native Audio model (~280ms latency). Audio streams bidirectionally through a backend WebSocket proxy. Gemini handles speech-to-speech; Claude Code remains the agent's reasoning engine and is invoked on demand via tool calling.
 
+> 📺 **Watch:** [I Gave My AI Three Years of My Notes — Then Interviewed It](https://youtu.be/xflQTzarEBQ) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Voice Session** — A live audio session bridged between the browser, Trinity backend, and Gemini Live API. Transcripts are saved to the agent's chat session on close.

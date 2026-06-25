@@ -29,6 +29,7 @@ from database import (
 from dependencies import get_current_user
 from models import User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
+from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
@@ -238,7 +239,7 @@ async def get_public_link_info(token: str, request: Request):
 
     if agent_available:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with agent_httpx_client(agent_name, timeout=5.0) as client:
                 response = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
                 if response.status_code == 200:
                     info = response.json()
@@ -284,7 +285,7 @@ async def get_public_playbooks(token: str, request: Request):
 
     try:
         agent_url = f"http://agent-{agent_name}:8000/api/skills"
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with agent_httpx_client(agent_name, timeout=10.0) as client:
             response = await client.get(agent_url)
             if response.status_code == 200:
                 return response.json()
@@ -621,7 +622,10 @@ async def public_chat(
         images=_pub_image_data,
     )
 
-    if result.status == "failed":
+    if result.status in ("failed", "cancelled"):
+        # #679: a CANCELLED turn is non-delivery, not a success-like empty
+        # response. It falls through to the generic 502 below (its error text
+        # matches no capacity/timeout branch) — the operator stopped the work.
         error = result.error or ""
         if "at capacity" in error:
             raise HTTPException(
@@ -725,7 +729,7 @@ async def get_agent_intro(
 
     # Execute intro prompt via parallel task endpoint
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with agent_httpx_client(agent_name, timeout=120.0) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/task",
                 json={
@@ -956,8 +960,10 @@ async def _execute_public_chat_background(
                         user_email=verified_email,
                         session_id=chat_session_id,
                     ))
-        elif result.status == "failed":
-            logger.error(f"[PublicChatAsync] Task failed for {agent_name}: {result.error}")
+        elif result.status in ("failed", "cancelled"):
+            # #679: non-delivery — only a SUCCESS turn with a response is posted
+            # to the public session above; a cancelled turn writes nothing.
+            logger.info(f"[PublicChatAsync] Task {result.status} for {agent_name}: {result.error}")
     except Exception as e:
         logger.error(f"[PublicChatAsync] Background execution error for {agent_name}: {e}")
 
@@ -992,7 +998,7 @@ async def public_stream_execution(
         """Proxy SSE stream from agent container."""
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with agent_httpx_client(agent_name, timeout=None) as client:
                 async with client.stream("GET", agent_url) as response:
                     if response.status_code != 200:
                         yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
@@ -1046,8 +1052,11 @@ async def public_execution_status(
     return {
         "execution_id": execution.id,
         "status": execution.status,
-        "response": execution.response if execution.status in ("success", "failed") else None,
-        "error": execution.error if execution.status == "failed" else None,
+        # #679 (F2): a CANCELLED execution carries a real status + a
+        # "cancelled by user" error; surface both like failed/success so the
+        # public poller gets a reason instead of a silent null body.
+        "response": execution.response if execution.status in ("success", "failed", "cancelled") else None,
+        "error": execution.error if execution.status in ("failed", "cancelled") else None,
     }
 
 

@@ -41,8 +41,6 @@ KNOWN_FACADE_GAPS: frozenset[str] = frozenset(
         "get_agent_last_activity",
         "get_agent_permissions",
         "get_agent_schedules",
-        "get_full_capabilities",
-        "set_full_capabilities",
         "update_business_status",
     }
 )
@@ -136,4 +134,20 @@ def test_webhook_001_methods_delegated():
     assert not missing, (
         f"WEBHOOK-001 methods missing from DatabaseManager: {sorted(missing)}. "
         "Add pass-through methods that delegate to self._schedule_ops."
+    )
+
+
+def test_1200_capabilities_methods_delegated():
+    """Regression check for #1200: the full-capabilities pair must be delegated
+    on DatabaseManager. They exist on SecurityMixin (composed into
+    AgentOperations) but the #1093 db decomposition forgot the facade
+    pass-through, so GET/PUT /api/agents/{name}/capabilities 500'd with
+    AttributeError.
+    """
+    methods = _databasemanager_methods()
+    required = {"get_full_capabilities", "set_full_capabilities"}
+    missing = required - methods
+    assert not missing, (
+        f"capabilities methods missing from DatabaseManager: {sorted(missing)}. "
+        "Add pass-through methods that delegate to self._agent_ops."
     )

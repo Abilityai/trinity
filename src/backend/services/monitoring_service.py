@@ -21,6 +21,7 @@ import docker
 import httpx
 
 from database import db
+from services.agent_auth import agent_httpx_client
 from db_models import (
     AgentHealthStatus,
     DockerHealthCheck,
@@ -243,7 +244,7 @@ async def check_network_health(
 
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with agent_httpx_client(agent_name, timeout=timeout) as client:
             response = await client.get(url)
             latency_ms = (time.monotonic() - start) * 1000
 
@@ -410,7 +411,7 @@ async def check_business_health(
 
     # Check /health endpoint for runtime status
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with agent_httpx_client(agent_name, timeout=timeout) as client:
             health_response = await client.get(f"http://agent-{agent_name}:8000/health")
             if health_response.status_code == 200:
                 health_data = health_response.json()
@@ -426,7 +427,7 @@ async def check_business_health(
 
     # Check /api/chat/session for context usage
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with agent_httpx_client(agent_name, timeout=timeout) as client:
             session_response = await client.get(f"http://agent-{agent_name}:8000/api/chat/session")
             if session_response.status_code == 200:
                 session_data = session_response.json()
@@ -439,7 +440,7 @@ async def check_business_health(
 
     # Check /api/executions/running for active executions
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with agent_httpx_client(agent_name, timeout=timeout) as client:
             exec_response = await client.get(f"http://agent-{agent_name}:8000/api/executions/running")
             if exec_response.status_code == 200:
                 exec_data = exec_response.json()

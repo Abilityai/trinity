@@ -2,6 +2,8 @@
 
 Platform-managed skills that can be assigned to agents and invoked from the UI via the Playbooks tab or chat autocomplete.
 
+> 📺 **Watch:** [Building Agents — Playbooks, Plugins, Deployment](https://youtu.be/MDxRZBikf70) *(Apr 2026)* · [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Skill** -- A reusable capability defined as a markdown file (`SKILL.md`) stored in the platform's skills library. Skills contain instructions, tools, and procedures that agents can execute.

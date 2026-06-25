@@ -1,0 +1,440 @@
+{
+  "version": "1.0",
+  "date": "2026-06-21",
+  "mode": "full",
+  "branch": "main",
+  "remediation_status": {
+    "added": "2026-06-23",
+    "summary": "Audit ran against `main` before the v0.7.0 cut. F1/F2/F3 are remediated on `dev` and ship in v0.7.0; F4/F5/F8 exploit path closed by #1159. Published as a historical posture snapshot, not open issues.",
+    "remediated": [
+      "F1",
+      "F2",
+      "F3"
+    ],
+    "exploit_path_closed": [
+      "F4",
+      "F5",
+      "F8"
+    ],
+    "still_open": [
+      "F6",
+      "F7",
+      "F9",
+      "F10",
+      "F11",
+      "F12",
+      "F13"
+    ],
+    "references": {
+      "F1": "#1159",
+      "F2": "#1255,#1289",
+      "F3": "#1254",
+      "F4_F5_F8": "#1159"
+    }
+  },
+  "scope": "full-codebase",
+  "confidence_gate": 8,
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "method": "6 parallel domain hunts + fresh-context adversarial verification of every surviving finding",
+  "attack_surface": {
+    "backend_routers": 56,
+    "backend_services": 37,
+    "mcp_tool_modules": 20,
+    "ci_workflows": 14,
+    "docker_networks": 2,
+    "agent_server_routers": 10,
+    "agent_server_auth": "none"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "CRITICAL",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "access_control_isolation",
+      "phase": 7,
+      "title": "Unauthenticated agent-server reachable by peer agents -> cross-agent credential theft, RCE-as-peer, file tampering",
+      "files": [
+        "docker/base-image/agent_server/main.py:46",
+        "docker/base-image/agent_server/main.py:100",
+        "docker/base-image/agent_server/routers/credentials.py:183",
+        "docker-compose.yml:415",
+        "docker-compose.prod.yml:429",
+        "src/backend/services/agent_client.py"
+      ],
+      "description": "The per-agent FastAPI agent-server binds 0.0.0.0:8000 with no auth on any route (only permissive CORS). The backend sends no shared secret. All agents share a flat trinity-agent-network (plain bridge, ICC enabled, no internal:true). Any agent can therefore call a peer's GET /api/credentials/read?paths=.env to retrieve its plaintext credentials (external API keys, OAuth tokens, the victim's TRINITY_MCP_API_KEY), POST /api/chat to execute as the peer, and PUT /api/files to tamper. Bypasses the MCP-layer agent_permissions model entirely.",
+      "exploit": "Compromised/malicious agent A enumerates peers via Docker DNS or /16 subnet scan, then `curl http://agent-B:8000/api/credentials/read?paths=.env,.mcp.json` returns B's full secrets; B's MCP key enables further lateral movement as B.",
+      "impact": "Fleet-wide credential exfiltration and execution-as-peer from a single compromised agent; complete failure of agent-to-agent isolation; tenant-isolation breach in multi-user deployments.",
+      "recommendation": "Authenticate the agent-server (backend->agent shared secret or mTLS via router-level dependency) AND network-segment agents from each other (per-agent networks or L3/iptables blocking agent->agent:8000 while preserving agent->mcp-server:8080 / agent->otel:4317). Add a test asserting a peer cannot reach :8000.",
+      "is_new": true,
+      "remediation": {
+        "state": "remediated_on_dev",
+        "pr": "#1159",
+        "commit": "0786f0b4",
+        "ships_in": "v0.7.0",
+        "note": "AgentAuthMiddleware enforces per-agent X-Trinity-Agent-Token (HMAC) on every agent-server route except /health; permissive CORS removed. Cross-agent exploit closed."
+      }
+    },
+    {
+      "id": "F2",
+      "severity": "HIGH",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "supply_chain",
+      "phase": 3,
+      "title": "fastmcp (runtime dep) pulls HIGH hono/undici/form-data into the MCP server",
+      "files": [
+        "src/mcp-server/package.json",
+        "src/mcp-server/package-lock.json"
+      ],
+      "description": "fastmcp@3.32.0 is a runtime/prod dependency; transitively pulls HIGH advisories hono (CORS credential reflection, JWT middleware scheme acceptance, static path traversal), undici (TLS cert-validation bypass, Set-Cookie injection, cache poisoning), form-data (CRLF). fastmcp is the MCP HTTP runtime so hono/undici are reachable. fixAvailable:true.",
+      "exploit": "Conditional on how fastmcp exercises hono/undici; advisories present on a live prod path.",
+      "impact": "Potential CORS/JWT/transport weaknesses in the MCP server HTTP surface.",
+      "recommendation": "npm audit fix / bump fastmcp in src/mcp-server/; re-run npm audit.",
+      "is_new": true,
+      "remediation": {
+        "state": "remediated_on_dev",
+        "pr": "#1255,#1289",
+        "ships_in": "v0.7.0",
+        "note": "hono bump (#1255), undici bump (#1289), fastmcp now ^4.3.0."
+      }
+    },
+    {
+      "id": "F3",
+      "severity": "HIGH",
+      "confidence": 7,
+      "status": "VERIFIED",
+      "category": "supply_chain",
+      "phase": 3,
+      "title": "form-data (HIGH, CRLF) via axios ships in prod frontend bundle",
+      "files": [
+        "src/frontend/package.json",
+        "src/frontend/package-lock.json"
+      ],
+      "description": "form-data@4.0.5 (HIGH CRLF) is transitive via axios@1.17.0, a production dependency in the nginx bundle. fixAvailable:true.",
+      "exploit": "Conditional on axios usage of vulnerable form-data path.",
+      "impact": "CRLF injection risk in outbound multipart requests from the shipped frontend.",
+      "recommendation": "npm audit fix / bump axios in src/frontend/.",
+      "is_new": true,
+      "remediation": {
+        "state": "remediated_on_dev",
+        "pr": "#1254",
+        "ships_in": "v0.7.0",
+        "note": "form-data 4.0.5->4.0.6 (#1254); frontend axios ^1.18.0."
+      }
+    },
+    {
+      "id": "F4",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "access_control",
+      "phase": 9,
+      "title": "Agent-server EDIT_PROTECTED_PATHS diverges from backend deny-list (KEEP IN SYNC violated)",
+      "files": [
+        "docker/base-image/agent_server/routers/files.py:178",
+        "src/backend/services/agent_service/files.py:23"
+      ],
+      "description": "Backend _FILE_WRITE_DENY_PATTERNS comment says KEEP IN SYNC with agent-server EDIT_PROTECTED_PATHS, but the agent-server list omits .ssh/*, .aws/*, .gcp/*, .claude/settings*.json. Since the agent-server is the real boundary for direct/peer callers (F1), writes to ~/.ssh/authorized_keys or ~/.aws/credentials are blocked at the backend proxy but ALLOWED at the agent-server.",
+      "exploit": "Peer agent (F1) PUTs .ssh/authorized_keys on a victim -> RCE-adjacent.",
+      "impact": "SSH/cloud-credential file overwrite on a peer agent.",
+      "recommendation": "Make EDIT_PROTECTED_PATHS a superset-or-equal of the backend list; ideally one shared glob validator across all agent-server file handlers.",
+      "is_new": true,
+      "remediation": {
+        "state": "exploit_path_closed",
+        "pr": "#1159",
+        "ships_in": "v0.7.0",
+        "note": "No longer peer-reachable without the agent-auth token; validator hardening tracked as defense-in-depth follow-up."
+      }
+    },
+    {
+      "id": "F5",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "path_traversal",
+      "phase": 9,
+      "title": "Sibling-prefix confinement bypass in 5 agent-server file handlers",
+      "files": [
+        "docker/base-image/agent_server/routers/files.py:40",
+        "docker/base-image/agent_server/routers/files.py:131",
+        "docker/base-image/agent_server/routers/files.py:270",
+        "docker/base-image/agent_server/routers/files.py:331",
+        "docker/base-image/agent_server/routers/files.py:393"
+      ],
+      "description": "list_files/download_file/delete_file/preview_file/update_file gate with str(requested_path).startswith('/home/developer') (no trailing slash, base not resolved), so /home/developer-evil/x passes. ../ is separately blocked by .resolve(). create_folder (:449) was already fixed to is_relative_to() and its comment documents this exact bug class; the other five were not updated.",
+      "exploit": "Bounded today: writes to a new sibling EPERM-fail under root-owned /home + UID 1000; no sibling read targets are provisioned. Latent if a sibling-prefixed agent-readable mount is ever introduced.",
+      "impact": "Workspace-confinement correctness/invariant defect.",
+      "recommendation": "Replace all five startswith checks with requested_path.is_relative_to(Path('/home/developer').resolve()).",
+      "is_new": true,
+      "remediation": {
+        "state": "exploit_path_closed",
+        "pr": "#1159",
+        "ships_in": "v0.7.0",
+        "note": "No longer peer-reachable without the agent-auth token; validator hardening tracked as defense-in-depth follow-up."
+      }
+    },
+    {
+      "id": "F6",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "cicd",
+      "phase": 4,
+      "title": "Secrets in pull_request-triggered jobs running PR-modifiable code; first-party actions on mutable tags",
+      "files": [
+        ".github/workflows/frontend-e2e.yml:52",
+        ".github/workflows/container-security.yml:68",
+        ".github/CODEOWNERS:11"
+      ],
+      "description": "E2E_ADMIN_PASSWORD/E2E_ANTHROPIC_API_KEY passed into pull_request-triggered jobs that execute start.sh + Dockerfiles (safe under default fork-secret policy; password masked). First-party actions/* pinned to mutable tags (rubric MEDIUM). Several workflows lack permissions: blocks. CODEOWNERS does not cover scripts/deploy/start.sh or docker/ that those workflows execute; single owner.",
+      "exploit": "Malicious same-repo branch or enabled fork-secrets setting could exfiltrate the secrets.",
+      "impact": "Potential CI secret exposure; tag-mutation supply-chain risk.",
+      "recommendation": "Gate secret steps on head.repo.full_name == github.repository; SHA-pin first-party actions; add permissions: blocks (esp deploy-dev.yml); extend CODEOWNERS to scripts/deploy + docker, add a 2nd owner.",
+      "is_new": true
+    },
+    {
+      "id": "F7",
+      "severity": "LOW",
+      "confidence": 10,
+      "status": "VERIFIED",
+      "category": "access_control_idor",
+      "phase": 9,
+      "title": "Three agent_config GET handlers leak any agent's config to any authenticated user",
+      "files": [
+        "src/backend/routers/agent_config.py:262",
+        "src/backend/routers/agent_config.py:453",
+        "src/backend/routers/agent_config.py:611"
+      ],
+      "description": "GET capabilities/timeout/guardrails only Depends(get_current_user); no can_user_access_agent check (unlike resources/capacity/api-key GETs in the same file). Leaks capability flags, timeout, guardrail deny-lists, and agent-name existence (200 vs 404). Non-secret operational config -> LOW. Invariant #8 violation.",
+      "exploit": "Any authenticated user GETs /api/agents/<victim>/guardrails with their own JWT.",
+      "impact": "Cross-tenant disclosure of non-sensitive agent config.",
+      "recommendation": "Switch the three signatures to AuthorizedAgentByName (one line each).",
+      "is_new": true
+    },
+    {
+      "id": "F8",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "path_traversal",
+      "phase": 9,
+      "title": "/api/credentials/update writes files with only lstrip('/') (no .. guard)",
+      "files": [
+        "docker/base-image/agent_server/routers/credentials.py:105"
+      ],
+      "description": "update_credentials files loop does clean_path = file_path.lstrip('/') then writes home_dir/clean_path with no .. rejection or containment check, while the sibling read_credential_files (:202) blocks '..'. ../foo escapes lexically (bounded by root-owned FS perms).",
+      "exploit": "Peer/backend caller writes ../foo outside /home/developer (constrained by UID-1000 perms).",
+      "impact": "Missing-validation inconsistency; defense-in-depth gap.",
+      "recommendation": "Copy the .. + is_relative_to guard from the read path.",
+      "is_new": true,
+      "remediation": {
+        "state": "exploit_path_closed",
+        "pr": "#1159",
+        "ships_in": "v0.7.0",
+        "note": "No longer peer-reachable without the agent-auth token; validator hardening tracked as defense-in-depth follow-up."
+      }
+    },
+    {
+      "id": "F9",
+      "severity": "LOW",
+      "confidence": 10,
+      "status": "VERIFIED",
+      "category": "crypto_auth",
+      "phase": 2,
+      "title": "Slack email-verification code uses non-CSPRNG and has no attempt cap",
+      "files": [
+        "src/backend/adapters/slack_adapter.py:504"
+      ],
+      "description": "random.choices(string.digits, k=6) (Mersenne Twister) where db/email_auth.py:159 uses secrets.randbelow. Verify path has no attempt counter/lockout. MT-state recovery infeasible (codes emailed to victim); real weakness is unthrottled online brute-force of 10^6 within 10-min window.",
+      "exploit": "Brute-force the 6-digit code to bind an attacker Slack identity to a victim email and access email-gated agents.",
+      "impact": "Bypass of Slack email-verification control.",
+      "recommendation": "secrets.randbelow(1000000) + attempt counter with lockout.",
+      "is_new": true
+    },
+    {
+      "id": "F10",
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "ssrf_token_leak",
+      "phase": 6,
+      "title": "slack_service.download_file fetches event-supplied URL with bot token, no host allowlist",
+      "files": [
+        "src/backend/services/slack_service.py:639",
+        "src/backend/adapters/slack_adapter.py:480"
+      ],
+      "description": "GET url (from inbound event url_private_download) with Authorization: Bearer <bot_token> and follow_redirects=True, no host allowlist, unlike Telegram/WhatsApp adapters. Gated by HMAC-verified Slack events (attacker doesn't normally control url_private) -> defense-in-depth / token-leak-on-redirect.",
+      "exploit": "If url_private points off-Slack or 302-redirects off-domain, the bot token is sent to that host.",
+      "impact": "Bot-token leak on redirect; theoretical internal SSRF.",
+      "recommendation": "Allowlist files.slack.com/*.slack.com; follow_redirects=False.",
+      "is_new": true
+    },
+    {
+      "id": "F11",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "auth_resilience",
+      "phase": 9,
+      "title": "OTP/login rate-limiters fail open when Redis unavailable",
+      "files": [
+        "src/backend/routers/auth.py:90",
+        "src/backend/routers/auth.py:168",
+        "src/backend/routers/auth.py:185"
+      ],
+      "description": "check_otp_rate_limit / login limiter return True (allow) when Redis is None or raises. During a Redis outage, brute-force protection on the 6-digit OTP (10^6, 10-min window) evaporates. OTP itself is DB-backed, single-use, expiry-enforced.",
+      "exploit": "Attacker who can induce/await a Redis outage brute-forces the active OTP.",
+      "impact": "Conditional brute-force of email OTP.",
+      "recommendation": "Fail closed for auth limiters, or back the OTP attempt counter in the DB row.",
+      "is_new": true
+    },
+    {
+      "id": "F12",
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "misconfiguration",
+      "phase": 9,
+      "title": "SECRET_KEY placeholder default accepted with only a warning",
+      "files": [
+        "src/backend/config.py:22"
+      ],
+      "description": "If SECRET_KEY equals the literal placeholder, config prints CRITICAL but still uses it -> world-known JWT signing key (forgeable tokens). Unset key safely auto-generates random.",
+      "exploit": "Operator who sets the placeholder ships a forgeable-JWT instance.",
+      "impact": "Full auth bypass if misconfigured.",
+      "recommendation": "raise / refuse to boot on the known placeholder (match Redis-password discipline).",
+      "is_new": true
+    },
+    {
+      "id": "F13",
+      "severity": "LOW",
+      "confidence": 7,
+      "status": "VERIFIED",
+      "category": "crypto_hygiene",
+      "phase": 6,
+      "title": "Telegram webhook secret-token compared with != (non-constant-time)",
+      "files": [
+        "src/backend/adapters/transports/telegram_webhook.py:54"
+      ],
+      "description": "256-bit secret token compared with != rather than hmac.compare_digest. Timing attack infeasible on a 256-bit secret + second URL-secret factor. Hygiene only.",
+      "exploit": "n/a (infeasible).",
+      "impact": "None practical.",
+      "recommendation": "Use hmac.compare_digest to match the Slack transport.",
+      "is_new": true
+    }
+  ],
+  "supply_chain_summary": {
+    "node_lockfiles_tracked": 4,
+    "mcp_server_npm_audit": {
+      "high": 3,
+      "moderate": 1,
+      "low": 1
+    },
+    "frontend_npm_audit": {
+      "high": 2,
+      "moderate": 1,
+      "low": 1
+    },
+    "prod_reachable_high_after_excluding_dev_only": 3,
+    "all_high_fixable_via_bump": true,
+    "install_scripts_firstparty": "none",
+    "python_pins": "pinned inline in docker/backend/Dockerfile; no reachable HIGH; python-jose CVEs neutralized by HS256-only + explicit algorithm allowlist + no JWE",
+    "dev_only_excluded": [
+      "vite",
+      "esbuild",
+      "qs"
+    ]
+  },
+  "filter_stats": {
+    "candidates": 30,
+    "hard_excluded": "DoS/race/path-only-SSRF/dev-only-CVE noise",
+    "reported": 13,
+    "verifier_passes": "fresh-context refutation on F1, F4, F5, F7, F8, F9, F10 + linchpin network-reachability proof"
+  },
+  "totals": {
+    "critical": 1,
+    "high": 2,
+    "medium": 3,
+    "low": 7,
+    "total": 13
+  },
+  "secrets_archaeology": {
+    "commits_scanned": 2299,
+    "leaked_secrets_found": 0,
+    "env_files_tracked": 0,
+    "note": "All prefix hits are documented placeholders or test fixtures; no incident-response playbook required."
+  },
+  "clean_areas": [
+    "sql_injection",
+    "command_injection",
+    "frontend_xss",
+    "credential_encryption_aes_gcm",
+    "ssh_public_key_only",
+    "agents_cannot_reach_redis",
+    "redis_auth_and_acl",
+    "base_image_allowlist",
+    "setup_endpoint_single_use_token",
+    "non_root_containers_no_socket_no_privileged",
+    "webhook_signature_verification_all_receivers",
+    "voip_ws_ticket_auth",
+    "mcp_permission_model",
+    "no_cross_user_prompt_injection",
+    "ssrf_allowlists",
+    "skill_supply_chain",
+    "audit_logging_masked"
+  ],
+  "trend": {
+    "baseline_full_report": "cso-2026-05-17",
+    "F1_status": "new",
+    "note": "F1 never previously flagged; #589 isolation work scoped to agents<->Redis only, not agent<->agent. Deps F2/F3 are new advisories. Strong historical remediation track record (589 OBS-1/2/3 all resolved in-cycle).",
+    "resolved": [],
+    "persistent": [],
+    "new": [
+      "F1",
+      "F2",
+      "F3",
+      "F4",
+      "F5",
+      "F6",
+      "F7",
+      "F8",
+      "F9",
+      "F10",
+      "F11",
+      "F12",
+      "F13"
+    ]
+  },
+  "remediation_order": [
+    "F1",
+    "F4",
+    "F5",
+    "F8",
+    "F2",
+    "F3",
+    "F6",
+    "F7",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
+    "F13"
+  ]
+}

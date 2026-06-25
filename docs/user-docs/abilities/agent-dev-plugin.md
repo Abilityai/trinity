@@ -2,6 +2,8 @@
 
 Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, and long-running pipelines.
 
+> 📺 **Watch:** [Why Every AI Agent Needs a GitHub Repo](https://youtu.be/R4nNHf6ywEs) *(Apr 2026)* · [3 AI Agents Run My Software Development Pipeline](https://youtu.be/zCDFDhewFkk) *(Apr 2026)* · [all videos](../videos.md)
+
 ## Installation
 
 ```bash

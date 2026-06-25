@@ -18,6 +18,7 @@ import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import StackedBarChart from './StackedBarChart.vue'
 import TrendLineChart from './TrendLineChart.vue'
+import CompatibilityPanel from './CompatibilityPanel.vue'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -77,6 +78,7 @@ const syncFailures = ref(0)
 const health = ref(null) // AgentHealthDetail
 const healthTrend = ref(null) // { dates, uptime, latency }
 const schedulesCount = ref(null)
+const schedulesPerf = ref(null) // #1115 per-schedule rollups (window-keyed)
 const skillsCount = ref(null)
 const recent = ref([])
 
@@ -172,13 +174,28 @@ async function loadAnalytics() {
   if (!agentName.value) return
   analyticsLoading.value = true
   try {
-    analytics.value = await executionsStore.fetchAgentAnalytics(agentName.value, window.value)
-  } catch {
-    analytics.value = null
+    const [a, s] = await Promise.allSettled([
+      executionsStore.fetchAgentAnalytics(agentName.value, window.value),
+      executionsStore.fetchSchedulesSummary(agentName.value, window.value),
+    ])
+    analytics.value = a.status === 'fulfilled' ? a.value : null
+    schedulesPerf.value = s.status === 'fulfilled' ? s.value : null
   } finally {
     analyticsLoading.value = false
   }
 }
+
+// #1115 per-schedule scorecard formatters (shared style with the Schedules tab).
+function fmtSuccessRate(rate) {
+  return rate == null ? '—' : `${Math.round(rate * 100)}%`
+}
+function successRateClass(rate) {
+  if (rate == null) return 'text-gray-400 dark:text-gray-500'
+  if (rate >= 0.9) return 'text-status-success-600 dark:text-status-success-400'
+  if (rate >= 0.5) return 'text-status-warning-600 dark:text-status-warning-400'
+  return 'text-status-danger-600 dark:text-status-danger-400'
+}
+// Reuses the existing `fmtDuration` defined for the Duration chart below.
 
 async function loadSidecars() {
   const name = agentName.value
@@ -290,6 +307,9 @@ onMounted(() => {
       <span class="text-xs text-status-warning-700 dark:text-status-warning-400">View in Operations →</span>
     </router-link>
 
+    <!-- 2b. Deployment compatibility (#668) — count + expandable checklist, auto-fix -->
+    <CompatibilityPanel :agent="agent" />
+
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
       <div class="flex items-center justify-between px-5 pt-4">
@@ -357,6 +377,57 @@ onMounted(() => {
 
       <p v-if="analytics?.sampled" class="px-5 pb-3 -mt-2 text-[11px] text-gray-400">
         p95 sampled over the newest {{ analytics.sample_size }} runs.
+      </p>
+    </div>
+
+    <!-- 3.5 Schedules performance (#1115) — per-schedule rollups for the
+         window. Hidden when the agent has no schedules. Each row deep-links
+         to the Schedules tab (the #868 per-schedule deep view). -->
+    <div
+      v-if="schedulesPerf && schedulesPerf.schedules.length"
+      class="bg-white dark:bg-gray-800 rounded-lg p-5 border border-gray-200 dark:border-gray-700"
+    >
+      <div class="flex items-baseline justify-between mb-3">
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Schedules performance</h3>
+        <span class="text-xs text-gray-400">last {{ window }}</span>
+      </div>
+      <div class="divide-y divide-gray-100 dark:divide-gray-700/60">
+        <button
+          v-for="s in schedulesPerf.schedules"
+          :key="s.schedule_id"
+          @click="emit('navigate-tab', 'schedules')"
+          class="w-full flex items-center gap-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded px-1 -mx-1"
+          :title="`Open ${s.name} in the Schedules tab`"
+        >
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ s.command || s.name }}</p>
+            <p class="text-xs text-gray-400 truncate font-mono">{{ s.name }} · {{ s.cron_expression }}</p>
+          </div>
+          <div class="shrink-0 flex items-center gap-4 text-right">
+            <div class="w-14">
+              <p :class="['text-sm font-semibold', successRateClass(s.success_rate)]">{{ fmtSuccessRate(s.success_rate) }}</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">success</p>
+            </div>
+            <div class="w-16 hidden sm:block">
+              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ fmtDuration(s.avg_duration_ms) }}</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">avg</p>
+            </div>
+            <div class="w-10">
+              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ s.total_executions }}</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">runs</p>
+            </div>
+            <div class="w-10 hidden sm:block">
+              <p class="text-sm font-mono text-gray-700 dark:text-gray-200">{{ s.tool_call_total }}</p>
+              <p class="text-[10px] text-gray-400 uppercase tracking-wide">tools</p>
+            </div>
+            <svg class="w-4 h-4 text-gray-300 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+          </div>
+        </button>
+      </div>
+      <p v-if="schedulesPerf.tool_calls_sampled" class="mt-2 text-[11px] text-gray-400">
+        Tool counts sampled over the newest runs.
       </p>
     </div>
 

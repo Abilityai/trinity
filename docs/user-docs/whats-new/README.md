@@ -4,4 +4,5 @@ User-facing highlights for each Trinity release — what changed and why it matt
 
 ## Releases
 
+- [v0.6.1](v0.6.1.md) — 2026-06-12 · UI/UX + reliability; unified Operations area, Agent Overview dashboard, sequential loops, VoIP phone calls, secure-by-default access.
 - [v0.6.0](v0.6.0.md) — 2026-06-01 · Reliability + security release; stateful Session chat and experimental Voice Workspace.

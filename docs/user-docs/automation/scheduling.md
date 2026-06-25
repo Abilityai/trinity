@@ -2,6 +2,8 @@
 
 Cron-based automation for agents using APScheduler. Schedule recurring tasks with timezone support, execution history, and manual triggers.
 
+> 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Schedule** -- A cron expression paired with a message or task sent to an agent at the specified times.

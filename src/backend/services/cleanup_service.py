@@ -22,6 +22,7 @@ import httpx
 
 from database import db
 from models import ActivityState, TaskExecutionStatus
+from services.agent_auth import build_agent_auth_headers
 from services.capacity_manager import get_capacity_manager
 from services.slot_service import SLOT_TTL_BUFFER
 from utils.helpers import utc_now, utc_now_iso, parse_iso_timestamp
@@ -975,7 +976,8 @@ class CleanupService:
         """
         try:
             response = await client.get(
-                f"http://agent-{agent_name}:8000/api/executions/running"
+                f"http://agent-{agent_name}:8000/api/executions/running",
+                headers=build_agent_auth_headers(agent_name),
             )
             if response.status_code == 200:
                 # #921: union of currently-running + recently-completed via
@@ -1015,6 +1017,7 @@ class CleanupService:
             response = await client.get(
                 f"http://agent-{agent_name}:8000/api/executions/{execution_id}/last-error",
                 timeout=ERROR_FETCH_TIMEOUT,
+                headers=build_agent_auth_headers(agent_name),
             )
             if response.status_code == 200:
                 data = response.json()
@@ -1120,7 +1123,8 @@ class CleanupService:
         """
         try:
             response = await client.post(
-                f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate"
+                f"http://agent-{agent_name}:8000/api/executions/{execution_id}/terminate",
+                headers=build_agent_auth_headers(agent_name),
             )
             if response.status_code < 300:
                 return True

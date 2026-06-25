@@ -25,7 +25,8 @@ from services.docker_utils import (
 from services.agent_service.helpers import validate_base_image
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, is_claude_runtime
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
+from services.agent_auth import derive_agent_token
 from .file_sharing import check_public_folder_mount_matches
 from .read_only import inject_read_only_hooks, remove_read_only_hooks
 
@@ -96,6 +97,8 @@ from .capabilities import (  # noqa: F401
     PROHIBITED_CAPABILITIES,
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
+    normalize_cpu,
+    normalize_memory,
 )
 
 
@@ -262,7 +265,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
         not check_full_capabilities_match(container, agent_name) or
-        not check_guardrails_env_matches(container, agent_name)
+        not check_guardrails_env_matches(container, agent_name) or
+        not check_agent_auth_token_env_matches(container, agent_name)
     )
 
     if needs_recreation:
@@ -418,6 +422,13 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     else:
         env_vars.pop('AGENT_GUARDRAILS', None)
 
+    # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
+    # this re-derives under the CURRENT name — the load-bearing part of the
+    # rename fix (a renamed container otherwise keeps derive(old_name) and 401s
+    # once enforcement is on). check_agent_auth_token_env_matches forces this
+    # recreate whenever the running token is missing or stale.
+    env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
+
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
 
@@ -430,6 +441,13 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     else:
         cpu = labels.get("trinity.cpu") or system_defaults["cpu"]
         memory = labels.get("trinity.memory") or system_defaults["memory"]
+
+    # #1197: validate/normalize before they reach Docker (int(cpu) NanoCpus /
+    # mem_limit). A stale label or DB override carrying a non-integer cpu or a
+    # Kubernetes-style memory would otherwise crash recreate with an opaque
+    # ValueError; fail with a clear message instead.
+    cpu = normalize_cpu(cpu, system_defaults["cpu"])
+    memory = normalize_memory(memory, system_defaults["memory"])
 
     # Update labels with new resource limits for future reference
     labels["trinity.cpu"] = cpu

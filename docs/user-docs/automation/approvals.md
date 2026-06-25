@@ -2,6 +2,8 @@
 
 Human-in-the-loop approval gates surfaced through the Operating Room queue. Agents that need authorization for a sensitive action write an approval item; an operator approves or rejects from the UI; the agent reads the decision back and continues.
 
+> 📺 **Watch:** [Trinity Platform Demo — operator queue & approvals](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
+
 ## Concepts
 
 - **Approval item** — A row in the operator queue with `type=approval`. Created by the agent, consumed by an operator.

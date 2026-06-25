@@ -189,12 +189,31 @@
         </div>
 
     <!-- Timeline View (only visible in timeline mode) -->
-    <ReplayTimeline
-      v-if="isTimelineMode"
-      :agents="agents"
-      :nodes="nodes"
-      :events="historicalCollaborations"
-      :timeline-start="timelineStart"
+    <template v-if="isTimelineMode">
+      <!-- Loading skeleton (#1266): immediate feedback while fleet/timeline data loads -->
+      <div
+        v-if="isFleetLoading && agents.length === 0"
+        class="flex-1 min-h-0 overflow-hidden bg-white dark:bg-gray-800 px-4 py-4"
+      >
+        <SkeletonLoader variant="rows" :count="8" height="2.5rem" gap="0.5rem" />
+      </div>
+      <!-- Error state (#1266): distinct from an empty timeline / infinite skeleton -->
+      <div
+        v-else-if="fleetLoadError && agents.length === 0"
+        class="flex-1 min-h-0 flex flex-col items-center justify-center text-center px-4"
+      >
+        <p class="text-sm text-gray-600 dark:text-gray-300">Couldn't load timeline data.</p>
+        <button
+          @click="refreshAll"
+          class="mt-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+        >Retry</button>
+      </div>
+      <ReplayTimeline
+        v-else
+        :agents="agents"
+        :nodes="nodes"
+        :events="historicalCollaborations"
+        :timeline-start="timelineStart"
       :timeline-end="timelineEnd"
       :current-event-index="currentEventIndex"
       :total-events="totalEvents"
@@ -213,13 +232,35 @@
       @stop="handleStop"
       @speed-change="handleSpeedChange"
       @toggle-autonomy="handleToggleAutonomy"
-    />
+      />
+    </template>
 
     <!-- Graph Canvas - Full Height (expands to fill remaining space) - Hidden in Timeline mode -->
     <div v-if="!isTimelineMode" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
+      <!-- Loading skeleton (#1266): graph node placeholders instead of the "No agents" empty state -->
+      <div
+        v-if="isFleetLoading && nodes.length === 0"
+        class="absolute inset-0 flex items-center justify-center"
+      >
+        <SkeletonLoader variant="nodes" :count="5" />
+      </div>
+      <!-- Error state (#1266): distinct from loading and from a genuinely empty fleet -->
+      <div
+        v-else-if="fleetLoadError && nodes.length === 0"
+        class="absolute inset-0 flex items-center justify-center"
+      >
+        <div class="text-center">
+          <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">Couldn't load agents</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Something went wrong fetching the fleet.</p>
+          <button
+            @click="refreshAll"
+            class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+          >Retry</button>
+        </div>
+      </div>
       <!-- Empty state -->
       <div
-        v-if="nodes.length === 0"
+        v-else-if="nodes.length === 0"
         class="absolute inset-0 flex items-center justify-center"
       >
         <div class="text-center">
@@ -431,6 +472,7 @@
 import NavBar from '@/components/NavBar.vue'
 import HostTelemetry from '@/components/HostTelemetry.vue'
 import ReplayTimeline from '@/components/ReplayTimeline.vue'
+import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import axios from 'axios'
@@ -492,6 +534,8 @@ const {
   totalCollaborationCount,
   timeRangeHours,
   isLoadingHistory,
+  loading: isFleetLoading,
+  loadError: fleetLoadError,
   contextStats,
   executionStats,
   slotStats,

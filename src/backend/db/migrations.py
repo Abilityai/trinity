@@ -64,6 +64,7 @@ Migration Order (as of 2026-05-07):
 57. canary_violations_table - CANARY-001 / Issue #411 invariant harness violations
 58. execution_retention_index - #772 partial index on schedule_executions(completed_at)
 59. execution_retry_count - #678 retry_count column for reader-race auto-retry
+60. agent_compatibility_results_table - #668 latest-snapshot agent compatibility reports
 """
 import logging
 import sqlite3
@@ -969,6 +970,22 @@ def _migrate_agent_ownership_voice_prompt(cursor, conn):
         "ALTER TABLE agent_ownership ADD COLUMN voice_system_prompt TEXT",
     )
     conn.commit()
+
+def _migrate_agent_ownership_voice_name(cursor, conn):
+    """Add voice_name column to agent_ownership (#28).
+
+    Persists the per-agent Gemini Live voice (e.g. 'Kore', 'Puck'). NULL means
+    unset — the getter falls back to DEFAULT_VOICE_NAME ('Kore'), preserving the
+    prior hardcoded behaviour for existing agents.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "voice_name",
+        "ALTER TABLE agent_ownership ADD COLUMN voice_name TEXT",
+    )
+    conn.commit()
+
 
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
@@ -2459,6 +2476,35 @@ def _migrate_operator_queue_cleared_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_compatibility_results_table(cursor, conn):
+    """Create agent_compatibility_results table (#668).
+
+    Latest-snapshot-per-agent compatibility report (one row, upserted by
+    agent_name). Schema is also defined in db/schema.py for fresh installs;
+    this migration handles existing installs. Idempotent.
+    """
+    cursor.execute("PRAGMA table_info(agent_compatibility_results)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_compatibility_results (
+            agent_name TEXT PRIMARY KEY,
+            overall_status TEXT NOT NULL,
+            checks_json TEXT NOT NULL,
+            hard_count INTEGER NOT NULL DEFAULT 0,
+            soft_count INTEGER NOT NULL DEFAULT 0,
+            info_count INTEGER NOT NULL DEFAULT 0,
+            container_running INTEGER NOT NULL DEFAULT 0,
+            ai_ran_at TEXT,
+            static_ran_at TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    print("Created agent_compatibility_results table (#668)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2533,4 +2579,6 @@ MIGRATIONS = [
     ("voip_tables", _migrate_voip_tables),
     ("operator_queue_cleared_at", _migrate_operator_queue_cleared_at),
     ("activities_created_index", _migrate_activities_created_index),
+    ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
+    ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
 ]

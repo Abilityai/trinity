@@ -156,11 +156,29 @@ capabilities, platforms, tools) is tucked behind a native collapsible
 - The three tab-validity sites were deduped into one `DEEP_LINK_TABS` constant
   (includes `'overview'`); the invalid-tab fallback resets to `'overview'`.
 
+## Schedules performance section (#1115)
+Below the trend charts, a **Schedules performance** section lists the agent's
+non-deleted schedules — one compact scorecard each (command/name + cron,
+terminal success rate, avg duration, runs-in-window, tool calls), honoring the
+same 7/14/30d window selector. Each row deep-links to the Schedules tab (the
+#868 per-schedule deep view stays the drill-in target). Hidden when the agent
+has no schedules. The Schedules tab itself (`SchedulesPanel.vue`) renders the
+**same** rollups as inline mini-stats per row. Both consume one
+`executions.js` `fetchSchedulesSummary(name, window)` call
+(`GET /api/agents/{name}/schedules/analytics-summary`, DB
+`get_agent_schedules_summary`) — cached per `${name}:${window}`, no
+N per-schedule round-trips.
+
 ## Testing
 - `tests/unit/test_agent_analytics.py` — bucketing (incl. `Other` fallback),
   terminal-based success rate, **full-set avg vs sampled p95** correctness,
   NULL-skipping context avg, window boundary, empty agent, gap-filled timeline.
   12 tests; mirrors the #868 `test_schedule_analytics.py` fixture machinery.
+- `tests/unit/test_1115_schedules_summary.py` — per-schedule rollups:
+  terminal success rate (incl. `error`, non-terminal excluded), NULL-skipping
+  avg duration, tool-call total (malformed JSON skipped), zero-run schedule
+  still appears (rate `None`), soft-deleted excluded, out-of-window excluded.
+  6 tests.
 
 ## Related Flows
 - [executions-dashboard.md](executions-dashboard.md) — fleet-level sibling; shares
