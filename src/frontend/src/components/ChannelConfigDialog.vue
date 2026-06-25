@@ -54,13 +54,14 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
-// Close on Escape while open.
+// Close on Escape while open. `immediate` so it also binds when the dialog is
+// mounted already-open (parent gates mount with v-if="dialogOpen").
 const onKey = (e) => {
   if (e.key === 'Escape') emit('close')
 }
 watch(() => props.open, (isOpen) => {
   if (isOpen) document.addEventListener('keydown', onKey)
   else document.removeEventListener('keydown', onKey)
-})
+}, { immediate: true })
 onUnmounted(() => document.removeEventListener('keydown', onKey))
 </script>

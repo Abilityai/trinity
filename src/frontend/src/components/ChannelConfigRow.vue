@@ -35,8 +35,10 @@
       {{ status.connected ? 'Manage' : 'Configure' }}
     </button>
 
-    <!-- Config dialog: the channel panel renders inside, untouched -->
-    <ChannelConfigDialog :open="dialogOpen" :title="title" :icon="icon" @close="onDialogClose">
+    <!-- Config dialog: mounted only while open so the closed dialog (and its
+         slotted panel) never participates in this row's flex layout. The
+         channel panel renders inside the modal, untouched. -->
+    <ChannelConfigDialog v-if="dialogOpen" :open="dialogOpen" :title="title" :icon="icon" @close="onDialogClose">
       <slot />
     </ChannelConfigDialog>
   </div>
