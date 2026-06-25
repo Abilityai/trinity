@@ -17,7 +17,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 
 ## Frontend Layer (Phase 2, #1106)
 - **Tab**: `src/frontend/src/views/AgentDetail.vue` adds `{ id: 'loops', label: 'Loops' }` and mounts `<LoopsPanel :agent-name :agent-status />`.
-- **Component**: `src/frontend/src/components/LoopsPanel.vue` — collapsible Run-loop form (message template w/ `{{run}}`/`{{previous_response}}` helper text, `max_runs`, `stop_signal`, `delay_seconds`, `timeout_per_run`, `model` via `ModelSelector`, `allowed_tools` picker), loop list with status badge + `runs_completed/max_runs` + `stop_reason`, expandable per-run table (#/status/cost/duration/response), last full response via `renderMarkdown`, and a Stop control reflecting `stopping`→`stopped`. The Run-loop button is gated on `agentStatus === 'running'`.
+- **Component**: `src/frontend/src/components/LoopsPanel.vue` — collapsible Run-loop form (message template w/ `{{run}}`/`{{previous_response}}` helper text, `max_runs`, `stop_signal`, `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `model` via `ModelSelector`, `allowed_tools` picker), loop list with status badge + `runs_completed/max_runs` + `stop_reason`, expandable per-run table (#/status/cost/duration/response), last full response via `renderMarkdown`, and a Stop control reflecting `stopping`→`stopped`. The Run-loop button is gated on `agentStatus === 'running'`.
 - **Store**: `src/frontend/src/stores/loops.js` — agent-scoped Pinia store on the shared `api.js` client (Invariant #7). `setAgent(name)`/`clear()` bind the store to the mounted agent; `handleWebSocketEvent` filters fleet-wide `loop_run_completed`/`loop_completed` events by that agent and targeted-refreshes only the affected loop; a 12s backstop poll runs while any loop is `queued`/`running` to recover a missed terminal event. `expandedLoopId` lives in the store so it survives the `v-if` tab remount.
 - **WS wiring**: `src/frontend/src/utils/websocket.js` routes the `data.type`-keyed loop events to `loopsStore.handleWebSocketEvent` in the `default:` branch.
 - **e2e**: `src/frontend/e2e/loops-panel.spec.js` (@interactive — needs a live stack + running agent).
@@ -30,7 +30,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 ### Tool definitions
 - `src/mcp-server/src/tools/loops.ts`
 - Permission model identical to `chat_with_agent`: owner/admin/shared on the agent, or explicit `agent_permissions` for agent-scoped MCP keys. Backend enforces — MCP tools surface a cleaner message for unscoped keys.
-- `run_agent_loop` accepts `message`, `max_runs` (1–100, required), optional `stop_signal`, `delay_seconds` (0–3600), `timeout_per_run` (10–7200), `model`, `allowed_tools`. `agent_name` is required for user-scoped keys and defaults to the bound agent for agent-scoped keys.
+- `run_agent_loop` accepts `message`, `max_runs` (1–100, required), optional `stop_signal`, `delay_seconds` (0–3600), `timeout_per_run` (10–7200), `max_duration_seconds` (1–604800 = 7d; optional wall-clock deadline, #1156), `model`, `allowed_tools`. `agent_name` is required for user-scoped keys and defaults to the bound agent for agent-scoped keys.
 
 ### Client methods
 - `src/mcp-server/src/client.ts` — `startAgentLoop`, `getLoopStatus`, `stopAgentLoop`.
@@ -39,13 +39,16 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 
 ### Router
 - `src/backend/routers/loops.py` — two routers exported (agent-scoped + loop-scoped) and both mounted in `main.py`.
-- Request validation via `StartLoopRequest` Pydantic model (`max_runs` 1–100, `message` 1–100_000 chars, `stop_signal` ≤200 chars and stripped — blank → `None` → fixed mode).
+- Request validation via `StartLoopRequest` Pydantic model (`max_runs` 1–100, `message` 1–100_000 chars, `stop_signal` ≤200 chars and stripped — blank → `None` → fixed mode; `max_duration_seconds` 1–604800).
 - 202 Accepted on start; 404 on unknown loop; 403 if caller is not the initiator and lacks agent access.
+- **400** when `max_duration_seconds` is smaller than the effective per-run timeout (`timeout_per_run`, else the agent's `execution_timeout_seconds`) — a deadline that can't fit one run is rejected rather than silently never firing (#1156).
+- `GET /api/loops/{id}` returns `max_duration_seconds` plus a computed `elapsed_seconds` (from `started_at`).
 
 ### Service
 - `src/backend/services/loop_service.py` — `LoopService.start_loop()` creates the `agent_loops` row and spawns an `asyncio.Task` via `_run()`. One in-process handle per active loop (`_handles: dict[str, _LoopHandle]`) tracks the cooperative stop flag.
+- **Wall-clock deadline (#1156):** when `max_duration_seconds` is set, the runner checks `now - started_at` only at iteration boundaries (before the next run, and before/after the inter-run delay — which is itself capped to the remaining budget). An in-flight run is never killed mid-turn, so total overshoot is bounded by one `timeout_per_run`; on expiry the loop exits `completed` / `stop_reason="deadline_exceeded"`. Complements the `max_runs` count cap with a time cap.
 - Iteration body:
-  1. Cooperative stop check (`handle.should_stop`).
+  1. Cooperative stop check (`handle.should_stop`); then the deadline check above.
   2. Template substitution: `{{run}}` → 1-indexed; `{{previous_response}}` → trailing 2000 chars of last response (empty on iteration 1).
   3. Insert `agent_loop_runs` row in `running` status.
   4. `await task_execution_service.execute_task(triggered_by="loop", loop_id=...)`.
@@ -56,6 +59,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - Terminal states + reasons:
   - `completed` / `max_runs_reached`
   - `completed` / `stop_signal_matched`
+  - `completed` / `deadline_exceeded` (`max_duration_seconds` wall-clock budget reached, #1156)
   - `stopped` / `user_stopped` (via `stop_loop`)
   - `failed` / `error` (any iteration's `TaskExecutionResult.status != "success"` or an unhandled exception)
   - `interrupted` / `interrupted` (backend restart, swept by cleanup-service)
@@ -68,7 +72,8 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - Facade: `src/backend/database.py` exposes all of the above on `db`.
 
 ### Schema + migration
-- `src/backend/db/schema.py` — `agent_loops`, `agent_loop_runs`, plus `loop_id TEXT` column on `schedule_executions` + index `idx_executions_loop`.
+- `src/backend/db/schema.py` / `db/tables.py` — `agent_loops`, `agent_loop_runs`, plus `loop_id TEXT` column on `schedule_executions` + index `idx_executions_loop`. `agent_loops.max_duration_seconds INTEGER` (NULL = no deadline) added for #1156.
+- **Dual-track migration (Invariant #9)** for `max_duration_seconds`: SQLite `_migrate_agent_loops_max_duration` in `db/migrations.py` (`_safe_add_column`) **and** Alembic revision `src/backend/migrations/versions/0005_agent_loops_max_duration.py` (`ADD COLUMN IF NOT EXISTS`, chained after `0004_agent_ownership_voice_name`) for the Postgres backend.
 - `src/backend/db/migrations.py` — `_migrate_agent_loops_tables` (idempotent `CREATE TABLE IF NOT EXISTS` + `_safe_add_column` for the existing executions table).
 
 ### Execution dispatch
@@ -93,6 +98,8 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 | Iteration raises Python exception | `agent_loop_runs.status='failed'`, `agent_loops.status='failed'`, `stop_reason='error'`, loop terminates |
 | Iteration returns `TaskExecutionResult.status != "success"` | Same as above; `agent_loops.error` carries the iteration number + task error |
 | Stop requested while iteration in flight | Current iteration completes; loop exits with `stop_reason="user_stopped"` |
+| Wall-clock deadline reached (`max_duration_seconds`) | Detected at an iteration boundary; loop exits `completed` / `stop_reason="deadline_exceeded"`. An in-flight run is never killed mid-turn (overshoot ≤ one `timeout_per_run`) |
+| `max_duration_seconds` < effective per-run timeout | Rejected at create with **400** (can't fit one run) |
 | Backend restart mid-loop | On next boot, cleanup-service flips to `interrupted` |
 | Stop on already-terminal loop | Returns `already_done` (no-op) |
 | Stop on unknown loop | Returns `not_found` (router returns 404 separately) |
@@ -101,7 +108,7 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 - Standard agent-access check on start (`get_authorized_agent`).
 - Loop-scoped endpoints (`/api/loops/{id}/...`) verify that the caller is the initiator OR has access to the underlying agent (owner/admin/shared via `db.can_user_access_agent`).
 - No sensitive data in WS events — `cost`, `duration_ms`, `run_number`, `execution_id` only.
-- `max_runs` capped at 100; `delay_seconds` at 3600; `timeout_per_run` at 7200 to bound resource consumption.
+- `max_runs` capped at 100; `delay_seconds` at 3600; `timeout_per_run` at 7200; `max_duration_seconds` at 604800 (7d) to bound resource consumption.
 
 ## Testing
 **Prerequisites**: backend running; an agent the caller can access.
@@ -116,13 +123,14 @@ Phase 1 shipped headless (API/MCP only); iterations also appear in the standard 
 **Edge Cases**:
 - `max_runs=0` → 422.
 - `max_runs=101` → 422.
+- `max_duration_seconds` below the effective per-run timeout → 400; start a loop with a tight `max_duration_seconds` and verify it stops `completed` / `deadline_exceeded` before `max_runs`.
 - Loop on a non-accessible agent → 403.
 - Stop on already-completed loop → `{"status": "already_done"}`.
 - Backend restart mid-loop → next `GET /api/loops/{loop_id}` shows `status="interrupted"`.
 
-**Unit tests**: `tests/unit/test_loop_service.py` covers fixed/until modes, template substitution, graceful stop, failure paths, restart recovery, and `get_status`.
+**Unit tests**: `tests/unit/test_loop_service.py` covers fixed/until modes, template substitution, graceful stop, failure paths, restart recovery, `get_status`, and the #1156 wall-clock deadline (boundary check, delay capped to remaining budget, `deadline_exceeded`). `tests/unit/test_loops_router_validation.py` covers the create-time `max_duration_seconds` validation (400 below the effective per-run timeout).
 
-**Status**: ✅ Phase 1 (backend/MCP) + Phase 2 (web UI, #1106) shipped.
+**Status**: ✅ Phase 1 (backend/MCP) + Phase 2 (web UI, #1106) shipped; wall-clock deadline (`max_duration_seconds`, #1156) added.
 
 ## Related Flows
 - **Upstream**: `task-execution-service.md` — each iteration dispatches through `TaskExecutionService`.
