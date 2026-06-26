@@ -84,7 +84,7 @@
           </div>
           <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
             <li v-for="pb in availablePlaybooks" :key="pb.name" class="px-3 py-2 flex items-center gap-2">
-              <input type="checkbox" :value="pb.name" v-model="selected" :disabled="exposeAll || busy" @change="saveAllowList" />
+              <input type="checkbox" :value="pb.name" v-model="selected" :disabled="exposeAll || busy" @change="debouncedSaveAllowList" />
               <span class="text-sm text-gray-900 dark:text-gray-100">{{ pb.name }}</span>
               <span v-if="pb.description" class="text-xs text-gray-500 dark:text-gray-400 truncate">— {{ pb.description }}</span>
             </li>
@@ -170,6 +170,12 @@ const loadPlaybooks = async () => {
   try {
     const { data } = await api.get(`/api/agents/${props.agentName}/playbooks`)
     availablePlaybooks.value = (data?.skills || []).filter((s) => s.user_invocable !== false)
+    // Prune stale names: an allow-list entry that's no longer a live
+    // user_invocable playbook would otherwise linger and be re-sent forever.
+    if (!exposeAll.value) {
+      const names = new Set(availablePlaybooks.value.map((p) => p.name))
+      selected.value = selected.value.filter((n) => names.has(n))
+    }
   } catch (e) {
     availablePlaybooks.value = []
     playbooksError.value = e.response?.status === 503
@@ -233,6 +239,14 @@ const saveAllowList = async () => {
   } finally {
     busy.value = false
   }
+}
+
+// Coalesce a burst of checkbox toggles into one PUT (each send is the full set,
+// so last-write-wins is safe). The "expose all" toggle saves immediately.
+let saveTimer = null
+const debouncedSaveAllowList = () => {
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(saveAllowList, 400)
 }
 
 const copy = async (text) => {
