@@ -130,8 +130,13 @@ docker run --rm -v "${PROJECT}_agent-configs:/agent-configs" alpine \
     chown -R 1000:1000 /agent-configs
 ```
 
-`group_add` is silently ignored on Docker Desktop — leave `DOCKER_GID`
-at its default.
+Docker Desktop does **not** ignore `group_add`: it presents the socket
+root-group-owned (GID 0) inside the container, so the backend must join
+GID 0, not the Debian/Ubuntu default 999. `./scripts/deploy/start.sh`
+auto-detects this (it probes the in-container socket GID) and writes
+`DOCKER_GID=0` to `.env`. If you skip start.sh, set `DOCKER_GID=0`
+manually — leaving it at the 999 default denies socket access and the
+Agents page silently shows "No agents" (#1131).
 
 ---
 
@@ -151,7 +156,7 @@ docker exec trinity-backend python3 -c \
 ```
 
 CI runs the same probes on every PR via the `verify-non-root` step in
-`.github/workflows/frontend-e2e.yml`.
+`.github/workflows/container-security.yml`.
 
 ---
 

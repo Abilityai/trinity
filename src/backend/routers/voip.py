@@ -195,6 +195,16 @@ async def place_voip_call(
             public_url=public_url,
             context=request.context,
             process_transcript=request.process_transcript,
+            execution_id=request.execution_id,
+            dedup_label=request.dedup_label,
+        )
+    except idempotency_service.EffectInProgressError:
+        # Concurrent duplicate dial for the same (execution, number) is mid-flight
+        # (#1084). Release the outer trigger claim and surface a retryable 409.
+        idempotency_service.fail(idem)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A duplicate call for this execution is already in progress.",
         )
     except HTTPException:
         idempotency_service.fail(idem)  # nothing durable dialed → release the claim

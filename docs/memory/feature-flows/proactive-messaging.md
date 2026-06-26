@@ -304,3 +304,4 @@ WHERE allow_proactive = 1;
 - [telegram-integration.md](telegram-integration.md) — Telegram channel delivery
 - [slack-channel-routing.md](slack-channel-routing.md) — Slack DM delivery
 - [unified-channel-access-control.md](unified-channel-access-control.md) — Verified email as identity
+- [effect-idempotency.md](effect-idempotency.md) — `send_message` is wired through `effect_guard` (scope `effect:{execution_id}`, identity = resolved recipient+channel) so a re-delivered turn cannot re-send the same message (#1084)

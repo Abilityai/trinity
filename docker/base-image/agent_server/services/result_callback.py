@@ -76,7 +76,9 @@ def _callbacks_configured() -> bool:
 # malformed/hostile value never reaches the path build or the callback URL. (The
 # ``temp-…`` fallback id carries a ``.`` but only exists when execution_id is
 # absent, in which case try_spawn_async already falls back to sync.)
-# Suspenders: resolve() + is_relative_to() containment in _pending_path below.
+# Suspenders: the #950 normpath+startswith containment guard, co-located with the
+# write/unlink sinks in _persist/_delete below (CodeQL only honours a CWE-022
+# barrier in the same function as the sink, not across a callee's return).
 _SAFE_EXECUTION_ID = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
 
 
@@ -84,39 +86,37 @@ def _is_safe_execution_id(execution_id: Any) -> bool:
     return bool(isinstance(execution_id, str) and _SAFE_EXECUTION_ID.match(execution_id))
 
 
-def _pending_path(execution_id: str) -> Path:
-    """Resolve the on-disk pending-result path, guaranteeing containment.
-
-    Path-containment guard (the #950 CWE-022 pattern CodeQL recognizes):
-    os.path.normpath collapses any ``..`` in the joined path, an inline
-    startswith prefix-check confirms the result is under _PENDING_DIR, and the
-    *normalized* value is flowed downstream so the path reaching write/replace/
-    unlink is provably contained. Raises ValueError on escape — the best-effort
-    _persist/_delete callers catch and log it; the regex guard in
-    try_spawn_async remains the belt that rejects such ids before they get here.
-    """
-    base = os.path.normpath(str(_PENDING_DIR))
-    candidate = os.path.normpath(os.path.join(base, f"{execution_id}.json"))
-    if candidate != base and not candidate.startswith(base + os.sep):
-        raise ValueError(f"pending-result path escapes {base}: {execution_id!r}")
-    return Path(candidate)
-
-
 def _persist(execution_id: str, record: Dict) -> None:
     """Atomically write the pending record (tmp + rename) so a crash mid-write
-    never leaves a half-JSON file the sweep would choke on."""
+    never leaves a half-JSON file the sweep would choke on.
+
+    The #950 path-containment guard is inlined here, co-located with the
+    write/replace sink, so a hostile execution_id is provably confined to
+    _PENDING_DIR (CWE-022). Best-effort: a containment failure is swallowed.
+    """
     try:
         _PENDING_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _pending_path(execution_id).with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(record))
-        tmp.replace(_pending_path(execution_id))
+        base = os.path.normpath(str(_PENDING_DIR))
+        dest = os.path.normpath(os.path.join(base, f"{execution_id}.json"))
+        if dest != base and not dest.startswith(base + os.sep):
+            raise ValueError(f"pending-result path escapes {base}: {execution_id!r}")
+        tmp = f"{dest}.tmp"
+        Path(tmp).write_text(json.dumps(record))
+        Path(tmp).replace(dest)
     except Exception:  # noqa: BLE001 — persistence is best-effort
         logger.debug("[#1083] could not persist pending result %s", execution_id, exc_info=True)
 
 
 def _delete(execution_id: str) -> None:
+    """Remove a pending record. The #950 containment guard is inlined here,
+    co-located with the unlink sink, so a hostile id can't unlink outside
+    _PENDING_DIR (CWE-022). Best-effort: a containment failure is a no-op."""
     try:
-        _pending_path(execution_id).unlink(missing_ok=True)
+        base = os.path.normpath(str(_PENDING_DIR))
+        dest = os.path.normpath(os.path.join(base, f"{execution_id}.json"))
+        if dest != base and not dest.startswith(base + os.sep):
+            return
+        Path(dest).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
         logger.debug("[#1083] could not delete pending result %s", execution_id, exc_info=True)
 

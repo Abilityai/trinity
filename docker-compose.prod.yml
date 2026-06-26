@@ -179,10 +179,14 @@ services:
       - ALL
     # No cap_add: backend listens on 8000 (>=1024, no NET_BIND_SERVICE needed)
     # and reaches /var/run/docker.sock via group_add below — not capabilities.
-    # Issue #874: backend runs as UID 1000 (non-root) but still needs to talk
-    # to /var/run/docker.sock. On Linux the socket is group-owned by `docker`
-    # (typically GID 999 on Debian/Ubuntu, ~990 on RHEL family). macOS Docker
-    # Desktop ignores group_add; the default is safe there.
+    # Issue #874 / #1131: backend runs as UID 1000 (non-root) but still needs to
+    # talk to /var/run/docker.sock. The GID to join is the socket's group as a
+    # container sees it: a Linux bind mount exposes the host `docker` group
+    # (Debian/Ubuntu 999, RHEL ~991, Arch 990); Docker Desktop / Colima / Rancher
+    # present it root-group-owned (GID 0). Docker Desktop does NOT ignore
+    # group_add — the wrong assumption it does was the #1131 regression.
+    # start.sh auto-detects the right GID into DOCKER_GID; :-999 is the
+    # Debian/Ubuntu fallback used only when .env carries no value.
     group_add:
       - "${DOCKER_GID:-999}"
     tmpfs:

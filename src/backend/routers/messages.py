@@ -18,6 +18,7 @@ from models import (
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName
 from db_models import User
+from services.idempotency_service import EffectInProgressError
 from services.proactive_message_service import (
     proactive_message_service,
     NotAuthorizedError,
@@ -58,6 +59,8 @@ async def send_proactive_message(
             text=request.text,
             channel=request.channel,
             reply_to_thread=request.reply_to_thread,
+            execution_id=request.execution_id,
+            dedup_label=request.dedup_label,
         )
 
         return SendMessageResponse(
@@ -66,6 +69,11 @@ async def send_proactive_message(
             message_id=result.message_id,
             error=result.error,
         )
+
+    except EffectInProgressError as e:
+        # A concurrent duplicate send for the same (execution, recipient, channel)
+        # is mid-flight (#1084). Retryable — never a silent skip-and-succeed.
+        raise HTTPException(status_code=409, detail=str(e))
 
     except NotAuthorizedError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -105,7 +113,7 @@ async def update_proactive_setting(
     if not success:
         raise HTTPException(
             status_code=404,
-            detail=f"Share not found or not authorized to modify"
+            detail="Share not found or not authorized to modify"
         )
 
     return {

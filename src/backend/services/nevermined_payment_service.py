@@ -10,8 +10,38 @@ import logging
 from typing import Optional
 
 from db_models import NeverminedConfig, NeverminedPaymentResult
+from services import idempotency_service
 
 logger = logging.getLogger(__name__)
+
+
+class _SettleNotCompleted(Exception):
+    """Internal control-flow signal (#1084): a non-successful settle.
+
+    Raised inside the effect guard so the in_flight claim is RELEASED (not
+    persisted as completed) — a later retry can then re-attempt. Carries the
+    result so the caller still gets the settle outcome.
+    """
+
+    def __init__(self, result: NeverminedPaymentResult) -> None:
+        self.result = result
+        super().__init__("settle not completed")
+
+
+def _settle_snapshot(result: NeverminedPaymentResult) -> dict:
+    """JSON-stable, sanitized snapshot of a settle result for replay (#1084).
+
+    Never the raw SDK object — only the fields the paid-chat response needs so a
+    replayed settle reconstructs the same receipt without burning credits again.
+    """
+    return {
+        "success": result.success,
+        "payer": result.payer,
+        "credits_redeemed": result.credits_redeemed,
+        "remaining_balance": result.remaining_balance,
+        "tx_hash": result.tx_hash,
+        "error": result.error,
+    }
 
 # Lazy SDK availability check
 NEVERMINED_AVAILABLE = False
@@ -231,6 +261,85 @@ class NeverminedPaymentService:
             success=False,
             error=f"Settlement failed after 3 attempts: {last_error}",
         )
+
+    async def settle_payment_once(
+        self,
+        *,
+        config: NeverminedConfig,
+        nvm_api_key: str,
+        nvm_environment: str,
+        access_token: str,
+        agent_request_id: Optional[str],
+        execution_id: Optional[str],
+        base_url: str = "",
+    ) -> NeverminedPaymentResult:
+        """Settle exactly once per Nevermined ``agent_request_id`` (#1084).
+
+        Wraps :meth:`settle_payment` in the effect guard keyed on
+        ``payment:{agent_request_id}`` — Nevermined's native exactly-once token.
+        A retried paid chat reusing the same token replays the stored settle
+        receipt instead of burning credits twice; the native token remains the
+        real on-chain guarantee, this just avoids even attempting a duplicate
+        and gives a fast local replay.
+
+        - completed replay → returns the stored receipt, no re-settle.
+        - a FAILED settle → releases the claim so a later retry can re-attempt
+          (only a successful settle persists as completed/replayable).
+        - a concurrent in-flight settle → returns a retryable "already in
+          progress" result rather than a silent skip (codex #6).
+        - no ``agent_request_id`` (no native token) → fail-open, settle proceeds
+          without dedup.
+        """
+        try:
+            async with idempotency_service.effect_guard(
+                "nevermined_settle",
+                {"phase": "settle", "plan_id": getattr(config, "nvm_plan_id", None)},
+                payment_request_id=agent_request_id,
+                execution_id=execution_id,
+            ) as guard:
+                if guard.replay:
+                    # A completed replay is terminal — NEVER re-enter the external
+                    # settle path (that would double-charge). A missing snapshot
+                    # (NULL/unparseable — unreachable in normal flow, but the DB
+                    # contract permits it) still proves the prior settle COMPLETED,
+                    # so report success without a receipt rather than re-settling (#1084 I2).
+                    if guard.snapshot is None:
+                        logger.warning(
+                            "Nevermined settle replay for agent_request_id=%s has no stored "
+                            "snapshot — reporting success without receipt (no re-settle).",
+                            agent_request_id,
+                        )
+                        return NeverminedPaymentResult(
+                            success=True, agent_request_id=agent_request_id
+                        )
+                    return NeverminedPaymentResult(**guard.snapshot)
+
+                settle_result = await self.settle_payment(
+                    nvm_api_key=nvm_api_key,
+                    nvm_environment=nvm_environment,
+                    config=config,
+                    access_token=access_token,
+                    agent_request_id=agent_request_id,
+                    base_url=base_url,
+                )
+                if not settle_result.success:
+                    # Release the claim — only a SUCCESSFUL settle is replayable.
+                    raise _SettleNotCompleted(settle_result)
+                guard.snapshot = _settle_snapshot(settle_result)
+                return settle_result
+        except idempotency_service.EffectInProgressError:
+            logger.warning(
+                "Nevermined settle already in progress for agent_request_id=%s — "
+                "returning retryable in-progress result",
+                agent_request_id,
+            )
+            return NeverminedPaymentResult(
+                success=False,
+                agent_request_id=agent_request_id,
+                error="settlement already in progress",
+            )
+        except _SettleNotCompleted as not_done:
+            return not_done.result
 
 
 # ---------------------------------------------------------------------------

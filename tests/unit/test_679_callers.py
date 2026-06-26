@@ -67,9 +67,11 @@ def _drive_paid(exec_status: str):
     settle_mock = AsyncMock(return_value=SimpleNamespace(
         success=True, tx_hash="0xtx", remaining_balance=10, error=None,
     ))
+    # paid_chat settles the success path through settle_payment_once (the
+    # effect-scoped idempotency wrapper, #1084), not bare settle_payment.
     payment_service = MagicMock(
         verify_payment=AsyncMock(return_value=verify_result),
-        settle_payment=settle_mock,
+        settle_payment_once=settle_mock,
     )
 
     exec_result = SimpleNamespace(

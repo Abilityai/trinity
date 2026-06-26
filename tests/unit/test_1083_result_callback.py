@@ -174,23 +174,16 @@ class TestPersistResend:
         rc._delete("exec-9")
         assert not (tmp_path / "exec-9.json").exists()
 
-    def test_pending_path_rejects_traversal(self, tmp_path, monkeypatch):
-        # #950 containment pattern (CodeQL-recognized): normpath + startswith
-        # prefix-check raises on any id that escapes _PENDING_DIR.
+    def test_persist_delete_reject_traversal(self, tmp_path, monkeypatch):
+        # #950 containment (normpath + startswith), inlined co-located with the
+        # write/unlink sinks: a traversal id is rejected best-effort — nothing is
+        # written outside _PENDING_DIR and neither call raises.
         monkeypatch.setattr(rc, "_PENDING_DIR", tmp_path)
-        assert rc._pending_path("exec-ok") == (tmp_path / "exec-ok.json")
-        with pytest.raises(ValueError):
-            rc._pending_path("../../etc/passwd")
-        with pytest.raises(ValueError):
-            rc._pending_path("../escape")
-
-    def test_persist_delete_swallow_traversal(self, tmp_path, monkeypatch):
-        # _persist/_delete stay best-effort: a hostile id is logged, never raised,
-        # and nothing is written outside the pending dir.
-        monkeypatch.setattr(rc, "_PENDING_DIR", tmp_path)
-        rc._persist("../escape", {"agent_name": "a", "envelope": {}})  # must not raise
-        rc._delete("../escape")  # must not raise
+        for bad in ("../escape", "../../etc/passwd"):
+            rc._persist(bad, {"agent_name": "a", "envelope": {}})  # must not raise
+            rc._delete(bad)  # must not raise
         assert not (tmp_path.parent / "escape.json").exists()
+        assert not (tmp_path / "escape.json").exists()
 
     def test_resend_delivers_and_deletes(self, tmp_path, monkeypatch):
         monkeypatch.setattr(rc, "_PENDING_DIR", tmp_path)

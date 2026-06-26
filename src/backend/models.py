@@ -461,6 +461,10 @@ class ShareFileMcpRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
     display_name: Optional[str] = Field(default=None, max_length=255)
     expires_in: Optional[int] = None
+    # Effect-scoped idempotency (#1084): a re-run of the same turn sharing the
+    # same file replays the original signed URL instead of minting a new token.
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+    dedup_label: str = Field(default="", max_length=200)
 
 
 class ShareFileResponse(BaseModel):
@@ -1471,6 +1475,23 @@ class SendMessageRequest(BaseModel):
         default=False,
         description="Continue in last thread if one exists (channel-dependent)"
     )
+    execution_id: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "The execution this send belongs to (effect-scoped idempotency, #1084). "
+            "A re-delivery of the same turn dedupes to one send per (recipient, channel). "
+            "Fail-open when absent."
+        ),
+    )
+    dedup_label: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "Optional discriminator (#1084) to intentionally send two distinct "
+            "messages to the same recipient in one turn. Default → at-most-one."
+        ),
+    )
 
 
 class SendMessageResponse(BaseModel):
@@ -1988,6 +2009,10 @@ class VoipCallRequest(BaseModel):
     to_number: str
     context: Optional[str] = None
     process_transcript: bool = True
+    # Effect-scoped idempotency (#1084): a re-delivery of the same turn replays
+    # the original call instead of placing a second PSTN call. Fail-open absent.
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+    dedup_label: str = Field(default="", max_length=200)
 
 
 class VoipEnabledRequest(BaseModel):
