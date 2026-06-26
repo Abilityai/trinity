@@ -24,6 +24,7 @@ import type {
   OperatorQueueItem,
   OperatorQueueListResponse,
   CompatibilityReport,
+  AgentFileTreeResponse,
 } from "./types.js";
 
 /**
@@ -148,14 +149,18 @@ export class TrinityClient {
   }
 
   /**
-   * Public request method for custom API calls
+   * Shared transport: auth header + single 401-reauth-retry + error mapping,
+   * returning the raw `Response` so callers choose how to decode the body
+   * (#919: the JSON `request` path and the plain-text `downloadAgentFile`
+   * path differ only in `.json()` vs `.text()` — they must not duplicate the
+   * auth/retry/error logic).
    */
-  async request<T>(
+  private async _fetch(
     method: string,
     path: string,
     body?: unknown,
     isRetry: boolean = false
-  ): Promise<T> {
+  ): Promise<Response> {
     if (!this.token) {
       throw new Error("Not authenticated. Call authenticate() first or setToken().");
     }
@@ -186,7 +191,7 @@ export class TrinityClient {
       const success = await this.reauthenticate();
       if (success) {
         console.log("Re-authentication successful, retrying request...");
-        return this.request<T>(method, path, body, true);
+        return this._fetch(method, path, body, true);
       }
     }
 
@@ -194,6 +199,20 @@ export class TrinityClient {
       const error = await response.text();
       throw new Error(`API error (${response.status}): ${error}`);
     }
+
+    return response;
+  }
+
+  /**
+   * Public request method for custom API calls
+   */
+  async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    isRetry: boolean = false
+  ): Promise<T> {
+    const response = await this._fetch(method, path, body, isRetry);
 
     // Handle 204 No Content (e.g., successful DELETE)
     if (response.status === 204) {
@@ -760,6 +779,54 @@ export class TrinityClient {
       `/api/agents/${encodeURIComponent(name)}/logs?tail=${lines}`
     );
     return response.logs;
+  }
+
+  // ============================================================================
+  // Agent Workspace Files (#919 — pipeline introspection read surface)
+  // ============================================================================
+
+  /**
+   * Recursively list files under a workspace directory via the existing
+   * `GET /api/agents/{name}/files` surface (no new backend endpoint). Returns
+   * a hierarchical tree; `path` values are relative to `/home/developer` and
+   * each node carries an ISO-8601 `modified` mtime. A missing directory
+   * surfaces as a 404 (mapped to `API error (404): …`) — callers decide
+   * whether that means "empty" or "not found".
+   *
+   * @param name - Agent name
+   * @param path - Directory to list (relative to home, e.g. `.trinity/pipelines`)
+   * @param showHidden - Include dot-prefixed entries (default true here: the
+   *   pipeline paths live under the hidden `.trinity` directory)
+   */
+  async listAgentFiles(
+    name: string,
+    path: string,
+    showHidden: boolean = true
+  ): Promise<AgentFileTreeResponse> {
+    return this.request<AgentFileTreeResponse>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/files` +
+        `?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`
+    );
+  }
+
+  /**
+   * Download a single workspace file as plain text via the existing
+   * `GET /api/agents/{name}/files/download` surface. Uses the shared `_fetch`
+   * (auth + 401-retry + error mapping) but reads the body as text rather than
+   * JSON — the download endpoint returns `PlainTextResponse`.
+   *
+   * @param name - Agent name
+   * @param path - File path (relative to home, e.g.
+   *   `.trinity/pipelines/demo.yaml`)
+   */
+  async downloadAgentFile(name: string, path: string): Promise<string> {
+    const response = await this._fetch(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/files/download` +
+        `?path=${encodeURIComponent(path)}`
+    );
+    return response.text();
   }
 
   // ============================================================================
