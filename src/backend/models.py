@@ -1393,12 +1393,19 @@ MAX_TIMEOUT_PER_RUN = 7200
 MAX_STOP_SIGNAL_LEN = 200
 
 
+MAX_DURATION_SECONDS = 604_800  # 7 days — hard ceiling on the wall-clock deadline
+
+
 class StartLoopRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LEN)
     max_runs: int = Field(..., ge=1, le=MAX_RUNS_LIMIT)
     stop_signal: Optional[str] = Field(default=None, max_length=MAX_STOP_SIGNAL_LEN)
     delay_seconds: int = Field(default=0, ge=0, le=MAX_DELAY_SECONDS)
     timeout_per_run: Optional[int] = Field(default=None, ge=10, le=MAX_TIMEOUT_PER_RUN)
+    # #1156: optional loop-level wall-clock deadline. NULL = unbounded
+    # (max_runs is still the hard stop). Lower bound vs the per-run timeout
+    # is validated in the endpoint (needs the agent's configured timeout).
+    max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=MAX_DURATION_SECONDS)
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1443,6 +1450,10 @@ class LoopStatusResponse(BaseModel):
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    # #1156: wall-clock deadline (NULL = unbounded) + elapsed since started_at
+    # (frozen at completed_at once terminal). Both NULL before the loop runs.
+    max_duration_seconds: Optional[int] = None
+    elapsed_seconds: Optional[int] = None
 
 
 class StopLoopResponse(BaseModel):

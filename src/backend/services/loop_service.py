@@ -28,7 +28,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from database import db
@@ -97,6 +97,7 @@ class LoopService:
         stop_signal: Optional[str] = None,
         delay_seconds: int = 0,
         timeout_per_run: Optional[int] = None,
+        max_duration_seconds: Optional[int] = None,
         model: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         started_by_user_id: Optional[int] = None,
@@ -116,6 +117,7 @@ class LoopService:
             stop_signal=stop_signal,
             delay_seconds=delay_seconds,
             timeout_per_run=timeout_per_run,
+            max_duration_seconds=max_duration_seconds,
             model=model,
             allowed_tools=allowed_tools,
             started_by_user_id=started_by_user_id,
@@ -186,6 +188,17 @@ class LoopService:
         stop_reason = "max_runs_reached"
         terminal_error: Optional[str] = None
 
+        # #1156: optional wall-clock deadline measured from loop start
+        # (≈ started_at, just stamped by mark_loop_running above). NULL/0
+        # disables. Enforced only at iteration boundaries, so an in-flight
+        # run is never killed mid-turn — overshoot is bounded by one
+        # timeout_per_run.
+        max_duration = loop.get("max_duration_seconds")
+        deadline = (
+            datetime.utcnow() + timedelta(seconds=max_duration)
+            if max_duration else None
+        )
+
         try:
             for run_number in range(1, loop["max_runs"] + 1):
                 # Cooperative stop check BEFORE starting the next iteration.
@@ -194,6 +207,12 @@ class LoopService:
                 if handle is not None and handle.should_stop:
                     terminal_status = "stopped"
                     stop_reason = "user_stopped"
+                    break
+
+                # #1156: deadline check at the iteration boundary.
+                if deadline is not None and datetime.utcnow() >= deadline:
+                    terminal_status = "stopped"
+                    stop_reason = "deadline_exceeded"
                     break
 
                 rendered = _render_template(
@@ -300,8 +319,19 @@ class LoopService:
 
                 # Inter-run delay — also a stop point.
                 if loop["delay_seconds"] and run_number < loop["max_runs"]:
+                    sleep_for = loop["delay_seconds"]
+                    # #1156: never sleep past the deadline — cap the delay to
+                    # the remaining budget; the next boundary check then stops
+                    # the loop with deadline_exceeded.
+                    if deadline is not None:
+                        remaining = (deadline - datetime.utcnow()).total_seconds()
+                        if remaining <= 0:
+                            terminal_status = "stopped"
+                            stop_reason = "deadline_exceeded"
+                            break
+                        sleep_for = min(sleep_for, remaining)
                     try:
-                        await asyncio.sleep(loop["delay_seconds"])
+                        await asyncio.sleep(sleep_for)
                     except asyncio.CancelledError:
                         terminal_status = "stopped"
                         stop_reason = "user_stopped"

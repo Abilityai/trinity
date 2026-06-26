@@ -1821,6 +1821,7 @@ export class TrinityClient {
       stop_signal?: string;
       delay_seconds?: number;
       timeout_per_run?: number;
+      max_duration_seconds?: number;
       model?: string;
       allowed_tools?: string[];
     }

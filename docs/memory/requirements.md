@@ -2768,6 +2768,36 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   auto-resume after restart; cross-agent loops (`agent` parameter
   is `"self"` only for v1, matching `fan_out`).
 
+### 38.2 Loop-level wall-clock deadline (#1156)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #1156
+- **Description**: A third hard stop alongside the `max_runs` iteration
+  cap and the (separately tracked) cost budget: an optional total
+  wall-clock deadline so a loop legally configured today (`max_runs=100`
+  × `timeout_per_run` up to 2h + `delay_seconds`) cannot run for days.
+- **Parameter**: optional `max_duration_seconds` (int, 1 – 604800 = 7d;
+  NULL/omitted disables). Accepted on `POST /api/agents/{name}/loops`,
+  persisted on `agent_loops.max_duration_seconds`, exposed via the
+  `run_agent_loop` MCP tool.
+- **Enforcement**: deadline measured from `started_at`; checked only at
+  iteration boundaries — before starting the next run and before/after
+  the inter-run delay (the `delay_seconds` sleep is capped to the
+  remaining budget, never sleeping past the deadline). An in-flight run
+  is never killed mid-turn, so actual overshoot is bounded by one
+  `timeout_per_run`.
+- **Terminal state**: expiry stops the loop with terminal status
+  `stopped` and `stop_reason="deadline_exceeded"`.
+- **Validation**: reject (400) `max_duration_seconds` smaller than the
+  effective per-run timeout (`timeout_per_run`, else the agent's
+  `execution_timeout_seconds`) — otherwise no iteration could finish
+  before the deadline.
+- **Observability**: `GET /api/loops/{loop_id}` returns
+  `max_duration_seconds` and a computed `elapsed_seconds` (from
+  `started_at` to `completed_at` or now); the Loops UI shows the
+  deadline + elapsed when set.
+- **Out of scope**: interrupting an in-flight run mid-turn; persisting
+  elapsed across a backend restart (loops do not auto-resume).
+
 ---
 
 ## 39. VoIP Telephony (VOIP-001)

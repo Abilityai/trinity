@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -542,6 +543,160 @@ class TestRestartRecovery:
         assert db.mark_orphan_loops_interrupted() == 1
         # Second call: already interrupted, no-op.
         assert db.mark_orphan_loops_interrupted() == 0
+
+
+# ---------------------------------------------------------------------------
+# Runner — wall-clock deadline (#1156)
+# ---------------------------------------------------------------------------
+
+class _FakeClock:
+    """Controllable stand-in for ``datetime`` inside loop_service.
+
+    Only ``utcnow()`` is exercised by the runner; it returns the current
+    fake instant. Tests advance ``now`` (directly or via a task that bumps
+    it each run) to drive the deadline deterministically — no real sleeping.
+    """
+    now = datetime(2026, 1, 1, 0, 0, 0)
+
+    @classmethod
+    def utcnow(cls):
+        return cls.now
+
+
+class TestDeadline:
+    def _install_clock(self, ls, monkeypatch, *, advance_per_run: float):
+        """Swap in the fake clock; each execute_task advances it."""
+        _FakeClock.now = datetime(2026, 1, 1, 0, 0, 0)
+        monkeypatch.setattr(ls, "datetime", _FakeClock)
+
+        async def _exec(**kwargs):
+            ts = self._ts
+            ts.calls.append(kwargs)
+            result = ts.results[ts._idx] if ts._idx < len(ts.results) else _Result()
+            ts._idx += 1
+            _FakeClock.now = _FakeClock.now + timedelta(seconds=advance_per_run)
+            return result
+
+        return _exec
+
+    def test_deadline_stops_loop_at_boundary(self, loop_module, monkeypatch):
+        ls, db, ts = loop_module
+        self._ts = ts
+        ts.results = [_Result(response=f"r{i}") for i in range(1, 6)]
+        ts.execute_task = self._install_clock(ls, monkeypatch, advance_per_run=6)
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1",
+                message_template="m",
+                max_runs=5,
+                max_duration_seconds=10,  # ~1.6 runs fit before the deadline
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "deadline_exceeded"
+        # Run 1 (t0→6) and run 2 (t6→12) both started before the deadline; the
+        # boundary check before run 3 (t12 ≥ 10) trips. max_runs never reached.
+        assert loop["runs_completed"] == 2
+        assert len(ts.calls) == 2
+
+    def test_in_flight_run_is_not_killed_mid_turn(self, loop_module, monkeypatch):
+        ls, db, ts = loop_module
+        self._ts = ts
+        ts.results = [_Result(response="done-run")]
+        # One run pushes the clock well past the deadline; that run must still
+        # finalize as completed (deadline is enforced only at the boundary).
+        ts.execute_task = self._install_clock(ls, monkeypatch, advance_per_run=999)
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1",
+                message_template="m",
+                max_runs=5,
+                max_duration_seconds=10,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["stop_reason"] == "deadline_exceeded"
+        assert loop["runs_completed"] == 1  # the in-flight run completed
+        runs = db.list_loop_runs(loop_id)
+        assert runs[0]["status"] == "completed"
+        assert runs[0]["response"] == "done-run"
+
+    def test_delay_does_not_sleep_past_deadline(self, loop_module, monkeypatch):
+        ls, db, ts = loop_module
+        self._ts = ts
+        ts.results = [_Result(response="r1"), _Result(response="r2")]
+        ts.execute_task = self._install_clock(ls, monkeypatch, advance_per_run=3)
+
+        # Capture sleep durations and advance the fake clock by them instead
+        # of really sleeping.
+        slept: list[float] = []
+
+        async def _fake_sleep(secs):
+            slept.append(secs)
+            _FakeClock.now = _FakeClock.now + timedelta(seconds=secs)
+
+        monkeypatch.setattr(ls.asyncio, "sleep", _fake_sleep)
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1",
+                message_template="m",
+                max_runs=5,
+                delay_seconds=100,        # would blow way past the deadline
+                max_duration_seconds=10,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["stop_reason"] == "deadline_exceeded"
+        # run1 t0→3, then delay capped to remaining (10−3=7), not the full 100.
+        assert slept == [7]
+
+    def test_no_deadline_runs_all_when_unset(self, loop_module, monkeypatch):
+        ls, db, ts = loop_module
+        self._ts = ts
+        ts.results = [_Result(response=f"r{i}") for i in range(1, 4)]
+        # Clock jumps far each run; with no deadline it must be ignored.
+        ts.execute_task = self._install_clock(ls, monkeypatch, advance_per_run=10_000)
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1",
+                message_template="m",
+                max_runs=3,
+                max_duration_seconds=None,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 3
 
 
 # ---------------------------------------------------------------------------
