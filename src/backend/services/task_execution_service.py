@@ -29,7 +29,7 @@ import httpx
 
 from database import db
 from services.agent_auth import agent_httpx_client
-from models import ActivityState, ActivityType, TaskExecutionStatus
+from models import ActivityState, ActivityType, TaskExecutionStatus, activity_state_for_terminal
 from services.activity_service import activity_service
 from services.agent_call_limiter import (
     BackendAgentCallBudgetExhausted,
@@ -1385,9 +1385,12 @@ class TaskExecutionService:
                         reconciled_status,
                     )
                     if activity_id:
+                        # #1332: the row this SUCCESS lost to is terminal
+                        # (typically CANCELLED) — close the activity in its
+                        # actual state so a cancel doesn't read as FAILED.
                         await activity_service.complete_activity(
                             activity_id=activity_id,
-                            status=ActivityState.FAILED,
+                            status=activity_state_for_terminal(reconciled_status),
                             error=f"superseded by {reconciled_status}",
                         )
                     return TaskExecutionResult(
@@ -1458,9 +1461,12 @@ class TaskExecutionService:
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
         # release the slot ONLY if this writer won the CAS.
         if won and activity_id:
+            # #1332: map the persisted terminal to its activity state so a
+            # CANCELLED envelope closes the dispatch activity as CANCELLED, not
+            # FAILED (Path A — agent self-reports a cancelled terminal).
             await activity_service.complete_activity(
                 activity_id=activity_id,
-                status=ActivityState.FAILED,
+                status=activity_state_for_terminal(envelope.status),
                 error=envelope.error,
             )
         # #526 D10: AUTH-only counting — a non-auth failure never touches the
