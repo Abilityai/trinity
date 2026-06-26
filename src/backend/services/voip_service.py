@@ -33,7 +33,7 @@ from config import (
     VOIP_TICKET_TTL_SECONDS,
 )
 from database import db
-from services import rate_limiter
+from services import idempotency_service, rate_limiter
 from services.ws_ticket_service import mint_ticket
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,8 @@ class VoipService:
         public_url: str,
         context: Optional[str] = None,
         process_transcript: bool = True,
+        execution_id: Optional[str] = None,
+        dedup_label: str = "",
     ) -> dict:
         """Gate, stage, and dial. Returns {call_id, status, to_number}.
 
@@ -140,6 +142,14 @@ class VoipService:
         right status). On a Twilio dial failure the staged intent is cleaned up
         and a 502 is raised so the caller's idempotency key is released (the
         router treats a raised exception as a failed attempt).
+
+        Effect-scoped idempotency (#1084): the actual dial is wrapped in the
+        effect guard keyed on the RESOLVED dial target + Twilio account, scoped
+        to ``execution_id``. When the turn it ran in is re-delivered (pull-mode
+        at-least-once), the same number within the same execution replays the
+        original {call_id, status, ...} instead of placing a second PSTN call.
+        The router's boundary Idempotency-Key gate stays the OUTER layer.
+        Fail-open when ``execution_id`` is absent/invalid (old image).
         """
         if not self.is_available():
             raise HTTPException(status_code=404, detail="VoIP is not enabled")
@@ -158,6 +168,43 @@ class VoipService:
                 detail="public_chat_url is not configured; cannot build the Media Streams URL",
             )
 
+        async with idempotency_service.effect_guard(
+            "voip_call",
+            {"to": dest, "account": binding.get("account_sid")},
+            execution_id=execution_id,
+            agent_name=agent_name,
+            dedup_label=dedup_label,
+        ) as guard:
+            if guard.replay:
+                return guard.snapshot or {"call_id": None, "status": "ringing", "to_number": dest}
+            result = await self._place_call_inner(
+                agent_name=agent_name,
+                dest=dest,
+                binding=binding,
+                initiator_user_id=initiator_user_id,
+                initiator_email=initiator_email,
+                public_url=public_url,
+                context=context,
+                process_transcript=process_transcript,
+            )
+            guard.snapshot = result
+            return result
+
+    async def _place_call_inner(
+        self,
+        *,
+        agent_name: str,
+        dest: str,
+        binding: dict,
+        initiator_user_id: int,
+        initiator_email: str,
+        public_url: str,
+        context: Optional[str],
+        process_transcript: bool,
+    ) -> dict:
+        """Abuse controls → stage Gemini intent → dial Twilio. Wrapped by
+        place_outbound_call's effect guard (#1084): a success here is recorded
+        for replay; a raised HTTPException releases the claim for retry."""
         # --- Abuse controls (bounds PSTN spend) ---------------------------------
         # Frequency: sliding window per (owner, destination).
         rate_limiter.enforce(
@@ -224,7 +271,6 @@ class VoipService:
         twiml = self.build_stream_twiml(call_id, ticket, public_url)
         try:
             from twilio.rest import Client
-            from twilio.base.exceptions import TwilioRestException
 
             client = Client(binding["account_sid"], auth_token)
             twilio_call = await self._dial(client, dest, binding["from_number"], twiml)

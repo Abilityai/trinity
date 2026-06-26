@@ -87,6 +87,19 @@ export function createMessageTools(
             "Agent name to send as. Required for user-scoped API keys. " +
             "For agent-scoped keys, defaults to the calling agent."
           ),
+        execution_id: z.string().optional()
+          .describe(
+            "Your current execution_id — shown in the 'Execution Context' block of your system " +
+            "prompt as '- **Execution ID**: <id>'. Pass it so a re-delivery of this turn does NOT " +
+            "send a duplicate message (effect-scoped idempotency, #1084). Optional: if omitted, " +
+            "the send proceeds without dedup."
+          ),
+        dedup_label: z.string().optional()
+          .describe(
+            "Optional discriminator to intentionally send TWO distinct messages to the same " +
+            "recipient in one turn (e.g. 'reminder'). Default empty → at-most-one message per " +
+            "(recipient, channel) per turn."
+          ),
       }),
       execute: async (
         params: {
@@ -95,6 +108,8 @@ export function createMessageTools(
           channel?: "auto" | "telegram" | "slack" | "web";
           reply_to_thread?: boolean;
           agent_name?: string;
+          execution_id?: string;
+          dedup_label?: string;
         },
         context?: { session?: McpAuthContext }
       ) => {
@@ -138,6 +153,8 @@ export function createMessageTools(
             text: params.text.trim(),
             channel: params.channel || "auto",
             reply_to_thread: params.reply_to_thread || false,
+            execution_id: params.execution_id,
+            dedup_label: params.dedup_label,
           });
 
           if (result.success) {

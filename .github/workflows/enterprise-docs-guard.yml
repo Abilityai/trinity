@@ -31,7 +31,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Scan live public docs for enterprise disclosure
         run: |
           set -uo pipefail

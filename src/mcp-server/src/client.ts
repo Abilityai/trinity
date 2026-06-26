@@ -1252,6 +1252,8 @@ export class TrinityClient {
       filename: string;
       display_name?: string;
       expires_in?: number;
+      execution_id?: string;
+      dedup_label?: string;
     }
   ): Promise<{
     file_id: string;
@@ -1281,6 +1283,8 @@ export class TrinityClient {
       text: string;
       channel?: "auto" | "telegram" | "slack" | "web";
       reply_to_thread?: boolean;
+      execution_id?: string;
+      dedup_label?: string;
     }
   ): Promise<{
     success: boolean;
@@ -1309,6 +1313,8 @@ export class TrinityClient {
       to_number: string;
       context?: string;
       process_transcript?: boolean;
+      execution_id?: string;
+      dedup_label?: string;
     }
   ): Promise<{
     call_id: string;

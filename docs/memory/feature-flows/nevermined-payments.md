@@ -137,3 +137,7 @@ Shared User (view-only)
 3. Graceful degradation — 501 if SDK not installed
 4. No foreign key constraints to existing tables
 5. Independent failure domain — bugs affect only `/api/paid/` and `/api/nevermined/`
+
+## Related Flows
+
+- **Guards**: [effect-idempotency.md](effect-idempotency.md) — `settle_payment_once` is wired through `effect_guard` on the `payment:{agent_request_id}` scope (the Nevermined native exactly-once token) so a re-delivered turn cannot double-charge a settlement; preserves the existing terminal-turn no-settle guard (#1084).

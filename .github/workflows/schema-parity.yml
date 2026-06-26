@@ -17,6 +17,17 @@ name: Schema Parity Gate
 # doing work. When a relevant file changes, the real test runs and can fail.
 # Change detection is pure `git diff` — no third-party action and no token
 # scope beyond `contents: read`.
+#
+# CROSS-TRACK ALEMBIC GUARD (#1342): the pytest above guards only the SQLite
+# track. PostgreSQL is a SECOND track — `init_database()` runs
+# `alembic_runner.upgrade_to_head()`, which applies revision files only (it does
+# NOT autogenerate from `tables.py`). A SQLite-only schema change therefore
+# merges green yet PG-broken. The extra step below (`scripts/ci/check_alembic_parity.py`)
+# fails a PR that ADDS schema DDL to db/{migrations,schema,tables}.py without a
+# net-new revision under src/backend/migrations/versions/. Heuristic & false-
+# positive guard (comments / data-only / down migrations carry no DDL keyword,
+# so they don't trip) are documented in that script's module docstring. PR-only
+# (it needs the PR base/head to diff); pure stdlib, no extra deps.
 
 on:
   pull_request:
@@ -24,9 +35,12 @@ on:
     branches: [main, dev]
     paths:
       - 'src/backend/db/**'
+      - 'src/backend/migrations/**'
       - 'src/backend/database.py'
       - 'src/backend/utils/helpers.py'
       - 'tests/unit/test_schema_parity.py'
+      - 'tests/unit/test_alembic_parity_guard.py'
+      - 'scripts/ci/check_alembic_parity.py'
       - 'tests/requirements-test.txt'
       - '.github/workflows/schema-parity.yml'
   workflow_dispatch:
@@ -38,9 +52,18 @@ jobs:
   schema-parity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need base history to diff the PR's changed paths
+
+      # Cross-track guard (#1342): SQLite-track DDL must ship a paired Alembic
+      # revision. PR-only — needs the PR base/head SHAs to diff. Pure stdlib.
+      - name: Alembic (Postgres) parity guard
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci/check_alembic_parity.py
 
       - name: Detect schema-relevant changes
         id: changes
@@ -64,7 +87,7 @@ jobs:
           fi
           CHANGED="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
           echo "Changed files in PR:"; echo "$CHANGED"
-          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/requirements-test\.txt$|\.github/workflows/schema-parity\.yml$)'; then
+          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/unit/test_alembic_parity_guard\.py$|scripts/ci/check_alembic_parity\.py$|tests/requirements-test\.txt$|\.github/workflows/schema-parity\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             echo "schema-relevant files changed — running the parity check."
           else
@@ -98,4 +121,4 @@ jobs:
           REDIS_URL: "redis://test:test@redis:6379"
           REDIS_PASSWORD: "test"
           REDIS_BACKEND_PASSWORD: "test"
-        run: pytest tests/unit/test_schema_parity.py -v --tb=short
+        run: pytest tests/unit/test_schema_parity.py tests/unit/test_alembic_parity_guard.py -v --tb=short

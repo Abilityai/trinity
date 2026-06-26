@@ -1,75 +1,75 @@
 <template>
   <div class="p-6 space-y-8">
-    <!-- Framing: identity vs. authorization (Issue #446) -->
-    <div class="rounded-lg bg-action-primary-50 dark:bg-action-primary-900/20 border border-action-primary-100 dark:border-action-primary-900/40 p-4 text-sm text-action-primary-900 dark:text-action-primary-200">
-      Access to this agent has two layers:
-      <ul class="mt-2 list-disc pl-5 space-y-1">
-        <li><strong>Identity proof</strong> — "Require verified email" (below) forces every user to prove who they are via email verification before chatting. It is enforced on web, Slack, and Telegram.</li>
-        <li><strong>Authorization</strong> — "Team Sharing" (below) is the allow-list of emails who skip the owner-approval queue. Everyone else lands in Pending Access Requests until you approve them.</li>
-      </ul>
+    <!-- Framing: Google-Docs-style "share this agent" (trinity-enterprise#18) -->
+    <div>
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Share this agent</h3>
+      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+        Let external clients reach this agent through channels — Slack, Telegram, WhatsApp, voice, and public links.
+        Trinity <strong>operators</strong> (your teammates) are managed on the <span class="font-medium">Access</span> tab.
+      </p>
     </div>
 
-    <!-- Channel Access Policy (Issue #311) -->
+    <!-- External access policy: single Restricted ↔ Open control (#18) -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Identity Proof</h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Require users to prove who they are before chatting, across web, Telegram, and Slack.
-        Identity proof alone does <em>not</em> grant access — manage operators on the <strong>Access</strong> tab.
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Who can chat with this agent?</h4>
+
+      <div
+        class="mt-3 inline-flex rounded-lg border border-gray-300 dark:border-gray-600 p-1 bg-gray-100 dark:bg-gray-800"
+        role="group"
+        aria-label="External access policy"
+      >
+        <button
+          type="button"
+          :disabled="policyLoading"
+          :aria-pressed="accessMode === 'restricted'"
+          @click="setAccessMode('restricted')"
+          :class="['flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50',
+            accessMode === 'restricted'
+              ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
+              : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white']"
+        >
+          <span aria-hidden="true">🔒</span> Restricted
+        </button>
+        <button
+          type="button"
+          :disabled="policyLoading"
+          :aria-pressed="accessMode === 'open'"
+          @click="setAccessMode('open')"
+          :class="['flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50',
+            accessMode === 'open'
+              ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
+              : 'text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white']"
+        >
+          <span aria-hidden="true">🌐</span> Open
+        </button>
+      </div>
+
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        <template v-if="accessMode === 'open'">
+          <strong>Open</strong> — anyone with a verified email can chat without approval.
+        </template>
+        <template v-else>
+          <strong>Restricted</strong> — only people you approve can chat. Everyone else lands in Pending requests below.
+        </template>
+        Either way, clients must verify their email first (Telegram users <code>/login</code>; Slack uses workspace email; web requires verification).
       </p>
 
-      <div class="space-y-3">
-        <label class="flex items-start gap-3">
-          <input
-            type="checkbox"
-            class="mt-1"
-            :checked="policy.require_email"
-            :disabled="policyLoading"
-            @change="updatePolicy({ require_email: $event.target.checked })"
-          />
-          <div>
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Require verified email</div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-              Telegram users must <code>/login</code>; Slack uses workspace email; web requires email verification.
-              This only proves who the user is — it does not authorize them to chat. Use Team Sharing or Open access below for authorization.
-            </div>
-          </div>
-        </label>
-
-        <label class="flex items-start gap-3">
-          <input
-            type="checkbox"
-            class="mt-1"
-            :checked="policy.open_access"
-            :disabled="policyLoading"
-            @change="updatePolicy({ open_access: $event.target.checked })"
-          />
-          <div>
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Open access (anyone verified)</div>
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-              Anyone with a verified email may chat without owner approval.
-              When off, only users in Team Sharing skip the pending-approval queue.
-            </div>
-          </div>
-        </label>
-      </div>
-
-      <!-- Dead-end configuration warning (#446) -->
+      <!-- Dead-end heads-up: Restricted with nobody approved yet (#446) -->
       <div
-        v-if="policy.require_email && !policy.open_access && (!shares || shares.length === 0)"
+        v-if="accessMode === 'restricted' && (!shares || shares.length === 0)"
         class="mt-4 rounded-lg bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800/40 p-3 text-sm text-state-autonomous-900 dark:text-state-autonomous-200"
       >
-        <strong>Heads up:</strong> you've required verified email but haven't shared with anyone or enabled Open access.
-        Every verified user will land in Pending Access Requests and stay locked out until you approve them one by one.
-        Add operators on the <strong>Access</strong> tab, or enable Open access, to let people chat.
+        <strong>Heads up:</strong> access is Restricted and no one's approved yet — every verified client will wait in
+        Pending requests until you approve them. Approve requests below, or switch to <strong>Open</strong>.
       </div>
 
-      <!-- Pending access requests -->
+      <!-- Pending access requests (external clients) -->
       <div v-if="pendingRequests.length > 0" class="mt-6">
         <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
-          Pending access requests ({{ pendingRequests.length }})
+          Pending requests ({{ pendingRequests.length }})
         </h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-          Users who verified their identity but aren't in Team Sharing. Approving moves them into Team Sharing.
+          External clients who verified their identity but aren't approved yet. Approving lets them chat.
         </p>
         <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
           <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between">
@@ -96,57 +96,68 @@
       </div>
     </div>
 
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+    <!-- Channels: compact summary rows (detailed config moves to dialogs in #19) -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        Connect this agent to messaging channels. Expand a row to configure it.
+      </p>
+      <div class="space-y-2">
+        <ChannelDisclosure title="Slack" subtitle="@mentions in a Slack channel" icon="💬">
+          <SlackChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-    <!-- Slack Channel Section -->
-    <SlackChannelPanel :agent-name="agentName" />
+        <ChannelDisclosure title="Telegram" subtitle="DMs and group chats via a bot" icon="✈️">
+          <TelegramChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+        <ChannelDisclosure title="WhatsApp" subtitle="DMs via Twilio" icon="📱">
+          <WhatsAppChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-    <!-- Telegram Bot Section -->
-    <TelegramChannelPanel :agent-name="agentName" />
+        <ChannelDisclosure
+          v-if="sessionsStore.voipAvailable"
+          title="Voice calls"
+          subtitle="Outbound phone calls via Twilio + Gemini Live"
+          icon="📞"
+        >
+          <VoipChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+      </div>
+    </div>
 
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
+    <!-- Distribution: content/links sharing — not client access (#18 nudge) -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Distribution</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        Share generated files and public chat links. This is about distributing output, not granting client access.
+      </p>
+      <div class="space-y-2">
+        <ChannelDisclosure title="Public links" subtitle="Shareable public chat URLs" icon="🔗">
+          <PublicLinksPanel :agent-name="agentName" />
+        </ChannelDisclosure>
 
-    <!-- WhatsApp (Twilio) Section -->
-    <WhatsAppChannelPanel :agent-name="agentName" />
-
-    <!-- Voice Calls (VoIP) Section (#28) — gated on platform voip_available -->
-    <template v-if="sessionsStore.voipAvailable">
-      <!-- Divider -->
-      <div class="border-t border-gray-200 dark:border-gray-700"></div>
-      <VoipChannelPanel :agent-name="agentName" />
-    </template>
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- File Sharing Section (FILES-001) -->
-    <FileSharingPanel :agent-name="agentName" />
-
-    <!-- Divider -->
-    <div class="border-t border-gray-200 dark:border-gray-700"></div>
-
-    <!-- Public Links Section -->
-    <PublicLinksPanel :agent-name="agentName" />
+        <ChannelDisclosure title="File sharing" subtitle="Outbound shared files" icon="📂">
+          <FileSharingPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import axios from 'axios'
-import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { useNotification } from '../composables'
+import { useSessionsStore } from '../stores/sessions'
+import ChannelDisclosure from './ChannelDisclosure.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
-import { useSessionsStore } from '../stores/sessions'
 
 const props = defineProps({
   agentName: {
@@ -161,35 +172,32 @@ const props = defineProps({
 
 const emit = defineEmits(['agent-updated'])
 
-const agentsStore = useAgentsStore()
 const { showNotification } = useNotification()
 
-// VoIP panel visibility (#28) — gated purely on the platform `voip_available`
-// flag (VOIP_ENABLED && GEMINI_API_KEY). Cached, idempotent, fire-and-forget.
+// VoIP channel visibility (#28) — gated on the platform `voip_available` flag.
 const sessionsStore = useSessionsStore()
 sessionsStore.loadFeatureFlags()
 
-// Create agent ref for composable
-const agent = ref({ name: props.agentName, shares: props.shares })
-
-// Update agent ref when props change
-watch(() => [props.agentName, props.shares], () => {
-  agent.value = { name: props.agentName, shares: props.shares }
-}, { deep: true })
-
-// Reload agent function for composable
 const loadAgent = () => {
   emit('agent-updated')
 }
 
 // ---------------------------------------------------------------------------
-// Access policy + access requests (Issue #311)
+// External access policy + pending requests (Issue #311, reframed by #18)
 // ---------------------------------------------------------------------------
 const authStore = useAuthStore()
 const policy = ref({ require_email: false, open_access: false })
 const policyLoading = ref(false)
 const pendingRequests = ref([])
 const decisionLoading = ref(null)
+
+// The two backend flags collapse into one Restricted ↔ Open control:
+//   Restricted → require_email: true, open_access: false  (approval-gated)
+//   Open       → require_email: true, open_access: true   (anyone verified)
+// Identity proof (require_email) is always on for external sharing — a legacy
+// agent with require_email=false is shown by its open_access flag and upgraded
+// to identity-required the next time the operator picks a mode.
+const accessMode = computed(() => (policy.value.open_access ? 'open' : 'restricted'))
 
 const loadPolicy = async () => {
   try {
@@ -203,10 +211,13 @@ const loadPolicy = async () => {
   }
 }
 
-const updatePolicy = async (changes) => {
+const setAccessMode = async (mode) => {
+  const next = { require_email: true, open_access: mode === 'open' }
+  if (next.require_email === policy.value.require_email && next.open_access === policy.value.open_access) {
+    return
+  }
   policyLoading.value = true
   try {
-    const next = { ...policy.value, ...changes }
     const { data } = await axios.put(
       `/api/agents/${props.agentName}/access-policy`,
       next,

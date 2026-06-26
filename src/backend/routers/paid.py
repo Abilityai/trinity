@@ -220,13 +220,18 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             },
         )
 
-    # Step 4: Settle payment (on success only)
-    settle_result = await payment_service.settle_payment(
+    # Step 4: Settle payment (on success only). Effect-scoped guard (#1084) so a
+    # retried paid chat reusing the same Nevermined agent_request_id settles
+    # exactly once. The terminal-turn guard above (failed execution → no settle)
+    # is the outer layer and is preserved; the agent_request_id native token
+    # remains the real on-chain exactly-once guarantee.
+    settle_result = await payment_service.settle_payment_once(
+        config=config,
         nvm_api_key=nvm_api_key,
         nvm_environment=config.nvm_environment,
-        config=config,
         access_token=access_token,
         agent_request_id=verify_result.agent_request_id,
+        execution_id=exec_result.execution_id,
         base_url=base_url,
     )
 
