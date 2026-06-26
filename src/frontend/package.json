@@ -50,5 +50,8 @@
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.62.2",
     "@rollup/rollup-linux-arm64-musl": "^4.62.2"
+  },
+  "overrides": {
+    "dompurify": "^3.4.11"
   }
 }
