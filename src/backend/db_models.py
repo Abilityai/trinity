@@ -404,6 +404,20 @@ class AgentPermissionInfo(BaseModel):
 # Shared Folder Models (Phase 9.11: Agent Shared Folders)
 # =========================================================================
 
+class ConnectorConfig(BaseModel):
+    """Per-agent MCP connector config (ent#46).
+
+    The scoped connector key lives in mcp_api_keys (scope='connector'); this
+    holds whether the connector is enabled and the exposed-playbook allow-list
+    (``exposed_playbooks=None`` ⇒ all user_invocable playbooks).
+    """
+    agent_name: str
+    enabled: bool = False
+    exposed_playbooks: Optional[List[str]] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SharedFolderConfig(BaseModel):
     """Configuration for an agent's shared folder settings."""
     agent_name: str

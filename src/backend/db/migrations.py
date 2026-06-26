@@ -2522,6 +2522,32 @@ def _migrate_agent_loops_max_duration(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_connectors_table(cursor, conn):
+    """Create agent_connectors table (ent#46 — per-agent MCP connector).
+
+    Holds the per-agent connector config (enabled + exposed-playbook
+    allow-list); the scoped key lives in mcp_api_keys (scope='connector').
+    Schema is also defined in db/schema.py for fresh installs; this migration
+    handles existing installs. Idempotent.
+    """
+    cursor.execute("PRAGMA table_info(agent_connectors)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2599,4 +2625,5 @@ MIGRATIONS = [
     ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
     ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
     ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
+    ("agent_connectors_table", _migrate_agent_connectors_table),
 ]

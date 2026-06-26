@@ -131,6 +131,9 @@ AGENT_REFS: List[AgentRef] = [
     # --- Files / shared folders --------------------------------------------
     AgentRef("agent_shared_folder_config",   "agent_name",        Policy.CASCADE),
     AgentRef("agent_shared_files",           "agent_name",        Policy.CASCADE),
+    # ent#46 — per-agent MCP connector config (the scoped key is a separate
+    # mcp_api_keys ref below).
+    AgentRef("agent_connectors",             "agent_name",        Policy.CASCADE),
 
     # --- Public links and chained tables -----------------------------------
     # Order: chained tables before agent_public_links so the link rows
@@ -178,6 +181,10 @@ AGENT_REFS: List[AgentRef] = [
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
     AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
              extra_filter="scope = 'agent'"),
+    # ent#46 — connector-scoped keys are also per-agent: rename WITH the agent,
+    # wipe on purge (a leaked snippet must not survive the agent).
+    AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
+             extra_filter="scope = 'connector'"),
 ]
 
 

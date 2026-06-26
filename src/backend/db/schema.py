@@ -456,6 +456,26 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Per-agent MCP Connector (ent#46) — exposes an agent's playbooks as MCP
+    # tools for end-user consumption. The scoped connector key lives in
+    # mcp_api_keys (scope='connector'); this row holds the per-agent config:
+    # whether the connector is enabled and which playbooks are exposed
+    # (exposed_playbooks = JSON array of playbook names; NULL = all
+    # user_invocable playbooks).
+    # -------------------------------------------------------------------------
+    "agent_connectors": """
+        CREATE TABLE IF NOT EXISTS agent_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Shared Files (outbound agent-to-user file sharing via public URL)
     # -------------------------------------------------------------------------
     "agent_shared_files": """

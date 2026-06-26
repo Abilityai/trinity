@@ -46,6 +46,7 @@ from routers.agents import router as agents_router, set_websocket_manager as set
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
 from routers.agent_files import router as agent_files_router
+from routers.connectors import router as connectors_router
 from routers.agent_rename import router as agent_rename_router, set_websocket_manager as set_agent_rename_ws_manager, set_filtered_websocket_manager as set_agent_rename_filtered_ws_manager
 from routers.agent_ssh import router as agent_ssh_router
 from routers.credentials import router as credentials_router
@@ -875,6 +876,7 @@ app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
 app.include_router(agent_files_router)
+app.include_router(connectors_router)  # ent#46: per-agent MCP connector
 app.include_router(agent_rename_router)
 app.include_router(agent_ssh_router)
 app.include_router(activities_router)

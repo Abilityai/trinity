@@ -3164,6 +3164,47 @@ password) is **Phase 2**, gated on a configured email provider and the existing
 
 ---
 
+## 44. Per-Agent MCP Connector (ent#46)
+
+### 44.1 Playbooks-as-Tools Consumption Connector (ent#46 — PR1: backend + MCP)
+
+**Requirement:** Expose a single agent as a per-agent **MCP connector** that an
+end user (someone the agent is shared with) adds to their AI client in one line,
+turning the agent's **playbooks** (`.claude/skills/` SKILL.md) into MCP tools.
+The agent holds all credentials server-side; only a scoped, revocable key
+reaches the client. This is the lightweight Trinity-native consumption tier — a
+new client-sharing channel alongside Slack/Telegram/WhatsApp/VoIP/public link.
+The per-user SSO / corporate-IdP gateway (RFC 8693, per-user audit) is a separate
+enterprise epic and out of scope here.
+
+**Behavior:**
+- **Scoped key** — `mcp_api_keys.scope='connector'`, owner-bound to one agent,
+  SHA-256 hashed, independently revocable; **regenerate** invalidates the old
+  key so a leaked copy-paste snippet can be cut off. Distinct from the auto-minted
+  `scope='agent'` key.
+- **Allow-list** — the owner configures which playbooks are exposed
+  (`agent_connectors.exposed_playbooks`; NULL = all `user_invocable`). A
+  `user_invocable:false` playbook is **never** exposed, even if allow-listed.
+- **One-line install** — the connector generates per-client copy-paste config
+  with the key pre-embedded (Claude Code `claude mcp add` + `.mcp.json`, Cursor
+  `mcpServers`, Claude Desktop), zero manual editing.
+- **MCP tools** — connector-scope keys see ONLY `list_playbooks`,
+  `run_playbook`, and a chat-fallback `ask`; operator keys never see them
+  (FastMCP `canAccess` per-auth gating). The agent is taken from the bound key,
+  never a tool argument.
+- **Auth boundary** — a connector key is consumption-only: fenced to its bound
+  agent for read/chat and refused for any owner or role-gated operation, so a
+  leaked snippet can chat its one agent and nothing else.
+
+**Placement:** OSS core (public repo); the entitlement seam (#847, §35) can wrap
+it behind `requires_entitlement('mcp_connector')` later with a one-line diff.
+
+**Deferred (fast-follow):** `automation: gated` approval routing (no synchronous
+operator-approval primitive exists yet — only the 5s file-based queue), ChatGPT
+connector polish, and the Sharing-tab connector UI (PR2).
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

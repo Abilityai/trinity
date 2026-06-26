@@ -114,6 +114,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
+from db.connectors import ConnectorOperations
 from db.agent_shared_files import AgentSharedFilesOperations
 from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
@@ -333,6 +334,7 @@ class DatabaseManager:
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
+        self._connector_ops = ConnectorOperations()
         self._settings_ops = SettingsOperations()
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
@@ -766,6 +768,31 @@ class DatabaseManager:
 
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
+
+    # Connector-scoped keys (ent#46)
+    def create_connector_mcp_api_key(self, agent_name: str, owner_username: str):
+        return self._mcp_key_ops.create_connector_mcp_api_key(agent_name, owner_username)
+
+    def get_connector_mcp_api_key(self, agent_name: str):
+        return self._mcp_key_ops.get_connector_mcp_api_key(agent_name)
+
+    def delete_connector_mcp_api_key(self, agent_name: str):
+        return self._mcp_key_ops.delete_connector_mcp_api_key(agent_name)
+
+    def regenerate_connector_mcp_api_key(self, agent_name: str, owner_username: str):
+        return self._mcp_key_ops.regenerate_connector_mcp_api_key(agent_name, owner_username)
+
+    # Connector config (ent#46, delegated to db/connectors.py)
+    def get_connector_config(self, agent_name: str):
+        return self._connector_ops.get_connector_config(agent_name)
+
+    def upsert_connector_config(self, agent_name: str, enabled=None, exposed_playbooks=None, *, clear_playbooks: bool = False):
+        return self._connector_ops.upsert_connector_config(
+            agent_name, enabled=enabled, exposed_playbooks=exposed_playbooks, clear_playbooks=clear_playbooks
+        )
+
+    def delete_connector_config(self, agent_name: str):
+        return self._connector_ops.delete_connector_config(agent_name)
 
     def validate_mcp_api_key(self, api_key: str, *, track_usage: bool = True):
         return self._mcp_key_ops.validate_mcp_api_key(api_key, track_usage=track_usage)

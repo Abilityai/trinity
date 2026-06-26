@@ -214,6 +214,101 @@ class McpKeyOperations:
             result = conn.execute(stmt)
             return result.rowcount > 0
 
+    # ------------------------------------------------------------------
+    # Connector-scoped keys (ent#46) — a separate, user-facing, revocable
+    # key bound to one agent, distinct from the auto-minted agent-scoped
+    # key. scope='connector'.
+    # ------------------------------------------------------------------
+    def create_connector_mcp_api_key(
+        self, agent_name: str, owner_username: str
+    ) -> Optional[McpApiKeyWithSecret]:
+        """Mint a connector-scoped MCP API key bound to ``agent_name``.
+
+        Unlike the agent-scoped key (auto-minted at provisioning, one per
+        agent, injected into the container), the connector key is created on
+        demand for end-user consumption and is independently revocable. The
+        raw key is returned exactly once.
+        """
+        user = self._user_ops.get_user_by_username(owner_username)
+        if not user:
+            return None
+
+        key_id = self._generate_id()
+        api_key = self._generate_mcp_api_key()
+        key_hash = self._hash_api_key(api_key)
+        now = utc_now_iso()
+        key_name = f"connector-{agent_name}-key"
+
+        with get_engine().begin() as conn:
+            conn.execute(
+                insert(mcp_api_keys).values(
+                    id=key_id,
+                    name=key_name,
+                    description=f"Connector key for agent {agent_name}",
+                    key_prefix=api_key[:20],
+                    key_hash=key_hash,
+                    created_at=now,
+                    user_id=user["id"],
+                    agent_name=agent_name,
+                    scope="connector",
+                )
+            )
+
+        return McpApiKeyWithSecret(
+            id=key_id,
+            name=key_name,
+            description=f"Connector key for agent {agent_name}",
+            key_prefix=api_key[:20],
+            created_at=datetime.fromisoformat(now),
+            last_used_at=None,
+            usage_count=0,
+            is_active=True,
+            user_id=user["id"],
+            username=owner_username,
+            user_email=user.get("email"),
+            agent_name=agent_name,
+            scope="connector",
+            api_key=api_key,
+        )
+
+    def get_connector_mcp_api_key(self, agent_name: str) -> Optional[McpApiKey]:
+        """Get the active connector key for an agent (no secret)."""
+        stmt = (
+            select(*_KEY_JOIN_COLUMNS)
+            .select_from(mcp_api_keys.join(users, mcp_api_keys.c.user_id == users.c.id))
+            .where(
+                mcp_api_keys.c.agent_name == agent_name,
+                mcp_api_keys.c.scope == "connector",
+                mcp_api_keys.c.is_active == 1,
+            )
+            .order_by(mcp_api_keys.c.created_at.desc())
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+            return self._row_to_mcp_api_key(row) if row else None
+
+    def delete_connector_mcp_api_key(self, agent_name: str) -> bool:
+        """Delete all connector-scoped keys for an agent (revoke / cascade)."""
+        stmt = delete(mcp_api_keys).where(
+            mcp_api_keys.c.agent_name == agent_name,
+            mcp_api_keys.c.scope == "connector",
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+            return result.rowcount > 0
+
+    def regenerate_connector_mcp_api_key(
+        self, agent_name: str, owner_username: str
+    ) -> Optional[McpApiKeyWithSecret]:
+        """Revoke any existing connector key and mint a fresh one (atomic-ish).
+
+        Invalidates a leaked copy-paste snippet: the old key stops validating
+        immediately, the new key is returned once.
+        """
+        self.delete_connector_mcp_api_key(agent_name)
+        return self.create_connector_mcp_api_key(agent_name, owner_username)
+
     def validate_mcp_api_key(
         self, api_key: str, *, track_usage: bool = True
     ) -> Optional[Dict]:

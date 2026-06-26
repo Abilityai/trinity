@@ -62,6 +62,11 @@ class User(BaseModel):
     role: str = "user"
     # For agent-scoped MCP API keys, this is the agent name
     agent_name: Optional[str] = None
+    # For connector-scoped MCP keys (ent#46): the single agent this key may
+    # consume. Set ⇒ the principal is a connector (consumption-only): it may
+    # read/chat ONLY this agent and may NOT perform owner operations, even
+    # though it resolves to the owner user.
+    connector_agent: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -517,6 +522,64 @@ class AgentDefaultResourcesUpdate(BaseModel):
 class AgentDefaultAccessPolicyUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/access-policy (#1129)."""
     require_email: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Per-agent MCP Connector (ent#46)
+# ---------------------------------------------------------------------------
+
+class ConnectorConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/connector.
+
+    `exposed_playbooks=None` leaves the allow-list unchanged; an explicit empty
+    or non-empty list sets it; `expose_all_playbooks=True` resets it to "all
+    user_invocable playbooks" (clears the allow-list).
+    """
+    enabled: Optional[bool] = None
+    exposed_playbooks: Optional[List[str]] = None
+    expose_all_playbooks: Optional[bool] = None
+
+
+class ConnectorClientSnippet(BaseModel):
+    """A copy-paste-ready connector config for one AI client."""
+    client: str            # 'claude-code' | 'cursor' | 'claude-desktop'
+    label: str             # human label, e.g. "Claude Code"
+    format: str            # 'shell' | 'json' — how to render the block
+    content: str           # the literal block to copy (key pre-embedded)
+    note: Optional[str] = None
+
+
+class ConnectorPlaybook(BaseModel):
+    """A playbook exposed by the connector as an MCP tool."""
+    name: str
+    description: Optional[str] = None
+    argument_hint: Optional[str] = None
+    automation: Optional[str] = None     # manual | gated | autonomous
+
+
+class ConnectorStatus(BaseModel):
+    """Response for GET /api/agents/{name}/connector (owner view)."""
+    agent_name: str
+    enabled: bool = False
+    exposed_playbooks: Optional[List[str]] = None   # None ⇒ all user_invocable
+    has_key: bool = False
+    key_prefix: Optional[str] = None                # masked identifier, not the secret
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ConnectorKeySecret(BaseModel):
+    """Response when minting/regenerating the connector key.
+
+    The raw key is returned exactly once; thereafter only `key_prefix` is shown.
+    """
+    agent_name: str
+    api_key: str
+    key_prefix: str
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

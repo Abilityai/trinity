@@ -404,6 +404,19 @@ agent_shared_folder_config = Table(
     Column("updated_at", Text),
 )
 
+# Per-agent MCP Connector config (ent#46). The scoped key lives in mcp_api_keys
+# (scope='connector'); this row holds enabled + the exposed-playbook allow-list
+# (JSON array; NULL = all user_invocable playbooks).
+agent_connectors = Table(
+    "agent_connectors",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("enabled", Integer),
+    Column("exposed_playbooks", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
 agent_shared_files = Table(
     "agent_shared_files",
     metadata,

@@ -268,6 +268,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
+| `connector.ts` (3) | `list_playbooks`, `run_playbook`, `ask` | **Connector-scope only** (FastMCP `canAccess` gates by scope): the per-agent end-user consumption surface. Agent comes from the bound key, never a tool arg. `list_playbooks` reads the backend's allow-list-filtered list; `run_playbook` re-checks exposure then dispatches via chat; `ask` is the chat fallback. Operator keys never see these tools; connector keys see ONLY these. See [Per-Agent MCP Connector](#per-agent-mcp-connector-ent46) (ent#46) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -441,6 +442,20 @@ Bounded sequential task execution against one agent. Runner is an in-process `as
 **Access & gating:** all endpoints per-user scoped (owners cannot see other users' sessions) and return 404 — not 403 — on mismatch to avoid leaking session-id existence. All return 404 when `is_session_tab_enabled()` is false; flag `system_settings.session_tab_enabled` (or `SESSION_TAB_ENABLED` env), default ON.
 
 **JSONL reaping** (`session_cleanup_service.py`): default 6h cycle diffs each running agent's `~/.claude/projects/-home-developer/<uuid>.jsonl` set against `agent_sessions.cached_claude_session_id`, deleting JSONLs outside the keep set with mtime older than `min_age_seconds` (default 1h race guard). Synchronous `reap_jsonl()` also fires on reset/delete. Uses `execute_command_in_container` (no agent-server endpoint). Headless-task JSONLs (timeout > 600s auto-enables persistence for the #678 stdout-race recovery in `agent_server/services/jsonl_recovery.py`) aren't in `agent_sessions`, so they fall out of the keep set and the same sweep removes them.
+
+### Per-Agent MCP Connector (ent#46)
+
+A per-agent **MCP connector** — a new client-sharing channel (alongside Slack/Telegram/WhatsApp/VoIP/public link) that exposes an agent's **playbooks** (`.claude/skills/` SKILL.md) as MCP tools an end user adds to their AI client (Claude Code, Cursor, Claude Desktop) in one line. The agent holds all credentials server-side; only a scoped, revocable key reaches the client. **OSS core** today; the entitlement seam (#847) can wrap it later with a one-line diff (the per-user SSO/RFC-8693 tier is a separate enterprise epic). Three-surface (Invariant #13): backend router + DB, MCP server tools, no agent-server change.
+
+**Scoped key:** `mcp_api_keys` gains `scope='connector'` — a separate, user-facing, owner-bound, independently-revocable key (distinct from the auto-minted `scope='agent'` key), SHA-256 hashed like every MCP key. `db/connectors.py` owns the `agent_connectors` config row (enabled + exposed-playbook allow-list); `db/mcp_keys.py` owns connector-key create/get/**regenerate** (revoke-old-mint-new, invalidates a leaked snippet)/revoke. Cascade + rename via `AGENT_REFS` (config row + connector keys re-key/wipe with the agent).
+
+**Config + snippets:** owner-only `routers/connectors.py` (status / `PUT` config / `POST` key / `DELETE` key) + a connector-key-readable `/playbooks`. `services/connector_service.py` (pure) builds **per-client copy-paste config with the key pre-embedded** (Claude Code `claude mcp add` + `.mcp.json`, Cursor `mcpServers`, Claude Desktop) and resolves the exposed set = allow-list ∩ `user_invocable` (a `user_invocable:false` playbook is **never** exposed, even if allow-listed). The raw key is returned **once** at mint/regenerate; status shows only the masked prefix + placeholder snippets.
+
+**MCP surface:** FastMCP tools are server-global, so visibility is gated per-auth by `canAccess(scope)` — connector keys see ONLY `connector.ts`'s `list_playbooks` / `run_playbook` / `ask`; every operator key never sees them. The bound agent comes from the key's auth context, never a tool arg, so a connector key can only ever reach its own agent. `run_playbook` re-checks exposure server-side before dispatching via chat.
+
+**Auth boundary (security-critical):** a connector key resolves to the owner user but is **consumption-only** — `dependencies._enforce_connector_scope` fences it to its bound agent on read/chat and refuses owner operations (`OwnedAgent*` → 403), and `_reject_connector_principal` blocks it from every role-gated endpoint (`require_role`/`require_admin`). So a leaked connector snippet can chat its one agent and nothing else.
+
+**Deferred (fast-follow):** `automation: gated` approval routing (only the 5s file-based operator queue exists — no synchronous gate primitive), ChatGPT connector polish, and the Sharing-tab UI (PR2). v1 is backend + MCP tools + the per-client snippet generators.
 
 ### Outbound File Sharing (FILES-001)
 
@@ -739,6 +754,15 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | GET | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
 | POST | `/api/nevermined/retry-settlement/{log_id}` | Admin | Retry settlement |
 
+### Per-Agent MCP Connector (ent#46)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/agents/{name}/connector` | Owner | Status: enabled, exposed-playbook allow-list, masked key prefix, resolved MCP URL, structural per-client snippets (placeholder key) |
+| PUT | `/api/agents/{name}/connector` | Owner | Set `enabled` + `exposed_playbooks` (allow-list); `expose_all_playbooks` clears it to "all user_invocable" |
+| POST | `/api/agents/{name}/connector/key` | Owner | Mint/regenerate the scoped key — returns the secret **once** + per-client copy-paste snippets with the key embedded; old key invalidated |
+| DELETE | `/api/agents/{name}/connector/key` | Owner | Revoke the connector key (idempotent) — leaked snippets stop working |
+| GET | `/api/agents/{name}/connector/playbooks` | Connector key / owner | Exposed playbooks (allow-list ∩ `user_invocable`) the MCP server advertises; authoritative server-side filter |
+
 ### Outbound File Sharing (FILES-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -932,9 +956,24 @@ CREATE TABLE mcp_api_keys (
     usage_count INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
     user_id INTEGER NOT NULL,
-    agent_name TEXT,                 -- non-null for agent-scoped keys
-    scope TEXT DEFAULT 'user',       -- user | agent | system
+    agent_name TEXT,                 -- non-null for agent-scoped + connector-scoped keys
+    scope TEXT DEFAULT 'user',       -- user | agent | system | connector (ent#46)
     FOREIGN KEY (user_id) REFERENCES users(id)
+);
+```
+
+`scope='connector'` (ent#46) is the per-agent end-user consumption key — see [Per-Agent MCP Connector](#per-agent-mcp-connector-ent46).
+
+**agent_connectors** (ent#46 — per-agent MCP connector config; the scoped key lives in `mcp_api_keys` with `scope='connector'`):
+```sql
+CREATE TABLE agent_connectors (
+    agent_name TEXT PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    exposed_playbooks TEXT,          -- JSON array of playbook names; NULL = all user_invocable
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
+        ON DELETE CASCADE ON UPDATE CASCADE
 );
 ```
 
