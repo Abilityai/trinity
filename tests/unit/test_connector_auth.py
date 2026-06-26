@@ -7,10 +7,12 @@ core recognizes a `scope='connector'` MCP key as a consumption-only principal
 and fences it to its bound agent, refusing owner and role-gated operations —
 the same core-primitive + enterprise-knob shape as `users.suspended_at` (#995).
 
-These tests pin that enforcement. Pure (no DB).
+These tests pin that enforcement.
 """
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,12 +21,18 @@ while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)
 
+from db_harness import db_backend, seed_user, seed_agent  # noqa: E402,F401
+
 pytestmark = pytest.mark.unit
 
 
 def _user(connector_agent=None, role="creator"):
     from models import User
     return User(id=1, username="owner", role=role, connector_agent=connector_agent)
+
+
+def _fake_request(method, path):
+    return SimpleNamespace(method=method, url=SimpleNamespace(path=path))
 
 
 class TestConnectorScope:
@@ -70,3 +78,87 @@ class TestUserModel:
         from models import User
         u = User(id=1, username="owner", role="user")
         assert u.connector_agent is None
+
+
+class TestCentralGuard:
+    """get_current_user is the single auth entry point — a connector key must be
+    contained there to the exact routes its MCP tools call, so the ~dozens of
+    endpoints with inline access checks can't be reached by a leaked snippet."""
+
+    @pytest.fixture
+    def patched(self, monkeypatch):
+        import dependencies as deps
+        monkeypatch.setattr(deps.db, "validate_mcp_api_key", lambda *_a, **_k: {
+            "scope": "connector", "agent_name": "agent-1",
+            "user_id": "owner", "user_email": "owner@example.com",
+        })
+        monkeypatch.setattr(deps.db, "get_user_by_email", lambda *_a, **_k: {
+            "id": 1, "username": "owner", "email": "owner@example.com", "role": "creator",
+        })
+        return deps
+
+    def _call(self, deps, request):
+        # A non-JWT token falls through to the MCP-key path.
+        return asyncio.run(deps.get_current_user(request, token="trinity_mcp_fake"))
+
+    def test_allows_bound_agent_chat(self, patched):
+        u = self._call(patched, _fake_request("POST", "/api/agents/agent-1/chat"))
+        assert u.connector_agent == "agent-1"
+
+    def test_allows_bound_agent_playbooks(self, patched):
+        u = self._call(patched, _fake_request("GET", "/api/agents/agent-1/connector/playbooks"))
+        assert u.connector_agent == "agent-1"
+
+    def test_blocks_other_agent_chat(self, patched):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            self._call(patched, _fake_request("POST", "/api/agents/agent-2/chat"))
+        assert exc.value.status_code == 403
+
+    def test_blocks_owner_endpoint_on_bound_agent(self, patched):
+        from fastapi import HTTPException
+        # An inline-checked endpoint on the bound agent (e.g. loops) is refused
+        # at the auth layer before any handler runs.
+        with pytest.raises(HTTPException) as exc:
+            self._call(patched, _fake_request("POST", "/api/agents/agent-1/loops"))
+        assert exc.value.status_code == 403
+
+    def test_blocks_wrong_method(self, patched):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            self._call(patched, _fake_request("DELETE", "/api/agents/agent-1/chat"))
+        assert exc.value.status_code == 403
+
+
+class TestKeyCleanup:
+    """ent#46 re-split fix: connector keys (scope='connector' in the OSS
+    mcp_api_keys table) must be swept on agent delete, like scope='agent' keys."""
+
+    def test_connector_key_in_agent_refs(self):
+        from db.agent_cleanup import AGENT_REFS
+        conn_refs = [r for r in AGENT_REFS
+                     if r.table == "mcp_api_keys" and (r.extra_filter or "").find("connector") >= 0]
+        assert len(conn_refs) == 1, "expected exactly one scope='connector' mcp_api_keys cleanup ref"
+
+    def test_cascade_delete_removes_connector_key(self, db_backend):
+        # Evict cached db modules so they bind to the harness backend.
+        for mod in ("db.connection", "database"):
+            sys.modules.pop(mod, None)
+        seed_user(user_id=1, username="owner")
+        seed_agent(agent_name="agent-1", owner_id=1)
+        from db.engine import get_engine
+        from db.tables import mcp_api_keys
+        from sqlalchemy import insert, select
+        from db.agent_cleanup import cascade_delete
+        with get_engine().begin() as conn:
+            conn.execute(insert(mcp_api_keys).values(
+                id="k1", name="connector-agent-1-key", key_prefix="trinity_mcp_xxxx",
+                key_hash="hash-connector", created_at="2026-01-01T00:00:00Z",
+                user_id=1, agent_name="agent-1", scope="connector", is_active=1,
+            ))
+        with get_engine().begin() as conn:
+            cascade_delete(conn, "agent-1")
+        with get_engine().connect() as conn:
+            rows = conn.execute(select(mcp_api_keys.c.id).where(
+                mcp_api_keys.c.agent_name == "agent-1")).all()
+        assert rows == [], "connector key should be deleted with its agent"

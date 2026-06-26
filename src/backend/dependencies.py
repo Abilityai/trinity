@@ -220,6 +220,23 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # agent (see _enforce_connector_scope). The key is minted by an
             # entitled module; core only recognizes + enforces the scope.
             connector_agent = mcp_key_info.get("agent_name") if scope == "connector" else None
+            if connector_agent:
+                # Central containment (ent#46): a connector key may reach ONLY
+                # its bound agent's chat + connector playbook list. Enforced here
+                # at the single auth entry point — NOT only in the agent path-
+                # deps — so the many endpoints that do inline access checks (and
+                # resolve this principal to the owner) can't be reached by a
+                # leaked connector snippet. The allowlist is the exact set of
+                # backend routes the connector MCP tools call.
+                allowed = {
+                    ("POST", f"/api/agents/{connector_agent}/chat"),
+                    ("GET", f"/api/agents/{connector_agent}/connector/playbooks"),
+                }
+                if (request.method.upper(), request.url.path) not in allowed:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Connector keys may only chat their bound agent and list its playbooks",
+                    )
             return User(
                 id=user["id"],
                 username=user["username"],

@@ -178,6 +178,12 @@ AGENT_REFS: List[AgentRef] = [
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
     AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
              extra_filter="scope = 'agent'"),
+    # Connector-scoped keys (ent#46) are also per-agent: rename WITH the agent,
+    # wipe on purge. Edition-agnostic (inert in OSS-only builds — none exist),
+    # and security-relevant: an orphaned connector key must not survive its agent
+    # (else a future same-name agent could be reached by a leaked old snippet).
+    AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
+             extra_filter="scope = 'connector'"),
 ]
 
 
