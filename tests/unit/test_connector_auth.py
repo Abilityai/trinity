@@ -162,3 +162,42 @@ class TestKeyCleanup:
             rows = conn.execute(select(mcp_api_keys.c.id).where(
                 mcp_api_keys.c.agent_name == "agent-1")).all()
         assert rows == [], "connector key should be deleted with its agent"
+
+
+class TestExtraAgentTableSeam:
+    """The OSS rename/delete seam for entitled-module agent-scoped tables
+    (register_agent_owned_table) — resolved by NAME via raw SQL so a private
+    enterprise table can't KeyError the OSS metadata lookup."""
+
+    def test_register_is_idempotent(self):
+        from db.agent_cleanup import register_agent_owned_table, EXTRA_AGENT_REFS
+        register_agent_owned_table("ent_demo_tbl", "agent_name")
+        register_agent_owned_table("ent_demo_tbl", "agent_name")
+        assert EXTRA_AGENT_REFS.count(("ent_demo_tbl", "agent_name")) == 1
+
+    def test_cascade_delete_sweeps_registered_table(self, db_backend):
+        for mod in ("db.connection", "database"):
+            sys.modules.pop(mod, None)
+        from db.engine import get_engine
+        from sqlalchemy import text
+        from db.agent_cleanup import register_agent_owned_table, cascade_delete
+        with get_engine().begin() as conn:
+            conn.execute(text("CREATE TABLE IF NOT EXISTS ent_demo_tbl (agent_name TEXT)"))
+            conn.execute(text("INSERT INTO ent_demo_tbl (agent_name) VALUES ('a1')"))
+        register_agent_owned_table("ent_demo_tbl", "agent_name")
+        with get_engine().begin() as conn:
+            cascade_delete(conn, "a1")
+        with get_engine().connect() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM ent_demo_tbl WHERE agent_name='a1'")).scalar()
+        assert n == 0
+
+    def test_cascade_delete_skips_absent_registered_table(self, db_backend):
+        # A registered table that doesn't exist (OSS-only build) must be skipped,
+        # never raise.
+        for mod in ("db.connection", "database"):
+            sys.modules.pop(mod, None)
+        from db.engine import get_engine
+        from db.agent_cleanup import register_agent_owned_table, cascade_delete
+        register_agent_owned_table("ent_absent_tbl", "agent_name")
+        with get_engine().begin() as conn:
+            cascade_delete(conn, "whatever")  # no raise

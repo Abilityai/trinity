@@ -187,19 +187,21 @@ AGENT_REFS: List[AgentRef] = [
 ]
 
 
-# Rename-extension registry (ent#46). `rename_agent` updates a HARDCODED set of
-# OSS tables; an entitled module that owns an agent-scoped table (e.g.
-# `enterprise_connectors`) registers `(table, agent_name_column)` here so the
-# rename also moves its rows. Empty in OSS-only builds. Delete is already
-# covered by appending to `AGENT_REFS` (which `cascade_delete` iterates); this
-# is the rename twin, because `rename_agent` is not AGENT_REFS-driven.
-EXTRA_RENAME_REFS: List[tuple] = []  # list[(table_name, column_name)]
+# Entitled-module agent-scoped tables (ent#46). An entitled module that owns
+# an agent-scoped table (e.g. `enterprise_connectors`) registers it here so the
+# OSS delete + rename paths keep its rows aligned with the agent. Empty in
+# OSS-only builds. Handled via raw `text()` keyed by table NAME — NOT through
+# `AGENT_REFS`, because `cascade_delete`/`cascade_rename` resolve Table objects
+# from the OSS `db.tables.metadata`, which can't see a private enterprise table
+# (appending one there would KeyError and break agent deletion).
+EXTRA_AGENT_REFS: List[tuple] = []  # list[(table_name, agent_name_column)]
 
 
-def register_rename_ref(table: str, column: str = "agent_name") -> None:
-    """Idempotently register an extra agent-scoped table for rename handling."""
-    if (table, column) not in EXTRA_RENAME_REFS:
-        EXTRA_RENAME_REFS.append((table, column))
+def register_agent_owned_table(table: str, column: str = "agent_name") -> None:
+    """Idempotently register an entitled-module agent-scoped table so the OSS
+    delete + rename paths sweep/re-key it with its agent."""
+    if (table, column) not in EXTRA_AGENT_REFS:
+        EXTRA_AGENT_REFS.append((table, column))
 
 
 # Chained-via-link tables: these don't have an `agent_name` column but
@@ -313,6 +315,20 @@ def cascade_delete(conn, agent_name: str) -> Dict[str, int]:
         if result.rowcount > 0:
             key = f"{ref.table}:{ref.column}" if _multi_column(ref.table) else ref.table
             deleted[key] = deleted.get(key, 0) + result.rowcount
+
+    # Entitled-module agent-scoped tables (ent#46), resolved by NAME via raw
+    # text() — these aren't in the OSS metadata, so `_table()` can't build a
+    # statement for them. Table/column come from code (not user input); the
+    # agent name is bound. Absent tables (OSS-only / partial installs) skipped.
+    for table, column in EXTRA_AGENT_REFS:
+        if not _table_exists(conn, table):
+            continue
+        result = conn.execute(
+            sa_text(f"DELETE FROM {table} WHERE {column} = :name"),
+            {"name": agent_name},
+        )
+        if result.rowcount and result.rowcount > 0:
+            deleted[table] = deleted.get(table, 0) + result.rowcount
 
     return deleted
 
