@@ -389,7 +389,7 @@ TABLES = {
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
             activity_type TEXT NOT NULL,
-            activity_state TEXT NOT NULL,
+            activity_state TEXT NOT NULL,  -- started, completed, failed, cancelled (#1332)
             parent_activity_id TEXT,
             started_at TEXT NOT NULL,
             completed_at TEXT,

@@ -148,6 +148,7 @@ class ActivityState(str, Enum):
     STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"  # #1332: user-cancelled terminal, distinct from FAILED
 
 
 class ActivityCreate(BaseModel):
@@ -223,6 +224,25 @@ class TaskExecutionStatus(str, Enum):
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
     PENDING_RETRY = "pending_retry"  # Awaiting retry dispatch (#271)
+
+
+def activity_state_for_terminal(status) -> "ActivityState":
+    """Map a terminal execution status to the activity state that closes its
+    dispatch activity (#1332).
+
+    SUCCESS → COMPLETED, CANCELLED → CANCELLED, everything else → FAILED.
+
+    A cancelled execution must read as a distinct, non-failure terminal so
+    activity-derived views (collaboration timeline, replay, needs-attention)
+    don't collapse it into FAILED. ``status`` accepts a ``TaskExecutionStatus``
+    or its bare string value (both compare equal — str-backed enum). The
+    explicit ``else`` keeps a future status (e.g. PENDING_RETRY) deterministic.
+    """
+    if status == TaskExecutionStatus.SUCCESS:
+        return ActivityState.COMPLETED
+    if status == TaskExecutionStatus.CANCELLED:
+        return ActivityState.CANCELLED
+    return ActivityState.FAILED
 
 
 class BusinessStatus(str, Enum):
@@ -1305,7 +1325,7 @@ class ActivityTrackRequest(BaseModel):
 
 class ActivityCompleteRequest(BaseModel):
     """Request model for completing an activity."""
-    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed
+    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed, cancelled
     details: Optional[Dict] = None
     error: Optional[str] = None
 
