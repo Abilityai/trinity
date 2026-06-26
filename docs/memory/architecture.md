@@ -244,7 +244,7 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: Bearer` header; FastMCP `authenticate` callback validates keys against the backend and stores an `McpAuthContext` in session: `{userId, userEmail, keyName, agentName?, scope: "user"|"agent", mcpApiKey}`. Agent-to-agent collaboration uses agent-scoped keys for access control.
 
-**Tools** across 20 tool modules (`src/tools/`):
+**Tools** across 21 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
@@ -264,6 +264,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 | `files.ts` (1) | `share_file` | Publish file from `/home/developer/public/`, return download URL (FILES-001) |
+| `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |

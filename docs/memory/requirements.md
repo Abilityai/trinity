@@ -2432,7 +2432,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ## 34. Agent-Defined Pipelines (#919)
 
 ### 34.1 Standardized Pipeline Introspection Surface (#919)
-- **Status**: 📋 Planned
+- **Status**: ✅ Implemented (2026-06-26)
 - **Implements**: Issue #919
 - **Description**: Trinity-compatible agents that run long-running
   multi-stage pipelines (perception → incubation → synthesis → publish →
@@ -2477,6 +2477,26 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   (expressed as event chains between independent per-agent pipelines);
   GUI editor for `pipeline.yaml`; persisting pipeline state in
   Trinity's database.
+- **Implementation** (2026-06-26): shipped as an **MCP-only** change —
+  `src/mcp-server/src/tools/pipelines.ts` adds the two tools over the
+  **existing** `GET /api/agents/{name}/files` (recursive list) and
+  `/files/download` (read) surfaces via two new thin client methods
+  (`listAgentFiles`/`downloadAgentFile`, sharing a `_fetch` helper). No
+  backend router/service, no agent-server endpoint, no DB table (Invariant
+  #8/#13 satisfied by reuse). Hardening: `pipeline_id`/`instance_id` are
+  zod-validated `^[A-Za-z0-9._-]+$` and reject `..`/`/`/encoded-slashes
+  **before** any download (the download endpoint has no deny-list — a P1
+  traversal guard); definition YAML is parsed with a 256 KiB pre-parse size
+  cap + duplicate-key rejection + alias-expansion guard, and a malformed
+  single file is an item-level error that never aborts the list. Latest
+  instance is selected by state-file mtime (tie-break: lexical
+  `instance_id`), keeping the read fan-out at one download per pipeline
+  (capped at 50 pipelines, truncation logged). Error contract: only a 404
+  maps to empty/not-found; a 400 (agent stopped) or 5xx (unreachable)
+  surfaces as a distinct real error. Authoritative file schemas live in
+  `docs/schemas/agent-pipeline.schema.json` and
+  `agent-pipeline-state.schema.json`; the agent guide documents the
+  contract, the operator-queue `context` convention, and the adoption note.
 ## 35. Enterprise Edition Architecture (#847)
 
 ### 35.1 Open-Core Seam — Private Submodule Integration (#847)
