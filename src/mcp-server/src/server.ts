@@ -24,6 +24,7 @@ import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
 import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
+import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
@@ -224,6 +225,7 @@ export async function createServer(config: ServerConfig = {}) {
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
+    createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
     createSubscriptionTools(client, requireApiKey),
     createMonitoringTools(client, requireApiKey),
     createNeverminedTools(client, requireApiKey),
