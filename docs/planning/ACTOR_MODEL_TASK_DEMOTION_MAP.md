@@ -7,7 +7,7 @@
 > **Purpose.** Before #945 (the actor-model postcard) can be written honestly,
 > we need to know whether the four message `kind`s (`chat`, `task`, `event`,
 > `reply`) can be reduced to envelope-shaped payloads. The blocker is
-> `ParallelTaskRequest` — 15 fields, all but `message` optional, several
+> `ParallelTaskRequest` — 14 fields, all but `message` optional, several
 > mutually conditional. This document walks each field and decides where it
 > should live in an actor-model world.
 
@@ -34,21 +34,21 @@ defines the message envelope as:
 
 The envelope only works as a real abstraction if the **platform** (dispatch,
 projector, audit, observability) can route a message without reading inside
-the payload. Today's `ParallelTaskRequest` fails that test: 12 of its 15
+the payload. Today's `ParallelTaskRequest` fails that test: 13 of its 14
 fields are optional, and several drive platform-layer branching (session
 binding, persistence, self-execute behavior).
 
 `#945` cannot honestly say "the postcard fits" until those fields are either
 **moved out of the envelope** (to session/agent state, envelope headers, or
 out-of-band storage) or **explicitly quarantined** (one declared overrides
-sub-object, not 12 silent siblings).
+sub-object, not 13 silent siblings).
 
 This document is the pre-#945 work product. Its output is the demotion
 sequence; once executed, #945 becomes a 30-minute writeup.
 
 ---
 
-## Current shape (`src/backend/models.py:84-99`)
+## Current shape (`src/backend/models.py:97-112`)
 
 ```python
 class ParallelTaskRequest(BaseModel):
