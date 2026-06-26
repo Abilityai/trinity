@@ -187,6 +187,21 @@ AGENT_REFS: List[AgentRef] = [
 ]
 
 
+# Rename-extension registry (ent#46). `rename_agent` updates a HARDCODED set of
+# OSS tables; an entitled module that owns an agent-scoped table (e.g.
+# `enterprise_connectors`) registers `(table, agent_name_column)` here so the
+# rename also moves its rows. Empty in OSS-only builds. Delete is already
+# covered by appending to `AGENT_REFS` (which `cascade_delete` iterates); this
+# is the rename twin, because `rename_agent` is not AGENT_REFS-driven.
+EXTRA_RENAME_REFS: List[tuple] = []  # list[(table_name, column_name)]
+
+
+def register_rename_ref(table: str, column: str = "agent_name") -> None:
+    """Idempotently register an extra agent-scoped table for rename handling."""
+    if (table, column) not in EXTRA_RENAME_REFS:
+        EXTRA_RENAME_REFS.append((table, column))
+
+
 # Chained-via-link tables: these don't have an `agent_name` column but
 # their rows are owned by an agent via `agent_public_links.id` or a
 # channel-binding `id`. They are not in AGENT_REFS (parity check is

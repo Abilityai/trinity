@@ -276,6 +276,19 @@ class MetadataMixin:
                     .values(agent_name=new_name)
                 )
 
+                # Entitled-module agent-scoped tables (ent#46) registered via
+                # db.agent_cleanup.register_rename_ref — e.g. enterprise_connectors.
+                # Table/column come from code (not user input); values are bound.
+                # Absent tables (OSS-only / partial installs) are skipped.
+                from db.agent_cleanup import EXTRA_RENAME_REFS, _table_exists
+                for table, column in EXTRA_RENAME_REFS:
+                    if not _table_exists(conn, table):
+                        continue
+                    conn.execute(
+                        text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
+                        {"new": new_name, "old": old_name},
+                    )
+
                 return True
 
             except IntegrityError:
