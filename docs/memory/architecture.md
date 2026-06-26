@@ -238,7 +238,7 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 **Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days" while the persistent `AgentHeader` owns "now + cost" (no duplicate live gauges). Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`.
 
-**Collaboration Dashboard** (`views/AgentCollaboration.vue`, `components/AgentNode.vue`, `stores/collaborations.js`): Vue Flow node graph of agent-to-agent communication — draggable status-colored nodes, edges animated 3s on collaboration, real-time activity feed, replay with time-range filtering, localStorage node positions. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed).
+**Collaboration Dashboard** (`views/AgentCollaboration.vue`, `components/AgentNode.vue`, `stores/collaborations.js`): Vue Flow node graph of agent-to-agent communication — draggable status-colored nodes, edges animated 3s on collaboration, real-time activity feed, replay with time-range filtering, localStorage node positions. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
 ### MCP Server (`src/mcp-server/`)
 
@@ -1051,7 +1051,7 @@ CREATE TABLE agent_activities (
     id TEXT PRIMARY KEY,
     agent_name TEXT NOT NULL,
     activity_type TEXT NOT NULL,            -- chat_start, chat_end, tool_call, schedule_start, schedule_end, agent_collaboration
-    activity_state TEXT NOT NULL,           -- started, completed, failed
+    activity_state TEXT NOT NULL,           -- started, completed, failed, cancelled (#1332)
     parent_activity_id TEXT,                -- link to parent activity (tool → chat)
     started_at TEXT NOT NULL,
     completed_at TEXT,

@@ -283,6 +283,7 @@ Slot TTL: Dynamic (agent timeout + 5 min buffer). See parallel-capacity.md for d
 | Execution start | `ActivityType.CHAT_START` | After slot acquired (line 203) |
 | Execution success | `complete_activity(status="completed")` | After response persisted (line 297) |
 | Execution failure | `complete_activity(status="failed")` | On any exception (lines 332, 374, 398) |
+| Terminal applier close | `complete_activity(status=activity_state_for_terminal(envelope.status))` | `apply_result` won-CAS failure branch + the SUCCESS-lost-CAS-to-cancel reconcile branch — a CANCELLED terminal closes the dispatch activity as `cancelled`, not `failed` (#1332) |
 
 ### WebSocket Broadcasts
 
