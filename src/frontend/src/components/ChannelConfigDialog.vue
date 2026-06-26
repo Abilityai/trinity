@@ -12,7 +12,9 @@
 
         <!-- Dialog -->
         <div
-          class="inline-block align-bottom sm:align-middle bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 w-full sm:max-w-2xl"
+          ref="panelEl"
+          tabindex="-1"
+          class="inline-block align-bottom sm:align-middle bg-white dark:bg-gray-800 rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 w-full sm:max-w-2xl focus:outline-none"
           @click.stop
         >
           <!-- Header -->
@@ -44,7 +46,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, nextTick, ref } from 'vue'
 
 defineProps({
   title: { type: String, required: true },
@@ -53,11 +55,65 @@ defineProps({
 
 const emit = defineEmits(['close'])
 
+const panelEl = ref(null)
+// Element to restore focus to on close (the Configure/Manage button), and the
+// body overflow value to restore after the scroll lock.
+let prevActive = null
+let prevOverflow = ''
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+const focusables = () => {
+  const root = panelEl.value
+  if (!root) return []
+  return Array.from(root.querySelectorAll(FOCUSABLE)).filter((el) => el.offsetParent !== null)
+}
+
+// Keep Tab within the dialog (simple wrap-around trap).
+const trapTab = (e) => {
+  const items = focusables()
+  if (items.length === 0) {
+    e.preventDefault()
+    panelEl.value?.focus()
+    return
+  }
+  const first = items[0]
+  const last = items[items.length - 1]
+  const active = document.activeElement
+  const outside = !panelEl.value?.contains(active)
+  if (e.shiftKey && (active === first || outside)) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && (active === last || outside)) {
+    e.preventDefault()
+    first.focus()
+  }
+}
+
 // The dialog only exists while open (the parent gates mount via
-// v-if="dialogOpen"), so bind Escape-to-close for its whole lifetime.
+// v-if="dialogOpen"), so bind these for its whole lifetime.
 const onKey = (e) => {
   if (e.key === 'Escape') emit('close')
+  else if (e.key === 'Tab') trapTab(e)
 }
-onMounted(() => document.addEventListener('keydown', onKey))
-onUnmounted(() => document.removeEventListener('keydown', onKey))
+
+onMounted(() => {
+  prevActive = document.activeElement
+  prevOverflow = document.body.style.overflow
+  document.body.style.overflow = 'hidden'        // scroll lock
+  document.addEventListener('keydown', onKey)
+  // Move focus into the dialog (first focusable, else the panel itself).
+  nextTick(() => {
+    const items = focusables()
+    ;(items[0] || panelEl.value)?.focus()
+  })
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKey)
+  document.body.style.overflow = prevOverflow
+  // Restore focus to whatever opened the dialog.
+  if (prevActive && typeof prevActive.focus === 'function') prevActive.focus()
+})
 </script>
