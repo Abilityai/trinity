@@ -639,6 +639,34 @@ tasks:
 
 ---
 
+## Direct Git Operations (MCP) — #905
+
+Trinity exposes the agent git surface as **direct, deterministic MCP tools** so an
+orchestrator can run git without spending an LLM turn via `chat_with_agent`:
+
+| Tool | What it does |
+|------|--------------|
+| `get_git_status` | Branch, remote, changed files, pending-sync flag (read-only) |
+| `get_git_log` | Recent commits (`limit` clamped 1–100, read-only) |
+| `get_git_sync_state` | Persisted sync-health row (last status, consecutive failures) |
+| `git_sync` | Stage + commit + push to the working branch |
+| `git_pull` | Pull from GitHub (`clean` / `stash_reapply` / `force_reset`) |
+| `reset_to_main_preserve_state` | ⚠️ **Destructive** recovery — adopt `origin/main` and force-with-lease, preserving only the persistent-state allowlist |
+
+Guidance:
+
+- **Conflicts stay LLM-mediated.** A `git_sync`/`git_pull` conflict returns a
+  structured `409` with `conflict_type`/`conflict_class` and a hint to resolve via
+  `chat_with_agent` — the deterministic tools never try to auto-merge.
+- **Auth.** `git_sync` and `reset_to_main_preserve_state` are **owner-only**; a
+  shared (non-owner) key gets read + `git_pull` only. Agent-scoped keys may act on
+  themselves or agents they have explicit permission for.
+- **Traceability.** Every mutating call (sync/pull success *and* conflict, and every
+  reset path) is audited, and the MCP tool-call row joins the backend git row via a
+  shared request id (`GET /api/audit-log?request_id=`).
+
+---
+
 ## Shared Folders
 
 Trinity enables file-based collaboration between agents via shared Docker volumes.

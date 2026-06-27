@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "inspect": "npx @modelcontextprotocol/inspector http://localhost:8080/mcp",
-    "test": "node --import tsx --test src/*.test.ts"
+    "test": "node --import tsx --test src/*.test.ts src/tools/*.test.ts"
   },
   "keywords": [
     "mcp",

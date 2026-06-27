@@ -151,7 +151,7 @@
 - `operator_intake_service.py` - Fire-and-forget, once-per-install opt-in operator intake POST at first-run; owns `installation_id` (trinity-enterprise#38)
 
 *Execution & Scheduling:*
-- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry (see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
+- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry + #792 SUB-003 switch-retry (pre-raise 429/auth interception → single retry with the same execution_id after a successful subscription switch, so one-shot triggers recover instead of FAILED; see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
 - `capacity_manager.py` - Unified capacity facade for admit/release/status — see [Capacity & Backlog](#capacity--backlog-428)
 - `slot_service.py` - Internal to `CapacityManager`: atomic N-ary capacity counter (Redis ZSET, dynamic per-agent TTL) (CAPACITY-001)
 - `backlog_service.py` - Internal to `CapacityManager`: persistent SQLite FIFO overflow store with drain-on-release (BACKLOG-001)
@@ -245,7 +245,7 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: Bearer` header; FastMCP `authenticate` callback validates keys against the backend and stores an `McpAuthContext` in session: `{userId, userEmail, keyName, agentName?, scope: "user"|"agent", mcpApiKey}`. Agent-to-agent collaboration uses agent-scoped keys for access control.
 
-**Tools** across 21 tool modules (`src/tools/`):
+**Tools** across 22 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
@@ -271,6 +271,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
+| `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint. Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -739,7 +740,7 @@ WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_qu
 ### Platform Audit Log (SEC-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start/end_time, limit, offset) |
+| GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start/end_time, `request_id` (#905 — joins an MCP `mcp_operation` row to the backend row it triggered), limit, offset) |
 | GET | `/api/audit-log/stats` | Admin | Counts by event_type and actor_type |
 | GET | `/api/audit-log/heatmap` | Admin | Day-of-week × hour-of-day sparse 7×24 grid; honors time + event/actor filters (#941) |
 | GET | `/api/audit-log/calendar` | Admin | Per-day calendar heatmap (sparse `[{date, count}]`); same filters — *when* in calendar time vs the weekly pattern from `/heatmap` (#941) |
@@ -750,7 +751,7 @@ WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_qu
 | POST | `/api/audit-log/hash-chain/enable` | Admin | Toggle hash-chain computation for new entries |
 | POST | `/api/internal/audit` | Internal secret | Fire-and-forget write path for MCP tool-call audit |
 
-Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request-ID middleware; MCP tool-call audit via a transparent wrapper (all 66+ tools, zero per-tool code). Storage: append-only `audit_log` table (see schema). `/api/audit-log` is the only audit surface (the old `/api/audit` Process Engine router is gone).
+Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request-ID middleware; MCP tool-call audit via a transparent wrapper (all 66+ tools, zero per-tool code). The wrapper centrally resolves each `mcp_operation` row's `target_id` (from the tool's `agent_name`/`name` param) and `request_id` (a per-call id a tool may stamp on the shared context, e.g. the git tools) — both previously dropped (#905). Storage: append-only `audit_log` table (see schema). `/api/audit-log` is the only audit surface (the old `/api/audit` Process Engine router is gone).
 
 ### Canary (CANARY-001)
 | Method | Path | Auth | Description |

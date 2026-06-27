@@ -126,7 +126,52 @@ Backend logs event, sends notification, retries execution
 - [x] No switch occurs if setting is disabled, only 1 subscription exists, or all alternatives are recently rate-limited
 - [x] Subscription badge in agent header updates after auto-switch
 
+## Retry the triggering execution after a successful switch (#792)
+
+When a switch fires mid-execution the triggering execution was marked FAILED. Three recovery
+patterns existed — interactive chat retries client-side (`routers/chat.py`), recurring cron
+recovers on the next tick — but **one-shot triggers** (manual `POST …/schedules/{id}/trigger`,
+webhook, MCP `trigger_agent_schedule`) produced a single FAILED execution with no recovery.
+
+`TaskExecutionService.execute_task` now retries that execution **once** after a successful
+switch:
+
+- **Pre-raise interception**: `agent_post_with_retry` *returns* the agent response (it never
+  calls `raise_for_status`), so a 429/auth is caught **before** `raise_for_status`, adjacent to
+  the #678 reader-race retry, and falls through to the single shared success-parse path by
+  reassigning `response` (no duplicated parse/finalize logic).
+- **Full switch surface**: `classify_switch_failure(response)` mirrors SUB-003's trigger surface
+  (429 → rate_limit; 503/401/403/402 or `is_auth_failure` body → auth), so any case that
+  switches also retries.
+- **One retry, dedicated guard**: a `subscription_switch_attempted` flag (NOT `retry_count`,
+  which the #678 retry owns — the two never suppress each other) bounds it to one retry and gates
+  the `except`-handler switch so a cascade (retry still failing) does **not** switch a second
+  time. The 2h skip-list prevents re-selecting the exhausted subscription.
+- **Retry-is-the-probe**: a short `_SWITCH_RETRY_DELAY_S` pre-delay only — no circuit-aware
+  `/health` poll (would poison the transport breaker on cold start) and no trust in
+  `restart_result`'s string status. A still-failing retry writes FAILED, as today.
+- **Cost/budget**: first-attempt cost is salvaged into `previous_attempt_cost` (#678 R2 rollup);
+  the retry timeout is capped to the **remaining** original budget so a post-long-run 429 can't
+  balloon wall-clock/slot time.
+- **Idempotency**: the retry reuses the same `execution_id`, so #1084 `effect_guard` dedups wired
+  outbound sinks; residual double-fire risk for arbitrary MCP tool calls is the same the #678
+  retry already accepts.
+
+**Out of scope / follow-ups**: the #1083 fire-and-forget async path (`DISPATCH_ASYNC`, default
+OFF) routes 429s through the result-callback, bypassing this sync path; a concurrent
+switch-lock *loser* (gets `None` from `handle_subscription_failure`) does not retry.
+
+### Acceptance Criteria (#792)
+
+- [x] A one-shot trigger whose first attempt hits a switch-and-recover lands SUCCESS, not FAILED
+- [x] Retry covers the full switch surface (429 + auth-class body), not just status codes
+- [x] Exactly one retry and exactly one switch on a cascade (retry still failing → FAILED)
+- [x] A prior #678 reader-race retry does not suppress the SUB-003 switch+retry (and vice-versa)
+- [x] First-attempt cost is rolled into the terminal cost; retry timeout bounded by remaining budget
+- [x] No alternative subscription ⇒ no retry (FAILED), as before
+
 ## History
 
 - 2026-03-21 — initial implementation (issue #153, threshold = 2, 429-only, default OFF)
 - 2026-04-25 — #441: threshold dropped to 1, broadened to auth-class failures, default flipped to ON. `handle_rate_limit_error` kept as a backward-compat shim around the new `handle_subscription_failure(failure_kind=…)`.
+- 2026-06-27 — #792: retry the triggering one-shot execution once after a successful switch (pre-raise 429/auth interception, same `execution_id`, dedicated `subscription_switch_attempted` guard, retry-is-the-probe).
