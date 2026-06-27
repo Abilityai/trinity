@@ -1,13 +1,13 @@
 # Feature: Session Tab — `--resume`-default chat surface
 
-> **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04). Default ON (`session_tab_enabled` flag, settable to false to disable platform-wide).
+> **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04). **Unified into the Chat tab (2026-06, #1112/#1340)** — no longer a standalone tab; it is now the **Session mode** of the single Chat tab (toggle, default ON). Default ON (`session_tab_enabled` flag, settable to false to disable platform-wide).
 > **Design doc**: [docs/planning/SESSION_TAB_2026-04.md](../../planning/SESSION_TAB_2026-04.md) — read first if you're touching anything in this flow.
 
 ## Overview
 
-A new Agent Detail tab that lives alongside the existing Chat tab. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>` so the agent retains tool-result memory, mid-skill state, and reasoning state across messages — strictly more capable than Chat's stateless text-replay model.
+The `--resume`-default chat surface. Since #1112 (2026-06) it is **not a separate tab** — it is the **Session mode** of the single unified **Chat** tab on Agent Detail (Session-mode toggle, default ON; OFF falls back to the legacy stateless `ChatPanel`). See [Unified Chat tab (#1112)](#unified-chat-tab-1112) below. Each turn reattaches to the same Claude Code session via `claude --print --resume <uuid>` so the agent retains tool-result memory, mid-skill state, and reasoning state across messages — strictly more capable than the legacy stateless text-replay model.
 
-The Session surface is **strictly parallel** to Chat: separate router, separate Pinia store, separate Vue component, separate DB tables. Chat is untouched. Schedules, MCP `chat_with_agent`, fan-out, and webhook triggers stay on text-replay (concurrency hazards make `--resume` unsafe there).
+The Session surface is **strictly parallel** to legacy chat: separate router, separate Pinia store, separate Vue component, separate DB tables. Legacy chat is untouched. Schedules, MCP `chat_with_agent`, fan-out, and webhook triggers stay on text-replay (concurrency hazards make `--resume` unsafe there).
 
 ## User Story
 
@@ -15,9 +15,26 @@ As a Trinity user running long, multi-turn reasoning tasks against an agent, I w
 
 ## Entry Points
 
-- **UI**: `src/frontend/src/components/SessionPanel.vue` — invoked from `AgentDetail.vue` when the "Session" tab is active and `sessionsStore.sessionTabEnabled` is true.
+- **UI**: `src/frontend/src/components/SessionPanel.vue` — rendered by the unified **Chat** tab in `AgentDetail.vue` when `effectiveChatMode === 'session'` (the Session-mode toggle is ON and the Session surface is available). It is no longer a standalone tab. See [Unified Chat tab (#1112)](#unified-chat-tab-1112).
 - **API**: `POST /api/agents/{name}/sessions/{id}/message` (the turn endpoint).
-- **Feature flag**: `GET /api/settings/feature-flags` exposes `session_tab_enabled` to non-admin users so the frontend can decide whether to render the tab.
+- **Feature flag**: `GET /api/settings/feature-flags` exposes `session_tab_enabled` to non-admin users so the frontend can decide whether to offer the Session-mode toggle (`sessionsStore.sessionTabEnabled`).
+
+---
+
+## Unified Chat tab (#1112)
+
+Before #1112 (PR #1340, commit `b98d0bed`, 2026-06) Agent Detail had **two** tabs: a stateless **Chat** tab (`ChatPanel.vue`) and a separate **Session** tab (`SessionPanel.vue`). #1112 collapsed them into a **single Chat tab** carrying a **Session-mode toggle** (default ON). All of this lives in `src/frontend/src/views/AgentDetail.vue` — the only code file changed in `b98d0bed`. The turn semantics, Redis locks, JSONL reaping, and DB tables below are **unchanged**; only the surface that mounts `SessionPanel` changed.
+
+| Concern | Identifier (`AgentDetail.vue`) | Behavior |
+|---|---|---|
+| Single Chat tab | `visibleTabs` `{ id: 'chat', label: 'Chat' }` (line 714) | No separate `session` tab entry (see the explanatory comment, lines 717-720). |
+| Mode state | `chatMode` ref (line 392); key `CHAT_MODE_KEY = 'trinity.chatMode'` (line 391) | Read once at init (`localStorage.getItem('trinity.chatMode') === 'legacy' ? 'legacy' : 'session'`); **default Session ON**. Persisted per-user (one preference across all agents) by `toggleChatMode` (line 409). |
+| Availability gate | `sessionAvailable` computed (lines 398-400) | `sessionsStore.sessionTabEnabled && agent.value?.runtime !== 'codex'` — Session mode is offered only when the platform flag is ON **and** the runtime has `--resume` machinery (Codex does not, #1187). |
+| Effective mode | `effectiveChatMode` computed (lines 401-405) | `!sessionAvailable` → `'legacy'` (toggle hidden, never zero chat surfaces); else `routeForcedMode` (if set) wins; else the saved `chatMode`. |
+| Toggle | `toggleChatMode()` (lines 406-410); button `AgentDetail.vue:97-122` | Clears `routeForcedMode` (user intent overrides routing), flips mode, writes `localStorage['trinity.chatMode']`. The toggle row is `v-if="sessionAvailable"` (line 98), so it's hidden in the legacy fallback. |
+| Surface swap | `v-if`/`v-else` on `effectiveChatMode` (lines 124-137) | `SessionPanel` when `effectiveChatMode === 'session'` (line 126); legacy `ChatPanel` otherwise (line 130). Chat-tab content is `v-show` (line 94) so the active surface stays mounted across tab switches. |
+| Legacy `?tab=session` alias | `TAB_ALIASES = { guardrails: 'settings', session: 'chat' }` (line 349); `resolveDeepLinkTab` (lines 351-354) | A legacy `?tab=session` deep-link resolves to the `chat` tab and additionally hints Session mode (`if (route.query.tab === 'session') chatMode.value = 'session'`, line 1138). |
+| ExecutionDetail "continue as chat" | `routeForcedMode` ref (line 395); `resumeSessionId` computed (line 385) | A `?tab=chat&resumeSessionId=…` landing sets `routeForcedMode.value = 'legacy'` (line 1143) so the legacy `ChatPanel` owns the `--resume` execution — **without** rewriting the user's saved `chatMode` preference (the override is transient, never persisted). |
 
 ---
 
@@ -28,7 +45,7 @@ As a Trinity user running long, multi-turn reasoning tasks against an agent, I w
 | Component | File | Purpose |
 |---|---|---|
 | `SessionPanel.vue` | `src/frontend/src/components/SessionPanel.vue` | Main surface — header (session selector + model picker + Reset memory + "+ New Session"), `ChatMessages` for the bubble list, `ChatInput` for input. Reuses chat sub-components for visual parity. |
-| `AgentDetail.vue` | `src/frontend/src/views/AgentDetail.vue` | Tab insertion (between Chat and Dashboard/Schedules), gated on `sessionsStore.sessionTabEnabled`. The `isFullscreenTab` computed extends Chat's full-viewport flex layout to the Session tab. |
+| `AgentDetail.vue` | `src/frontend/src/views/AgentDetail.vue` | Hosts the unified **Chat** tab (single `{ id: 'chat' }` tab; no separate Session tab since #1112). The Session-mode toggle (`AgentDetail.vue:97-122`) swaps `SessionPanel` (`v-if="effectiveChatMode === 'session'"`, line 126) for the legacy `ChatPanel` (`v-else`, line 130) in-place. `isFullscreenTab` (line 358) keys on `activeTab === 'chat'`, so both modes get the full-viewport flex layout. |
 
 ### State Management
 
@@ -239,7 +256,7 @@ These items are NOT bugs — they are design boundaries we explicitly chose, def
 ## Related Flows
 
 - [persistent-chat-tracking.md](persistent-chat-tracking.md) — the older `chat_sessions` / `chat_messages` system this surface is parallel to.
-- [authenticated-chat-tab.md](authenticated-chat-tab.md) — the Chat tab that sits next to Session in the AgentDetail tab row.
+- [authenticated-chat-tab.md](authenticated-chat-tab.md) — the legacy stateless `ChatPanel`, now the **Session-mode-OFF** surface of the same unified Chat tab (#1112).
 - [parallel-headless-execution.md](parallel-headless-execution.md) — the `task_execution_service.execute_task` shared pipeline this surface plugs into.
 - [continue-execution-as-chat.md](continue-execution-as-chat.md) — the EXEC-023 `resume_session_id` plumbing this surface inherits from.
 - [websocket-event-bus.md](websocket-event-bus.md) — RELIABILITY-003 transport for any WebSocket events this flow emits.

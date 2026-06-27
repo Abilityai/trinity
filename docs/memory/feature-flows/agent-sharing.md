@@ -476,6 +476,7 @@ Working - Agent sharing fully functional with email-based collaboration
 
 ## See Also
 
+- **[access-tab.md](access-tab.md)** — The Agent Detail **Access** tab: a read-only roster of Trinity *operators* (platform users) resolved from this same `agent_sharing` allow-list (active operator vs pending invite). Add/remove there reuse the `/share` + `/share/{email}` endpoints documented here (trinity-enterprise#17).
 - **[unified-channel-access-control.md](unified-channel-access-control.md)** — Canonical reference for the cross-channel gate, `email_has_agent_access` semantics, and how Telegram/Slack/web public links resolve a verified email and consult `agent_sharing`. This flow only documents the sharing UX and API surface; gate implementation lives there.
 
 ## Related Flows

@@ -278,6 +278,83 @@ async def terminate_agent_execution(
 
 ---
 
+## Cancelled as a first-class terminal outcome (#679)
+
+> Defense-in-depth follow-up to #671 (PR #1333, commit `ea444e9a`). The older work (see "Status Preservation on Termination" above) only stopped error handlers from *overwriting* a `cancelled` row with `failed`/`timeout`. #679 goes further: it makes the **agent task-runner itself** aware that an operator cancel happened and surfaces a **third** terminal outcome — `cancelled` — alongside success/failed, end-to-end. A cancel is never recorded as a billable success nor as an agent failure.
+
+### 1. Agent-side cancel marker + relabeling
+
+**`ProcessRegistry._terminated` marker** (`docker/base-image/agent_server/services/process_registry.py`):
+
+| Lifecycle | Anchor | Detail |
+|-----------|--------|--------|
+| Field | `process_registry.py:74` | `self._terminated: Dict[str, float] = {}` (execution_id → unix ts) |
+| TTL | `process_registry.py:39` | `TERMINATED_TTL_SECONDS = 300` (best-effort; the DB CANCELLED write is the durable authority) |
+| **Set** | `process_registry.py:176-177` | Inside `terminate()`, immediately after a **successful SIGINT send, still-running branch only**. NOT set on `not_found`/`already_finished` (returned earlier at 147/154) nor on a signal that raises (falls to the `except` at 228). The send is causally before the subprocess's graceful exit, so the marker is set before the chat handler observes `execute_headless` returning — race-free. |
+| **Read** | `was_terminated()` `process_registry.py:329-343` | Read-only — does NOT pop, so the graceful-exit relabel and a later SIGKILL→504 check both observe it. Lazy TTL eviction on read (mirrors `list_recently_completed_ids`). |
+| **Clear** | `process_registry.py:97` | `self._terminated.pop(execution_id, None)` in `register()`, so an execution_id reused by the #678 in-line reader-race retry can't inherit a stale cancel label (C10). |
+
+**Sync chat handler** (`docker/base-image/agent_server/routers/chat.py`, `POST /api/task`):
+- **Graceful exit-0 path** (`chat.py:197-213`): `cancelled = bool(request.execution_id) and was_terminated(...)`, keyed off the backend `execution_id` (NEVER the returned `session_id`, which can differ on a resumed/forked turn). Response `status` becomes `"cancelled"`.
+- **HTTPException path** (`chat.py:160-187`): a terminated non-auth/non-rate terminal (SIGKILL→504 / 502 empty-result / 500) is relabelled to a `cancelled` 200 (`is_cancel` at 169-173). 503/429/auth and any *unterminated* terminal re-raise unchanged (Issue 6/C6) so SUB-003 + the AUTH dispatch breaker still fire.
+
+**Async result callback** (`docker/base-image/agent_server/services/result_callback.py`): `_run_and_report` post-checks `was_terminated()` and, unless the envelope is auth/rate (`_is_auth_or_rate`, `result_callback.py:195-202`), relabels via `_cancelled_override()` (`result_callback.py:181-192`) — keeping the graceful final message/metadata/session_id and dropping `error_code`. Wiring at `result_callback.py:298-316`.
+
+### 2. Neutral dispatch-breaker finish (`success=None`)
+
+`AgentState.record_task_finish` (`docker/base-image/agent_server/state.py:79-98`) now accepts `success: Optional[bool]`:
+- `True` → reset `consecutive_failures` (the #526 dispatch-breaker signal)
+- `False` → increment it (failure)
+- **`None` → NEUTRAL** (`state.py:93-94`): the task still finishes (decrement active count, stamp `last_task_at`) but the failure counter is left untouched. A cancel is neither a failure (must not push a healthy agent toward an open breaker) nor a success (proves nothing about agent health). Recorded `None` on all three cancel sub-paths: sync graceful (`chat.py:198`), sync HTTPException (`chat.py:176`), async (`result_callback.py:312`).
+
+### 3. Backend 3-way status map + AUTH trust-boundary guard
+
+Two backend finalizers map the agent's label → terminal status:
+
+- **Async fire-and-forget callback** — `src/backend/routers/agents.py`, `POST /{agent_name}/executions/{execution_id}/result`: **3-way map at `agents.py:954-959`** — `success`→SUCCESS, `cancelled`→CANCELLED, else→FAILED (incl. unknown forward-compat values). `CANCELLED` sits in `_AUTHORITATIVE_TERMINALS` (`agents.py:840-844`) so a replayed cancel callback short-circuits as an idempotent no-op ACK.
+- **Sync applier** — `src/backend/services/task_execution_service.py`: cancel cross-validation at `task_execution_service.py:1044-1059` — when the agent's 200 reply carries `status: "cancelled"`, a `CANCELLED` `TerminalEnvelope` is finalized via the shared `apply_result` (defense-in-depth over the #671 CAS). An old image omits `status` → `.get()` returns None → the unchanged SUCCESS path runs.
+
+**Trust-boundary guard (CSO finding 2, 2026-06-22)**: an auth/rate terminal is NEVER reclassified as a cancellation, even if the agent labels it `"cancelled"`. The agent already guards this (`result_callback._is_auth_or_rate`), but the backend callback is the trust boundary, so it mirrors the guard — `is_auth_or_rate` at `agents.py:950-953` (`payload.error_code == AUTH` or `terminal_reason in ("auth","rate_limit")`) forces such a payload down the FAILED branch (`agents.py:956`), so a buggy/mixed-version agent can't silently dodge the AUTH dispatch breaker / SUB-003 auto-switch.
+
+### 4. Consumers treat `cancelled` as non-delivery
+
+Every result-branching consumer broadened `== "failed"` → `in ("failed", "cancelled")`, so a cancel is non-delivery (not a success-like empty body):
+
+| Consumer | Anchor | Behavior |
+|----------|--------|----------|
+| Channel router | `src/backend/adapters/message_router.py:439-441` | Surfaces the cancel notice instead of posting an empty "success" reply |
+| Sync chat/task proxy | `src/backend/routers/chat.py:1783-1785`, `1841-1843` | Surfaces a clean 503 rather than an empty success |
+| Paid (x402) | `src/backend/routers/paid.py:202-221` | **Does NOT settle on cancel** — fixes the charge-on-cancel money bug; returns `payment.settled=false`, "Execution cancelled — no charge" |
+| Public chat | `src/backend/routers/public.py:625-628`, `963-966`, `1055-1059` | Cancel → generic 502 / writes nothing to the public session; the poll endpoint surfaces the real status + "cancelled by user" error (F2) |
+| Validation service | `src/backend/services/validation_service.py:274-283` | A cancelled validation turn → `ValidationStatus.ERROR`, never parsed as a verdict |
+
+### 5. `terminate` writes CANCELLED only when it actually stopped a turn (Issue 7)
+
+`POST /{name}/executions/{execution_id}/terminate` (`src/backend/routers/chat.py:2418-2429`): the DB row is written `CANCELLED` **only** when the agent reports `status == "terminated"` (it actually stopped a running turn). On `already_finished` the cancel arrived too late and the agent's genuine terminal already stands — left in place ("agent self-report is authoritative"). Capacity is still force-released in both cases (`chat.py:2407-2416`).
+
+### Models (`src/backend/models.py`)
+
+- `TaskExecutionStatus.CANCELLED` already existed (`models.py:221`); its state-machine docstring names the terminate handler as the guarded `RUNNING → CANCELLED` writer (`models.py:208`). **No new enum value landed** — #679 is a label-routing change over the existing status.
+- `ExecutionResultEnvelope` (`models.py:578-602`) is the typed callback body; `status` is free-form `str` for forward-compat, and the docstring documents the `success`→SUCCESS / `cancelled`→CANCELLED / else→FAILED map plus the `cancelled` `terminal_reason` value.
+
+### Testing
+
+Nine `#679` unit suites under `tests/unit/` (plus additions to `tests/test_execution_termination.py`; `tests/unit/test_loop_service.py` touched for the loop caller):
+
+| Suite | Covers |
+|-------|--------|
+| `test_679_terminated_marker.py` | marker set-after-SIGINT only; not on already_finished/not_found/signal-failure; cleared on register; read-not-pop; TTL eviction; multi-exec isolation |
+| `test_679_cancel_neutral_finish.py` | `record_task_finish(None)` neutral (F4); `execute_task` records None on graceful + 504 cancel, True/False otherwise |
+| `test_679_agent_chat_cancel.py` | sync `/api/task` relabeling (graceful exit-0 + HTTPException paths) |
+| `test_679_result_callback_cancel.py` | agent async `_run_and_report` cancel override (graceful + SIGKILL→504), auth/rate exclusion (C6) |
+| `test_679_callback_cancel.py` | backend callback endpoint 3-way map (success→SUCCESS / cancelled→CANCELLED / else→FAILED) |
+| `test_679_backend_cancel.py` | `apply_result` honors `envelope.status` (CANCELLED writes CANCELLED); sync cross-validation; old-image no-`status` → unchanged SUCCESS |
+| `test_679_callers.py` | paid no-settle (money bug) + validation_service ERROR on cancel |
+| `test_679_public_poll_cancel.py` | public poll endpoint surfaces cancelled status + "cancelled by user" error |
+| `test_679_terminate_already_finished.py` | Issue 7 — no CANCELLED write when the agent reports `already_finished` |
+
+---
+
 ## Frontend Layer
 
 ### TasksPanel.vue (`src/frontend/src/components/TasksPanel.vue`)
@@ -544,6 +621,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 
 | Date | Changes |
 |------|---------|
+| 2026-06-26 | #679 (PR #1333): `cancelled` is now a first-class third terminal outcome end-to-end. Agent `ProcessRegistry._terminated` marker + `was_terminated()` relabel a SIGINT-graceful-exit-0 / SIGKILL→504 turn as cancelled (sync chat + async callback); neutral dispatch-breaker finish (`success=None`); backend 3-way status map (callback + sync applier) with AUTH-never-reclassified trust-boundary guard; consumers (message_router/chat/paid[money-bug]/public/validation) treat cancel as non-delivery; `terminate` writes CANCELLED only when it actually stopped a running turn (Issue 7). |
 | 2026-03-22 | Fix: `/api/chat` path now passes `execution_id` to agent (was only `/api/task`). Added `execution_id` to `ChatRequest` model, `execute()` runtime interface, and backend chat payload. Terminate endpoint defaults `task_execution_id` to `execution_id` for DB update. |
 | 2026-01-13 | Added "Live" button entry point (lines 213-232) - green badge with pulsing dot for running tasks, navigates to Execution Detail page for real-time monitoring |
 | 2026-01-13 | Updated: Unified execution ID flow (backend passes to agent), status preservation in error handlers, frontend polling improvements, cancelled status styling |

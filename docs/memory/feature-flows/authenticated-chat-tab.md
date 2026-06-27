@@ -4,6 +4,8 @@
 
 A dedicated **Chat** tab in the Agent Detail page that provides a simple, clean chat interface for authenticated users. This complements the Terminal tab (which provides full Claude Code TUI access) with a simpler chat experience that tracks all activity in the Dashboard timeline.
 
+> **Note (#1112, 2026-06):** the standalone Chat tab described here is now the **legacy / Session-mode-OFF** surface of the unified Chat tab — `ChatPanel.vue` renders when the Chat tab's Session-mode toggle is off (or unavailable). See [session-tab.md](session-tab.md#unified-chat-tab-1112).
+
 **Spec**: `docs/requirements/AUTHENTICATED_CHAT_TAB.md`
 
 ## User Story
