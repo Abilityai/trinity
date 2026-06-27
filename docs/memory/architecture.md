@@ -150,7 +150,7 @@
 - `operator_intake_service.py` - Fire-and-forget, once-per-install opt-in operator intake POST at first-run; owns `installation_id` (trinity-enterprise#38)
 
 *Execution & Scheduling:*
-- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry (see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
+- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry + #792 SUB-003 switch-retry (pre-raise 429/auth interception → single retry with the same execution_id after a successful subscription switch, so one-shot triggers recover instead of FAILED; see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
 - `capacity_manager.py` - Unified capacity facade for admit/release/status — see [Capacity & Backlog](#capacity--backlog-428)
 - `slot_service.py` - Internal to `CapacityManager`: atomic N-ary capacity counter (Redis ZSET, dynamic per-agent TTL) (CAPACITY-001)
 - `backlog_service.py` - Internal to `CapacityManager`: persistent SQLite FIFO overflow store with drain-on-release (BACKLOG-001)
