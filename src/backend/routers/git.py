@@ -30,6 +30,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agents", tags=["git"])
 
 
+async def _audit_git(
+    *,
+    action: str,
+    request: Request,
+    current_user: User,
+    agent_name: str,
+    success: bool,
+    details: Dict,
+) -> None:
+    """Emit a single GIT_OPERATION audit row for a mutating git op (#905).
+
+    Called exactly once per handler exit path — on success AND on the
+    business-failure (409 conflict / 400 / 500) paths — so the audit trail
+    covers mutating/destructive operations symmetrically. Forwards the
+    request's correlation id (adopted from an incoming `X-Request-ID`, e.g.
+    an MCP tool call) so the MCP `mcp_operation` row and this row are
+    joinable via `GET /api/audit-log?request_id=...`. Best-effort: the audit
+    service swallows its own errors and never raises.
+    """
+    await platform_audit_service.log(
+        event_type=AuditEventType.GIT_OPERATION,
+        event_action=action,
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={**details, "success": success},
+    )
+
+
 @router.get("/{agent_name}/git/status")
 async def get_git_status(
     agent_name: AuthorizedAgentByName,
@@ -129,22 +162,33 @@ async def sync_to_github(
             conflict_headers = {"X-Conflict-Type": result.conflict_type}
             if result.conflict_class:
                 conflict_headers["X-Conflict-Class"] = result.conflict_class
+        # #905: audit the failure path too — conflicts on a mutating op must be
+        # traceable, not silently dropped (previously only the success path logged).
+        await _audit_git(
+            action="sync",
+            request=request,
+            current_user=current_user,
+            agent_name=agent_name,
+            success=False,
+            details={
+                "strategy": body.strategy,
+                "status_code": status_code,
+                "conflict_type": result.conflict_type,
+                "conflict_class": result.conflict_class,
+            },
+        )
         raise HTTPException(
             status_code=status_code,
             detail=result.message,
             headers=conflict_headers,
         )
 
-    await platform_audit_service.log(
-        event_type=AuditEventType.GIT_OPERATION,
-        event_action="sync",
-        source="api",
-        actor_user=current_user,
-        actor_ip=request.client.host if request.client else None,
-        target_type="agent",
-        target_id=agent_name,
-        endpoint=str(request.url.path),
-        request_id=getattr(request.state, "request_id", None),
+    await _audit_git(
+        action="sync",
+        request=request,
+        current_user=current_user,
+        agent_name=agent_name,
+        success=True,
         details={
             "commit_sha": result.commit_sha,
             "files_changed": result.files_changed,
@@ -226,22 +270,32 @@ async def pull_from_github(
             conflict_class = result.get("conflict_class")
             if conflict_class:
                 conflict_headers["X-Conflict-Class"] = conflict_class
+        # #905: audit the failure path too (see sync handler).
+        await _audit_git(
+            action="pull",
+            request=request,
+            current_user=current_user,
+            agent_name=agent_name,
+            success=False,
+            details={
+                "strategy": body.strategy,
+                "status_code": status_code,
+                "conflict_type": conflict_type,
+                "conflict_class": result.get("conflict_class"),
+            },
+        )
         raise HTTPException(
             status_code=status_code,
             detail=result.get("message"),
             headers=conflict_headers,
         )
 
-    await platform_audit_service.log(
-        event_type=AuditEventType.GIT_OPERATION,
-        event_action="pull",
-        source="api",
-        actor_user=current_user,
-        actor_ip=request.client.host if request.client else None,
-        target_type="agent",
-        target_id=agent_name,
-        endpoint=str(request.url.path),
-        request_id=getattr(request.state, "request_id", None),
+    await _audit_git(
+        action="pull",
+        request=request,
+        current_user=current_user,
+        agent_name=agent_name,
+        success=True,
         details={"strategy": body.strategy},
     )
 
@@ -631,6 +685,7 @@ async def clear_agent_github_pat(
 @router.post("/{agent_name}/git/reset-to-main-preserve-state")
 async def reset_to_main_preserve_state(
     agent_name: OwnedAgentByName,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """Adopt `origin/main` as the new baseline, preserving instance state.
@@ -649,23 +704,38 @@ async def reset_to_main_preserve_state(
     result = await git_service.reset_to_main_preserve_state(agent_name)
 
     err = result.get("error")
-    if err == "agent_busy":
-        raise HTTPException(
-            status_code=409,
-            detail=result.get("message", "Agent is currently executing a task"),
-            headers={"X-Conflict-Type": "agent_busy"},
-        )
-    if err in ("no_git_config", "no_remote_main"):
-        raise HTTPException(
-            status_code=409,
-            detail=result.get("message", err),
-            headers={"X-Conflict-Type": err},
-        )
     if err:
-        raise HTTPException(
-            status_code=500,
-            detail=result.get("message", err),
+        # #905: this is a destructive, force-with-lease recovery op — every
+        # exit path (success and each guardrail/failure) must be auditable.
+        status_code = 409 if err in ("agent_busy", "no_git_config", "no_remote_main") else 500
+        await _audit_git(
+            action="reset_to_main_preserve_state",
+            request=request,
+            current_user=current_user,
+            agent_name=agent_name,
+            success=False,
+            details={"error": err, "status_code": status_code},
         )
+        headers = {"X-Conflict-Type": err} if status_code == 409 else None
+        raise HTTPException(
+            status_code=status_code,
+            detail=result.get("message", err),
+            headers=headers,
+        )
+
+    await _audit_git(
+        action="reset_to_main_preserve_state",
+        request=request,
+        current_user=current_user,
+        agent_name=agent_name,
+        success=True,
+        details={
+            "snapshot_dir": result.get("snapshot_dir"),
+            "commit_sha": result.get("commit_sha"),
+            "files_preserved": result.get("files_preserved"),
+            "working_branch": result.get("working_branch"),
+        },
+    )
 
     return {"success": True, **result}
 

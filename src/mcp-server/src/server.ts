@@ -28,6 +28,7 @@ import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
+import { createGitTools } from "./tools/git.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -237,6 +238,7 @@ export async function createServer(config: ServerConfig = {}) {
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
+    createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
   ];
   for (const group of toolGroups) {
     addAllTools(group);

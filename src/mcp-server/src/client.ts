@@ -40,6 +40,30 @@ function debugLog(...args: any[]) {
 }
 
 /**
+ * Typed error thrown by `request()` on a non-2xx response (#905). Carries the
+ * HTTP status and the conflict-classification headers the git endpoints set
+ * (`X-Conflict-Type`/`X-Conflict-Class`), so a tool can branch on the conflict
+ * type (e.g. "use chat_with_agent") without parsing the free-form detail string.
+ *
+ * Backward-compatible: `.message` keeps the historical `API error (<status>): <body>`
+ * shape, so existing callers/tests that match on the message still work, and
+ * `instanceof Error` holds.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly conflictType?: string;
+  readonly conflictClass?: string;
+
+  constructor(status: number, body: string, headers?: Headers) {
+    super(`API error (${status}): ${body}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.conflictType = headers?.get("X-Conflict-Type") ?? undefined;
+    this.conflictClass = headers?.get("X-Conflict-Class") ?? undefined;
+  }
+}
+
+/**
  * #914 pure matcher for the chat-timeout recovery lookup. Extracted from
  * `TrinityClient.findRecentMcpExecution` so a unit test can drive it
  * without spinning up a real backend.
@@ -159,7 +183,8 @@ export class TrinityClient {
     method: string,
     path: string,
     body?: unknown,
-    isRetry: boolean = false
+    isRetry: boolean = false,
+    requestId?: string
   ): Promise<Response> {
     if (!this.token) {
       throw new Error("Not authenticated. Call authenticate() first or setToken().");
@@ -171,6 +196,14 @@ export class TrinityClient {
 
     if (body) {
       headers["Content-Type"] = "application/json";
+    }
+
+    // #905: forward a caller-supplied correlation id. The backend's
+    // add_request_id middleware adopts an incoming X-Request-ID, so the
+    // server-side audit row (e.g. git_operation) carries the SAME id the MCP
+    // tool stamps on its own mcp_operation audit row — making the two joinable.
+    if (requestId) {
+      headers["X-Request-ID"] = requestId;
     }
 
     // Security: Log requests without exposing tokens in production
@@ -191,13 +224,15 @@ export class TrinityClient {
       const success = await this.reauthenticate();
       if (success) {
         console.log("Re-authentication successful, retrying request...");
-        return this._fetch(method, path, body, true);
+        return this._fetch(method, path, body, true, requestId);
       }
     }
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`API error (${response.status}): ${error}`);
+      // #905: typed error so callers can branch on .status / .conflictType
+      // without parsing the message. Message shape is unchanged for back-compat.
+      throw new ApiError(response.status, error, response.headers);
     }
 
     return response;
@@ -210,9 +245,10 @@ export class TrinityClient {
     method: string,
     path: string,
     body?: unknown,
-    isRetry: boolean = false
+    isRetry: boolean = false,
+    requestId?: string
   ): Promise<T> {
-    const response = await this._fetch(method, path, body, isRetry);
+    const response = await this._fetch(method, path, body, isRetry, requestId);
 
     // Handle 204 No Content (e.g., successful DELETE)
     if (response.status === 204) {
@@ -1988,5 +2024,79 @@ export class TrinityClient {
       skipped: string[];
       bytes_received: number;
     }>;
+  }
+
+  // ============================================================================
+  // Git Sync (#905) — direct, deterministic (non-LLM) git operations
+  // ============================================================================
+
+  /** Live git status for an agent (branch, remote, changes, sync_status). */
+  async getGitStatus(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/status`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Stage, commit, and push agent changes to the working branch. */
+  async gitSync(
+    name: string,
+    body: { message?: string; paths?: string[]; strategy?: string },
+    requestId?: string,
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/sync`,
+      body,
+      false,
+      requestId,
+    );
+  }
+
+  /** Recent commit history for an agent. */
+  async getGitLog(name: string, limit: number, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/log?limit=${encodeURIComponent(String(limit))}`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Pull latest changes from GitHub with the given conflict strategy. */
+  async gitPull(name: string, strategy: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/pull`,
+      { strategy },
+      false,
+      requestId,
+    );
+  }
+
+  /** Persisted git sync-state row (#389) for an agent. */
+  async getGitSyncState(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/sync-state`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Destructive recovery: adopt origin/main, preserving instance state (#384). */
+  async resetToMainPreserveState(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/reset-to-main-preserve-state`,
+      undefined,
+      false,
+      requestId,
+    );
   }
 }

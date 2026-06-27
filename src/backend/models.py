@@ -1351,6 +1351,10 @@ class InternalAuditRequest(BaseModel):
     # Target
     target_type: Optional[str] = None
     target_id: Optional[str] = None
+    # Request correlation (#905): lets an MCP `mcp_operation` row be joined to
+    # the backend `git_operation`/etc. row it triggered, when the MCP tool
+    # forwards the same X-Request-ID it sends on the proxied backend call.
+    request_id: Optional[str] = None
     # Details
     details: Optional[Dict] = None
 
