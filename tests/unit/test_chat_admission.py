@@ -315,9 +315,18 @@ def test_run_finalize_budget_exhausted_on_cancelled_row_closes_activity_cancelle
     CANCELLED closes the chat activity CANCELLED, not FAILED."""
     from routers.chat import _run_chat_and_finalize
     from models import ActivityState, TaskExecutionStatus
-    from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 
-    budget_exc = BackendAgentCallBudgetExhausted(
+    # Raise the exact BackendAgentCallBudgetExhausted class object that
+    # routers.chat bound at import — NOT a fresh `from services.agent_call_limiter
+    # import ...`. test_904_agent_call_limiter.py::test_default_timeout_is_one_hour
+    # does `importlib.reload(services.agent_call_limiter)`, which rebinds the
+    # module's exception class to a new object. Under pytest-randomly orderings
+    # where that test runs first, a fresh import here would yield the post-reload
+    # class, which routers.chat's pre-reload `except BackendAgentCallBudgetExhausted`
+    # cannot catch — the simulated exception would escape uncaught and this test
+    # would fail spuriously. Referencing the handler's own bound class keeps the
+    # test order-independent (and is what the production raiser uses anyway).
+    budget_exc = _CHAT.BackendAgentCallBudgetExhausted(
         agent_name="agent1", agent_cap=2, global_cap=8, wait_ms=1500,
     )
     act = AsyncMock()
