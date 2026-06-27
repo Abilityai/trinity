@@ -98,6 +98,9 @@ ORPHAN_SCAN_TABLES = [
     ("agent_public_links", "agent_name", None),
     ("operator_queue", "agent_name", "status = 'pending'"),
     ("access_requests", "agent_name", "status = 'pending'"),
+    # #918 — CASCADE table holding agent-published report payloads (can be
+    # sensitive); watch for orphans referencing a deleted agent.
+    ("agent_reports", "agent_name", None),
 ]
 
 

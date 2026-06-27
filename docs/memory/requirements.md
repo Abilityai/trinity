@@ -3184,6 +3184,45 @@ password) is **Phase 2**, gated on a configured email provider and the existing
 
 ---
 
+## 44. Agent-Reported Structured Reports (#918)
+
+**Description**: A generic **agent report** primitive — agents publish typed-but-flexible
+structured reports (telemetry, domain results: leads found, KPI snapshots, weekly summaries)
+via an MCP tool. Reports are persisted, surfaced on the Agent Detail "Reports" tab and a
+fleet-wide Reports view, so users see what each agent produces without reading chat
+transcripts. Three-surface feature (backend router, MCP tool, frontend); no agent-server
+endpoint — reports flow agent → MCP → backend.
+
+- **FR-1 — MCP tool `report`**: `report(report_type, title, payload, display_hint?,
+  schema_version?, period_start?, period_end?)`. The reporting agent + author are resolved
+  **server-side** from the MCP auth context (agent-scoped key → bound agent); the tool
+  requires an agent-scoped key so a report cannot be attributed to another agent.
+- **FR-2 — Storage**: `agent_reports` table (id, agent_name, user_id, report_type, title,
+  payload JSON, display_hint, schema_version, period_start/end, created_at). Indexes on
+  `(agent_name, created_at DESC)`, `(report_type, created_at DESC)`, and `(created_at)` for
+  the retention sweep. Dual-track migration (SQLite `migrations.py` + Alembic `0006`).
+- **FR-3 — Backend API** (access control mirrors `/api/executions`): self-gated `POST
+  /api/agents/{name}/reports` (agent-scoped key must equal the path agent; payload capped at
+  256 KB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
+  `GET /api/reports` (fleet, accessible-agent filtered; `agent`/`report_type`/`hours`/`search`),
+  `GET /api/reports/stats` (total / by_type / agents KPI counts), `GET /api/reports/{id}`
+  (full payload; 404 on no-access), `DELETE /api/agents/{name}/reports/{id}` (owner; scoped by
+  agent_name + id).
+- **FR-4 — Real-time**: a **thin** `agent_report` WebSocket trigger (agent_name, report_id,
+  report_type, created_at — never title/payload, since `/ws` is unfiltered SCOPE_ALL); the
+  frontend refetches via the access-controlled REST endpoints.
+- **FR-5 — Frontend**: Agent Detail "Reports" tab + Operations → "Reports" fleet tab. Generic
+  + typed renderers (table / KPI tiles / markdown / timeline / JSON) chosen by `display_hint`,
+  then `report_type` prefix, then JSON; each renderer validates payload shape and falls back to
+  the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
+- **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
+  `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
+
+**Deferred**: effect-guard dedup on `report()` for at-least-once pull-mode re-delivery
+(#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

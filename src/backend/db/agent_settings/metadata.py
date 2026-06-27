@@ -29,6 +29,7 @@ from ..tables import (
     agent_dashboard_values,
     monitoring_alert_cooldowns,
     agent_shared_files,
+    agent_reports,
 )
 
 
@@ -109,6 +110,8 @@ class MetadataMixin:
         - agent_health_checks
         - agent_dashboard_values
         - monitoring_alert_cooldowns
+        - agent_shared_files
+        - agent_reports
 
         Args:
             old_name: Current agent name
@@ -273,6 +276,15 @@ class MetadataMixin:
                 conn.execute(
                     update(agent_shared_files)
                     .where(agent_shared_files.c.agent_name == old_name)
+                    .values(agent_name=new_name)
+                )
+
+                # Reports (#918) — re-key so the renamed agent keeps its report
+                # history and the old name doesn't leave orphaned rows a reused
+                # name could inherit (cross-tenant disclosure).
+                conn.execute(
+                    update(agent_reports)
+                    .where(agent_reports.c.agent_name == old_name)
                     .values(agent_name=new_name)
                 )
 

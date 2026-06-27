@@ -3,7 +3,7 @@ Pydantic models for the Trinity backend API.
 """
 import re
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
@@ -184,6 +184,97 @@ class Activity(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ============================================================================
+# Agent Reports (#918) — agent-published structured telemetry / domain reports
+# ============================================================================
+
+# Max serialized-JSON byte length of a report payload. Enforced at the router
+# (oversize → HTTP 413) to bound SQLite growth and list-response weight.
+REPORT_PAYLOAD_MAX_BYTES = 256 * 1024  # 256 KiB
+
+# Renderer hints the frontend understands; an unknown/absent hint falls back to
+# the report_type prefix map, then the JSON viewer.
+ReportDisplayHint = Literal["table", "kpi", "markdown", "timeline", "json"]
+
+_REPORT_TYPE_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)+$")
+
+
+def _validate_iso8601(value: Optional[str]) -> Optional[str]:
+    """Reject a non-ISO-8601 period bound (None passes through)."""
+    if value is None:
+        return value
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        raise ValueError("must be an ISO-8601 timestamp")
+    return value
+
+
+class ReportCreate(BaseModel):
+    """Request body for an agent publishing a structured report (#918).
+
+    The agent + author are resolved server-side from the MCP/JWT auth context —
+    never from this body — so a report cannot be attributed to another agent.
+    """
+    report_type: str = Field(..., min_length=1, max_length=128)
+    title: str = Field(..., min_length=1, max_length=300)
+    payload: Dict  # byte-capped at the router (REPORT_PAYLOAD_MAX_BYTES → 413)
+    display_hint: Optional[ReportDisplayHint] = None
+    schema_version: int = Field(1, ge=1, le=1000)
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+
+    @field_validator("report_type")
+    @classmethod
+    def _check_report_type(cls, v: str) -> str:
+        if not _REPORT_TYPE_RE.match(v):
+            raise ValueError(
+                "report_type must be namespaced lower_snake segments joined by "
+                "'.', e.g. 'recon.weekly_summary'"
+            )
+        return v
+
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def _check_period_iso(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_iso8601(v)
+
+    @model_validator(mode="after")
+    def _check_period_order(self) -> "ReportCreate":
+        if self.period_start and self.period_end and self.period_start > self.period_end:
+            raise ValueError("period_start must be <= period_end")
+        return self
+
+
+class ReportSummary(BaseModel):
+    """List-response model — metadata only, never carries ``payload`` (#918)."""
+    id: str
+    agent_name: str
+    report_type: str
+    title: str
+    display_hint: Optional[str] = None
+    schema_version: int = 1
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class Report(ReportSummary):
+    """Detail-response model — full row including the decoded ``payload``."""
+    user_id: Optional[int] = None
+    payload: Dict
+
+
+class FleetReportStats(BaseModel):
+    """Aggregate stat-card data for the fleet Reports view (#918)."""
+    total: int
+    by_type: Dict[str, int]
+    agents: int
 
 
 # ============================================================================

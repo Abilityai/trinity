@@ -409,6 +409,26 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Agent Reports (#918) — agent-published structured telemetry/domain reports
+    # -------------------------------------------------------------------------
+    "agent_reports": """
+        CREATE TABLE IF NOT EXISTS agent_reports (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER,
+            report_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            display_hint TEXT,
+            schema_version INTEGER DEFAULT 1,
+            period_start TEXT,
+            period_end TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Notifications (NOTIF-001)
     # -------------------------------------------------------------------------
     "agent_notifications": """
@@ -1272,6 +1292,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_activities_parent ON agent_activities(parent_activity_id)",
     "CREATE INDEX IF NOT EXISTS idx_activities_chat_msg ON agent_activities(related_chat_message_id)",
     "CREATE INDEX IF NOT EXISTS idx_activities_execution ON agent_activities(related_execution_id)",
+
+    # Agent report indexes (#918)
+    "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
+    # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
+    "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
 
     # Permission indexes
     "CREATE INDEX IF NOT EXISTS idx_permissions_source ON agent_permissions(source_agent)",

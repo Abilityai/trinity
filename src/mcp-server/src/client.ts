@@ -1244,6 +1244,36 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Publish a structured agent report (#918). The path agent is the calling
+   * agent (resolved from the auth context by the report tool); the backend
+   * self-gates an agent-scoped key to itself.
+   */
+  async createReport(
+    agentName: string,
+    data: {
+      report_type: string;
+      title: string;
+      payload: Record<string, unknown>;
+      display_hint?: string;
+      schema_version?: number;
+      period_start?: string;
+      period_end?: string;
+    }
+  ): Promise<{
+    id: string;
+    agent_name: string;
+    report_type: string;
+    title: string;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reports`,
+      data
+    );
+  }
+
   // ============================================================================
   // Operator Queue (OPS-001, #1101) — read surface
   // ============================================================================

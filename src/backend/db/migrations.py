@@ -2522,6 +2522,50 @@ def _migrate_agent_loops_max_duration(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_reports_table(cursor, conn):
+    """Create agent_reports table (#918).
+
+    Agent-published structured reports (telemetry / domain reports) surfaced on
+    the dashboard. Schema is also defined in db/schema.py for fresh installs;
+    this migration handles existing installs. Idempotent. Mirrored by the
+    Alembic revision 0006_agent_reports for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_reports)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_reports (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_id INTEGER,
+            report_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            display_hint TEXT,
+            schema_version INTEGER DEFAULT 1,
+            period_start TEXT,
+            period_end TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent "
+        "ON agent_reports(agent_name, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_type "
+        "ON agent_reports(report_type, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reports_created "
+        "ON agent_reports(created_at)"
+    )
+    conn.commit()
+    print("Created agent_reports table (#918)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2599,4 +2643,5 @@ MIGRATIONS = [
     ("agent_compatibility_results_table", _migrate_agent_compatibility_results_table),
     ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
     ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
+    ("agent_reports_table", _migrate_agent_reports_table),
 ]

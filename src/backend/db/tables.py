@@ -367,6 +367,22 @@ agent_activities = Table(
     Column("created_at", Text),
 )
 
+agent_reports = Table(
+    "agent_reports",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_id", Integer),
+    Column("report_type", Text),
+    Column("title", Text),
+    Column("payload", Text),
+    Column("display_hint", Text),
+    Column("schema_version", Integer),
+    Column("period_start", Text),
+    Column("period_end", Text),
+    Column("created_at", Text),
+)
+
 agent_notifications = Table(
     "agent_notifications",
     metadata,

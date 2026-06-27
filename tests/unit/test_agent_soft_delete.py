@@ -82,6 +82,10 @@ def _seed_into(_db, name: str, deleted_at: str | None = None):
     _hrun("INSERT INTO agent_skills (agent_name, skill_name, assigned_by, assigned_at) "
           "VALUES (:n, 'sk', 'admin', :ts)", n=name, ts=_TS)
     _hrun("INSERT INTO agent_tags (agent_name, tag) VALUES (:n, 't1')", n=name)
+    # #918 reports — CASCADE on purge, re-key on rename (cross-tenant guard)
+    _hrun("INSERT INTO agent_reports (id, agent_name, user_id, report_type, title, "
+          "payload, created_at) VALUES (:id, :n, 1, 'ops.health', 't', '{}', :ts)",
+          id=f"rep-{name}", n=name, ts=_TS)
     # KEEP-on-purge children (billing rollups)
     _hrun("INSERT INTO schedule_executions (id, schedule_id, agent_name, status, started_at, "
           "message, triggered_by) VALUES (:id, :sch, :n, 'success', :ts, 'm', 'schedule')",
@@ -123,7 +127,7 @@ def test_delete_sets_deleted_at(tmp_agent_db, agent_ops):
 
     # Children untouched
     for t in ("agent_sharing", "agent_schedules", "chat_messages",
-              "agent_activities", "agent_skills", "agent_tags",
+              "agent_activities", "agent_skills", "agent_tags", "agent_reports",
               "schedule_executions", "nevermined_payment_log"):
         n = _count(tmp_agent_db, t, "agent_name=?", ("doomed",))
         assert n == 1, f"{t} child row must survive soft-delete"
@@ -151,7 +155,7 @@ def test_purge_runs_cascade_and_removes_owner_row(tmp_agent_db, agent_ops):
     assert _count(tmp_agent_db, "agent_ownership", "agent_name=?", ("purgeme",)) == 0
     # CASCADE children gone
     for t in ("agent_sharing", "agent_schedules", "chat_messages",
-              "agent_activities", "agent_skills", "agent_tags"):
+              "agent_activities", "agent_skills", "agent_tags", "agent_reports"):
         n = _count(tmp_agent_db, t, "agent_name=?", ("purgeme",))
         assert n == 0, f"{t} should be wiped after purge"
     # KEEP children survive (billing rollups)
@@ -209,3 +213,20 @@ def test_name_reservation_sees_soft_deleted_rows(tmp_agent_db, agent_ops):
     assert agent_ops.is_agent_name_reserved("alive") is True
     assert agent_ops.is_agent_name_reserved("soft_deleted_ghost") is True
     assert agent_ops.is_agent_name_reserved("nonexistent") is False
+
+
+# -----------------------------------------------------------------------------
+# rename_agent re-keys reports (#918) — orphaned rows under a freed name are a
+# cross-tenant disclosure when the name is reused, so reports must move with it.
+# -----------------------------------------------------------------------------
+
+def test_rename_rekeys_reports(tmp_agent_db, agent_ops):
+    _seed_into(tmp_agent_db, "old_name")
+
+    assert agent_ops.rename_agent("old_name", "new_name") is True
+
+    # The report follows the rename — no row left under the freed old name.
+    assert _count(tmp_agent_db, "agent_reports", "agent_name=?", ("old_name",)) == 0, \
+        "no orphaned report under the freed old name (cross-tenant guard)"
+    assert _count(tmp_agent_db, "agent_reports", "agent_name=?", ("new_name",)) == 1, \
+        "report must be re-keyed to the new agent name"
