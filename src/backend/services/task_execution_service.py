@@ -236,6 +236,81 @@ def _is_reader_race_signature(detail) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SUB-003 switch-trigger classifier + attempt salvage (#792)
+# ---------------------------------------------------------------------------
+
+# Small settle before the post-switch retry so a hot-reloaded token is picked
+# up by the NEXT claude subprocess. The retry itself is the readiness probe
+# (#792 review): we deliberately do NOT poll the circuit-aware /health endpoint
+# (cold-start polling can open the transport breaker and cancel the retry) nor
+# trust restart_result's string status (it proves the call returned, not that
+# the new token authenticates). A still-failing retry just writes FAILED.
+_SWITCH_RETRY_DELAY_S = 3.0
+
+
+def _extract_agent_error(response: Optional[httpx.Response], fallback: str) -> tuple[str, dict]:
+    """Pull a human error string + any #678 structured ``metadata`` from an
+    agent error-response body. Shared by the pre-raise switch path (#792) and
+    the ``except httpx.HTTPError`` handler so both read the body identically."""
+    error_msg = fallback
+    partial_metadata: dict = {}
+    if response is None:
+        return error_msg, partial_metadata
+    try:
+        error_data = response.json()
+        detail = error_data.get("detail")
+        if isinstance(detail, dict):
+            # #678 structured body
+            error_msg = detail.get("message") or str(detail)
+            if isinstance(detail.get("metadata"), dict):
+                partial_metadata = detail["metadata"]
+        elif "detail" in error_data:
+            error_msg = error_data["detail"]
+    except Exception:
+        if response.text:
+            error_msg = response.text[:500]
+    return error_msg, partial_metadata
+
+
+def classify_switch_failure(response: httpx.Response) -> Optional[str]:
+    """Map an agent response to a SUB-003 switch ``failure_kind``, or None.
+
+    Mirrors the trigger surface SUB-003 uses in the ``except httpx.HTTPError``
+    handler so the #792 contract — "any switch-success retries" — is actually
+    true (not just 429/503 by status code):
+
+        429                          -> "rate_limit"
+        503 / 401 / 403 / 402        -> "auth"
+        other 4xx/5xx whose body trips ``is_auth_failure`` -> "auth"
+        anything else (incl. 2xx)    -> None
+    """
+    # Imported here (not at module scope) to match the except-handler import and
+    # keep the test patch target `subscription_auto_switch.is_auth_failure` live.
+    from services.subscription_auto_switch import is_auth_failure
+
+    code = response.status_code
+    if code == 429:
+        return "rate_limit"
+    if code in (503, 401, 403, 402):
+        return "auth"
+    if code >= 400:
+        error_msg, _ = _extract_agent_error(response, "")
+        if is_auth_failure(error_msg):
+            return "auth"
+    return None
+
+
+def _salvage_attempt_cost(partial_metadata: dict) -> float:
+    """Best-effort first-attempt cost from a salvaged ``metadata`` dict, for the
+    #678 R2 ``previous_attempt_cost`` rollup. A mid-run 429/auth can carry
+    nonzero cost — "≈$0" is not a contract (#792 review, Codex #3)."""
+    raw = partial_metadata.get("cost_usd")
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Agent HTTP helper (moved from routers/chat.py)
 # ---------------------------------------------------------------------------
 
@@ -914,6 +989,11 @@ class TaskExecutionService:
             # internal retries are exhausted).
             retry_count = 0
             previous_attempt_cost = 0.0  # accumulator: failed-attempt cost rolled into terminal write
+            # #792: one-shot guard for the SUB-003 switch+retry. A dedicated flag
+            # (NOT retry_count, which #678's reader-race retry owns) so the two
+            # retry reasons never suppress each other. Read by the except handler
+            # to skip a cascade double-switch.
+            subscription_switch_attempted = False
 
             response = await agent_post_with_retry(
                 agent_name,
@@ -1013,6 +1093,101 @@ class TaskExecutionService:
                             f"[TaskExecService] Agent {agent_name} retry responded: "
                             f"HTTP {response.status_code} ({execution_time_ms}ms, "
                             f"http_timeout={retry_http_timeout}s, "
+                            f"agent_timeout={retry_agent_timeout}s)"
+                        )
+
+            # #792 SUB-003 switch+retry: a returned 429/auth response is
+            # interceptable HERE, before raise_for_status (below) raises it into
+            # the except handler — mirroring the #678 502 path above. If the agent
+            # rate-limited / auth-failed and SUB-003 successfully switched the
+            # subscription, re-issue the turn ONCE with the SAME execution_id so a
+            # one-shot trigger (manual / webhook / mcp) recovers instead of landing
+            # FAILED. The retry IS the readiness probe (see _SWITCH_RETRY_DELAY_S).
+            # Guarded by its own one-shot flag (NOT retry_count, which #678 owns) so
+            # the two retry reasons never suppress each other; the except handler
+            # reads the flag to skip a cascade double-switch.
+            if not subscription_switch_attempted:
+                switch_failure_kind = classify_switch_failure(response)
+                if switch_failure_kind is not None:
+                    subscription_switch_attempted = True
+                    switch_error_msg, switch_partial_meta = _extract_agent_error(
+                        response, f"HTTP {response.status_code} from agent"
+                    )
+                    switch_result = None
+                    try:
+                        from services.subscription_auto_switch import (
+                            handle_subscription_failure,
+                        )
+                        switch_result = await handle_subscription_failure(
+                            agent_name=agent_name,
+                            error_message=switch_error_msg,
+                            failure_kind=switch_failure_kind,
+                        )
+                    except Exception as switch_err:
+                        logger.error(
+                            f"[SUB-003] Auto-switch failed for '{agent_name}': {switch_err}"
+                        )
+
+                    if switch_result and switch_result.get("switched"):
+                        retry_count += 1
+                        # #678 R2 rollup: accumulate the failed attempt's cost so it
+                        # isn't absorbed by the retry's success replacement.
+                        previous_attempt_cost += _salvage_attempt_cost(switch_partial_meta)
+                        # Cap the retry to the REMAINING original budget so a 429
+                        # after a long run can't balloon wall-clock / slot time.
+                        elapsed_s = (datetime.utcnow() - start_time).total_seconds()
+                        remaining_s = max(1.0, effective_timeout - elapsed_s)
+                        retry_http_timeout = min(remaining_s, _AUTO_RETRY_MAX_TIMEOUT_S)
+                        retry_agent_timeout = int(
+                            min(float(timeout_seconds or 600), retry_http_timeout)
+                        )
+                        logger.warning(
+                            f"[TaskExecService] SUB-003 switched '{agent_name}' "
+                            f"({switch_failure_kind}) -> "
+                            f"'{switch_result.get('new_subscription')}' — auto-retry 1/1 "
+                            f"(prev_cost=${previous_attempt_cost:.4f})"
+                        )
+                        # Best-effort audit. phase=initiated documents the retry was queued.
+                        try:
+                            await platform_audit_service.log(
+                                event_type=AuditEventType.EXECUTION,
+                                event_action="auto_retry",
+                                source="task_execution_service",
+                                actor_agent_name=agent_name,
+                                target_type="execution",
+                                target_id=execution_id,
+                                details={
+                                    "reason": "subscription_auto_switch",
+                                    # retry_count was just incremented above; +1 makes
+                                    # this the human attempt number. In the #678→#792
+                                    # interplay this is correctly 3 (not a second "2").
+                                    "attempt": retry_count + 1,
+                                    "phase": "initiated",
+                                    "failure_kind": switch_failure_kind,
+                                    "new_subscription": switch_result.get("new_subscription"),
+                                },
+                            )
+                        except Exception as audit_err:
+                            logger.debug(f"[TaskExecService] audit log failed (non-fatal): {audit_err}")
+
+                        # Small settle so a hot-reloaded token is live for the next
+                        # subprocess; the retry call itself probes readiness.
+                        await asyncio.sleep(_SWITCH_RETRY_DELAY_S)
+                        retry_payload = {**payload, "timeout_seconds": retry_agent_timeout}
+                        start_time = datetime.utcnow()
+                        response = await agent_post_with_retry(
+                            agent_name,
+                            "/api/task",
+                            retry_payload,
+                            max_retries=3,
+                            retry_delay=1.0,
+                            timeout=retry_http_timeout,
+                        )
+                        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+                        logger.info(
+                            f"[TaskExecService] Agent {agent_name} post-switch retry "
+                            f"responded: HTTP {response.status_code} ({execution_time_ms}ms, "
+                            f"http_timeout={retry_http_timeout:.0f}s, "
                             f"agent_timeout={retry_agent_timeout}s)"
                         )
 
@@ -1150,52 +1325,45 @@ class TaskExecutionService:
             )
 
         except httpx.HTTPError as e:
-            error_msg = f"HTTP error: {type(e).__name__}"
             # #678: when the agent returns a structured dict detail (from
             # _classify_empty_result), salvage partial metadata onto the
-            # failure row instead of writing null-everything.
-            partial_metadata: dict = {}
-            error_data = None
-            if hasattr(e, "response") and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    detail = error_data.get("detail")
-                    if isinstance(detail, dict):
-                        # #678 structured body
-                        error_msg = detail.get("message") or str(detail)
-                        if isinstance(detail.get("metadata"), dict):
-                            partial_metadata = detail["metadata"]
-                    elif "detail" in error_data:
-                        error_msg = error_data["detail"]
-                except Exception:
-                    if e.response.text:
-                        error_msg = e.response.text[:500]
+            # failure row instead of writing null-everything. Shared extractor
+            # (#792) so this handler and the pre-raise switch path read the body
+            # identically.
+            error_msg, partial_metadata = _extract_agent_error(
+                getattr(e, "response", None), f"HTTP error: {type(e).__name__}"
+            )
             logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
 
             # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
             # failures (503 from agent server, or auth indicators in the error
             # text). Fire-and-forget under broad exception handling so a switch
             # error never masks the underlying execution failure.
+            # #792 cascade guard: if the pre-raise path already attempted a switch
+            # this execution (and its retry still failed into here), do NOT switch
+            # again — a second switch would burn another rate-limit event and churn
+            # to a third never-used subscription.
             agent_status_code = getattr(getattr(e, "response", None), "status_code", None)
-            try:
-                from services.subscription_auto_switch import (
-                    handle_subscription_failure,
-                    is_auth_failure,
-                )
-                if agent_status_code == 429:
-                    await handle_subscription_failure(
-                        agent_name=agent_name,
-                        error_message=error_msg,
-                        failure_kind="rate_limit",
+            if not subscription_switch_attempted:
+                try:
+                    from services.subscription_auto_switch import (
+                        handle_subscription_failure,
+                        is_auth_failure,
                     )
-                elif agent_status_code == 503 or is_auth_failure(error_msg):
-                    await handle_subscription_failure(
-                        agent_name=agent_name,
-                        error_message=error_msg,
-                        failure_kind="auth",
-                    )
-            except Exception as switch_err:
-                logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
+                    if agent_status_code == 429:
+                        await handle_subscription_failure(
+                            agent_name=agent_name,
+                            error_message=error_msg,
+                            failure_kind="rate_limit",
+                        )
+                    elif agent_status_code == 503 or is_auth_failure(error_msg):
+                        await handle_subscription_failure(
+                            agent_name=agent_name,
+                            error_message=error_msg,
+                            failure_kind="auth",
+                        )
+                except Exception as switch_err:
+                    logger.error(f"[SUB-003] Auto-switch check failed for '{agent_name}': {switch_err}")
 
             # Issue #285: Detect auth failures (HTTP 503 from agent server)
             # Return structured error code so callers can handle appropriately
