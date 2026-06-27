@@ -44,6 +44,9 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
+      # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
+      - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the

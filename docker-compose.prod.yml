@@ -87,6 +87,9 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
