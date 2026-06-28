@@ -1501,6 +1501,10 @@ class StartLoopRequest(BaseModel):
     # (max_runs is still the hard stop). Lower bound vs the per-run timeout
     # is validated in the endpoint (needs the agent's configured timeout).
     max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=MAX_DURATION_SECONDS)
+    # #1157: doom-loop detection. Stop the loop after K consecutive runs whose
+    # response fingerprint (SHA-256 of normalized text) is identical. 0 disables;
+    # default 3. 1 is nonsensical ("repeated identical" needs ≥2) → rejected.
+    no_progress_threshold: Optional[int] = Field(default=3, ge=0)
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1511,6 +1515,16 @@ class StartLoopRequest(BaseModel):
             return None
         v = v.strip()
         return v or None  # empty after strip → fixed mode
+
+    @field_validator("no_progress_threshold")
+    @classmethod
+    def _validate_no_progress_threshold(cls, v: Optional[int]) -> Optional[int]:
+        if v == 1:
+            raise ValueError(
+                "no_progress_threshold must be 0 (disabled) or >= 2; "
+                "1 would stop after the first success"
+            )
+        return v
 
 
 class StartLoopResponse(BaseModel):
@@ -1549,6 +1563,8 @@ class LoopStatusResponse(BaseModel):
     # (frozen at completed_at once terminal). Both NULL before the loop runs.
     max_duration_seconds: Optional[int] = None
     elapsed_seconds: Optional[int] = None
+    # #1157: no-progress threshold (NULL = disabled / legacy loop).
+    no_progress_threshold: Optional[int] = None
 
 
 class StopLoopResponse(BaseModel):
