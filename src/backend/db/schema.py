@@ -249,6 +249,7 @@ TABLES = {
             delay_seconds INTEGER NOT NULL DEFAULT 0,
             timeout_per_run INTEGER,
             max_duration_seconds INTEGER,
+            no_progress_threshold INTEGER,
             model TEXT,
             allowed_tools TEXT,
             status TEXT NOT NULL,
