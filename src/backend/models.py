@@ -1501,6 +1501,12 @@ class StartLoopRequest(BaseModel):
     # (max_runs is still the hard stop). Lower bound vs the per-run timeout
     # is validated in the endpoint (needs the agent's configured timeout).
     max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=MAX_DURATION_SECONDS)
+    # #1155: optional per-loop USD cost budget. NULL = no limit (max_runs is
+    # still the hard stop). Enforced as an iteration-boundary gate — the loop
+    # stops before the next run once accumulated cost meets/exceeds the budget
+    # (stop_reason='budget_exhausted'). The current run always finishes, so one
+    # run (including the first) can overshoot. No upper cap — allow sub-cent.
+    max_cost_usd: Optional[float] = Field(default=None, gt=0)
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1549,6 +1555,11 @@ class LoopStatusResponse(BaseModel):
     # (frozen at completed_at once terminal). Both NULL before the loop runs.
     max_duration_seconds: Optional[int] = None
     elapsed_seconds: Optional[int] = None
+    # #1155: cost budget (NULL = unbounded) + total_cost computed on read as
+    # the sum of agent_loop_runs.cost (NULL→0). total_cost is always a float,
+    # 0.0 for a zero-run loop.
+    max_cost_usd: Optional[float] = None
+    total_cost: float = 0.0
 
 
 class StopLoopResponse(BaseModel):
