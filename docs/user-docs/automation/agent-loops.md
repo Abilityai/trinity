@@ -15,6 +15,7 @@ Loops are the sequential counterpart to [Fan-Out](fan-out.md) (parallel batch) a
 - **Fixed mode** — No stop signal set: the loop runs exactly `max_runs` iterations.
 - **Until mode** — A `stop_signal` is set: after each iteration, Trinity checks whether the agent's response contains the stop signal as a plain substring. On match, the loop ends early with reason `stop signal matched`. A recommended sentinel is `[[DONE]]` — tell the agent to emit it when the work is finished.
 - **Cooperative stop** — Stopping a loop never kills the in-flight iteration. The current run finishes, then the loop exits with reason `stopped by user`.
+- **Cost budget** — An optional `max_cost_usd` ceiling on total loop spend. It is checked **between runs**, not mid-run: before each iteration Trinity sums the cost of completed runs and, once that meets or exceeds the budget, stops the loop with reason `budget exhausted` **before starting the next run**. The current run always finishes, so one run — including the very first — can overshoot the budget by any amount; this is a guardrail against runaway loops, not a hard mid-call cap. A run that reports no cost counts as `$0` toward the budget (the loop is still bounded by `max_runs`).
 
 ## How It Works
 
@@ -40,7 +41,7 @@ The panel updates in real time via WebSocket events as each run completes, with 
 |--------|---------|
 | `queued` / `running` | Loop active; iterations dispatching |
 | `completed` | Reached max runs, or the stop signal matched |
-| `stopped` | Stopped by a user; the in-flight iteration finished first |
+| `stopped` | Stopped by a user, or the cost budget (`max_cost_usd`) was met/exceeded at a run boundary; the in-flight iteration finished first |
 | `failed` | An iteration failed (task error or exception) — the loop aborts at that iteration |
 | `interrupted` | The backend restarted mid-loop; loops do **not** auto-resume |
 
@@ -178,6 +179,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 | `stop_signal` | none (fixed mode) | ≤200 chars | Substring that ends the loop early; whitespace-stripped, blank = fixed mode |
 | `delay_seconds` | 0 | 0–3600 | Pause between iterations |
 | `timeout_per_run` | agent's execution timeout | 10–7200 | Per-iteration timeout in seconds |
+| `max_cost_usd` | none (no budget) | > 0 | Total USD spend budget; checked **between runs** (the current run always finishes). Stops with reason `budget exhausted` once spend meets/exceeds it. Runs reporting no cost count as `$0`. |
 | `model` | agent default | — | Model override applied to every iteration |
 | `allowed_tools` | unrestricted | — | Tool restrictions applied to every iteration |
 

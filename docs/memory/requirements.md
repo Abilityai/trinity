@@ -2826,6 +2826,44 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Out of scope**: interrupting an in-flight run mid-turn; persisting
   elapsed across a backend restart (loops do not auto-resume).
 
+### 38.3 Loop-level cost budget (#1155)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #1155
+- **Description**: An optional per-loop USD spend ceiling — a fourth hard
+  stop alongside `max_runs`, the deadline (#1156), and `stop_signal`. A
+  `max_runs=100` loop on an expensive model previously had no cost bound.
+- **Parameter**: optional `max_cost_usd` (float, `gt=0`, no upper cap so
+  sub-cent budgets are allowed; NULL/omitted disables). Accepted on
+  `POST /api/agents/{name}/loops`, persisted on
+  `agent_loops.max_cost_usd`, exposed via the `run_agent_loop` MCP tool.
+- **Enforcement (iteration-boundary gate)**: the runner accumulates each
+  completed run's cost in memory and, *before starting the next run*,
+  stops the loop once accumulated cost meets/exceeds the budget. Checked
+  *after* the deadline check. Only finite, positive costs accumulate; a
+  NaN/inf cost is ignored (so it can't poison the accumulator); a
+  NULL/unknown cost counts as **0** (fail-open per AC — `max_runs` still
+  bounds the loop) and emits one `logger.warning` per such run when a
+  budget is active.
+- **Honest semantics (not a mid-run hard cap)**: the current run always
+  finishes, so one run — **including the first** — can overshoot the
+  budget by any amount. The gate is "checked between runs"; an in-flight
+  run is never killed mid-turn.
+- **Precedence (boundary-only)**: per iteration the order is
+  `user_stopped` → `deadline_exceeded` → `budget_exhausted` → run →
+  `stop_signal_matched`; natural exit `max_runs_reached`. `budget_exhausted`
+  fires *only when a next iteration would start over budget* — a run that
+  crosses the budget but is also the final `max_runs` run or matches
+  `stop_signal` yields those reasons instead.
+- **Terminal state**: terminal status `stopped` with
+  `stop_reason="budget_exhausted"`.
+- **Observability**: `GET /api/loops/{loop_id}` returns `max_cost_usd` and
+  a `total_cost` **computed on read** as the sum of `agent_loop_runs.cost`
+  (NULL→0; `0.0` for a zero-run loop — no stored column to drift); the
+  Loops UI shows spend / budget when set.
+- **Out of scope**: mid-run cost interruption (would need streaming cost
+  callbacks the runtime doesn't expose); a stored `total_cost` column;
+  stopping when cost is unknown (contradicts the fail-open AC).
+
 ---
 
 ## 39. VoIP Telephony (VOIP-001)
