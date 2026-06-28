@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
@@ -96,3 +97,81 @@ class TestMaxDurationValidation:
         assert resp.loop_id == "loop_x"
         fake_db.get_execution_timeout.assert_not_called()
         assert service.start_loop.await_args.kwargs["max_duration_seconds"] is None
+
+
+class TestMaxCostValidation:
+    """Pydantic gt=0 on max_cost_usd (#1155).
+
+    Asserts the model-layer constraint directly (StartLoopRequest(...) raising
+    ValidationError) — matching this file's convention. There is no endpoint
+    cross-field check for the budget, so this is NOT an HTTP-422 path; it's the
+    Pydantic field validator. A live 422 would require a TestClient.
+    """
+
+    def test_rejects_zero(self, monkeypatch):
+        loops_router, _, _ = _load_router(monkeypatch)
+        with pytest.raises(ValidationError):
+            loops_router.StartLoopRequest(message="m", max_runs=5, max_cost_usd=0)
+
+    def test_rejects_negative(self, monkeypatch):
+        loops_router, _, _ = _load_router(monkeypatch)
+        with pytest.raises(ValidationError):
+            loops_router.StartLoopRequest(message="m", max_runs=5, max_cost_usd=-1)
+
+    def test_accepts_positive(self, monkeypatch):
+        loops_router, _, _ = _load_router(monkeypatch)
+        payload = loops_router.StartLoopRequest(
+            message="m", max_runs=5, max_cost_usd=0.5,
+        )
+        assert payload.max_cost_usd == 0.5
+
+    def test_threaded_through_to_service(self, monkeypatch):
+        loops_router, _, service = _load_router(monkeypatch)
+        payload = loops_router.StartLoopRequest(
+            message="m", max_runs=5, max_cost_usd=2.5,
+        )
+        resp = __import__("asyncio").run(_call(loops_router, payload))
+        assert resp.loop_id == "loop_x"
+        assert service.start_loop.await_args.kwargs["max_cost_usd"] == 2.5
+
+
+class TestTotalCostOnRead:
+    """total_cost is the sum of run costs, computed on read (#1155)."""
+
+    @staticmethod
+    def _loop(**over):
+        base = {
+            "id": "loop_x", "agent_name": "a1", "status": "completed",
+            "max_runs": 3, "runs_completed": 3, "stop_reason": "max_runs_reached",
+            "last_response": None, "error": None, "created_at": "t",
+            "started_at": "t", "completed_at": "t", "max_duration_seconds": None,
+            "max_cost_usd": None,
+        }
+        base.update(over)
+        return base
+
+    @staticmethod
+    def _run_row(n, cost):
+        return {
+            "run_number": n, "execution_id": None, "status": "completed",
+            "response": None, "cost": cost, "duration_ms": 10, "error": None,
+            "started_at": "t", "completed_at": "t",
+        }
+
+    def test_sums_run_costs_and_echoes_budget(self, monkeypatch):
+        loops_router, fake_db, _ = _load_router(monkeypatch)
+        fake_db.list_loop_runs.return_value = [
+            self._run_row(1, 0.01), self._run_row(2, 0.02), self._run_row(3, None),
+        ]
+        resp = loops_router._build_status_response(
+            self._loop(max_cost_usd=0.5)
+        )
+        assert resp.total_cost == pytest.approx(0.03)  # None → 0
+        assert resp.max_cost_usd == 0.5
+
+    def test_zero_run_loop_reports_zero(self, monkeypatch):
+        loops_router, fake_db, _ = _load_router(monkeypatch)
+        fake_db.list_loop_runs.return_value = []
+        resp = loops_router._build_status_response(self._loop(runs_completed=0))
+        assert resp.total_cost == 0.0
+        assert resp.max_cost_usd is None

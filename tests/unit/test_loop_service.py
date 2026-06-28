@@ -700,6 +700,120 @@ class TestDeadline:
 
 
 # ---------------------------------------------------------------------------
+# Runner — cost budget (#1155)
+# ---------------------------------------------------------------------------
+
+class TestBudget:
+    """max_cost_usd as an iteration-boundary gate (boundary-only precedence)."""
+
+    @staticmethod
+    def _drive(ls, service, **start_kwargs):
+        async def go():
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", **start_kwargs,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+        return _run(go())
+
+    def test_budget_stops_at_boundary(self, loop_module):
+        ls, db, ts = loop_module
+        # cost 0.01/run, budget 0.025: runs 1–3 execute (acc 0.01, 0.02, 0.03);
+        # the boundary before run 4 sees 0.03 >= 0.025 and stops.
+        ts.results = [_Result(response=f"r{i}", cost=0.01) for i in range(1, 6)]
+        service = ls.LoopService()
+        loop_id = self._drive(ls, service, max_runs=5, max_cost_usd=0.025)
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "budget_exhausted"
+        assert loop["runs_completed"] == 3
+        assert len(ts.calls) == 3
+
+    def test_in_flight_run_not_killed(self, loop_module):
+        ls, db, ts = loop_module
+        # The very first run overshoots the budget by 500x; it must still
+        # finalize as completed (boundary-only — never killed mid-turn). The
+        # NEXT boundary then stops the loop.
+        ts.results = [_Result(response="big", cost=5.0)]
+        service = ls.LoopService()
+        loop_id = self._drive(ls, service, max_runs=5, max_cost_usd=0.01)
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "budget_exhausted"
+        assert loop["runs_completed"] == 1
+        runs = db.list_loop_runs(loop_id)
+        assert runs[0]["status"] == "completed"
+
+    def test_null_cost_counts_zero(self, loop_module, caplog):
+        ls, db, ts = loop_module
+        # Cost reporting is broken (all None): fail-open — the loop runs all
+        # max_runs iterations (NULL counts as 0) and a WARN is emitted per run.
+        ts.results = [_Result(response=f"r{i}", cost=None) for i in range(1, 4)]
+        service = ls.LoopService()
+        with caplog.at_level("WARNING"):
+            loop_id = self._drive(ls, service, max_runs=3, max_cost_usd=0.05)
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 3
+        assert any("reported no cost" in r.message for r in caplog.records)
+
+    def test_no_budget_runs_all(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response=f"r{i}", cost=99.0) for i in range(1, 4)]
+        service = ls.LoopService()
+        loop_id = self._drive(ls, service, max_runs=3, max_cost_usd=None)
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 3
+
+    def test_nan_cost_does_not_poison(self, loop_module, caplog):
+        ls, db, ts = loop_module
+        # Run 1 reports NaN (ignored — accumulator stays 0); run 2 reports a
+        # real 0.10 that crosses the 0.05 budget, so the boundary before run 3
+        # trips. Without the finite guard, NaN would poison the accumulator and
+        # `NaN >= budget` would never fire. The NaN run must also WARN — under
+        # an active budget a non-finite cost is a metering fault, not silent.
+        ts.results = [
+            _Result(response="r1", cost=float("nan")),
+            _Result(response="r2", cost=0.10),
+            _Result(response="r3", cost=0.10),
+        ]
+        service = ls.LoopService()
+        with caplog.at_level("WARNING"):
+            loop_id = self._drive(ls, service, max_runs=5, max_cost_usd=0.05)
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "budget_exhausted"
+        assert loop["runs_completed"] == 2
+        assert any("non-finite cost" in r.message for r in caplog.records)
+
+    def test_budget_vs_signal_precedence(self, loop_module):
+        ls, db, ts = loop_module
+        # A single run both blows the budget AND matches the stop_signal. The
+        # end-of-run stop_signal check fires within the same iteration, before
+        # the next boundary — so stop_signal_matched wins (boundary-only spec).
+        ts.results = [_Result(response="all done [[DONE]]", cost=5.0)]
+        service = ls.LoopService()
+        loop_id = self._drive(
+            ls, service, max_runs=5, max_cost_usd=0.01, stop_signal="[[DONE]]",
+        )
+
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "stop_signal_matched"
+        assert loop["runs_completed"] == 1
+
+
+# ---------------------------------------------------------------------------
 # get_status
 # ---------------------------------------------------------------------------
 
