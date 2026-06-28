@@ -250,6 +250,7 @@ TABLES = {
             timeout_per_run INTEGER,
             max_duration_seconds INTEGER,
             max_cost_usd REAL,
+            no_progress_threshold INTEGER,
             model TEXT,
             allowed_tools TEXT,
             status TEXT NOT NULL,

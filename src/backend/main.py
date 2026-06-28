@@ -15,6 +15,7 @@ Refactored for better concern separation:
 import asyncio
 import json
 import os
+import random
 from datetime import datetime
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -485,14 +486,18 @@ async def lifespan(app: FastAPI):
         capacity = get_capacity_manager()
 
         async def _capacity_maintenance_loop():
-            # First tick after a short delay so startup stays snappy.
-            await asyncio.sleep(15)
+            # First tick after a short delay so startup stays snappy. #1085: a
+            # small startup jitter so replicas don't realign their maintenance
+            # ticks after a coordinated restart.
+            await asyncio.sleep(15 + random.uniform(0, 2))
             while True:
                 try:
                     await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
                     logger.warning(f"[Capacity] maintenance tick failed: {exc}")
-                await asyncio.sleep(60)
+                # #1085: jitter the loop period so concurrent replicas' drain
+                # sweeps spread out instead of firing in lockstep every 60s.
+                await asyncio.sleep(60 + random.uniform(0, 15))
 
         asyncio.create_task(_capacity_maintenance_loop())
         logger.info("CapacityManager initialised; maintenance loop running (60s)")

@@ -1956,6 +1956,7 @@ export class TrinityClient {
       timeout_per_run?: number;
       max_duration_seconds?: number;
       max_cost_usd?: number;
+      no_progress_threshold?: number;
       model?: string;
       allowed_tools?: string[];
     }

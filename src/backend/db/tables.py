@@ -235,6 +235,7 @@ agent_loops = Table(
     Column("timeout_per_run", Integer),
     Column("max_duration_seconds", Integer),  # #1156 — wall-clock deadline
     Column("max_cost_usd", Float),  # #1155 — per-loop USD cost budget
+    Column("no_progress_threshold", Integer),  # #1157 — doom-loop detection (NULL = disabled)
     Column("model", Text),
     Column("allowed_tools", Text),
     Column("status", Text),

@@ -1507,6 +1507,10 @@ class StartLoopRequest(BaseModel):
     # (stop_reason='budget_exhausted'). The current run always finishes, so one
     # run (including the first) can overshoot. No upper cap — allow sub-cent.
     max_cost_usd: Optional[float] = Field(default=None, gt=0)
+    # #1157: doom-loop detection. Stop the loop after K consecutive runs whose
+    # response fingerprint (SHA-256 of normalized text) is identical. 0 disables;
+    # default 3. 1 is nonsensical ("repeated identical" needs ≥2) → rejected.
+    no_progress_threshold: Optional[int] = Field(default=3, ge=0)
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1517,6 +1521,16 @@ class StartLoopRequest(BaseModel):
             return None
         v = v.strip()
         return v or None  # empty after strip → fixed mode
+
+    @field_validator("no_progress_threshold")
+    @classmethod
+    def _validate_no_progress_threshold(cls, v: Optional[int]) -> Optional[int]:
+        if v == 1:
+            raise ValueError(
+                "no_progress_threshold must be 0 (disabled) or >= 2; "
+                "1 would stop after the first success"
+            )
+        return v
 
 
 class StartLoopResponse(BaseModel):
@@ -1560,6 +1574,8 @@ class LoopStatusResponse(BaseModel):
     # 0.0 for a zero-run loop.
     max_cost_usd: Optional[float] = None
     total_cost: float = 0.0
+    # #1157: no-progress threshold (NULL = disabled / legacy loop).
+    no_progress_threshold: Optional[int] = None
 
 
 class StopLoopResponse(BaseModel):

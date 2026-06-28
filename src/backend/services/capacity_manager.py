@@ -498,8 +498,29 @@ class CapacityManager:
         missing-heartbeat state during the boot window.
         """
         await self._backlog.expire_stale(max_age_hours=max_age_hours)
-        await self._backlog.drain_orphans_all()
-        await self._backstop_open_breaker_backlog()
+
+        # #1085: while the re-delivery governor's shared-cause pause is armed,
+        # skip the active orphan drain + the breaker-backstop re-fail. Both push
+        # backlog forward / fail queued rows — during a fleet outage we hold that
+        # pressure back so a throttled-then-resumed callback still lands. The 24h
+        # `expire_stale` above is the slow safety net and always runs. Fail-open:
+        # governor degrades to not-paused, so a Redis blip resumes normal drain.
+        paused = False
+        try:
+            import config
+
+            if config.REDELIVERY_GOVERNOR_ENABLED:
+                from services.redelivery_governor import get_redelivery_governor
+
+                paused = get_redelivery_governor().should_hold_reaper()
+        except Exception as e:  # noqa: BLE001 — never block maintenance on a gate error
+            logger.debug("[Capacity] governor drain-gate skipped: %s", e)
+
+        if paused:
+            logger.info("[Capacity] orphan drain + breaker-backstop held — re-delivery paused (#1085)")
+        else:
+            await self._backlog.drain_orphans_all()
+            await self._backstop_open_breaker_backlog()
         try:
             self._redis.set("canary:drain_tick_at", str(time.time()))
         except Exception as e:  # pragma: no cover - defensive

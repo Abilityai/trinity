@@ -107,6 +107,7 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
         elapsed_seconds=_elapsed_seconds(loop),
         max_cost_usd=loop.get("max_cost_usd"),
         total_cost=total_cost,
+        no_progress_threshold=loop.get("no_progress_threshold"),
     )
 
 
@@ -166,6 +167,7 @@ async def start_loop(
         timeout_per_run=payload.timeout_per_run,
         max_duration_seconds=payload.max_duration_seconds,
         max_cost_usd=payload.max_cost_usd,
+        no_progress_threshold=payload.no_progress_threshold,
         model=payload.model,
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,

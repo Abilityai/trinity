@@ -2530,13 +2530,31 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     once accumulated cost meets/exceeds the budget
     (stop_reason='budget_exhausted'), bounding total loop spend alongside the
     existing `max_runs` cap. Mirrored by the Alembic revision
-    0007_agent_loops_max_cost for PostgreSQL.
+    0008_agent_loops_max_cost for PostgreSQL.
     """
     _safe_add_column(
         cursor,
         "agent_loops",
         "max_cost_usd",
         "ALTER TABLE agent_loops ADD COLUMN max_cost_usd REAL",
+    )
+    conn.commit()
+
+
+def _migrate_agent_loops_no_progress(cursor, conn):
+    """#1157 — no-progress / doom-loop detection.
+
+    Adds `no_progress_threshold INTEGER` to `agent_loops`. NULL = disabled
+    (back-compat for in-flight loops created before this change); new loops
+    created via the API/MCP default to 3. The runner fingerprints each
+    successful run's response and stops the loop (stop_reason='no_progress')
+    once K consecutive runs produce an identical fingerprint.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "no_progress_threshold",
+        "ALTER TABLE agent_loops ADD COLUMN no_progress_threshold INTEGER",
     )
     conn.commit()
 
@@ -2663,5 +2681,6 @@ MIGRATIONS = [
     ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
     ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
     ("agent_reports_table", _migrate_agent_reports_table),
+    ("agent_loops_no_progress", _migrate_agent_loops_no_progress),
     ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
 ]
