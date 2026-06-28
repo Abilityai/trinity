@@ -1,0 +1,56 @@
+{
+  "version": "1.0",
+  "date": "2026-06-28",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev (859f66ca)",
+  "branch": "AndriiPasternak31/issue-1155",
+  "subject": "#1155 — per-loop USD cost budget (max_cost_usd) for sequential agent loops",
+  "phases_run": [0, 1, 2, 3, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "modified_endpoints": 2,
+    "modified_endpoint_paths": [
+      "POST /api/agents/{name}/loops (new optional field max_cost_usd)",
+      "GET /api/loops/{id} (new read-only fields max_cost_usd, total_cost)"
+    ],
+    "new_db_columns": 1,
+    "new_db_columns_detail": ["agent_loops.max_cost_usd REAL (NULL = no budget)"],
+    "new_migrations": 2,
+    "new_migrations_detail": [
+      "SQLite: db/migrations.py agent_loops_max_cost (_safe_add_column, fixed DDL)",
+      "PostgreSQL: migrations/versions/0007_agent_loops_max_cost.py (ADD COLUMN IF NOT EXISTS, fixed DDL)"
+    ],
+    "auth_changes": 0,
+    "secrets_touched": 0,
+    "external_calls": 0,
+    "file_writes": 0,
+    "crypto_touched": 0
+  },
+  "findings": [],
+  "supply_chain_summary": {
+    "new_dependencies": 0,
+    "install_scripts_added": 0,
+    "note": "No new Python or Node dependencies. math (stdlib) is the only new import."
+  },
+  "filter_stats": {
+    "candidates_considered": 4,
+    "discarded_dos_resource": 1,
+    "discarded_below_confidence_gate": 0,
+    "discarded_docs_or_tests": 0,
+    "verified": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "trend": {
+    "prior_reports_present": true,
+    "overlapping_fingerprints": 0,
+    "note": "Prior diff report (cso-diff-2026-06-27-918) covers a different surface (agent reports). No shared findings; first audit of the loops cost-budget surface. Clean."
+  },
+  "assessment": "No findings at or above the 8/10 daily confidence gate. The change is a contained, defensive cost-limiting feature on existing, properly-gated endpoints. New field is validated (gt=0), persisted via parameterized SQLAlchemy core insert, and read on an access-controlled path. Migration DDL is fixed (no interpolation). Cost accumulation defends against NaN/inf poisoning. inf passes gt=0 validation but is harmless (max_runs 1-100 remains the hard stop)."
+}
