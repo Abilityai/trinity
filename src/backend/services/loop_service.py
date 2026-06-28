@@ -27,6 +27,7 @@ Template substitution:
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -98,6 +99,7 @@ class LoopService:
         delay_seconds: int = 0,
         timeout_per_run: Optional[int] = None,
         max_duration_seconds: Optional[int] = None,
+        max_cost_usd: Optional[float] = None,
         model: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         started_by_user_id: Optional[int] = None,
@@ -118,6 +120,7 @@ class LoopService:
             delay_seconds=delay_seconds,
             timeout_per_run=timeout_per_run,
             max_duration_seconds=max_duration_seconds,
+            max_cost_usd=max_cost_usd,
             model=model,
             allowed_tools=allowed_tools,
             started_by_user_id=started_by_user_id,
@@ -199,6 +202,16 @@ class LoopService:
             if max_duration else None
         )
 
+        # #1155: optional per-loop USD cost budget. NULL = no limit. Enforced
+        # only at iteration boundaries — once accumulated cost of completed
+        # runs meets/exceeds the budget, the loop stops before the next run
+        # (stop_reason='budget_exhausted'). The current run always finishes, so
+        # one run (including the first) can overshoot. accumulated_cost grows
+        # only on the success branch (the only path that loops back here);
+        # display stays correct because GET sums the run rows.
+        max_cost = loop.get("max_cost_usd")
+        accumulated_cost = 0.0
+
         try:
             for run_number in range(1, loop["max_runs"] + 1):
                 # Cooperative stop check BEFORE starting the next iteration.
@@ -213,6 +226,16 @@ class LoopService:
                 if deadline is not None and datetime.utcnow() >= deadline:
                     terminal_status = "stopped"
                     stop_reason = "deadline_exceeded"
+                    break
+
+                # #1155: cost-budget check at the iteration boundary. Fires only
+                # when a NEXT run would start with the budget already met/
+                # exceeded — boundary-only, so a run that crosses the budget but
+                # is the final run (max_runs) or matches stop_signal yields
+                # those reasons instead.
+                if max_cost is not None and accumulated_cost >= max_cost:
+                    terminal_status = "stopped"
+                    stop_reason = "budget_exhausted"
                     break
 
                 rendered = _render_template(
@@ -273,6 +296,32 @@ class LoopService:
                     )
                     previous_response = result.response
                     runs_completed = run_number
+
+                    # #1155: accumulate spend toward the budget. Only finite,
+                    # positive costs count — a NaN/inf cost is ignored so it
+                    # can't poison the accumulator (NaN >= max_cost is always
+                    # False → budget would never trip). NULL/unknown cost is
+                    # fail-open (counts as 0 per AC). When a budget is active,
+                    # BOTH unusable-cost cases WARN (distinct messages) so the
+                    # "spends while showing $0" blind spot is greppable instead
+                    # of silent — NULL and non-finite are both metering faults.
+                    c = result.cost
+                    if c is not None and math.isfinite(c) and c > 0:
+                        accumulated_cost += c
+                    elif max_cost is not None and c is None:
+                        logger.warning(
+                            "[Loop] %s run %d reported no cost; counts as 0 "
+                            "toward the $%.4f budget",
+                            loop_id, run_number, max_cost,
+                        )
+                    elif max_cost is not None and c is not None and not math.isfinite(c):
+                        logger.warning(
+                            "[Loop] %s run %d reported a non-finite cost (%r); "
+                            "ignored so it can't poison the $%.4f budget "
+                            "accumulator (counts as 0)",
+                            loop_id, run_number, c, max_cost,
+                        )
+
                     db.update_loop_progress(
                         loop_id,
                         runs_completed=runs_completed,
