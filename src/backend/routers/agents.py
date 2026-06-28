@@ -12,6 +12,7 @@ Related routers (same /api/agents prefix):
 """
 import json
 import logging
+import random
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
 
@@ -843,6 +844,15 @@ _AUTHORITATIVE_TERMINALS = frozenset({
 _ASYNC_DISPATCH_MARKER = "dispatched_async"
 
 
+def _jittered_retry_after(base_seconds: int) -> int:
+    """A jittered Retry-After (seconds) for a paused/throttled callback (#1085).
+
+    Spreads ±50% around ``base`` so throttled agents don't realign on the same
+    backoff edge and re-storm in lockstep when the hint elapses. Floored at 1."""
+    base = max(1, int(base_seconds))
+    return max(1, int(random.uniform(base * 0.5, base * 1.5)))
+
+
 @router.post("/{agent_name}/executions/{execution_id}/result")
 async def agent_execution_result(
     agent_name: str,
@@ -925,6 +935,53 @@ async def agent_execution_result(
             raise HTTPException(status_code=422, detail="execution_log is not JSON-serializable")
         if log_bytes > _MAX_CALLBACK_LOG_BYTES:
             raise HTTPException(status_code=413, detail="execution_log too large")
+
+    # ---- #1085 re-delivery governor: shared-cause pause + rate caps --------
+    # Master-flag gated (inert when OFF). Placed AFTER the replay-ACK (an
+    # already-final row still ACKs 200 while paused) and the marker-409 (a
+    # non-async row is still permanently rejected) so ONLY a legit accepted async
+    # terminal is ever throttled. Throttle/pause raises **503 + Retry-After**,
+    # NOT 429: 503 ∉ result_callback._PERMANENT_STATUSES, so a throttled callback
+    # stays persisted on disk and retries on its jittered backoff — the startup
+    # sweep and lease reaper remain the never-drop backstops. Fail-open:
+    # rate_limiter.check / is_paused degrade to allow on a Redis outage.
+    import config
+    if config.REDELIVERY_GOVERNOR_ENABLED:
+        from services import rate_limiter
+        from services.redelivery_governor import get_redelivery_governor
+
+        if get_redelivery_governor().is_paused():
+            retry_after = _jittered_retry_after(config.REDELIVERY_PAUSE_RETRY_AFTER_SECONDS)
+            logger.warning(
+                "[#1085] result callback for %s held — fleet re-delivery paused (shared cause)",
+                execution_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Re-delivery paused (shared cause); retry later",
+                headers={"Retry-After": str(retry_after)},
+            )
+        fleet = rate_limiter.check(
+            "redelivery:fleet",
+            config.REDELIVERY_FLEET_LIMIT,
+            config.REDELIVERY_FLEET_WINDOW_SECONDS,
+        )
+        per_agent = rate_limiter.check(
+            f"redelivery:agent:{agent_name}",
+            config.REDELIVERY_AGENT_LIMIT,
+            config.REDELIVERY_AGENT_WINDOW_SECONDS,
+        )
+        if not fleet.allowed or not per_agent.allowed:
+            retry_after = max(fleet.retry_after, per_agent.retry_after, 1)
+            logger.warning(
+                "[#1085] result callback for %s throttled (fleet_ok=%s agent_ok=%s)",
+                execution_id, fleet.allowed, per_agent.allowed,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Re-delivery rate limit exceeded; retry later",
+                headers={"Retry-After": str(retry_after)},
+            )
 
     # ---- Build the normalized terminal + apply -----------------------------
     # #679: 3-way map — success→SUCCESS, cancelled→CANCELLED, everything else

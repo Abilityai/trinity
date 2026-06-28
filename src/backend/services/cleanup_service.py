@@ -382,7 +382,29 @@ class CleanupService:
         """3. Reclaim stale Redis slots + fail their execution records.
 
         (#219, #226, #378 — see _process_stale_slot_reclaims docstring.)
+
+        #1085: while the re-delivery governor's shared-cause pause is armed, hold
+        off this destructive sweep entirely. During a fleet outage an async row's
+        callback is being throttled/held (not lost) — failing it to LEASE_EXPIRED
+        now would race the throttled-then-resumed callback. The pause TTL (300s)
+        stays well under the lease window (timeout + SLOT_TTL_BUFFER), and a late
+        SUCCESS still corrects any reaper FAIL via the apply_result CAS — but the
+        hold-off avoids the churn. Fail-open: governor degrades to not-paused.
         """
+        try:
+            import config
+
+            if config.REDELIVERY_GOVERNOR_ENABLED:
+                from services.redelivery_governor import get_redelivery_governor
+
+                if get_redelivery_governor().should_hold_reaper():
+                    logger.info(
+                        "[Cleanup] stale-slot reaper held — re-delivery paused (#1085)"
+                    )
+                    return
+        except Exception as e:  # noqa: BLE001 — never block the sweep on a gate error
+            logger.debug("[Cleanup] governor reaper-gate skipped: %s", e)
+
         try:
             capacity = get_capacity_manager()
 

@@ -172,6 +172,46 @@ ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
 # can't drift.
 MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
 
+# Correlated-Failure / Thundering-Herd Controls (#1085) — re-delivery governor.
+# These guard the live #1083 fire-and-forget callback path (and, unchanged, the
+# future pull-mode re-delivery path) against a fleet-wide retry storm: a backend
+# restart re-sends ~N persisted terminal envelopes plus in-flight callback
+# retries, all hammering POST /api/agents/{name}/executions/{id}/result.
+#
+# REDELIVERY_GOVERNOR_ENABLED is the single master switch for the BACKEND
+# controls (re-delivery rate caps + shared-cause pause reads). Default OFF — the
+# governor is inert until flipped, and a flip back is the whole rollback.
+# Agent-side jitter (Part A) is behaviorally safe and ships UNFLAGGED.
+# Everything here is fail-open: a Redis blip degrades to allow/no-op, never to
+# blocking or dropping a terminal.
+REDELIVERY_GOVERNOR_ENABLED = os.getenv("REDELIVERY_GOVERNOR_ENABLED", "false").lower() == "true"
+
+# Fleet-wide re-delivery cap (~10/s default) — bounds total callback admissions
+# across all agents over a rolling window.
+REDELIVERY_FLEET_LIMIT = int(os.getenv("REDELIVERY_FLEET_LIMIT", "600"))
+REDELIVERY_FLEET_WINDOW_SECONDS = int(os.getenv("REDELIVERY_FLEET_WINDOW_SECONDS", "60"))
+
+# Per-agent re-delivery cap — bounds one agent's callback admissions so a single
+# crash-looping agent can't exhaust the fleet budget.
+REDELIVERY_AGENT_LIMIT = int(os.getenv("REDELIVERY_AGENT_LIMIT", "20"))
+REDELIVERY_AGENT_WINDOW_SECONDS = int(os.getenv("REDELIVERY_AGENT_WINDOW_SECONDS", "60"))
+
+# Shared-cause detector: when this many DISTINCT agents post an AUTH/BILLING
+# terminal within the rolling window, a fleet-wide cause is inferred (Claude API
+# outage, expired platform key, a bad skill pushed fleet-wide) and re-delivery is
+# paused for the whole fleet.
+CORRELATED_FAILURE_THRESHOLD = int(os.getenv("CORRELATED_FAILURE_THRESHOLD", "20"))
+CORRELATED_FAILURE_WINDOW_SECONDS = int(os.getenv("CORRELATED_FAILURE_WINDOW_SECONDS", "120"))
+
+# Pause flag TTL — the pause auto-expires (no explicit unpause, so there is no
+# stuck-pause failure mode). Kept well under the lease window (timeout +
+# SLOT_TTL_BUFFER, buffer=300) so a held row is never failed during the pause.
+CORRELATED_PAUSE_TTL_SECONDS = int(os.getenv("CORRELATED_PAUSE_TTL_SECONDS", "300"))
+
+# Retry-After hint (seconds) returned on a 503 while paused/throttled — jittered
+# at the callsite so throttled callbacks don't realign on the same backoff edge.
+REDELIVERY_PAUSE_RETRY_AFTER_SECONDS = int(os.getenv("REDELIVERY_PAUSE_RETRY_AFTER_SECONDS", "30"))
+
 # Voice Chat Configuration (VOICE-001)
 VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # Coalesce empty → default (#1076): os.getenv(name, default) returns the

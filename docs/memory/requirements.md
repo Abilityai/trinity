@@ -610,6 +610,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam
 - **Flow**: `docs/memory/feature-flows/dispatch-circuit-breaker.md`, `docs/memory/feature-flows/capacity-management.md`, `docs/memory/feature-flows/task-execution-service.md`
 
+### 10.11.1 Correlated-Failure / Thundering-Herd Controls (#1085)
+- **Status**: ✅ Implemented (2026-06-28); backend controls default-OFF behind one master flag, agent-side jitter ships unflagged
+- **GitHub Issue**: #1085
+- **Description**: Make the live #1083 fire-and-forget re-delivery path safe at fleet scale — a backend restart re-sends ~N persisted terminal envelopes plus in-flight callback retries, hammering the result-callback endpoint in lockstep. Adds **jittered re-poll/reconnect**, **per-agent + fleet-wide re-delivery rate caps**, and a **shared-cause pause** that halts re-delivery for the whole fleet on a common fault (Claude-API outage, expired platform key, a bad skill pushed fleet-wide). Built as reusable primitives that the future pull-mode re-delivery (Epic #1045/#1081) consumes unchanged. Everything is **fail-open**; **no DB schema change** (all state is Redis).
+- **Key Features**:
+  - **Jitter (agent-side, unflagged)** — `result_callback._deliver` uses decorrelated jitter (`min(cap, uniform(base, prev*3))`, AWS pattern) and honors a server `Retry-After` as a floor; `resend_pending_results` adds a one-shot initial-jitter (≤60s) + per-envelope jitter so a restart smears the t≈0 sweep burst; `main.py` capacity-loop period jittered so replicas don't realign. Jitter helper duplicated agent-side, not vendored (Invariant #5 governs mirrored contracts, not utility math)
+  - **Re-delivery rate caps (backend)** — callback endpoint gates on `services/rate_limiter.check` keys `redelivery:fleet` (≈10/s) + `redelivery:agent:{name}`; over-limit → **503 + Retry-After** (not 429 — 503 stays retryable, so a throttled callback is never dropped: startup sweep + lease reaper backstop)
+  - **Shared-cause pause** (`services/redelivery_governor.py`) — records AUTH/BILLING terminals on the CAS-`won` branch in `apply_result` (no replay double-count) into a Redis ZSET counting **distinct agents** (one crash-looper can't arm it); at `≥ CORRELATED_FAILURE_THRESHOLD` distinct agents sets a TTL'd `governor:pause` (auto-expiry, no explicit unpause). Three flag-gated read points: callback endpoint (503), lease reaper hold-off (keeps async rows RUNNING), capacity drain hold-off (keeps 24h `expire_stale`)
+  - **BILLING populated** — `result_callback._STATUS_MAP` maps agent `429 → ("billing","rate_limit")` (enum existed but was never set) so a fleet-wide Claude-API 429 storm arms the detector alongside AUTH; `terminal_reason` stays `rate_limit` (cancel-relabel guard unaffected)
+  - **Config** (all in `config.py`): `REDELIVERY_GOVERNOR_ENABLED` (master, default false), `REDELIVERY_FLEET_LIMIT`/`_WINDOW_SECONDS` (600/60), `REDELIVERY_AGENT_LIMIT`/`_WINDOW_SECONDS` (20/60), `CORRELATED_FAILURE_THRESHOLD` (20), `CORRELATED_FAILURE_WINDOW_SECONDS` (120), `CORRELATED_PAUSE_TTL_SECONDS` (300, < lease window), `REDELIVERY_PAUSE_RETRY_AFTER_SECONDS` (30). Surfaced as `redelivery_governor_enabled` in `GET /api/settings/feature-flags` for soak observability
+- **Flow**: `docs/memory/feature-flows/redelivery-governor.md`
+
 ### 10.12 Unified Executions Dashboard (EXEC-022)
 - **Status**: ✅ Implemented (2026-05-15)
 - **Requirement ID**: EXEC-022

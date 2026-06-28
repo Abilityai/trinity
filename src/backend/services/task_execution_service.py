@@ -1631,12 +1631,37 @@ class TaskExecutionService:
                 status=ActivityState.FAILED,
                 error=envelope.error,
             )
+        # Compare by ``.value``, NOT by enum-member equality — ``@dataclass`` on
+        # the fieldless ``TaskExecutionErrorCode`` str-Enum gives every member a
+        # zero-field dataclass ``__eq__`` that returns True for ANY two members
+        # (verified: ``BILLING == AUTH`` and even ``TIMEOUT == AUTH`` are True).
+        # A direct ``== TaskExecutionErrorCode.AUTH`` therefore misfires for every
+        # non-None code that reaches this applier (e.g. a 504→TIMEOUT or, since
+        # #1085, a 429→BILLING async callback), wrongly tripping the AUTH dispatch
+        # breaker. Value-compare is correct regardless of the quirk. (#1085)
+        _ec_value = envelope.error_code.value if envelope.error_code is not None else None
         # #526 D10: AUTH-only counting — a non-auth failure never touches the
         # breaker (None would falsely reset it).
-        if won and envelope.error_code == TaskExecutionErrorCode.AUTH:
+        if won and _ec_value == "auth":
             await _record_dispatch_terminal(
                 agent_name, breaker_enabled, TaskExecutionErrorCode.AUTH
             )
+        # #1085: feed the shared-cause detector. Gated on the CAS `won` bool so a
+        # replayed/late callback never double-counts, and on the master flag so
+        # the governor is fully inert when disabled. AUTH/BILLING are the
+        # fleet-correlated codes (expired platform key, Claude-API 429 storm).
+        if won and _ec_value in ("auth", "billing"):
+            try:
+                import config
+
+                if config.REDELIVERY_GOVERNOR_ENABLED:
+                    from services.redelivery_governor import get_redelivery_governor
+
+                    get_redelivery_governor().record_terminal_failure(
+                        agent_name, _ec_value
+                    )
+            except Exception:  # noqa: BLE001 — detection is best-effort, never blocks a terminal
+                logger.debug("[#1085] governor record skipped", exc_info=True)
         if won and release_slot and eid:
             await capacity.release(agent_name, eid)
 

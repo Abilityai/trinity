@@ -125,7 +125,13 @@ async def get_public_feature_flags(
     Auth required (any role) — these flags reveal nothing sensitive but we
     still keep them out of the unauthenticated surface.
     """
-    from config import GEMINI_API_KEY, VOICE_ENABLED, VOIP_ENABLED, MCP_AGENT_CHAT_PULL_ENABLED
+    from config import (
+        GEMINI_API_KEY,
+        VOICE_ENABLED,
+        VOIP_ENABLED,
+        MCP_AGENT_CHAT_PULL_ENABLED,
+        REDELIVERY_GOVERNOR_ENABLED,
+    )
     from services.entitlement_service import entitlement_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     return {
@@ -140,6 +146,11 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # Re-delivery governor (#1085) — default OFF. Observability-only here:
+        # the actual gates live at the callback endpoint / reaper / drain read
+        # points. Lets an operator confirm via the API whether the correlated-
+        # failure controls are armed during a soak. NOT a UI surface.
+        "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
         "platform_default_model": settings_service.get_platform_default_model(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
