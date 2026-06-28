@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trinity.abilityai.dev/schemas/agent-pipeline.schema.json",
+  "title": "Trinity Agent Pipeline Definition",
+  "description": "Definition of an agent-defined, long-running multi-stage pipeline, published by the agent at ~/.trinity/pipelines/<pipeline_id>.yaml. Trinity reads this file via the list_agent_pipelines MCP tool to produce a summary; it does NOT own or execute the DAG (Architectural Invariant #8). The agent owns stage advancement, retry, and escalation via its own primitives (schedules, events, operator queue, the pre-check hook). This schema is the authoritative documentation contract; the MCP tool parses the YAML only to summarise name/stages and does not run a hard validator.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "description": "Stable pipeline identifier. SHOULD equal the <pipeline_id> in the filename. Must match ^[A-Za-z0-9._-]+$ (the same grammar the MCP tools enforce on path-interpolated ids)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable pipeline name."
+    },
+    "description": {
+      "type": "string",
+      "description": "What this pipeline does."
+    },
+    "version": {
+      "type": ["string", "number"],
+      "description": "Definition version, bumped by the agent when the DAG shape changes."
+    },
+    "stages": {
+      "type": "array",
+      "description": "Ordered list of stages in the pipeline (e.g. perception -> incubation -> synthesis -> publish -> measure).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stage identifier, unique within the pipeline. Used as current_stage in the state file."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable stage name."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the stage does."
+          },
+          "preconditions": {
+            "type": "array",
+            "description": "Conditions the agent checks before entering this stage. Free-form; evaluated by the agent, not Trinity.",
+            "items": { "type": "string" }
+          },
+          "transitions": {
+            "type": "array",
+            "description": "Allowed next stages and the conditions that select them. Owned and evaluated by the agent.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "to": { "type": "string", "description": "Target stage id." },
+                "when": { "type": "string", "description": "Condition expression (agent-evaluated)." }
+              },
+              "required": ["to"],
+              "additionalProperties": true
+            }
+          },
+          "retry": {
+            "type": "object",
+            "description": "Per-stage retry policy applied by the agent's heartbeat.",
+            "properties": {
+              "max_attempts": { "type": "integer", "minimum": 0 },
+              "backoff_seconds": { "type": "number", "minimum": 0 }
+            },
+            "additionalProperties": true
+          },
+          "escalation": {
+            "type": "object",
+            "description": "When/how the agent escalates a stuck stage to the operator queue. The queue item's context SHOULD carry { pipeline_id, instance_id, stage } so escalations group by pipeline.",
+            "additionalProperties": true
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": true
+      }
+    },
+    "retry": {
+      "type": "object",
+      "description": "Pipeline-level default retry policy (stages may override).",
+      "additionalProperties": true
+    },
+    "escalation": {
+      "type": "object",
+      "description": "Pipeline-level default escalation policy (stages may override).",
+      "additionalProperties": true
+    }
+  },
+  "required": ["stages"],
+  "additionalProperties": true
+}

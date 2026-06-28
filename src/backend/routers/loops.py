@@ -70,6 +70,10 @@ def _elapsed_seconds(loop: dict) -> Optional[int]:
 
 def _build_status_response(loop: dict) -> LoopStatusResponse:
     runs_raw = db.list_loop_runs(loop["id"])
+    # #1155: total_cost is computed on read (no stored column to drift) — the
+    # sum of every run's cost (NULL→0). sum(()) is 0.0, so a zero-run loop
+    # reports 0.0 verbatim with no None special-case.
+    total_cost = sum((r["cost"] or 0.0) for r in runs_raw)
     runs: List[LoopRunResponse] = []
     for r in runs_raw:
         response_preview = None
@@ -101,6 +105,9 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
         completed_at=loop["completed_at"],
         max_duration_seconds=loop.get("max_duration_seconds"),
         elapsed_seconds=_elapsed_seconds(loop),
+        max_cost_usd=loop.get("max_cost_usd"),
+        total_cost=total_cost,
+        no_progress_threshold=loop.get("no_progress_threshold"),
     )
 
 
@@ -159,6 +166,8 @@ async def start_loop(
         delay_seconds=payload.delay_seconds,
         timeout_per_run=payload.timeout_per_run,
         max_duration_seconds=payload.max_duration_seconds,
+        max_cost_usd=payload.max_cost_usd,
+        no_progress_threshold=payload.no_progress_threshold,
         model=payload.model,
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,

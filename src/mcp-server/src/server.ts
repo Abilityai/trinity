@@ -15,6 +15,7 @@ import { createSkillsTools } from "./tools/skills.js";
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
+import { createReportTools } from "./tools/reports.js";
 import { createSubscriptionTools } from "./tools/subscriptions.js";
 import { createMonitoringTools } from "./tools/monitoring.js";
 import { createNeverminedTools } from "./tools/nevermined.js";
@@ -24,9 +25,11 @@ import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
 import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
+import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
+import { createGitTools } from "./tools/git.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -223,7 +226,9 @@ export async function createServer(config: ServerConfig = {}) {
     createScheduleTools(client, requireApiKey),
     createTagTools(client, requireApiKey),
     createNotificationTools(client, requireApiKey),
+    createReportTools(client, requireApiKey),     // Agent Reports (#918)
     createFileTools(client, requireApiKey),       // FILES-001 — outbound file sharing
+    createPipelineTools(client, requireApiKey),   // #919 — agent-defined pipeline introspection
     createSubscriptionTools(client, requireApiKey),
     createMonitoringTools(client, requireApiKey),
     createNeverminedTools(client, requireApiKey),
@@ -235,6 +240,7 @@ export async function createServer(config: ServerConfig = {}) {
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
+    createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
   ];
   for (const group of toolGroups) {
     addAllTools(group);

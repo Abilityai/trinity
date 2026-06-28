@@ -64,6 +64,7 @@ def _configure_db(db):
     db.find_soft_deleted_schedules_past_retention.return_value = ["s1", "s2"]
     db.purge_schedule.return_value = True
     db.idempotency_purge_expired.return_value = 11  # RELIABILITY-006 / #525
+    db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
 
 
 def _run(svc):
@@ -76,7 +77,7 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
-         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7)), \
+         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
          patch.object(_CS, "_wal_checkpoint_truncate") as wal:
         _configure_db(db)
         report = _run(svc)
@@ -94,7 +95,8 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     assert report.soft_deleted_agents_purged == 1
     assert report.soft_deleted_schedules_purged == 2
     assert report.idempotency_keys_purged == 11
-    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11
+    assert report.agent_reports_pruned == 3  # #918
+    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3
     # retention reclaimed rows ⇒ WAL checkpoint fires
     wal.assert_called_once()
     # cycle counter advanced
@@ -108,7 +110,7 @@ def test_sweep_error_does_not_abort_cycle():
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
-         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7)), \
+         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
          patch.object(_CS, "_wal_checkpoint_truncate"):
         _configure_db(db)
         db.mark_stale_executions_failed.side_effect = RuntimeError("boom")
@@ -130,7 +132,7 @@ def test_rate_limit_prune_is_cycle_gated():
         svc._cycle_count = cycle
         with patch.object(_CS, "db") as db, \
              patch.object(_CS, "get_capacity_manager", return_value=capacity), \
-             patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0)), \
+             patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0, 0)), \
              patch.object(_CS, "_wal_checkpoint_truncate"):
             _configure_db(db)
             _run(svc)
@@ -147,7 +149,7 @@ def test_wal_checkpoint_skipped_when_no_retention_work():
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
-         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7)), \
+         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
          patch.object(_CS, "_wal_checkpoint_truncate") as wal:
         _configure_db(db)
         # nothing reclaimed by any retention sweep
@@ -157,8 +159,36 @@ def test_wal_checkpoint_skipped_when_no_retention_work():
         db.find_soft_deleted_agents_past_retention.return_value = []
         db.find_soft_deleted_schedules_past_retention.return_value = []
         db.idempotency_purge_expired.return_value = 0
+        db.prune_agent_reports.return_value = 0  # #918
         _run(svc)
     wal.assert_not_called()
+
+
+def test_wal_checkpoint_fires_when_only_agent_reports_pruned():
+    """#918: agent_reports pruning alone must still trigger the WAL checkpoint.
+
+    Regression guard — `agent_reports_pruned` was originally omitted from the
+    `_maybe_wal_checkpoint` retention_total, so a cycle that reclaimed only
+    report rows left the freed pages in the WAL.
+    """
+    svc = _make_service()
+    capacity = MagicMock()
+    capacity.reclaim_stale = AsyncMock(return_value={})
+    with patch.object(_CS, "db") as db, \
+         patch.object(_CS, "get_capacity_manager", return_value=capacity), \
+         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
+         patch.object(_CS, "_wal_checkpoint_truncate") as wal:
+        _configure_db(db)
+        # Every other retention sweep reclaims nothing; only agent_reports prunes.
+        db.prune_execution_logs.return_value = 0
+        db.prune_execution_rows.return_value = 0
+        db.cleanup_old_health_records.return_value = 0
+        db.find_soft_deleted_agents_past_retention.return_value = []
+        db.find_soft_deleted_schedules_past_retention.return_value = []
+        db.idempotency_purge_expired.return_value = 0
+        db.prune_agent_reports.return_value = 4  # #918 — the only work this cycle
+        _run(svc)
+    wal.assert_called_once()
 
 
 def test_retention_sweeps_skipped_when_disabled():
@@ -168,7 +198,7 @@ def test_retention_sweeps_skipped_when_disabled():
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
-         patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0)), \
+         patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0, 0)), \
          patch.object(_CS, "_wal_checkpoint_truncate"):
         _configure_db(db)
         db.get_setting_value.side_effect = lambda key, default=None: "0"

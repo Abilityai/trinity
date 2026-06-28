@@ -15,6 +15,7 @@ Refactored for better concern separation:
 import asyncio
 import json
 import os
+import random
 from datetime import datetime
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -81,6 +82,8 @@ from routers.internal import router as internal_router
 from routers.tags import router as tags_router
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
+from routers.reports import router as reports_router
+from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -240,6 +243,8 @@ set_chat_ws_manager(manager)
 set_public_links_ws_manager(manager)
 set_notifications_ws_manager(manager)
 set_notifications_filtered_ws_manager(filtered_manager)
+set_reports_ws_manager(manager)
+set_reports_filtered_ws_manager(filtered_manager)
 set_monitoring_ws_manager(manager)
 set_monitoring_filtered_ws_manager(filtered_manager)
 set_operator_queue_ws_manager(manager)
@@ -481,14 +486,18 @@ async def lifespan(app: FastAPI):
         capacity = get_capacity_manager()
 
         async def _capacity_maintenance_loop():
-            # First tick after a short delay so startup stays snappy.
-            await asyncio.sleep(15)
+            # First tick after a short delay so startup stays snappy. #1085: a
+            # small startup jitter so replicas don't realign their maintenance
+            # ticks after a coordinated restart.
+            await asyncio.sleep(15 + random.uniform(0, 2))
             while True:
                 try:
                     await capacity.run_maintenance(max_age_hours=24)
                 except Exception as exc:
                     logger.warning(f"[Capacity] maintenance tick failed: {exc}")
-                await asyncio.sleep(60)
+                # #1085: jitter the loop period so concurrent replicas' drain
+                # sweeps spread out instead of firing in lockstep every 60s.
+                await asyncio.sleep(60 + random.uniform(0, 15))
 
         asyncio.create_task(_capacity_maintenance_loop())
         logger.info("CapacityManager initialised; maintenance loop running (60s)")
@@ -910,6 +919,7 @@ app.include_router(internal_router)  # Internal agent-to-backend endpoints (no a
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
+app.include_router(reports_router)  # Agent Reports (#918)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)

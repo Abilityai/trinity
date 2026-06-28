@@ -5,6 +5,7 @@ import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
+import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -25,6 +26,8 @@ export function useWebSocket() {
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
   const loopsStore = useLoopsStore()
+  const reportsStore = useReportsStore()
+  const fleetReportsStore = useFleetReportsStore()
 
   const connect = async () => {
     if (ws.value) return
@@ -159,6 +162,13 @@ export function useWebSocket() {
         // The store filters by the agent currently shown in LoopsPanel.
         if (data.type === 'loop_run_completed' || data.type === 'loop_completed') {
           loopsStore.handleWebSocketEvent(data)
+        }
+        // #918: agent report thin trigger (broadcast fleet-wide, keyed by type).
+        // The agent store filters by the agent on screen; the fleet store does a
+        // guarded refresh. Each is a no-op when its panel isn't mounted.
+        if (data.type === 'agent_report') {
+          reportsStore.handleWebSocketEvent(data)
+          fleetReportsStore.handleWebSocketEvent(data)
         }
         break
     }

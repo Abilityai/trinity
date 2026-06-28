@@ -1,0 +1,59 @@
+{
+  "version": "1.0",
+  "date": "2026-06-27",
+  "mode": "diff-daily",
+  "confidence_gate": 8,
+  "scope": "issue-905 working-tree diff (MCP git tools + request_id audit correlation)",
+  "branch": "AndriiPasternak31/issue-905",
+  "base": "origin/dev",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_mcp_tools": 6,
+    "new_backend_endpoints": 0,
+    "new_unauthenticated_endpoints": 0,
+    "new_admin_filter": "GET /api/audit-log?request_id=",
+    "files_changed": 15
+  },
+  "findings": [],
+  "candidate_observations": [
+    {
+      "id": "OBS-1",
+      "title": "Verbatim X-Request-ID adoption feeds audit correlation",
+      "severity": "informational",
+      "status": "REFUTED",
+      "reason": "Pre-existing middleware (SEC-001/#371); actor fields server-derived; hash chain intact; read filter admin-only. Caller can only mis-tag their own server-attributed row."
+    },
+    {
+      "id": "OBS-2",
+      "title": "CRLF response-splitting via reflected X-Request-ID",
+      "severity": "informational",
+      "status": "REFUTED",
+      "reason": "h11/uvicorn reject bare CR/LF in header values on parse and emit; not reachable."
+    }
+  ],
+  "access_control_verification": {
+    "mcp_gate": "checkAgentAccess enforces {self} U permitted for agent scope; user/system defer to backend",
+    "backend_reads": "AuthorizedAgentByName (status, log, sync-state, pull)",
+    "backend_mutating": "OwnedAgentByName (sync, reset-to-main-preserve-state)",
+    "result": "CONFIRMED correct, properly layered"
+  },
+  "injection_checks": {
+    "git_log_limit": "int-typed at FastAPI boundary; structured query param to agent server; no shell interpolation",
+    "request_id_filter": "parameterized SQLAlchemy Core ==; no SQLi",
+    "request_id_value": "minted via randomUUID() in MCP tool"
+  },
+  "filter_stats": {
+    "candidates": 2,
+    "refuted": 2,
+    "hard_excluded": 1,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "informational": 2
+  },
+  "trend": "first-run for this feature; no fingerprint match against prior reports"
+}

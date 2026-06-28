@@ -112,6 +112,7 @@ from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
+from db.reports import ReportOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -330,6 +331,7 @@ class DatabaseManager:
         self._chat_ops = ChatOperations()
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
+        self._report_ops = ReportOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -1135,6 +1137,39 @@ class DatabaseManager:
 
     def get_current_activities(self, agent_name: str):
         return self._activity_ops.get_current_activities(agent_name)
+
+    # =========================================================================
+    # Agent Report Methods (#918 — delegated to db/reports.py)
+    # =========================================================================
+
+    def create_report(self, agent_name, user_id, report_type, title, payload,
+                       display_hint=None, schema_version=1,
+                       period_start=None, period_end=None):
+        return self._report_ops.create_report(
+            agent_name, user_id, report_type, title, payload,
+            display_hint, schema_version, period_start, period_end,
+        )
+
+    def get_report(self, report_id: str):
+        return self._report_ops.get_report(report_id)
+
+    def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              limit: int = 50, offset: int = 0):
+        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+
+    def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
+                          search: str = None, limit: int = 50, offset: int = 0):
+        return self._report_ops.get_fleet_reports(
+            agent_names, report_type, hours, search, limit, offset)
+
+    def get_fleet_report_stats(self, agent_names, report_type: str = None, hours: int = None):
+        return self._report_ops.get_fleet_report_stats(agent_names, report_type, hours)
+
+    def delete_report(self, agent_name: str, report_id: str):
+        return self._report_ops.delete_report(agent_name, report_id)
+
+    def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000):
+        return self._report_ops.prune_agent_reports(retention_days, chunk_size)
 
     # =========================================================================
     # Cleanup Operations (for CleanupService)

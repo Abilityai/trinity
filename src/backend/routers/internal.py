@@ -538,6 +538,7 @@ async def log_audit_entry(request: InternalAuditRequest):
             actor_agent_name=request.actor_agent_name,
             target_type=request.target_type,
             target_id=request.target_id,
+            request_id=request.request_id,
             details=request.details,
         )
 

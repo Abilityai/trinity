@@ -639,6 +639,34 @@ tasks:
 
 ---
 
+## Direct Git Operations (MCP) — #905
+
+Trinity exposes the agent git surface as **direct, deterministic MCP tools** so an
+orchestrator can run git without spending an LLM turn via `chat_with_agent`:
+
+| Tool | What it does |
+|------|--------------|
+| `get_git_status` | Branch, remote, changed files, pending-sync flag (read-only) |
+| `get_git_log` | Recent commits (`limit` clamped 1–100, read-only) |
+| `get_git_sync_state` | Persisted sync-health row (last status, consecutive failures) |
+| `git_sync` | Stage + commit + push to the working branch |
+| `git_pull` | Pull from GitHub (`clean` / `stash_reapply` / `force_reset`) |
+| `reset_to_main_preserve_state` | ⚠️ **Destructive** recovery — adopt `origin/main` and force-with-lease, preserving only the persistent-state allowlist |
+
+Guidance:
+
+- **Conflicts stay LLM-mediated.** A `git_sync`/`git_pull` conflict returns a
+  structured `409` with `conflict_type`/`conflict_class` and a hint to resolve via
+  `chat_with_agent` — the deterministic tools never try to auto-merge.
+- **Auth.** `git_sync` and `reset_to_main_preserve_state` are **owner-only**; a
+  shared (non-owner) key gets read + `git_pull` only. Agent-scoped keys may act on
+  themselves or agents they have explicit permission for.
+- **Traceability.** Every mutating call (sync/pull success *and* conflict, and every
+  reset path) is audited, and the MCP tool-call row joins the backend git row via a
+  shared request id (`GET /api/audit-log?request_id=`).
+
+---
+
 ## Shared Folders
 
 Trinity enables file-based collaboration between agents via shared Docker volumes.
@@ -1242,6 +1270,74 @@ widgets:
 ```
 
 **Note**: Agent must be running for dashboard to display. See `docs/memory/feature-flows/agent-dashboard.md` for complete schema.
+
+---
+
+## Agent-Defined Pipelines (#919)
+
+If your agent runs a long-running, multi-stage pipeline (e.g. perception → incubation → synthesis → publish → measure), you can make its shape and live state **uniformly discoverable** by Trinity — **without** Trinity owning the DAG, the execution, or the recovery. You own all of that (via schedules, events, the operator queue, and the pre-check hook); Trinity only **reads** two files you publish.
+
+### The file contract
+
+Publish two kinds of file inside your container:
+
+```
+~/.trinity/pipelines/<pipeline_id>.yaml                  # definition (the DAG)
+~/.trinity/pipeline-state/<pipeline_id>/<instance_id>.json  # live state per instance
+```
+
+- **`<pipeline_id>`** and **`<instance_id>`** must match `^[A-Za-z0-9._-]+$` (no `/`, no `..`). Trinity interpolates them into read paths and rejects anything else.
+- **`<instance_id>` SHOULD be time-sortable.** Trinity selects the *latest* instance by the state file's mtime, tie-broken by `instance_id` lexically.
+- Authoritative schemas (validate your files against these):
+  - [`docs/schemas/agent-pipeline.schema.json`](schemas/agent-pipeline.schema.json) — the definition
+  - [`docs/schemas/agent-pipeline-state.schema.json`](schemas/agent-pipeline-state.schema.json) — the state. **Required:** `instance_id`, `current_stage`, `health`, `updated_at` (ISO-8601), `escalations` (array). Trinity reads exactly these for its summary.
+
+Minimal example:
+
+```yaml
+# ~/.trinity/pipelines/research.yaml
+id: research
+name: Daily Research Pipeline
+stages:
+  - id: collect
+  - id: synthesize
+  - id: publish
+```
+
+```json
+// ~/.trinity/pipeline-state/research/2026-06-26T1200.json
+{
+  "instance_id": "2026-06-26T1200",
+  "pipeline_id": "research",
+  "current_stage": "synthesize",
+  "health": "green",
+  "updated_at": "2026-06-26T12:05:00Z",
+  "escalations": []
+}
+```
+
+### Reading it back (MCP tools)
+
+Two thin, read-only MCP tools wrap the existing agent file-browser surface — no new backend endpoint, no Trinity-side DB:
+
+- **`list_agent_pipelines(agent_name)`** — enumerates `pipelines/*.yaml`, each with a health summary from its latest instance (`current_stage`, `health`, `open_escalations`, `updated_at`). Returns `[]` when you publish no pipelines. A *stopped/unreachable* agent surfaces a real error, not an empty list (the files live in the container).
+- **`get_agent_pipeline_state(agent_name, pipeline_id, instance_id?)`** — the full parsed state JSON for one instance; omit `instance_id` for the latest. A missing pipeline/instance returns a clean not-found (never a 500).
+
+`open_escalations` counts `escalations[]` entries that are still open — an entry is open unless it carries `open: false`, `resolved: true`, or `status` in `{resolved, closed, done}`.
+
+### Grouping escalations by pipeline (operator-queue convention)
+
+When you escalate a stuck stage to the **operator queue**, put the pipeline coordinates in the queue item's free-form `context` JSON so escalations group by pipeline in the UI — **no Trinity schema change**:
+
+```json
+{ "pipeline_id": "research", "instance_id": "2026-06-26T1200", "stage": "synthesize" }
+```
+
+### Driving it (agent-side heartbeat — not Trinity)
+
+Stage advancement, retry, and escalation are owned by your agent: run a single `pipeline-tick` skill on a cron schedule, gated by your `~/.trinity/pre-check` hook so it's near-free when nothing needs attention. That heartbeat ships with the **`agent-dev:add-pipeline`** plugin in [`abilityai/abilities`](https://github.com/abilityai/abilities), **not** with Trinity.
+
+> **Adoption note:** these tools ship as MCP + docs only. Existing agents return `[]` until they adopt this file convention — that's by design, not a bug.
 
 ---
 

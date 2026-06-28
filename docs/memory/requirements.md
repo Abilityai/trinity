@@ -610,6 +610,18 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Exposes `record_failure("missed_heartbeat")` as the #307 heartbeat seam
 - **Flow**: `docs/memory/feature-flows/dispatch-circuit-breaker.md`, `docs/memory/feature-flows/capacity-management.md`, `docs/memory/feature-flows/task-execution-service.md`
 
+### 10.11.1 Correlated-Failure / Thundering-Herd Controls (#1085)
+- **Status**: ✅ Implemented (2026-06-28); backend controls default-OFF behind one master flag, agent-side jitter ships unflagged
+- **GitHub Issue**: #1085
+- **Description**: Make the live #1083 fire-and-forget re-delivery path safe at fleet scale — a backend restart re-sends ~N persisted terminal envelopes plus in-flight callback retries, hammering the result-callback endpoint in lockstep. Adds **jittered re-poll/reconnect**, **per-agent + fleet-wide re-delivery rate caps**, and a **shared-cause pause** that halts re-delivery for the whole fleet on a common fault (Claude-API outage, expired platform key, a bad skill pushed fleet-wide). Built as reusable primitives that the future pull-mode re-delivery (Epic #1045/#1081) consumes unchanged. Everything is **fail-open**; **no DB schema change** (all state is Redis).
+- **Key Features**:
+  - **Jitter (agent-side, unflagged)** — `result_callback._deliver` uses decorrelated jitter (`min(cap, uniform(base, prev*3))`, AWS pattern) and honors a server `Retry-After` as a floor; `resend_pending_results` adds a one-shot initial-jitter (≤60s) + per-envelope jitter so a restart smears the t≈0 sweep burst; `main.py` capacity-loop period jittered so replicas don't realign. Jitter helper duplicated agent-side, not vendored (Invariant #5 governs mirrored contracts, not utility math)
+  - **Re-delivery rate caps (backend)** — callback endpoint gates on `services/rate_limiter.check` keys `redelivery:fleet` (≈10/s) + `redelivery:agent:{name}`; over-limit → **503 + Retry-After** (not 429 — 503 stays retryable, so a throttled callback is never dropped: startup sweep + lease reaper backstop)
+  - **Shared-cause pause** (`services/redelivery_governor.py`) — records AUTH/BILLING terminals on the CAS-`won` branch in `apply_result` (no replay double-count) into a Redis ZSET counting **distinct agents** (one crash-looper can't arm it); at `≥ CORRELATED_FAILURE_THRESHOLD` distinct agents sets a TTL'd `governor:pause` (auto-expiry, no explicit unpause). Three flag-gated read points: callback endpoint (503), lease reaper hold-off (keeps async rows RUNNING), capacity drain hold-off (keeps 24h `expire_stale`)
+  - **BILLING populated** — `result_callback._STATUS_MAP` maps agent `429 → ("billing","rate_limit")` (enum existed but was never set) so a fleet-wide Claude-API 429 storm arms the detector alongside AUTH; `terminal_reason` stays `rate_limit` (cancel-relabel guard unaffected)
+  - **Config** (all in `config.py`): `REDELIVERY_GOVERNOR_ENABLED` (master, default false), `REDELIVERY_FLEET_LIMIT`/`_WINDOW_SECONDS` (600/60), `REDELIVERY_AGENT_LIMIT`/`_WINDOW_SECONDS` (20/60), `CORRELATED_FAILURE_THRESHOLD` (20), `CORRELATED_FAILURE_WINDOW_SECONDS` (120), `CORRELATED_PAUSE_TTL_SECONDS` (300, < lease window), `REDELIVERY_PAUSE_RETRY_AFTER_SECONDS` (30). Surfaced as `redelivery_governor_enabled` in `GET /api/settings/feature-flags` for soak observability
+- **Flow**: `docs/memory/feature-flows/redelivery-governor.md`
+
 ### 10.12 Unified Executions Dashboard (EXEC-022)
 - **Status**: ✅ Implemented (2026-05-15)
 - **Requirement ID**: EXEC-022
@@ -1584,6 +1596,14 @@ All subsections 18.1–18.10 were deleted with the code. Flow docs archived at `
   - `src/frontend/src/views/Settings.vue` - Toggle UI
 - **Negative markers on `is_auth_failure` (#904, 2026-05-21)**: substring match on `AUTH_INDICATORS` now short-circuits to False when the error message also contains an unambiguous signal-kill / OOM / timeout marker (`sigkill`, `sigterm`, `sigint`, `exit code -9`, `exit code 137`, `exit code 143`, `out of memory`, `oom`, `memory cgroup`, `terminated by`, `killed by`). Prevents the SUB-003 trigger from firing on cgroup OOM kills whose detail string happens to contain a word like "token" or "authentication" via downstream wrapping. The same exclusion list lives in `src/scheduler/service.py:_is_auth_failure` to keep the two surfaces from drifting (see §10.4.1).
 - **Hot-reload, not recreate (#1089, 2026-06-13)**: the auto-switch no longer recreates the container — `_perform_auto_switch` hot-reloads the new token in place so in-flight turns on the agent survive. See §20.6.
+- **Retry the triggering execution after a successful switch (#792, 2026-06-27)**: previously, when a switch fired mid-execution the triggering row was marked FAILED. Interactive chat retries client-side (`routers/chat.py`) and recurring cron recovers next tick, but **one-shot triggers** (manual `…/schedules/{id}/trigger`, webhook, MCP `trigger_agent_schedule`) had no recovery. `TaskExecutionService.execute_task` now intercepts a returned 429/auth response **pre-`raise_for_status`** (mirroring the #678 reader-race retry); when SUB-003 reports a successful switch it re-issues the turn **once** with the **same `execution_id`** and the row lands SUCCESS. Details:
+  - **Trigger surface**: the full SUB-003 surface via `classify_switch_failure(response)` (429 → rate_limit; 503/401/403/402 or `is_auth_failure` body → auth), not just status codes — so "any switch-success retries" holds.
+  - **Budget**: one retry, guarded by a dedicated `subscription_switch_attempted` flag (NOT `retry_count`, which the #678 retry owns, so the two never suppress each other). A cascade (retry still failing) writes FAILED; the `except` handler is gated on the same flag so it does **not** switch a second time. The 2h skip-list prevents re-selecting the exhausted sub.
+  - **Settle**: the retry **is** the readiness probe (`_SWITCH_RETRY_DELAY_S` short pre-delay only) — no circuit-aware `/health` poll (would poison the transport breaker on cold start) and no trust in `restart_result`'s string status.
+  - **Cost/budget**: first-attempt cost salvaged into `previous_attempt_cost` (#678 R2 rollup); retry timeout capped to the **remaining** original budget so a post-long-run 429 can't balloon wall-clock/slot time.
+  - **Same-`execution_id`** retry means #1084 `effect_guard` dedups wired outbound sinks; residual double-fire risk for arbitrary MCP tool calls is the same the #678 retry already accepts.
+  - **Out of scope / follow-ups**: the #1083 fire-and-forget async path (`DISPATCH_ASYNC`, default OFF) routes 429s through the result-callback, bypassing this sync path; and a concurrent switch-lock *loser* (gets `None` from `handle_subscription_failure`) does not retry. Both deferred.
+  - **Files**: `src/backend/services/task_execution_service.py` (`classify_switch_failure`, `_extract_agent_error`, `_salvage_attempt_cost`, pre-raise block, except-handler gate); tests `tests/unit/test_792_subscription_retry.py`.
 
 ### 20.5 Per-Subscription Usage Tracking (SUB-004)
 - **Status**: ✅ Implemented (2026-04-01)
@@ -2432,7 +2452,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 ## 34. Agent-Defined Pipelines (#919)
 
 ### 34.1 Standardized Pipeline Introspection Surface (#919)
-- **Status**: 📋 Planned
+- **Status**: ✅ Implemented (2026-06-26)
 - **Implements**: Issue #919
 - **Description**: Trinity-compatible agents that run long-running
   multi-stage pipelines (perception → incubation → synthesis → publish →
@@ -2477,6 +2497,26 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   (expressed as event chains between independent per-agent pipelines);
   GUI editor for `pipeline.yaml`; persisting pipeline state in
   Trinity's database.
+- **Implementation** (2026-06-26): shipped as an **MCP-only** change —
+  `src/mcp-server/src/tools/pipelines.ts` adds the two tools over the
+  **existing** `GET /api/agents/{name}/files` (recursive list) and
+  `/files/download` (read) surfaces via two new thin client methods
+  (`listAgentFiles`/`downloadAgentFile`, sharing a `_fetch` helper). No
+  backend router/service, no agent-server endpoint, no DB table (Invariant
+  #8/#13 satisfied by reuse). Hardening: `pipeline_id`/`instance_id` are
+  zod-validated `^[A-Za-z0-9._-]+$` and reject `..`/`/`/encoded-slashes
+  **before** any download (the download endpoint has no deny-list — a P1
+  traversal guard); definition YAML is parsed with a 256 KiB pre-parse size
+  cap + duplicate-key rejection + alias-expansion guard, and a malformed
+  single file is an item-level error that never aborts the list. Latest
+  instance is selected by state-file mtime (tie-break: lexical
+  `instance_id`), keeping the read fan-out at one download per pipeline
+  (capped at 50 pipelines, truncation logged). Error contract: only a 404
+  maps to empty/not-found; a 400 (agent stopped) or 5xx (unreachable)
+  surfaces as a distinct real error. Authoritative file schemas live in
+  `docs/schemas/agent-pipeline.schema.json` and
+  `agent-pipeline-state.schema.json`; the agent guide documents the
+  contract, the operator-queue `context` convention, and the adoption note.
 ## 35. Enterprise Edition Architecture (#847)
 
 ### 35.1 Open-Core Seam — Private Submodule Integration (#847)
@@ -2797,6 +2837,81 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   deadline + elapsed when set.
 - **Out of scope**: interrupting an in-flight run mid-turn; persisting
   elapsed across a backend restart (loops do not auto-resume).
+
+### 38.3 Loop-level cost budget (#1155)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #1155
+- **Description**: An optional per-loop USD spend ceiling — a fourth hard
+  stop alongside `max_runs`, the deadline (#1156), and `stop_signal`. A
+  `max_runs=100` loop on an expensive model previously had no cost bound.
+- **Parameter**: optional `max_cost_usd` (float, `gt=0`, no upper cap so
+  sub-cent budgets are allowed; NULL/omitted disables). Accepted on
+  `POST /api/agents/{name}/loops`, persisted on
+  `agent_loops.max_cost_usd`, exposed via the `run_agent_loop` MCP tool.
+- **Enforcement (iteration-boundary gate)**: the runner accumulates each
+  completed run's cost in memory and, *before starting the next run*,
+  stops the loop once accumulated cost meets/exceeds the budget. Checked
+  *after* the deadline check. Only finite, positive costs accumulate; a
+  NaN/inf cost is ignored (so it can't poison the accumulator); a
+  NULL/unknown cost counts as **0** (fail-open per AC — `max_runs` still
+  bounds the loop) and emits one `logger.warning` per such run when a
+  budget is active.
+- **Honest semantics (not a mid-run hard cap)**: the current run always
+  finishes, so one run — **including the first** — can overshoot the
+  budget by any amount. The gate is "checked between runs"; an in-flight
+  run is never killed mid-turn.
+- **Precedence (boundary-only)**: per iteration the order is
+  `user_stopped` → `deadline_exceeded` → `budget_exhausted` → run →
+  `stop_signal_matched`; natural exit `max_runs_reached`. `budget_exhausted`
+  fires *only when a next iteration would start over budget* — a run that
+  crosses the budget but is also the final `max_runs` run or matches
+  `stop_signal` yields those reasons instead.
+- **Terminal state**: terminal status `stopped` with
+  `stop_reason="budget_exhausted"`.
+- **Observability**: `GET /api/loops/{loop_id}` returns `max_cost_usd` and
+  a `total_cost` **computed on read** as the sum of `agent_loop_runs.cost`
+  (NULL→0; `0.0` for a zero-run loop — no stored column to drift); the
+  Loops UI shows spend / budget when set.
+- **Out of scope**: mid-run cost interruption (would need streaming cost
+  callbacks the runtime doesn't expose); a stored `total_cost` column;
+  stopping when cost is unknown (contradicts the fail-open AC).
+### 38.4 No-progress / doom-loop detection (#1157)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #1157
+- **Description**: A loop feeding `{{previous_response}}` forward can get
+  stuck re-emitting the same response every iteration, burning the entire
+  remaining `max_runs` budget while making zero progress (the classic
+  autonomous-agent "doom loop"). Iteration caps don't catch it. Detect it
+  by fingerprinting each successful run's response and stopping once K
+  consecutive runs are identical.
+- **Parameter**: optional `no_progress_threshold` (int; `0` disables;
+  **default 3** for new loops; `1` rejected → 422, since "repeated
+  identical" needs ≥2). Accepted on `POST /api/agents/{name}/loops`,
+  persisted on `agent_loops.no_progress_threshold` (nullable — **NULL ⇒
+  disabled** so loops created before this change keep today's behavior),
+  exposed via the `run_agent_loop` MCP tool and the Loops UI.
+- **Detection**: SHA-256 of the **full** response text normalized by
+  collapsing whitespace runs to single spaces and stripping
+  (`" ".join(text.split())`) — preserves word boundaries (`"foo bar"` ≠
+  `"foobar"`); empty / None / whitespace-only all normalize to one
+  fingerprint (repeated empty output IS a doom loop and counts). Counter +
+  last-fingerprint are **runner-local** (no per-run persistence). **Exact-hash
+  only** — no fuzzy/semantic similarity (out of scope; would need an LLM
+  judge).
+- **Terminal state**: stops the loop with terminal status `stopped` and
+  `stop_reason="no_progress"`.
+- **Precedence**: `stop_signal_matched` wins (checked first in the success
+  branch); a pending `user_stopped` or passed `deadline_exceeded` also
+  outranks `no_progress` (re-checked before the no-progress break) — an
+  explicit operator Stop or deadline must never be relabeled "no progress".
+- **Known limitation / mitigation**: a loop that legitimately repeats an
+  identical confirmation while making external progress will be stopped.
+  Mitigated (not solved) by the `0`-to-disable escape, the MCP tool /
+  UI helper text, and the default-on behavior-change note — NULL⇒disabled
+  shields in-flight loops.
+- **Out of scope**: fuzzy/semantic similarity; progress-identity vs
+  response-identity (a tool-call/external-effect fingerprint); persisting
+  the fingerprint/counter; retro-applying detection to in-flight loops.
 
 ---
 
@@ -3161,6 +3276,45 @@ password) is **Phase 2**, gated on a configured email provider and the existing
   (own-account scoped; 409 if the email belongs to another account), surfaced as
   an **Admin sign-in email** card in Settings → General. No verification email is
   sent; existing `admin`+password login keeps working until/unless an email is set.
+
+---
+
+## 44. Agent-Reported Structured Reports (#918)
+
+**Description**: A generic **agent report** primitive — agents publish typed-but-flexible
+structured reports (telemetry, domain results: leads found, KPI snapshots, weekly summaries)
+via an MCP tool. Reports are persisted, surfaced on the Agent Detail "Reports" tab and a
+fleet-wide Reports view, so users see what each agent produces without reading chat
+transcripts. Three-surface feature (backend router, MCP tool, frontend); no agent-server
+endpoint — reports flow agent → MCP → backend.
+
+- **FR-1 — MCP tool `report`**: `report(report_type, title, payload, display_hint?,
+  schema_version?, period_start?, period_end?)`. The reporting agent + author are resolved
+  **server-side** from the MCP auth context (agent-scoped key → bound agent); the tool
+  requires an agent-scoped key so a report cannot be attributed to another agent.
+- **FR-2 — Storage**: `agent_reports` table (id, agent_name, user_id, report_type, title,
+  payload JSON, display_hint, schema_version, period_start/end, created_at). Indexes on
+  `(agent_name, created_at DESC)`, `(report_type, created_at DESC)`, and `(created_at)` for
+  the retention sweep. Dual-track migration (SQLite `migrations.py` + Alembic `0006`).
+- **FR-3 — Backend API** (access control mirrors `/api/executions`): self-gated `POST
+  /api/agents/{name}/reports` (agent-scoped key must equal the path agent; payload capped at
+  256 KB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
+  `GET /api/reports` (fleet, accessible-agent filtered; `agent`/`report_type`/`hours`/`search`),
+  `GET /api/reports/stats` (total / by_type / agents KPI counts), `GET /api/reports/{id}`
+  (full payload; 404 on no-access), `DELETE /api/agents/{name}/reports/{id}` (owner; scoped by
+  agent_name + id).
+- **FR-4 — Real-time**: a **thin** `agent_report` WebSocket trigger (agent_name, report_id,
+  report_type, created_at — never title/payload, since `/ws` is unfiltered SCOPE_ALL); the
+  frontend refetches via the access-controlled REST endpoints.
+- **FR-5 — Frontend**: Agent Detail "Reports" tab + Operations → "Reports" fleet tab. Generic
+  + typed renderers (table / KPI tiles / markdown / timeline / JSON) chosen by `display_hint`,
+  then `report_type` prefix, then JSON; each renderer validates payload shape and falls back to
+  the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
+- **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
+  `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
+
+**Deferred**: effect-guard dedup on `report()` for at-least-once pull-mode re-delivery
+(#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
 
 ---
 
