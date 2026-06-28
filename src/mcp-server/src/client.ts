@@ -1955,6 +1955,7 @@ export class TrinityClient {
       delay_seconds?: number;
       timeout_per_run?: number;
       max_duration_seconds?: number;
+      no_progress_threshold?: number;
       model?: string;
       allowed_tools?: string[];
     }

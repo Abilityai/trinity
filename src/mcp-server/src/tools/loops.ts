@@ -121,6 +121,18 @@ export function createLoopTools(
               "Must be >= timeout_per_run (or the agent's execution timeout when unset). " +
               "Omit for no time bound (max_runs still applies)."
           ),
+        no_progress_threshold: z
+          .number()
+          .int()
+          .min(0)
+          .refine((v) => v !== 1, "must be 0 (disabled) or >= 2")
+          .optional()
+          .describe(
+            "Stop the loop after K consecutive runs that produce an identical " +
+              "response (doom-loop / no-progress detection). 0 disables; default 3. " +
+              "Detection is exact-hash on the normalized response text. Set 0 for " +
+              "loops that legitimately repeat identical confirmations."
+          ),
         model: z
           .string()
           .optional()
@@ -139,6 +151,7 @@ export function createLoopTools(
           delay_seconds?: number;
           timeout_per_run?: number;
           max_duration_seconds?: number;
+          no_progress_threshold?: number;
           model?: string;
           allowed_tools?: string[];
         },
@@ -161,6 +174,7 @@ export function createLoopTools(
             delay_seconds: params.delay_seconds,
             timeout_per_run: params.timeout_per_run,
             max_duration_seconds: params.max_duration_seconds,
+            no_progress_threshold: params.no_progress_threshold,
             model: params.model,
             allowed_tools: params.allowed_tools,
           });
