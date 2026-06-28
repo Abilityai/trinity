@@ -25,6 +25,7 @@ Template substitution:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -60,6 +61,18 @@ class _LoopHandle:
     task: asyncio.Task
     should_stop: bool = False
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _fingerprint(text: Optional[str]) -> str:
+    """SHA-256 of normalized response text for no-progress detection (#1157).
+
+    Normalizes by collapsing every whitespace run to a single space and
+    stripping (`" ".join(text.split())`). This preserves word boundaries so
+    `"foo bar"` and `"foobar"` do NOT collide, while `"hi"` and `"hi  \\n"`
+    do. Empty / None / whitespace-only all normalize to `""` — a repeated
+    empty response IS a doom loop and counts like any other fingerprint.
+    """
+    return hashlib.sha256(" ".join((text or "").split()).encode()).hexdigest()
 
 
 def _render_template(template: str, run_number: int, previous_response: Optional[str]) -> str:
@@ -98,6 +111,7 @@ class LoopService:
         delay_seconds: int = 0,
         timeout_per_run: Optional[int] = None,
         max_duration_seconds: Optional[int] = None,
+        no_progress_threshold: Optional[int] = None,
         model: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         started_by_user_id: Optional[int] = None,
@@ -118,6 +132,7 @@ class LoopService:
             delay_seconds=delay_seconds,
             timeout_per_run=timeout_per_run,
             max_duration_seconds=max_duration_seconds,
+            no_progress_threshold=no_progress_threshold,
             model=model,
             allowed_tools=allowed_tools,
             started_by_user_id=started_by_user_id,
@@ -198,6 +213,14 @@ class LoopService:
             datetime.utcnow() + timedelta(seconds=max_duration)
             if max_duration else None
         )
+
+        # #1157: no-progress / doom-loop detection. NULL/0 disables (back-compat
+        # for in-flight loops). Fingerprint each successful run's response; stop
+        # once `repeat_count` consecutive identical fingerprints reach the
+        # threshold. Runner-local — no persistence.
+        no_progress_threshold = loop.get("no_progress_threshold")
+        last_fingerprint: Optional[str] = None
+        repeat_count = 0
 
         try:
             for run_number in range(1, loop["max_runs"] + 1):
@@ -291,9 +314,36 @@ class LoopService:
                     })
 
                     # Stop-signal check — substring match on the full response.
+                    # Placed BEFORE no-progress so stop_signal wins if both fire.
                     if loop["stop_signal"] and loop["stop_signal"] in (result.response or ""):
                         stop_reason = "stop_signal_matched"
                         break
+
+                    # #1157: no-progress detection. Fingerprint the full
+                    # response and track consecutive identical results.
+                    if no_progress_threshold:
+                        fp = _fingerprint(result.response)
+                        if fp == last_fingerprint:
+                            repeat_count += 1
+                        else:
+                            last_fingerprint = fp
+                            repeat_count = 1
+                        # A pending user-stop or passed deadline outranks
+                        # no_progress — let the next iteration's top-of-loop
+                        # checks finalize user_stopped/deadline_exceeded. An
+                        # explicit Stop must never be relabeled "no progress".
+                        deadline_passed = (
+                            deadline is not None
+                            and datetime.utcnow() >= deadline
+                        )
+                        if (
+                            repeat_count >= no_progress_threshold
+                            and not (handle is not None and handle.should_stop)
+                            and not deadline_passed
+                        ):
+                            terminal_status = "stopped"
+                            stop_reason = "no_progress"
+                            break
                 else:
                     db.finalize_loop_run(
                         run_id,
