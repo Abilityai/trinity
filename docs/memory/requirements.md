@@ -2826,6 +2826,44 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 - **Out of scope**: interrupting an in-flight run mid-turn; persisting
   elapsed across a backend restart (loops do not auto-resume).
 
+### 38.3 No-progress / doom-loop detection (#1157)
+- **Status**: ✅ Implemented
+- **Implements**: Issue #1157
+- **Description**: A loop feeding `{{previous_response}}` forward can get
+  stuck re-emitting the same response every iteration, burning the entire
+  remaining `max_runs` budget while making zero progress (the classic
+  autonomous-agent "doom loop"). Iteration caps don't catch it. Detect it
+  by fingerprinting each successful run's response and stopping once K
+  consecutive runs are identical.
+- **Parameter**: optional `no_progress_threshold` (int; `0` disables;
+  **default 3** for new loops; `1` rejected → 422, since "repeated
+  identical" needs ≥2). Accepted on `POST /api/agents/{name}/loops`,
+  persisted on `agent_loops.no_progress_threshold` (nullable — **NULL ⇒
+  disabled** so loops created before this change keep today's behavior),
+  exposed via the `run_agent_loop` MCP tool and the Loops UI.
+- **Detection**: SHA-256 of the **full** response text normalized by
+  collapsing whitespace runs to single spaces and stripping
+  (`" ".join(text.split())`) — preserves word boundaries (`"foo bar"` ≠
+  `"foobar"`); empty / None / whitespace-only all normalize to one
+  fingerprint (repeated empty output IS a doom loop and counts). Counter +
+  last-fingerprint are **runner-local** (no per-run persistence). **Exact-hash
+  only** — no fuzzy/semantic similarity (out of scope; would need an LLM
+  judge).
+- **Terminal state**: stops the loop with terminal status `stopped` and
+  `stop_reason="no_progress"`.
+- **Precedence**: `stop_signal_matched` wins (checked first in the success
+  branch); a pending `user_stopped` or passed `deadline_exceeded` also
+  outranks `no_progress` (re-checked before the no-progress break) — an
+  explicit operator Stop or deadline must never be relabeled "no progress".
+- **Known limitation / mitigation**: a loop that legitimately repeats an
+  identical confirmation while making external progress will be stopped.
+  Mitigated (not solved) by the `0`-to-disable escape, the MCP tool /
+  UI helper text, and the default-on behavior-change note — NULL⇒disabled
+  shields in-flight loops.
+- **Out of scope**: fuzzy/semantic similarity; progress-identity vs
+  response-identity (a tool-call/external-effect fingerprint); persisting
+  the fingerprint/counter; retro-applying detection to in-flight loops.
+
 ---
 
 ## 39. VoIP Telephony (VOIP-001)
