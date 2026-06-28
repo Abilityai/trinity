@@ -249,6 +249,7 @@ TABLES = {
             delay_seconds INTEGER NOT NULL DEFAULT 0,
             timeout_per_run INTEGER,
             max_duration_seconds INTEGER,
+            max_cost_usd REAL,
             model TEXT,
             allowed_tools TEXT,
             status TEXT NOT NULL,

@@ -2522,6 +2522,25 @@ def _migrate_agent_loops_max_duration(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_loops_max_cost(cursor, conn):
+    """#1155 — per-loop USD cost budget.
+
+    Adds `max_cost_usd REAL` (NULL = no limit) to `agent_loops`. The runner
+    accumulates per-run cost and stops the loop at the next iteration boundary
+    once accumulated cost meets/exceeds the budget
+    (stop_reason='budget_exhausted'), bounding total loop spend alongside the
+    existing `max_runs` cap. Mirrored by the Alembic revision
+    0007_agent_loops_max_cost for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_loops",
+        "max_cost_usd",
+        "ALTER TABLE agent_loops ADD COLUMN max_cost_usd REAL",
+    )
+    conn.commit()
+
+
 def _migrate_agent_reports_table(cursor, conn):
     """Create agent_reports table (#918).
 
@@ -2644,4 +2663,5 @@ MIGRATIONS = [
     ("agent_ownership_voice_name", _migrate_agent_ownership_voice_name),
     ("agent_loops_max_duration", _migrate_agent_loops_max_duration),
     ("agent_reports_table", _migrate_agent_reports_table),
+    ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
 ]
