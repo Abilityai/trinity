@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -46,8 +47,37 @@ _SLOT_TTL_BUFFER_SECONDS = 300
 _PENDING_DIR = Path(os.path.expanduser("~/.trinity/pending-results"))
 _POST_TIMEOUT = 15.0          # per-attempt HTTP timeout
 _BACKOFF_BASE = 1.0
-_BACKOFF_CAP = 60.0           # cap exponential backoff between retries
+_BACKOFF_CAP = 60.0           # cap backoff between retries
 _SWEEP_DEADLINE_SECONDS = 180.0  # bounded best-effort window for the startup sweep
+
+# #1085 startup-sweep spread. After a backend restart ~N agents all run the
+# resend sweep at once; jittering the first POST (and each envelope) smears that
+# t≈0 thundering herd over a window instead of a synchronized spike.
+_SWEEP_INITIAL_JITTER_SECONDS = 60.0
+_SWEEP_PER_ENVELOPE_JITTER_SECONDS = 5.0
+
+
+def _jittered_backoff(prev_sleep: float) -> float:
+    """Decorrelated-jitter backoff (AWS pattern), capped at ``_BACKOFF_CAP``.
+
+    ``sleep ∈ [base, max(base, prev) * 3]`` — self-paces (grows with the previous
+    sleep) AND spreads (uniform), so a fleet of retrying agents desynchronises.
+    Unlike pure exponential (lockstep, every agent on the same schedule) or full
+    jitter (``uniform(0, cap)``, which discards the floor and can hot-loop)."""
+    return min(_BACKOFF_CAP, random.uniform(_BACKOFF_BASE, max(_BACKOFF_BASE, prev_sleep) * 3))
+
+
+def _parse_retry_after(value: object) -> float:
+    """Best-effort parse of a ``Retry-After`` header (integer seconds form) to a
+    float. The backend only ever sends integer seconds (e.g. the #1085 governor
+    503). Returns 0.0 on absence / a non-integer (HTTP-date) value — the jittered
+    backoff then applies unchanged."""
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(int(str(value).strip())))
+    except (TypeError, ValueError):
+        return 0.0
 
 # Permanent rejects — retrying won't help (auth/ownership/marker/size/replay).
 _PERMANENT_STATUSES = frozenset({400, 401, 403, 404, 409, 413, 422})
@@ -138,11 +168,19 @@ def _success_envelope(response_text, raw_messages, metadata, session_id) -> Dict
 # status_code → (error_code, terminal_reason). Only "auth" feeds the backend
 # dispatch breaker (D10); the rest are informational. Mirrors the sync-path
 # classification (503 → AUTH; everything else non-AUTH).
+#
+# #1085: 429 now carries error_code "billing" (the enum existed but was never
+# set). A fleet-wide Claude-API 429 storm is a shared cause the re-delivery
+# governor must catch alongside AUTH — without this, a rate-limit terminal would
+# stay error_code=None and never reach the distinct-agent detector. The
+# terminal_reason stays "rate_limit" so the cancel-relabel guard
+# (`_is_auth_or_rate`) and the backend's mirror still treat it as auth/rate (must
+# never be reclassified as a clean cancellation).
 _STATUS_MAP = {
     503: ("auth", "auth"),
     504: ("timeout", "max_duration"),
     502: (None, "empty_result"),
-    429: (None, "rate_limit"),
+    429: ("billing", "rate_limit"),
     422: (None, "max_turns"),
     500: (None, "error"),
 }
@@ -221,9 +259,10 @@ async def _deliver(
     """
     url = f"{backend_url}/api/agents/{agent_name}/executions/{execution_id}/result"
     headers = {"Authorization": f"Bearer {mcp_key}"}
-    attempt = 0
+    prev_sleep = _BACKOFF_BASE
     async with httpx.AsyncClient(timeout=_POST_TIMEOUT) as client:
         while True:
+            retry_after_floor = 0.0
             try:
                 resp = await client.post(url, json=envelope, headers=headers)
                 if resp.status_code < 300:
@@ -237,6 +276,11 @@ async def _deliver(
                         execution_id, resp.status_code,
                     )
                     return True
+                # Transient (incl. the #1085 governor 503 throttle/pause). Honor a
+                # Retry-After hint as a floor on the jittered backoff so a
+                # throttled agent actually waits the hinted time instead of
+                # re-storming on its own short schedule.
+                retry_after_floor = _parse_retry_after(resp.headers.get("Retry-After"))
                 logger.warning(
                     "[#1083] result for %s got %s — will retry", execution_id, resp.status_code
                 )
@@ -251,10 +295,12 @@ async def _deliver(
                     execution_id,
                 )
                 return False
-            backoff = min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** attempt))
+            # #1085: decorrelated jitter (not lockstep exponential) so a fleet of
+            # retrying agents desynchronises, with a server Retry-After as a floor.
+            backoff = max(_jittered_backoff(prev_sleep), retry_after_floor)
+            prev_sleep = min(_BACKOFF_CAP, backoff)
             # Never sleep past the deadline.
             backoff = min(backoff, max(0.0, deadline_monotonic - now))
-            attempt += 1
             await asyncio.sleep(backoff)
 
 
@@ -373,6 +419,10 @@ async def resend_pending_results() -> None:
     here — a late SUCCESS can still correct a reaper's LEASE_EXPIRED via CAS."""
     if not _callbacks_configured() or not _PENDING_DIR.exists():
         return
+    # #1085 A2 (highest-value change): one-shot initial jitter so ~N agents
+    # restarting together smear the t≈0 resend burst over a minute instead of a
+    # synchronized spike on the backend's callback endpoint.
+    await asyncio.sleep(random.uniform(0, _SWEEP_INITIAL_JITTER_SECONDS))
     backend_url = os.getenv("TRINITY_BACKEND_URL")
     mcp_key = os.getenv("TRINITY_MCP_API_KEY")
     fallback_agent = agent_state.agent_name
@@ -381,6 +431,9 @@ async def resend_pending_results() -> None:
     except Exception:  # noqa: BLE001
         return
     for path in pending:
+        # #1085 A2: small per-envelope jitter so one agent's many envelopes don't
+        # fire back-to-back in a tight loop.
+        await asyncio.sleep(random.uniform(0, _SWEEP_PER_ENVELOPE_JITTER_SECONDS))
         execution_id = path.stem
         try:
             record = json.loads(path.read_text())
