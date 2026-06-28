@@ -14,6 +14,7 @@ service. Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -697,6 +698,290 @@ class TestDeadline:
         assert loop["status"] == "completed"
         assert loop["stop_reason"] == "max_runs_reached"
         assert loop["runs_completed"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Runner — no-progress / doom-loop detection (#1157)
+# ---------------------------------------------------------------------------
+
+class _FakeWS:
+    """Captures broadcast payloads for the WS contract assertion."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    async def broadcast(self, payload):
+        self.events.append(json.loads(payload))
+
+
+class TestNoProgress:
+    def test_stops_after_k_identical_responses(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same") for _ in range(10)]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=10,
+                no_progress_threshold=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "no_progress"
+        assert loop["runs_completed"] == 3
+        assert len(ts.calls) == 3
+
+    def test_near_miss_resets_counter(self, loop_module):
+        ls, db, ts = loop_module
+        # A, A, B, A, A, A → counter resets on B; stops on the 3rd trailing A.
+        ts.results = [
+            _Result(response="A"), _Result(response="A"), _Result(response="B"),
+            _Result(response="A"), _Result(response="A"), _Result(response="A"),
+            _Result(response="A"),  # would-be 7th, must not run
+        ]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=10,
+                no_progress_threshold=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "no_progress"
+        assert loop["runs_completed"] == 6
+        assert len(ts.calls) == 6
+
+    def test_disabled_with_zero_runs_to_max_runs(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same") for _ in range(4)]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=4,
+                no_progress_threshold=0,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 4
+
+    def test_disabled_with_none_runs_to_max_runs(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same") for _ in range(3)]
+
+        async def go():
+            service = ls.LoopService()
+            # no_progress_threshold omitted → service default None → disabled
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 3
+
+    def test_whitespace_normalization_counts_as_identical(self, loop_module):
+        ls, db, ts = loop_module
+        # "hi" and "hi  \n" normalize to the same fingerprint.
+        ts.results = [_Result(response="hi"), _Result(response="hi  \n"),
+                      _Result(response="should not run")]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=5,
+                no_progress_threshold=2,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "no_progress"
+        assert loop["runs_completed"] == 2
+        assert len(ts.calls) == 2
+
+    def test_distinct_words_do_not_collide(self, loop_module):
+        """`" ".join` preserves word boundaries: "foo bar" != "foobar"."""
+        ls, _, _ = loop_module
+        assert ls._fingerprint("foo bar") != ls._fingerprint("foobar")
+        assert ls._fingerprint("hi") == ls._fingerprint("  hi  \n")
+        # empty / None / whitespace-only all collapse to the same fingerprint
+        assert ls._fingerprint(None) == ls._fingerprint("")
+        assert ls._fingerprint("   \n ") == ls._fingerprint("")
+
+    def test_stop_signal_takes_precedence(self, loop_module):
+        """stop_signal is checked before no_progress, so it wins. All responses
+        contain the signal → the loop stops on run 1 with stop_signal_matched,
+        never accumulating a no_progress count."""
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="done [[STOP]]") for _ in range(10)]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=10,
+                stop_signal="[[STOP]]", no_progress_threshold=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["stop_reason"] == "stop_signal_matched"
+        assert loop["status"] == "completed"
+        assert loop["runs_completed"] == 1
+
+    def test_user_stop_takes_precedence_over_no_progress(self, loop_module):
+        """A pending user-stop on the K-th run must finalize user_stopped, not
+        no_progress."""
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same") for _ in range(10)]
+
+        captured: dict = {}
+
+        async def exec_flip(**kwargs):
+            ts.calls.append(kwargs)
+            idx = ts._idx
+            ts._idx += 1
+            # On the 3rd call (the run that would trip no_progress at K=3),
+            # set should_stop on the live handle mid-run.
+            if idx == 2:
+                for h in captured["service"]._handles.values():
+                    h.should_stop = True
+            return ts.results[idx]
+
+        ts.execute_task = exec_flip
+
+        async def go():
+            service = ls.LoopService()
+            captured["service"] = service
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=10,
+                no_progress_threshold=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "stopped"
+        assert loop["stop_reason"] == "user_stopped"
+
+    def test_deadline_takes_precedence_over_no_progress(self, loop_module, monkeypatch):
+        ls, db, ts = loop_module
+        # reuse the deadline test's fake clock
+        _FakeClock.now = datetime(2026, 1, 1, 0, 0, 0)
+        monkeypatch.setattr(ls, "datetime", _FakeClock)
+        ts.results = [_Result(response="same") for _ in range(10)]
+
+        async def _exec(**kwargs):
+            ts.calls.append(kwargs)
+            idx = ts._idx
+            ts._idx += 1
+            _FakeClock.now = _FakeClock.now + timedelta(seconds=4)
+            return ts.results[idx]
+
+        ts.execute_task = _exec
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=10,
+                no_progress_threshold=3, max_duration_seconds=10,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        # run1 t0→4, run2 t4→8, run3 t8→12: at run-3's no_progress check the
+        # deadline (10) is passed, so deadline_exceeded wins at the next boundary.
+        assert loop["stop_reason"] == "deadline_exceeded"
+        assert loop["status"] == "stopped"
+
+    def test_threshold_above_max_runs_never_fires(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same"), _Result(response="same")]
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=2,
+                no_progress_threshold=3,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        loop_id = _run(go())
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "completed"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["runs_completed"] == 2
+
+    def test_ws_completed_event_carries_no_progress(self, loop_module):
+        ls, db, ts = loop_module
+        ts.results = [_Result(response="same") for _ in range(5)]
+        ws = _FakeWS()
+        ls.set_websocket_manager(ws)
+
+        async def go():
+            service = ls.LoopService()
+            row = await service.start_loop(
+                agent_name="a1", message_template="m", max_runs=5,
+                no_progress_threshold=2,
+            )
+            handle = service._handles.get(row["id"])
+            if handle is not None:
+                await handle.task
+            return row["id"]
+
+        try:
+            loop_id = _run(go())
+        finally:
+            ls.set_websocket_manager(None)
+
+        completed = [e for e in ws.events if e["type"] == "loop_completed"]
+        assert len(completed) == 1
+        assert completed[0]["stop_reason"] == "no_progress"
+        assert completed[0]["status"] == "stopped"
 
 
 # ---------------------------------------------------------------------------

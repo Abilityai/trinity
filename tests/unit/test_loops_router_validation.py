@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
@@ -96,3 +97,63 @@ class TestMaxDurationValidation:
         assert resp.loop_id == "loop_x"
         fake_db.get_execution_timeout.assert_not_called()
         assert service.start_loop.await_args.kwargs["max_duration_seconds"] is None
+
+
+class TestNoProgressThreshold:
+    """#1157 — no-progress threshold model default + validation + wiring.
+
+    The default lives in the Pydantic model and is applied at the router
+    boundary; K=1 is rejected by the model's field_validator (→ FastAPI 422).
+    """
+
+    def test_default_is_three_and_threaded_to_service(self, monkeypatch):
+        loops_router, _, service = _load_router(monkeypatch)
+        # Omit no_progress_threshold → model default 3.
+        payload = loops_router.StartLoopRequest(message="m", max_runs=5)
+        assert payload.no_progress_threshold == 3
+        __import__("asyncio").run(_call(loops_router, payload))
+        assert service.start_loop.await_args.kwargs["no_progress_threshold"] == 3
+
+    def test_explicit_zero_disables_and_is_threaded(self, monkeypatch):
+        loops_router, _, service = _load_router(monkeypatch)
+        payload = loops_router.StartLoopRequest(
+            message="m", max_runs=5, no_progress_threshold=0,
+        )
+        assert payload.no_progress_threshold == 0
+        __import__("asyncio").run(_call(loops_router, payload))
+        assert service.start_loop.await_args.kwargs["no_progress_threshold"] == 0
+
+    def test_explicit_two_is_threaded(self, monkeypatch):
+        loops_router, _, service = _load_router(monkeypatch)
+        payload = loops_router.StartLoopRequest(
+            message="m", max_runs=5, no_progress_threshold=2,
+        )
+        __import__("asyncio").run(_call(loops_router, payload))
+        assert service.start_loop.await_args.kwargs["no_progress_threshold"] == 2
+
+    def test_k_equals_one_rejected_422(self):
+        with pytest.raises(ValidationError) as exc:
+            from models import StartLoopRequest
+            StartLoopRequest(message="m", max_runs=5, no_progress_threshold=1)
+        assert "no_progress_threshold" in str(exc.value)
+
+    def test_negative_rejected(self):
+        with pytest.raises(ValidationError):
+            from models import StartLoopRequest
+            StartLoopRequest(message="m", max_runs=5, no_progress_threshold=-1)
+
+    def test_status_response_echoes_threshold(self, monkeypatch):
+        """_build_status_response must surface no_progress_threshold from the
+        loop dict (guards the GET wiring alongside _loop_row_to_dict)."""
+        loops_router, fake_db, _ = _load_router(monkeypatch)
+        fake_db.list_loop_runs.return_value = []
+        loop = {
+            "id": "loop_x", "agent_name": "a1", "status": "stopped",
+            "max_runs": 5, "runs_completed": 2, "stop_reason": "no_progress",
+            "last_response": "same", "error": None, "created_at": "now",
+            "started_at": "now", "completed_at": "now",
+            "max_duration_seconds": None, "no_progress_threshold": 2,
+        }
+        resp = loops_router._build_status_response(loop)
+        assert resp.no_progress_threshold == 2
+        assert resp.stop_reason == "no_progress"
