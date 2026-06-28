@@ -155,6 +155,18 @@ services:
       # (observability). The actual routing gate is the mcp-server's read of the
       # SAME env key; keep both in sync via this single .env var.
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # Correlated-failure / thundering-herd controls (#1085) — re-delivery
+      # governor. Backend-only; all fail-open and inert until the master flag is
+      # on. Wired here so the .env levers actually reach the container.
+      - REDELIVERY_GOVERNOR_ENABLED=${REDELIVERY_GOVERNOR_ENABLED:-false}
+      - REDELIVERY_FLEET_LIMIT=${REDELIVERY_FLEET_LIMIT:-600}
+      - REDELIVERY_FLEET_WINDOW_SECONDS=${REDELIVERY_FLEET_WINDOW_SECONDS:-60}
+      - REDELIVERY_AGENT_LIMIT=${REDELIVERY_AGENT_LIMIT:-20}
+      - REDELIVERY_AGENT_WINDOW_SECONDS=${REDELIVERY_AGENT_WINDOW_SECONDS:-60}
+      - CORRELATED_FAILURE_THRESHOLD=${CORRELATED_FAILURE_THRESHOLD:-20}
+      - CORRELATED_FAILURE_WINDOW_SECONDS=${CORRELATED_FAILURE_WINDOW_SECONDS:-120}
+      - CORRELATED_PAUSE_TTL_SECONDS=${CORRELATED_PAUSE_TTL_SECONDS:-300}
+      - REDELIVERY_PAUSE_RETRY_AFTER_SECONDS=${REDELIVERY_PAUSE_RETRY_AFTER_SECONDS:-30}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./src/backend:/app
