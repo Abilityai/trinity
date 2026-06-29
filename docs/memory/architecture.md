@@ -587,9 +587,15 @@ never bypassed.
   server consumes it verbatim and applies one final guard against its own
   built-in tool names. The per-agent GET uses the same helper so UI and MCP never
   diverge.
-- **Description = cheap metadata** — generated from the agent name + the
-  `trinity.template` Docker label (no `template.yaml` container read; works for
-  stopped agents; tolerates missing label → name-only).
+- **Description = name-only (metadata-free)** — the dedicated tool's description
+  is advertised **globally** to every non-connector MCP key (FastMCP filters the
+  advertised list by `canAccess`; dedicated tools use only the connector-tier
+  gate), so it must carry no per-agent metadata. The `trinity.template` Docker
+  label is deliberately **excluded**: embedding it leaked the template/repo
+  identifier cross-tenant to callers who cannot access the agent and opened a
+  prompt-injection surface into the advertised description (#846 CSO). The agent
+  name is already intrinsic to the `chat_with_<slug>` tool name, so a name-only
+  description adds no disclosure beyond the name.
 - **Visibility** mirrors operator tools: dedicated tools register with the
   `connectorDenied` `canAccess` gate (hidden from connector-scoped keys, ent#46
   isolation preserved). The shared `chat_with_agent` body is extracted into
