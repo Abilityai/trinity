@@ -66,12 +66,21 @@ class TestCapacityGet:
 
         assert_status(response, 200)
         data = assert_json_response(response)
-        assert_has_fields(data, ["agent_name", "max_parallel_tasks", "active_slots", "available_slots", "slots"])
+        assert_has_fields(data, [
+            "agent_name", "max_parallel_tasks", "ceiling",
+            "effective_max_parallel_tasks", "active_slots", "available_slots", "slots",
+        ])
         assert data["agent_name"] == created_agent['name']
         assert isinstance(data["max_parallel_tasks"], int)
+        assert isinstance(data["ceiling"], int)
+        assert isinstance(data["effective_max_parallel_tasks"], int)
         assert isinstance(data["active_slots"], int)
         assert isinstance(data["available_slots"], int)
         assert isinstance(data["slots"], list)
+        # #506: effective == min(stored, ceiling)
+        assert data["effective_max_parallel_tasks"] == min(
+            data["max_parallel_tasks"], data["ceiling"]
+        )
 
     def test_get_capacity_default_is_three(self, api_client: TrinityApiClient, created_agent):
         """Agents should default to max_parallel_tasks=3."""
@@ -201,37 +210,46 @@ class TestCapacityUpdate:
         )
         assert_status(response, 400)
 
-    def test_put_capacity_rejects_above_maximum(self, api_client: TrinityApiClient, created_agent):
-        """PUT /api/agents/{name}/capacity rejects values above 10."""
+    def test_put_capacity_rejects_above_ceiling(self, api_client: TrinityApiClient, created_agent):
+        """PUT /api/agents/{name}/capacity rejects values above the fleet ceiling (#506).
+
+        Reads the live ceiling, then attempts ceiling+1 → 400.
+        """
+        ceiling_resp = api_client.get("/api/settings/max-parallel-tasks-ceiling")
+        ceiling = ceiling_resp.json()["value"] if ceiling_resp.status_code == 200 else 10
         response = api_client.put(
             f"/api/agents/{created_agent['name']}/capacity",
-            json={"max_parallel_tasks": 11}
+            json={"max_parallel_tasks": ceiling + 1}
         )
         assert_status(response, 400)
 
     def test_put_capacity_rejects_non_integer(self, api_client: TrinityApiClient, created_agent):
-        """PUT /api/agents/{name}/capacity rejects non-integer values."""
+        """PUT /api/agents/{name}/capacity rejects non-integer values.
+
+        #506: body is now the typed AgentCapacityUpdate model, so a fractional
+        value fails Pydantic validation with 422 (was a hand-rolled 400).
+        """
         response = api_client.put(
             f"/api/agents/{created_agent['name']}/capacity",
             json={"max_parallel_tasks": 3.5}
         )
-        assert_status(response, 400)
+        assert_status(response, 422)
 
     def test_put_capacity_rejects_string(self, api_client: TrinityApiClient, created_agent):
-        """PUT /api/agents/{name}/capacity rejects string values."""
+        """PUT /api/agents/{name}/capacity rejects string values (422, typed body #506)."""
         response = api_client.put(
             f"/api/agents/{created_agent['name']}/capacity",
             json={"max_parallel_tasks": "five"}
         )
-        assert_status(response, 400)
+        assert_status(response, 422)
 
     def test_put_capacity_requires_field(self, api_client: TrinityApiClient, created_agent):
-        """PUT /api/agents/{name}/capacity requires max_parallel_tasks field."""
+        """PUT /api/agents/{name}/capacity requires max_parallel_tasks field (422, typed body #506)."""
         response = api_client.put(
             f"/api/agents/{created_agent['name']}/capacity",
             json={}
         )
-        assert_status(response, 400)
+        assert_status(response, 422)
 
     def test_put_capacity_nonexistent_agent_returns_404(self, api_client: TrinityApiClient):
         """PUT /api/agents/{name}/capacity returns 404 for nonexistent agent."""
@@ -380,3 +398,44 @@ class TestSlotInfoStructure:
             assert isinstance(slot["started_at"], str)
             assert isinstance(slot["message_preview"], str)
             assert isinstance(slot["duration_seconds"], int)
+
+
+class TestCapacityCeilingIntegration:
+    """Two-tier ceiling behavior on the per-agent capacity endpoint (#506).
+
+    Lowers the fleet ceiling below an agent's stored value and asserts the GET
+    response reports stored + ceiling + effective consistently. Restores the
+    ceiling afterward.
+    """
+
+    pytestmark = pytest.mark.smoke
+
+    CEILING_ENDPOINT = "/api/settings/max-parallel-tasks-ceiling"
+
+    def test_lowered_ceiling_clamps_effective(self, api_client: TrinityApiClient, created_agent):
+        """With stored > ceiling, effective == ceiling and available is clamped."""
+        agent = created_agent['name']
+        cap_url = f"/api/agents/{agent}/capacity"
+
+        current = api_client.get(cap_url)
+        if current.status_code == 503:
+            pytest.skip("Agent server not ready")
+        assert_status(current, 200)
+        original_stored = current.json()["max_parallel_tasks"]
+        original_ceiling = api_client.get(self.CEILING_ENDPOINT).json()["value"]
+
+        try:
+            # Raise ceiling so we can store a high value (8), then lower it to 2.
+            api_client.put(self.CEILING_ENDPOINT, json={"value": 10})
+            assert_status(api_client.put(cap_url, json={"max_parallel_tasks": 8}), 200)
+            api_client.put(self.CEILING_ENDPOINT, json={"value": 2})
+
+            data = api_client.get(cap_url).json()
+            assert data["max_parallel_tasks"] == 8          # stored, unchanged
+            assert data["ceiling"] == 2                      # admin ceiling
+            assert data["effective_max_parallel_tasks"] == 2  # min(8, 2)
+            # available + active == effective
+            assert data["available_slots"] + data["active_slots"] == 2
+        finally:
+            api_client.put(self.CEILING_ENDPOINT, json={"value": original_ceiling})
+            api_client.put(cap_url, json={"max_parallel_tasks": min(original_stored, original_ceiling)})

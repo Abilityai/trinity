@@ -601,6 +601,27 @@ class TestBacklogDrain:
         assert len(fake_slots.acquire_calls) == 1
         assert len(fake_slots.release_calls) == 1
 
+    async def test_drain_clamps_slot_acquire_to_ceiling(
+        self, fake_db, fake_slots, monkeypatch
+    ):
+        """#506: the backlog-drain bypass acquires the slot under the EFFECTIVE
+        cap (stored clamped to the fleet ceiling), not the raw stored value.
+        """
+        from services.backlog_service import BacklogService
+        import services.settings_service as ss
+
+        # Stored cap 9, ceiling 2 → drain must acquire with max_parallel_tasks=2.
+        fake_db.max_parallel_tasks = 9
+        monkeypatch.setattr(ss, "get_max_parallel_tasks_ceiling", lambda: 2)
+
+        svc = BacklogService()
+        fake_db.queued_count_value = 1
+        fake_db.claim_next_return = None  # stop after the sentinel acquire
+
+        await svc.drain_next("alpha")
+        assert fake_slots.acquire_calls, "expected a sentinel slot acquire"
+        assert fake_slots.acquire_calls[0]["max_parallel_tasks"] == 2
+
     async def test_drain_corrupt_metadata_marks_failed(self, fake_db, fake_slots):
         from services.backlog_service import BacklogService
 
