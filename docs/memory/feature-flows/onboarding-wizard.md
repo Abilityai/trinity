@@ -29,18 +29,27 @@ agent is, chat) to get value. So: **teach by doing, not by reading.**
 
 ## Flow
 
+The wizard **drives the real UI** — it does not reimplement agent creation. It
+guides the user into the actual create form, then to the one credential the new
+agent still needs.
+
 ```
 Fresh install → admin account (existing SetupPassword.vue) → login
    → Dashboard, zero agents
        → OnboardingWizard auto-opens (once)
-           1. (if Claude auth missing) amber hint → Settings → Integrations
-           2. Pick a purpose  ── maps to a starter template
-           3. Name + Deploy   ── POST /api/agents
-           4. Success → "Open chat" → /agents/:name?tab=chat
+           1. intro      — one question, "what do you want it to do?"
+                           (a purpose card → prefills a starter template)
+           2. create     — opens the REAL CreateAgentModal, template
+                           preselected; user creates the agent (the right
+                           buttons, not a clone)
+           3. credential — "connect a Claude subscription so it can think"
+                           → Settings → Integrations → Claude Subscriptions
+                           (or "Open chat with <agent>")
 ```
 
 Dismiss at any step → remembered in `localStorage['trinity_onboarding_dismissed_v1']`.
-Re-openable any time from the Dashboard empty state ("Get started").
+Re-openable any time from the Dashboard empty state ("Get started") or via
+`/?onboarding=1` (re-run / QA preview, ignores the dismissed flag and fleet size).
 
 ## Purpose → template mapping
 
@@ -59,12 +68,15 @@ Code agent so deploy never 404s.
 ## Implementation
 
 **Frontend**
-- `components/OnboardingWizard.vue` — the overlay. Fetches templates, deploys via
-  `agentsStore.createAgent({ name, template })`, routes to the new agent's chat.
+- `components/OnboardingWizard.vue` — the guidance overlay. Step `create`
+  delegates to the real `CreateAgentModal` (`:initial-template` prefilled,
+  `@created`); step `credential` routes to Settings → Integrations. It never
+  calls `createAgent` itself.
 - `views/Dashboard.vue` — mounts the wizard; auto-opens via
   `maybeAutoOpenOnboarding()` (gated on `!isFleetLoading && agents.length === 0 &&
-  !dismissed`); empty-state "Get started" button re-opens it.
-- `stores/sessions.js` — caches `claudeAuthConfigured` from feature-flags.
+  !dismissed`, or forced by `?onboarding=1`); empty-state "Get started" re-opens it.
+- `stores/sessions.js` — caches `claudeAuthConfigured` from feature-flags
+  (decides whether the credential step nudges to connect, or confirms + offers chat).
 
 **Backend**
 - `routers/settings.py` `GET /api/settings/feature-flags` gains
