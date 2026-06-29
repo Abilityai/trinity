@@ -544,7 +544,10 @@ function maybeAutoOpenOnboarding() {
     return
   }
   if (isFleetLoading.value) return
-  if (agents.value.length > 0) return
+  // Count only user-created agents — `trinity-system` exists on every install,
+  // so counting it would mean a fresh fleet is never "empty" and auto-open
+  // would never fire.
+  if (agents.value.filter(a => !a.is_system).length > 0) return
   if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
   showOnboarding.value = true
 }
