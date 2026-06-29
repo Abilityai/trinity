@@ -158,7 +158,7 @@ async def get_public_feature_flags(
         # Anthropic key exists (DB or env) OR any Claude subscription is
         # registered. Non-sensitive: a boolean, never the key itself.
         "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
-        or bool(db.list_subscriptions()),
+        or db.has_any_subscription(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional

@@ -27,11 +27,17 @@
   />
 
   <!-- intro + credential: the wizard's own guidance card -->
-  <div v-else class="fixed inset-0 z-50 overflow-y-auto">
+  <div
+    v-else
+    class="fixed inset-0 z-50 overflow-y-auto"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="onboarding-title"
+  >
     <div class="flex min-h-screen items-center justify-center p-4">
       <div class="fixed inset-0 bg-gray-900/85 backdrop-blur-sm" @click="dismiss"></div>
 
-      <div class="relative w-full max-w-2xl rounded-2xl bg-white dark:bg-gray-800 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden">
+      <div ref="dialogCard" class="relative w-full max-w-2xl rounded-2xl bg-white dark:bg-gray-800 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden">
         <!-- Header -->
         <div class="px-6 pt-6 pb-4 sm:px-8">
           <div class="flex items-start justify-between">
@@ -39,7 +45,7 @@
               <p class="text-xs font-semibold uppercase tracking-wide text-action-primary-600 dark:text-action-primary-400">
                 {{ step === 'credential' ? 'Almost there' : 'Welcome to Trinity' }}
               </p>
-              <h2 class="mt-1 text-xl font-semibold text-gray-900 dark:text-white">
+              <h2 id="onboarding-title" class="mt-1 text-xl font-semibold text-gray-900 dark:text-white">
                 {{ step === 'credential' ? 'Give your agent a brain' : 'Launch your first agent' }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -145,11 +151,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
 import CreateAgentModal from './CreateAgentModal.vue'
-import { useAuthStore } from '../stores/auth'
 
 defineProps({
   // Whether platform Claude auth is configured (from feature-flags). Decides
@@ -159,10 +163,10 @@ defineProps({
 const emit = defineEmits(['close', 'deployed'])
 
 const router = useRouter()
-const authStore = useAuthStore()
 
 // Intent → starter template. Each maps to a real local template shipped in
-// config/agent-templates (existence verified on mount; missing → blank agent).
+// config/agent-templates. CreateAgentModal falls back to a blank agent if a
+// mapped template is missing in this deploy, so no existence pre-check here.
 const purposes = ref([
   { key: 'research', title: 'Research a market or topic', desc: 'Scans trends and competitors, summarizes findings.', icon: '🔎', template: 'local:scout' },
   { key: 'strategy', title: 'Advise on strategy', desc: 'Turns inputs into clear, actionable recommendations.', icon: '🧭', template: 'local:sage' },
@@ -174,18 +178,51 @@ const step = ref('intro')          // intro | create | credential
 const selectedTemplate = ref('')
 const createdName = ref('')
 
-onMounted(async () => {
-  // Confirm mapped local templates exist; fall back to blank so the prefilled
-  // CreateAgentModal never points at a missing template.
-  try {
-    const r = await axios.get('/api/templates', { headers: authStore.authHeader })
-    const ids = new Set((r.data || []).map((t) => t.id))
-    purposes.value.forEach((p) => {
-      if (p.template && !ids.has(p.template)) p.template = ''
-    })
-  } catch {
-    /* non-fatal — blank fallback covers it */
+// --- Modal a11y: Escape to close, focus trap, focus-on-open, scroll lock ---
+const dialogCard = ref(null)
+
+function focusable() {
+  if (!dialogCard.value) return []
+  return Array.from(
+    dialogCard.value.querySelectorAll(
+      'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+  )
+}
+
+function onKeydown(e) {
+  // While the real CreateAgentModal is open it owns the keyboard.
+  if (step.value === 'create') return
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    dismiss()
+    return
   }
+  if (e.key === 'Tab') {
+    const els = focusable()
+    if (!els.length) return
+    const first = els[0]
+    const last = els[els.length - 1]
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('keydown', onKeydown)
+  // Scroll-lock the page behind the modal; restored on unmount.
+  document.body.style.overflow = 'hidden'
+  nextTick(() => focusable()[0]?.focus())
+})
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeydown)
+  document.body.style.overflow = ''
 })
 
 function select(p) {

@@ -1587,6 +1587,9 @@ class DatabaseManager:
     def list_subscriptions(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions(owner_id)
 
+    def has_any_subscription(self):
+        return self._subscription_ops.has_any_subscription()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
