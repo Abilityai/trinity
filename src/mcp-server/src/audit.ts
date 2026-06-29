@@ -141,12 +141,16 @@ export function logToolCall(
  */
 export function withAudit<T>(
   toolName: string,
-  execute: (params: T, context?: ToolCallContext) => Promise<string>
+  execute: (params: T, context?: ToolCallContext) => Promise<string>,
+  boundTargetId?: string
 ): (params: T, context?: ToolCallContext) => Promise<string> {
   return async (params: T, context?: ToolCallContext) => {
     const start = Date.now();
     const authContext = context?.session;
-    const targetId = resolveTargetId(params);
+    // #846: dedicated chat_with_<slug> tools carry no `agent_name` param — the
+    // target agent is bound into the tool at registration. Fall back to that
+    // bound id so the audit row still attributes the action to the right agent.
+    const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
       const result = await execute(params, context);

@@ -199,13 +199,23 @@ export async function createServer(config: ServerConfig = {}) {
   // treatment window is unambiguous in the logs.
   console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
 
+  // #846: every registered tool name (built-in + dynamic) — the dynamic-tool
+  // reconciler uses the built-in set as a final collision guard.
+  const builtinToolNames = new Set<string>();
+
   // SEC-001 Phase 3: Wrap tool execute functions with audit logging.
   // withAudit captures tool name, auth context, timing, and success/failure,
   // then fires a non-blocking POST to the backend internal audit endpoint.
-  function addToolWithAudit(tool: any, canAccess?: (auth: any) => boolean): void {
+  // #846: auditTargetId binds the audited target for tools whose params carry
+  // no agent_name (the dedicated chat_with_<slug> tools).
+  function addToolWithAudit(
+    tool: any,
+    canAccess?: (auth: any) => boolean,
+    auditTargetId?: string
+  ): void {
     const wrapped: any = {
       ...tool,
-      execute: withAudit(tool.name, tool.execute),
+      execute: withAudit(tool.name, tool.execute, auditTargetId),
     };
     // ent#46: per-auth tool visibility. FastMCP filters the advertised tool
     // list per session by canAccess(authContext). A tool's own canAccess (if
@@ -220,6 +230,7 @@ export async function createServer(config: ServerConfig = {}) {
   function addAllTools(tools: Record<string, any>, canAccess?: (auth: any) => boolean): void {
     for (const tool of Object.values(tools)) {
       addToolWithAudit(tool, canAccess);
+      builtinToolNames.add((tool as any).name);
     }
   }
 
@@ -269,5 +280,40 @@ export async function createServer(config: ServerConfig = {}) {
     Object.keys(connectorGroup).length;
   console.log(`Registered ${totalTools} tools with audit wrapping (SEC-001 Phase 3)`);
 
-  return { server, port, client, requireApiKey };
+  // #846: dynamic-tool registration handles. The exposed-agents reconciler
+  // (index.ts) drives these — it NEVER calls server.addTool directly, so the
+  // audit + canAccess wrapping is applied uniformly. addTool/removeTool after
+  // server.start() fan a `notifications/tools/list_changed` to live sessions.
+  const dynamicToolNames = new Set<string>();
+  function registerDynamicTool(
+    tool: any,
+    canAccess: (auth: any) => boolean,
+    auditTargetId: string
+  ): void {
+    addToolWithAudit(tool, canAccess, auditTargetId);
+    dynamicToolNames.add(tool.name);
+  }
+  function unregisterDynamicTool(name: string): void {
+    if (!dynamicToolNames.has(name)) return;
+    try {
+      // removeTool(name) is public FastMCP 4.x API and triggers list_changed.
+      (server as any).removeTool(name);
+    } catch (e) {
+      console.error(`[#846] removeTool('${name}') failed:`, e);
+    }
+    dynamicToolNames.delete(name);
+  }
+
+  return {
+    server,
+    port,
+    client,
+    requireApiKey,
+    agentChatPullEnabled,
+    trinityApiUrl,
+    connectorDenied,
+    builtinToolNames,
+    registerDynamicTool,
+    unregisterDynamicTool,
+  };
 }

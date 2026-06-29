@@ -11,6 +11,7 @@ export interface Agent {
     memory: string;
   };
   container_id?: string;
+  mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
 }
 
 export interface AgentConfig {

@@ -5,12 +5,24 @@
  */
 
 import { createServer } from "./server.js";
+import { startExposedToolsReconciler } from "./tools/dynamic-agents.js";
 
 async function main() {
   console.log("Starting Trinity MCP Server...\n");
 
   try {
-    const { server, port, requireApiKey } = await createServer();
+    const {
+      server,
+      port,
+      requireApiKey,
+      client,
+      agentChatPullEnabled,
+      trinityApiUrl,
+      connectorDenied,
+      builtinToolNames,
+      registerDynamicTool,
+      unregisterDynamicTool,
+    } = await createServer();
 
     // Determine transport type from environment
     const transportType = process.env.MCP_TRANSPORT || "httpStream";
@@ -73,6 +85,30 @@ async function main() {
         );
         console.log(`\nTo enable API key authentication, set MCP_REQUIRE_API_KEY=true`);
       }
+    }
+
+    // #846: start the exposed-agents reconciler AFTER server.start() so that
+    // post-start addTool/removeTool fan `notifications/tools/list_changed` to
+    // live sessions. Polls the backend internal endpoint (~20s), fail-open.
+    const internalSecret = process.env.INTERNAL_API_SECRET || "";
+    if (!internalSecret) {
+      console.warn(
+        "[#846] INTERNAL_API_SECRET unset — dedicated chat_with_<slug> tools disabled " +
+        "(the exposed-agents poll would 403). Set it to enable MCP exposure."
+      );
+    } else {
+      startExposedToolsReconciler({
+        trinityApiUrl,
+        internalSecret,
+        client,
+        requireApiKey,
+        agentChatPullEnabled,
+        registerDynamicTool,
+        unregisterDynamicTool,
+        connectorDenied,
+        builtinToolNames,
+      });
+      console.log("[#846] Exposed-agents reconciler started (poll interval ~20s)");
     }
   } catch (error) {
     console.error("Failed to start server:", error);
