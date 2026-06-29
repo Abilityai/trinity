@@ -1,0 +1,55 @@
+{
+  "version": "1.0",
+  "date": "2026-06-29",
+  "mode": "daily",
+  "scope": "--diff (issue #846: per-agent expose-as-MCP-tool)",
+  "base": "origin/dev@5eaf7779",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_backend_endpoints": [
+      "GET /api/agents/{name}/mcp-exposed (AuthorizedAgentByName)",
+      "PUT /api/agents/{name}/mcp-exposed (OwnedAgentByName, audit-logged)",
+      "GET /api/internal/mcp-exposed-agents (X-Internal-Secret)"
+    ],
+    "new_mcp_tools": "dynamic chat_with_<slug> per exposed agent (canAccess=connectorDenied)",
+    "new_db_column": "agent_ownership.mcp_exposed (dual-track: SQLite migration + Alembic 0009)",
+    "new_frontend": "McpExposedPanel.vue (owner toggle, auto-escaped render)"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "category": "A01/A05 Information Disclosure",
+      "title": "Exposed-agent name + template label enumerable by all non-connector MCP keys",
+      "file": "src/mcp-server/src/tools/dynamic-agents.ts:248; src/mcp-server/src/server.ts:241",
+      "description": "Dedicated chat_with_<slug> tools register with canAccess=connectorDenied (scope!=='connector'), which admits all user/agent/system-scoped keys. FastMCP filters each session's tool set by canAccess, so any authenticated non-connector key enumerates every exposed agent's tool name + description (name + trinity.template label) regardless of per-agent access. Execution is still gated by checkAgentAccess (no bypass); the leak is metadata/enumeration only.",
+      "exploit": "Tenant B with an ordinary MCP key issues tools/list and receives chat_with_<other-tenant-agent> entries describing 'Template: github:Org/private-repo' for agents it cannot access, regressing the enumeration-resistance that list_agents enforces.",
+      "impact": "Cross-tenant disclosure of exposed agent names and template/repo identifiers to unauthorized authenticated users.",
+      "recommendation": "Scope dedicated-tool canAccess to actual agent access (mirror list_agents), OR drop the template label from build_tool_description, OR document global-visibility semantics in the owner UI."
+    },
+    {
+      "id": 2,
+      "severity": "LOW",
+      "confidence": 5,
+      "status": "TENTATIVE",
+      "category": "Prompt injection (tool description)",
+      "title": "Agent trinity.template label flows unsanitized into advertised tool description",
+      "file": "src/backend/services/agent_service/mcp_tool_names.py:79-82",
+      "description": "build_tool_description embeds the trinity.template label verbatim into the MCP tool description advertised to all connected LLM clients. If freeform text can land in the template label, it becomes a second-order prompt-injection surface. Not promoted: typical template labels are constrained; clean injection path not demonstrated.",
+      "recommendation": "Confirm the full set of values that can reach trinity.template; folds into Finding 1 rec #2 (name-only description)."
+    }
+  ],
+  "clean": [
+    "Internal poll endpoint gated by router-level verify_internal_secret (constant-time)",
+    "Execution access gate (checkAgentAccess) preserved with server-bound agent name",
+    "No SQL/command injection (computed slug, SQLAlchemy, static DDL)",
+    "No frontend XSS (auto-escaped, no v-html)",
+    "Authz separation: GET=read, PUT=owner-only + system-agent refusal + audit",
+    "Soft-delete guard on getter/setter",
+    "No secrets in diff"
+  ],
+  "totals": { "critical": 0, "high": 0, "medium": 1, "low": 1, "tentative": 1 },
+  "trend": "first_audit_of_branch"
+}
