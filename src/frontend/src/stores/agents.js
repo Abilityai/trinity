@@ -823,6 +823,25 @@ export const useAgentsStore = defineStore('agents', {
         headers: authStore.authHeader
       })
       return response.data
+    },
+
+    // Capacity (CAPACITY-001 / #506 — per-agent max_parallel_tasks within the fleet ceiling)
+    async getAgentCapacity(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/capacity`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setAgentCapacity(name, maxParallelTasks) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/capacity`, {
+        max_parallel_tasks: maxParallelTasks
+      }, {
+        headers: authStore.authHeader
+      })
+      return response.data
     }
   }
 })

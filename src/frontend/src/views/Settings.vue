@@ -233,6 +233,45 @@
                     override per agent in the agent's Sharing tab.
                   </p>
                 </div>
+
+                <!-- Fleet Capacity (#506) — admin-set ceiling on per-agent max_parallel_tasks -->
+                <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <label for="max-parallel-ceiling" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Fleet capacity ceiling
+                  </label>
+                  <div class="mt-1 flex gap-2 items-center">
+                    <input
+                      id="max-parallel-ceiling"
+                      type="number"
+                      v-model.number="maxParallelTasksCeiling"
+                      :min="ceilingMin"
+                      :max="ceilingMax"
+                      :disabled="savingCeiling"
+                      class="block w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                    />
+                    <button
+                      @click="saveMaxParallelTasksCeiling"
+                      :disabled="savingCeiling"
+                      class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <div v-if="ceilingSaveSuccess" class="mt-1 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    Saved
+                  </div>
+                  <p v-if="ceilingError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">
+                    {{ ceilingError }}
+                  </p>
+                  <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    Maximum parallel tasks any single agent is allowed to consume on this host
+                    ({{ ceilingMin }}–{{ ceilingMax }}). Owners pick a per-agent value within this
+                    ceiling; existing agents above it are clamped at runtime.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -2182,6 +2221,14 @@ const platformDefaultModelSaveSuccess = ref(false)
 const defaultRequireEmail = ref(true)
 const savingDefaultAccessPolicy = ref(false)
 const defaultAccessPolicySaveSuccess = ref(false)
+
+// #506: fleet-wide ceiling on per-agent max_parallel_tasks
+const maxParallelTasksCeiling = ref(10)
+const ceilingMin = ref(1)
+const ceilingMax = ref(32)
+const savingCeiling = ref(false)
+const ceilingSaveSuccess = ref(false)
+const ceilingError = ref('')
 const savingPublicUrl = ref(false)
 const publicUrlSaveSuccess = ref(false)
 
@@ -2344,6 +2391,7 @@ async function loadSettings() {
       loadPublicUrl(),
       loadPlatformDefaultModel(),
       loadDefaultAccessPolicy(),
+      loadMaxParallelTasksCeiling(),
       loadApiKeyStatus(),
       loadSlackSettings(),
       loadSlackTransportStatus(),
@@ -2594,6 +2642,35 @@ async function saveDefaultAccessPolicy() {
     await loadDefaultAccessPolicy()
   } finally {
     savingDefaultAccessPolicy.value = false
+  }
+}
+
+// #506: fleet-wide max_parallel_tasks ceiling
+async function loadMaxParallelTasksCeiling() {
+  try {
+    const data = await settingsStore.getMaxParallelTasksCeiling()
+    maxParallelTasksCeiling.value = data.value
+    ceilingMin.value = data.min
+    ceilingMax.value = data.max
+  } catch {
+    // non-critical; UI shows the code default (10)
+  }
+}
+
+async function saveMaxParallelTasksCeiling() {
+  savingCeiling.value = true
+  ceilingSaveSuccess.value = false
+  ceilingError.value = ''
+  try {
+    const data = await settingsStore.setMaxParallelTasksCeiling(maxParallelTasksCeiling.value)
+    maxParallelTasksCeiling.value = data.value
+    ceilingSaveSuccess.value = true
+    setTimeout(() => { ceilingSaveSuccess.value = false }, 3000)
+  } catch (e) {
+    ceilingError.value = e.response?.data?.detail || 'Failed to save fleet capacity ceiling'
+    await loadMaxParallelTasksCeiling()
+  } finally {
+    savingCeiling.value = false
   }
 }
 
