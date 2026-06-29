@@ -753,6 +753,12 @@ class DatabaseManager:
     def set_voice_name(self, agent_name: str, voice_name):
         return self._agent_ops.set_voice_name(agent_name, voice_name)
 
+    def get_public_channel_model(self, agent_name: str):
+        return self._agent_ops.get_public_channel_model(agent_name)
+
+    def set_public_channel_model(self, agent_name: str, model):
+        return self._agent_ops.set_public_channel_model(agent_name, model)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================

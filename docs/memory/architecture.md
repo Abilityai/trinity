@@ -601,6 +601,7 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 | POST | `/api/agents/{name}/ssh-access` | Ephemeral SSH credentials (admin-only) |
 | GET/PUT | `/api/agents/{name}/read-only` | Read-only mode status / toggle (blocks source file writes) |
 | GET/PUT | `/api/agents/{name}/timeout` | Execution timeout (60–7200s, default 3600s, #665). PUT 400 `agent_timeout_below_active_schedules` if the new cap drops below any non-deleted schedule's `timeout_seconds` (#929) |
+| GET/PUT | `/api/agents/{name}/public-channel-model` | Per-agent model override for **public-facing** channels — public link, Slack/Telegram/WhatsApp, x402 (#894). GET returns raw override + resolved model + selectable list; PUT owner-only, whitelist-validated (422), NULL clears → platform default. Resolved at `public.py`/`message_router.py`/`paid.py` (override → platform default → fallback); the owner's own chats/schedules are unaffected |
 | GET/PUT | `/api/agents/{name}/guardrails` | Per-agent guardrails config / overrides (GUARD-001) |
 | GET/PUT | `/api/agents/{name}/file-sharing` | Outbound file-sharing status + quota / owner-only toggle (returns `restart_required`) (FILES-001) |
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key) |
@@ -921,6 +922,7 @@ CREATE TABLE agent_ownership (
     group_auth_mode TEXT DEFAULT 'none',
     voice_system_prompt TEXT,
     voice_name TEXT,                               -- #28: persisted Gemini voice (NULL → 'Kore')
+    public_channel_model TEXT,                     -- #894: per-agent model for public channels (NULL → platform default)
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in

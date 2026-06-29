@@ -987,6 +987,23 @@ def _migrate_agent_ownership_voice_name(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_public_channel_model(cursor, conn):
+    """Add public_channel_model column to agent_ownership (#894).
+
+    Per-agent model override for public-facing channels (public link, Slack/
+    Telegram/WhatsApp, x402 paid chat). NULL means inherit the platform default
+    model — preserving the prior behaviour for existing agents (additive, no
+    backfill).
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "public_channel_model",
+        "ALTER TABLE agent_ownership ADD COLUMN public_channel_model TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -2683,4 +2700,5 @@ MIGRATIONS = [
     ("agent_reports_table", _migrate_agent_reports_table),
     ("agent_loops_no_progress", _migrate_agent_loops_no_progress),
     ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
+    ("agent_ownership_public_channel_model", _migrate_agent_ownership_public_channel_model),
 ]

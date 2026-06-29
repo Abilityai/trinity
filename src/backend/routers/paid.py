@@ -173,6 +173,8 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             message=request_body.message,
             triggered_by="paid",
             resume_session_id=request_body.session_id,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
         )
     except Exception as e:
         logger.error(f"Task execution failed for paid request on {agent_name}: {e}")

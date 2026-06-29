@@ -91,6 +91,7 @@ TABLES = {
             group_auth_mode TEXT DEFAULT 'none',
             voice_system_prompt TEXT,
             voice_name TEXT,
+            public_channel_model TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,
