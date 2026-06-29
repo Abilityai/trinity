@@ -2541,6 +2541,24 @@ def _migrate_agent_loops_max_cost(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_mcp_exposed(cursor, conn):
+    """#846 — per-agent MCP exposure toggle.
+
+    Adds ``mcp_exposed INTEGER DEFAULT 0`` to ``agent_ownership``. When set, the
+    Trinity MCP server (which polls the backend) dynamically registers a
+    dedicated ``chat_with_<slug>`` tool for the agent. Default 0 (OFF) — opt-in,
+    owner-toggled. Mirrored by the Alembic revision
+    0009_agent_ownership_mcp_exposed for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "mcp_exposed",
+        "ALTER TABLE agent_ownership ADD COLUMN mcp_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_no_progress(cursor, conn):
     """#1157 — no-progress / doom-loop detection.
 
@@ -2683,4 +2701,5 @@ MIGRATIONS = [
     ("agent_reports_table", _migrate_agent_reports_table),
     ("agent_loops_no_progress", _migrate_agent_loops_no_progress),
     ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
+    ("agent_ownership_mcp_exposed", _migrate_agent_ownership_mcp_exposed),
 ]

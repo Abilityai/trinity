@@ -649,6 +649,19 @@ class DatabaseManager:
         return self._agent_ops.get_all_circuit_breaker_enabled()
 
     # =========================================================================
+    # MCP exposure toggle (#846)
+    # =========================================================================
+
+    def get_mcp_exposed(self, agent_name: str) -> bool:
+        return self._agent_ops.get_mcp_exposed(agent_name)
+
+    def set_mcp_exposed(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_mcp_exposed(agent_name, enabled)
+
+    def get_mcp_exposed_agents(self):
+        return self._agent_ops.get_mcp_exposed_agents()
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 

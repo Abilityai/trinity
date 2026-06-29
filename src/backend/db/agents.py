@@ -30,6 +30,7 @@ from .agent_settings import (
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    McpExposureMixin,
 )
 from utils.helpers import utc_now_iso
 
@@ -47,6 +48,7 @@ class AgentOperations(
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    McpExposureMixin,
 ):
     """Agent ownership, access control, and settings database operations.
 

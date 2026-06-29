@@ -245,6 +245,7 @@ def get_accessible_agents(current_user: User) -> list:
         agent_dict["github_repo"] = metadata.get("github_repo")
         agent_dict["memory_limit"] = metadata.get("memory_limit")
         agent_dict["cpu_limit"] = metadata.get("cpu_limit")
+        agent_dict["mcp_exposed"] = metadata.get("mcp_exposed", False)  # #846
 
         # Avatar URL (AVATAR-001)
         avatar_updated_at = metadata.get("avatar_updated_at")
