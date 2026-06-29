@@ -152,6 +152,13 @@ async def get_public_feature_flags(
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
         "platform_default_model": settings_service.get_platform_default_model(),
+        # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
+        # Trinity agents can't think without it, so the first-run wizard uses
+        # this to surface the one hard setup gate. True if a platform-wide
+        # Anthropic key exists (DB or env) OR any Claude subscription is
+        # registered. Non-sensitive: a boolean, never the key itself.
+        "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
+        or bool(db.list_subscriptions()),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional

@@ -267,17 +267,23 @@
           <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
           </svg>
-          <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No agents</h3>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Create an agent to get started.</p>
-          <div class="mt-4">
-            <router-link
-              to="/agents"
+          <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
+          <div class="mt-4 flex items-center justify-center gap-3">
+            <button
+              @click="openOnboarding"
               class="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
             >
               <svg class="-ml-1 mr-2 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
-              Create Agent
+              Get started
+            </button>
+            <router-link
+              to="/agents"
+              class="text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+            >
+              Browse manually →
             </router-link>
           </div>
         </div>
@@ -465,6 +471,14 @@
       @close="closeEditor"
       @saved="onViewSaved"
     />
+
+    <!-- First-run onboarding wizard (trinity-enterprise#52) -->
+    <OnboardingWizard
+      v-if="showOnboarding"
+      :claude-auth-configured="sessionsStore.claudeAuthConfigured"
+      @close="closeOnboarding"
+      @deployed="closeOnboarding"
+    />
   </div>
 </template>
 
@@ -475,6 +489,8 @@ import ReplayTimeline from '@/components/ReplayTimeline.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
+import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
@@ -497,6 +513,26 @@ import '@vue-flow/minimap/dist/style.css'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
+const sessionsStore = useSessionsStore()
+
+// First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
+// install with zero agents; dismissal is remembered so it never nags.
+const ONBOARDING_DISMISSED_KEY = 'trinity_onboarding_dismissed_v1'
+const showOnboarding = ref(false)
+function openOnboarding() {
+  showOnboarding.value = true
+}
+function closeOnboarding() {
+  showOnboarding.value = false
+  try { localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1') } catch { /* ignore */ }
+}
+function maybeAutoOpenOnboarding() {
+  if (showOnboarding.value) return
+  if (isFleetLoading.value) return
+  if (agents.value.length > 0) return
+  if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
+  showOnboarding.value = true
+}
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
@@ -643,6 +679,11 @@ onMounted(async () => {
     networkStore.fetchSchedules(),
     fetchAvailableTags()
   ])
+
+  // First-run onboarding: load the Claude-auth flag (for the wizard's setup
+  // hint) and auto-open the wizard if this is a fresh, empty install.
+  sessionsStore.loadFeatureFlags().catch(() => {})
+  maybeAutoOpenOnboarding()
 
   // Connect WebSocket for real-time updates
   networkStore.connectWebSocket()
