@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 import threading
@@ -96,18 +97,24 @@ def _resolve_stall_limit_s() -> float:
     back to the default with a warning (a typo must not brick the executor).
     A value ``<= 0`` means *disabled* and is handled at the call site — it is
     NOT passed into ``_open_tool_exceeding`` (where ``> 0`` would fire instantly).
+    Non-finite values (``inf``/``nan``) parse as floats but would silently make
+    the watchdog inert/disabled, so they fall back to the default too — only a
+    deliberate ``<= 0`` disables.
     """
     raw = os.environ.get("AGENT_TOOL_STALL_LIMIT_S")
     if raw is None or not raw.strip():
         return _STALL_LIMIT_DEFAULT_S
     try:
-        return float(raw)
+        val = float(raw)
     except (TypeError, ValueError):
+        val = math.nan
+    if not math.isfinite(val):
         logger.warning(
             "[Headless Task] Invalid AGENT_TOOL_STALL_LIMIT_S=%r — using default %.0fs",
             raw, _STALL_LIMIT_DEFAULT_S,
         )
         return _STALL_LIMIT_DEFAULT_S
+    return val
 
 
 def _open_tool_exceeding(ctx: HeadlessRunContext, limit_s: float) -> Optional[str]:

@@ -210,6 +210,13 @@ class TestResolveStallLimit:
         monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "not-a-number")
         assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S
 
+    def test_non_finite_falls_back_to_default(self, monkeypatch):
+        # inf/nan parse as floats but would silently make the watchdog
+        # inert/disabled — they must fall back to the default, not pass through.
+        for bad in ("inf", "-inf", "Infinity", "nan", "NaN"):
+            monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", bad)
+            assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S, bad
+
     def test_zero_and_negative_pass_through_as_disabled_sentinel(self, monkeypatch):
         # <=0 is returned verbatim; the call site (not the helper) gates disable.
         monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "0")
