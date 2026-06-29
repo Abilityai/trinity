@@ -23,7 +23,7 @@
   />
 
   <!-- intro + credential: the wizard's own guidance card -->
-  <div v-else class="fixed inset-0 z-40 overflow-y-auto">
+  <div v-else class="fixed inset-0 z-50 overflow-y-auto">
     <div class="flex min-h-screen items-center justify-center p-4">
       <div class="fixed inset-0 bg-gray-900/70 backdrop-blur-sm" @click="dismiss"></div>
 
