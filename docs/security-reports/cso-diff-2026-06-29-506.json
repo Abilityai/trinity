@@ -1,0 +1,40 @@
+{
+  "version": "1.0",
+  "date": "2026-06-29",
+  "mode": "daily",
+  "scope": "diff",
+  "issue": 506,
+  "branch": "AndriiPasternak31/issue-506",
+  "base": "5eaf7779",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": 2,
+    "admin_gated": ["GET /api/settings/max-parallel-tasks-ceiling", "PUT /api/settings/max-parallel-tasks-ceiling"],
+    "owner_gated": ["PUT /api/agents/{name}/capacity"],
+    "new_frontend_components": ["CapacityPanel.vue"]
+  },
+  "findings": [],
+  "verification_notes": {
+    "A01": "PASS - require_admin on both settings endpoints; owner gate on per-agent; generic PUT /{key} blocks the validated key with 422",
+    "A03": "PASS - int re-validated 1-32 before str() into settings store; no interpolation",
+    "A04": "PASS - server-side range 1-32, descriptive 400; per-agent body dict->Pydantic model",
+    "A09": "PASS - audited via AuditEventType.CONFIGURATION (verified enum, matches access-policy audit pattern)",
+    "fail_open": "Accepted - degrades to conservative default ceiling 10 (not unbounded); only affects a resource-control limit",
+    "canary": "S-02 keeps stored cap (overbooking still caught); B-02 uses effective cap to avoid false-fire",
+    "secrets": "none in diff",
+    "xss": "no v-html/innerHTML/eval in changed/new frontend"
+  },
+  "filter_stats": {
+    "candidates": 0,
+    "above_gate": 0,
+    "excluded_resource_control": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "first_audit_of_506_no_recurring_findings",
+  "verdict": "APPROVED"
+}
