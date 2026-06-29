@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-28 | #1155 | feat(loops): per-loop cost budget (`max_cost_usd`) iteration-boundary hard stop | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1157 | feat(reliability): no-progress / doom-loop detection for sequential loops | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1085 | feat(reliability): correlated-failure / thundering-herd controls for re-delivery | [redelivery-governor.md](feature-flows/redelivery-governor.md) |
