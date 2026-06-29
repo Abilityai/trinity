@@ -214,17 +214,55 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         user = db.get_user_by_email(user_email) if user_email else db.get_user_by_username(user_id)
         if user and not user.get("suspended_at"):  # #995 — suspended users blocked here too
             # For agent-scoped keys, include the agent_name
-            agent_name = mcp_key_info.get("agent_name") if mcp_key_info.get("scope") == "agent" else None
+            scope = mcp_key_info.get("scope")
+            agent_name = mcp_key_info.get("agent_name") if scope == "agent" else None
+            # Connector-scoped keys: consumption-only principal fenced to one
+            # agent (see _enforce_connector_scope). The key is minted by an
+            # entitled module; core only recognizes + enforces the scope.
+            connector_agent = mcp_key_info.get("agent_name") if scope == "connector" else None
+            if connector_agent:
+                # Central containment (ent#46): a connector key may reach ONLY
+                # its bound agent's chat + connector playbook list. Enforced here
+                # at the single auth entry point — NOT only in the agent path-
+                # deps — so the many endpoints that do inline access checks (and
+                # resolve this principal to the owner) can't be reached by a
+                # leaked connector snippet. The allowlist is the exact set of
+                # backend routes the connector MCP tools call.
+                allowed = {
+                    ("POST", f"/api/agents/{connector_agent}/chat"),
+                    ("GET", f"/api/agents/{connector_agent}/connector/playbooks"),
+                }
+                if (request.method.upper(), request.url.path) not in allowed:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Connector keys may only chat their bound agent and list its playbooks",
+                    )
             return User(
                 id=user["id"],
                 username=user["username"],
                 email=user.get("email"),
                 role=user["role"],
-                agent_name=agent_name
+                agent_name=agent_name,
+                connector_agent=connector_agent,
             )
 
     # Both JWT and MCP key failed
     raise credentials_exception
+
+
+def _reject_connector_principal(current_user: User) -> None:
+    """Connector-scoped keys are consumption-only — never role-bearing.
+
+    Blocks a leaked connector key from reaching any role-gated endpoint
+    (create-agent, admin settings, …) even though it resolves to the owner.
+    Edition-agnostic enforcement primitive (the key is minted by an entitled
+    module).
+    """
+    if current_user.connector_agent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector keys are consumption-only and cannot perform this operation",
+        )
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -234,6 +272,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     Raises:
         HTTPException(403): If user is not an admin
     """
+    _reject_connector_principal(current_user)
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -259,6 +298,7 @@ def require_role(min_role: str):
         HTTPException(403): If user's role is below the minimum required
     """
     def _require_role(current_user: User = Depends(get_current_user)) -> User:
+        _reject_connector_principal(current_user)
         user_level = ROLE_HIERARCHY.index(current_user.role) if current_user.role in ROLE_HIERARCHY else -1
         min_level = ROLE_HIERARCHY.index(min_role) if min_role in ROLE_HIERARCHY else len(ROLE_HIERARCHY)
         if user_level < min_level:
@@ -322,6 +362,29 @@ def requires_entitlement(feature_id: str):
 # ============================================================================
 
 
+def _enforce_connector_scope(current_user: User, agent_name: str, *, owner_op: bool) -> None:
+    """Fence connector-scoped MCP keys (consumption-only, bound to one agent).
+
+    A connector key resolves to the owner user but must NOT be owner-equivalent:
+      - owner operations (OwnedAgent* dependencies) are refused outright, and
+      - read/chat is allowed ONLY against the key's bound agent.
+    No-op for ordinary (non-connector) principals. Edition-agnostic — the key
+    is minted by an entitled module; core recognizes + enforces the scope.
+    """
+    if not current_user.connector_agent:
+        return
+    if owner_op:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector keys are consumption-only and cannot perform owner operations",
+        )
+    if agent_name != current_user.connector_agent:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector key is scoped to a different agent",
+        )
+
+
 def get_authorized_agent(
     name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user)
@@ -343,6 +406,7 @@ def get_authorized_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
         )
+    _enforce_connector_scope(current_user, name, owner_op=False)
     # Then check if user has access
     if not db.can_user_access_agent(current_user.username, name):
         raise HTTPException(
@@ -373,6 +437,7 @@ def get_owned_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
         )
+    _enforce_connector_scope(current_user, name, owner_op=True)
     # Then check if user has owner access
     if not db.can_user_share_agent(current_user.username, name):
         raise HTTPException(
@@ -403,6 +468,7 @@ def get_authorized_agent_by_name(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
         )
+    _enforce_connector_scope(current_user, agent_name, owner_op=False)
     # Then check if user has access
     if not db.can_user_access_agent(current_user.username, agent_name):
         raise HTTPException(
@@ -433,6 +499,7 @@ def get_owned_agent_by_name(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
         )
+    _enforce_connector_scope(current_user, agent_name, owner_op=True)
     # Then check if user has owner access
     if not db.can_user_share_agent(current_user.username, agent_name):
         raise HTTPException(

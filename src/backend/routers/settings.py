@@ -1079,6 +1079,15 @@ def _get_default_mcp_url(request: Request) -> str:
     return f"http://{hostname}:8080/mcp"
 
 
+def resolve_mcp_url(request: Request) -> str:
+    """Effective MCP URL: the operator-configured override, else auto-detected.
+
+    Public accessor so other modules (e.g. the entitled MCP connector) don't
+    reach into the private helper above.
+    """
+    return db.get_setting_value(MCP_URL_SETTING_KEY) or _get_default_mcp_url(request)
+
+
 def _validate_mcp_url(url: str) -> str:
     """Validate and normalize MCP URL. Returns normalized URL or raises HTTPException."""
     url = url.strip().rstrip("/")

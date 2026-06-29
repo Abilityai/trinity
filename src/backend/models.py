@@ -64,6 +64,13 @@ class User(BaseModel):
     role: str = "user"
     # For agent-scoped MCP API keys, this is the agent name
     agent_name: Optional[str] = None
+    # For connector-scoped MCP keys, the single agent this key may consume.
+    # Set ⇒ the principal is consumption-only: it may read/chat ONLY this agent
+    # and may NOT perform owner or role-gated operations, even though it
+    # resolves to the owner user. Edition-agnostic enforcement primitive — the
+    # key itself is minted by an entitled module (core-primitive + enterprise-
+    # knob, same shape as users.suspended_at #995).
+    connector_agent: Optional[str] = None
 
 
 class Token(BaseModel):

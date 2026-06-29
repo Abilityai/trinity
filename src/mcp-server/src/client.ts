@@ -315,6 +315,20 @@ export class TrinityClient {
   }
 
   /**
+   * Get the playbooks an agent's connector exposes (ent#46).
+   * The backend enforces the allow-list + the user_invocable exclusion, so
+   * this returns only what the connector is permitted to advertise as tools.
+   */
+  async getConnectorPlaybooks(
+    name: string
+  ): Promise<Array<{ name: string; description?: string; argument_hint?: string; automation?: string }>> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/connector/playbooks`
+    );
+  }
+
+  /**
    * Get the agent compatibility report (#668).
    * STATIC checks recompute live; pass includeAi=true to force a fresh AI
    * evaluation (otherwise the last persisted AI verdicts are returned).

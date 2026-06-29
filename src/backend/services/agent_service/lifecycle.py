@@ -422,6 +422,16 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     else:
         env_vars.pop('AGENT_GUARDRAILS', None)
 
+    # #1369: refresh the operator-configurable headless stall-watchdog ceiling
+    # from the CURRENT backend env on every recreate (set or clear, mirroring the
+    # guardrails idiom above), so changing/unsetting AGENT_TOOL_STALL_LIMIT_S
+    # takes effect on recreate rather than persisting a stale baked value.
+    _stall_limit = (os.getenv('AGENT_TOOL_STALL_LIMIT_S') or '').strip()
+    if _stall_limit:
+        env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
+    else:
+        env_vars.pop('AGENT_TOOL_STALL_LIMIT_S', None)
+
     # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
     # this re-derives under the CURRENT name — the load-bearing part of the
     # rename fix (a renamed container otherwise keeps derive(old_name) and 401s

@@ -279,6 +279,18 @@ class MetadataMixin:
                     .values(agent_name=new_name)
                 )
 
+                # Entitled-module agent-scoped tables (ent#46) registered via
+                # db.agent_cleanup.register_agent_owned_table — e.g.
+                # enterprise_connectors. Table/column come from code (not user
+                # input); values are bound. Absent tables are skipped.
+                from db.agent_cleanup import EXTRA_AGENT_REFS, _table_exists
+                for table, column in EXTRA_AGENT_REFS:
+                    if not _table_exists(conn, table):
+                        continue
+                    conn.execute(
+                        text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
+                        {"new": new_name, "old": old_name},
+                    )
                 # Reports (#918) — re-key so the renamed agent keeps its report
                 # history and the old name doesn't leave orphaned rows a reused
                 # name could inherit (cross-tenant disclosure).

@@ -29,6 +29,7 @@ import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
+import { createConnectorTools } from "./tools/connector.js";
 import { createGitTools } from "./tools/git.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
@@ -181,7 +182,7 @@ export async function createServer(config: ServerConfig = {}) {
               keyId: result.key_id,  // MCP API key ID (AUDIT-001)
               keyName: result.key_name || "unknown",
               agentName: result.agent_name,  // Agent name if scope is 'agent' or 'system'
-              scope: scope as "user" | "agent" | "system",
+              scope: scope as "user" | "agent" | "system" | "connector",
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
             };
             return authContext;
@@ -201,20 +202,33 @@ export async function createServer(config: ServerConfig = {}) {
   // SEC-001 Phase 3: Wrap tool execute functions with audit logging.
   // withAudit captures tool name, auth context, timing, and success/failure,
   // then fires a non-blocking POST to the backend internal audit endpoint.
-  function addToolWithAudit(tool: any): void {
-    const wrapped = {
+  function addToolWithAudit(tool: any, canAccess?: (auth: any) => boolean): void {
+    const wrapped: any = {
       ...tool,
       execute: withAudit(tool.name, tool.execute),
     };
+    // ent#46: per-auth tool visibility. FastMCP filters the advertised tool
+    // list per session by canAccess(authContext). A tool's own canAccess (if
+    // any) wins; otherwise we apply the group default.
+    if (canAccess && wrapped.canAccess === undefined) {
+      wrapped.canAccess = canAccess;
+    }
     server.addTool(wrapped);
   }
 
   // Helper to register all tools from a tool group with audit wrapping
-  function addAllTools(tools: Record<string, any>): void {
+  function addAllTools(tools: Record<string, any>, canAccess?: (auth: any) => boolean): void {
     for (const tool of Object.values(tools)) {
-      addToolWithAudit(tool);
+      addToolWithAudit(tool, canAccess);
     }
   }
+
+  // ent#46 visibility gates: connector keys (end-user consumption tier) see
+  // ONLY the connector tools; every other (operator) key never sees them.
+  // When auth is disabled (dev), auth is undefined → operator tools show,
+  // connector tools hide (they require a connector key anyway).
+  const connectorDenied = (auth: any): boolean => auth?.scope !== "connector";
+  const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
 
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
@@ -242,10 +256,17 @@ export async function createServer(config: ServerConfig = {}) {
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
     createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
   ];
+  // Operator tools: hidden from connector-scoped keys.
   for (const group of toolGroups) {
-    addAllTools(group);
+    addAllTools(group, connectorDenied);
   }
-  const totalTools = toolGroups.reduce((sum, g) => sum + Object.keys(g).length, 0);
+  // Connector tools (ent#46): visible ONLY to connector-scoped keys.
+  const connectorGroup = createConnectorTools(client, requireApiKey);
+  addAllTools(connectorGroup, connectorOnly);
+
+  const totalTools =
+    toolGroups.reduce((sum, g) => sum + Object.keys(g).length, 0) +
+    Object.keys(connectorGroup).length;
   console.log(`Registered ${totalTools} tools with audit wrapping (SEC-001 Phase 3)`);
 
   return { server, port, client, requireApiKey };
