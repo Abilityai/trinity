@@ -534,6 +534,21 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - API: `GET/PUT /api/agents/{name}/timeout`
   - Validation: 60-7200s (1 min to 2 hours)
 - **Flow**: `docs/memory/feature-flows/parallel-capacity.md` (updated), `docs/memory/feature-flows/task-execution-service.md` (updated)
+- **Headless per-tool stall watchdog (#1369, 2026-06-29)**: the headless executor's
+  per-tool stall watchdog (`headless_executor.py`) — which kills an execution when a
+  `tool_use` has no `tool_result` for too long (introduced #970/#973 to bound a hung
+  stdio MCP `tools/call`; reason-labeled `stall_no_output` by #1094) — is now (a)
+  **scoped to `mcp__*` tools only** so legitimately long built-ins (`Bash`/`Read`/`Task`
+  sub-agents, already bounded by `execution_timeout_seconds`) are never stall-killed, and
+  (b) **operator-configurable** via `AGENT_TOOL_STALL_LIMIT_S` (default **1800s**, raised
+  from the old flat 300s; `0`/negative = disabled, relying on the execution-timeout
+  backstop). The value is read per-run inside the agent container and threaded from the
+  backend env at create/recreate (`crud.py`/`lifecycle.py`) — creation-time like
+  `AGENT_TMP_SIZE`, so existing agents pick up a change on **recreate**, not a plain
+  restart. Tradeoff: a genuinely hung built-in (or a hang *inside* a `Task` sub-agent,
+  which surfaces as an open `Task` in the parent log) now falls to the execution-timeout
+  budget instead of the 300s kill. Superseded long-term by the pull/work-stealing model
+  (#1081/#1083), which retires the watchdog entirely.
 
 ### 10.8 Persistent Task Backlog (BACKLOG-001)
 - **Status**: ✅ Implemented (2026-04-13); internalized behind `CapacityManager` (#428, 2026-04-26)
