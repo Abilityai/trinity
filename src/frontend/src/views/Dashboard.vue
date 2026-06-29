@@ -493,6 +493,7 @@ import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
@@ -514,6 +515,7 @@ import '@vue-flow/minimap/dist/style.css'
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
 const sessionsStore = useSessionsStore()
+const route = useRoute()
 
 // First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
 // install with zero agents; dismissal is remembered so it never nags.
@@ -528,6 +530,12 @@ function closeOnboarding() {
 }
 function maybeAutoOpenOnboarding() {
   if (showOnboarding.value) return
+  // Explicit ?onboarding=1 re-opens the wizard any time (re-run / QA preview),
+  // regardless of fleet size or prior dismissal.
+  if (route.query.onboarding === '1') {
+    showOnboarding.value = true
+    return
+  }
   if (isFleetLoading.value) return
   if (agents.value.length > 0) return
   if (localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1') return
