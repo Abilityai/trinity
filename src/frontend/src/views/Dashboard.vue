@@ -477,7 +477,7 @@
       v-if="showOnboarding"
       :claude-auth-configured="sessionsStore.claudeAuthConfigured"
       @close="closeOnboarding"
-      @deployed="closeOnboarding"
+      @deployed="onAgentDeployed"
     />
   </div>
 </template>
@@ -527,6 +527,13 @@ function openOnboarding() {
 function closeOnboarding() {
   showOnboarding.value = false
   try { localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1') } catch { /* ignore */ }
+}
+function onAgentDeployed() {
+  // Agent was created via the wizard's real create modal. Keep the wizard open
+  // (it advances to the credential step on its own) and refresh the fleet so
+  // the new agent appears on the graph without a manual page reload — the
+  // WebSocket agent_created event can lag while the container spins up.
+  networkStore.fetchAgents()
 }
 function maybeAutoOpenOnboarding() {
   if (showOnboarding.value) return

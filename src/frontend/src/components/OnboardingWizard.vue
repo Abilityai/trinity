@@ -189,8 +189,10 @@ function select(p) {
 }
 
 function onModalClose() {
-  // User backed out of the create form — return to the picker.
-  step.value = 'intro'
+  // CreateAgentModal emits 'created' THEN 'close'. Only treat a close as a
+  // cancel when we're still on the create step — once 'created' has advanced
+  // us to 'credential', this close must not bounce us back to the picker.
+  if (step.value === 'create') step.value = 'intro'
 }
 
 function onCreated(agent) {
