@@ -29,7 +29,7 @@
   <!-- intro + credential: the wizard's own guidance card -->
   <div v-else class="fixed inset-0 z-50 overflow-y-auto">
     <div class="flex min-h-screen items-center justify-center p-4">
-      <div class="fixed inset-0 bg-gray-900/70 backdrop-blur-sm" @click="dismiss"></div>
+      <div class="fixed inset-0 bg-gray-900/85 backdrop-blur-sm" @click="dismiss"></div>
 
       <div class="relative w-full max-w-2xl rounded-2xl bg-white dark:bg-gray-800 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden">
         <!-- Header -->
