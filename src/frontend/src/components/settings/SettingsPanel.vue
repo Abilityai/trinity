@@ -18,11 +18,17 @@
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
       <GuardrailsPanel :agent-name="agentName" :notify="notify" />
     </section>
+
+    <!-- Section 2: Expose via MCP (#846) -->
+    <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
+      <McpExposedPanel :agent-name="agentName" :notify="notify" />
+    </section>
   </div>
 </template>
 
 <script setup>
 import GuardrailsPanel from '../GuardrailsPanel.vue'
+import McpExposedPanel from '../McpExposedPanel.vue'
 
 defineProps({
   agentName: {

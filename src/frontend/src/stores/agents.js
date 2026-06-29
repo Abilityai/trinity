@@ -736,6 +736,23 @@ export const useAgentsStore = defineStore('agents', {
       })
     },
 
+    // MCP Exposure (#846) — expose the agent as a dedicated chat_with_<slug> tool
+    async getMcpExposedStatus(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/mcp-exposed`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setMcpExposed(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/mcp-exposed`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // Shared Folders Actions (Phase 9.11: Agent Shared Folders)
     async getAgentFolders(name) {
       const authStore = useAuthStore()
