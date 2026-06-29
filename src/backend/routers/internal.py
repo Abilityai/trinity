@@ -575,3 +575,44 @@ async def agent_files_share(payload: ShareFileRequest):
         created_by=payload.agent_name,
     )
     return ShareFileResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# MCP-exposed agents poll endpoint (#846)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp-exposed-agents")
+async def mcp_exposed_agents():
+    """Authoritative list of agents to expose as dedicated MCP tools (#846).
+
+    Polled by the Trinity MCP server (over the existing X-Internal-Secret path)
+    every ~20s. The backend is the single source of truth for the deterministic,
+    collision-free ``tool_name`` per exposed agent (computed over the full set),
+    so restarts/replicas of the MCP server agree and there is no client-side
+    slug split-brain.
+
+    ``description`` is intentionally **name-only** (see ``build_tool_description``):
+    the dedicated tool's description is advertised globally to every non-connector
+    MCP session, so it must not carry per-agent metadata (the agent's
+    ``trinity.template`` label was a cross-tenant leak + injection surface, #846).
+    """
+    from services.agent_service.mcp_tool_names import (
+        compute_tool_names,
+        build_tool_description,
+    )
+
+    exposed = db.get_mcp_exposed_agents()
+    names = [a["agent_name"] for a in exposed]
+    tool_names = compute_tool_names(names)
+
+    return {
+        "agents": [
+            {
+                "agent_name": name,
+                "tool_name": tool_names[name],
+                "description": build_tool_description(name),
+            }
+            for name in names
+        ]
+    }

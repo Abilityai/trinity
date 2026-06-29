@@ -699,6 +699,16 @@ class CircuitBreakerConfigUpdate(BaseModel):
     enabled: bool
 
 
+class McpExposedUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/mcp-exposed (#846).
+
+    Per-agent opt-in. When enabled, the Trinity MCP server dynamically registers
+    a dedicated ``chat_with_<slug>`` tool for the agent. Execution still runs the
+    same access gate — this only publishes a surface.
+    """
+    enabled: bool
+
+
 class ExecutionResultEnvelope(BaseModel):
     """Body for POST /api/agents/{name}/executions/{id}/result (#1083).
 

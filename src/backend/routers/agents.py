@@ -23,6 +23,7 @@ from models import (
     DeployLocalRequest,
     ExecutionResultEnvelope,
     HeartbeatPayload,
+    McpExposedUpdate,
     TaskExecutionStatus,
     User,
 )
@@ -775,6 +776,71 @@ async def set_circuit_breaker_endpoint(
         "agent_name": agent_name,
         "enabled": body.enabled,
         "global_enabled": bool(DISPATCH_BREAKER_ENABLED),
+    }
+
+
+# ============================================================================
+# MCP Exposure Toggle (#846)
+# ============================================================================
+
+
+@router.get("/{agent_name}/mcp-exposed")
+async def get_mcp_exposed_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Whether the agent is exposed as a dedicated MCP tool (#846).
+
+    Returns the current flag plus the deterministic ``tool_name`` the MCP server
+    would register, resolved over the live exposed set so the name shown matches
+    the suffixed tool actually registered when another exposed agent shares the
+    same base slug (#846).
+    """
+    from services.agent_service.mcp_tool_names import resolve_tool_name
+
+    enabled = db.get_mcp_exposed(agent_name)
+    exposed_names = [a["agent_name"] for a in db.get_mcp_exposed_agents()]
+    return {
+        "agent_name": agent_name,
+        "enabled": enabled,
+        "tool_name": resolve_tool_name(agent_name, exposed_names),
+    }
+
+
+@router.put("/{agent_name}/mcp-exposed")
+async def set_mcp_exposed_endpoint(
+    agent_name: OwnedAgentByName,
+    body: McpExposedUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable exposing the agent as a dedicated MCP tool (#846). Owner-only.
+
+    Refuses the system agent (it already bypasses all permission checks). The MCP
+    server polls the internal endpoint and adds/removes the dedicated tool within
+    one poll interval — no MCP-server restart.
+    """
+    from services.agent_service.mcp_tool_names import resolve_tool_name
+
+    if db.is_system_agent(agent_name):
+        raise HTTPException(status_code=403, detail="Cannot expose the system agent via MCP")
+
+    db.set_mcp_exposed(agent_name, body.enabled)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="mcp_exposed_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled},
+    )
+    # Resolve over the now-current exposed set so the returned name reflects any
+    # collision suffix the MCP server will actually register (#846).
+    exposed_names = [a["agent_name"] for a in db.get_mcp_exposed_agents()]
+    return {
+        "agent_name": agent_name,
+        "enabled": body.enabled,
+        "tool_name": resolve_tool_name(agent_name, exposed_names),
     }
 
 
