@@ -563,6 +563,45 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 - **Persistence** (`agent_compatibility_results`, latest-snapshot-per-agent, upsert): STATIC recomputes live; persisted AI verdicts merge in so findings show on every Overview load without re-spending tokens (`?include_ai=true` / "Re-run" forces fresh AI; requirements §41). Cascade/rename via `AGENT_REFS`.
 - **Auto-fix** (`POST .../compatibility/fix`, owner/admin): the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back; G-001 removes a blanket `.claude/` line by exact-line match. **No auto-commit** — uncommitted until next git sync. Creates no execution.
 
+### MCP Exposure — Dedicated Dynamic Tools (#846)
+
+Per-agent owner-toggled flag (`agent_ownership.mcp_exposed`, default 0) that
+publishes an agent as a first-class MCP tool. When enabled, the Trinity MCP
+server **dynamically registers** a dedicated `chat_with_<slug>` tool —
+functionally identical to `chat_with_agent` with the agent name pre-filled —
+**at runtime, no MCP-server restart**. The flag publishes a *surface* only;
+execution always runs the same `checkAgentAccess` gate, so ownership/sharing is
+never bypassed.
+
+- **Refresh = poll, not WS.** The MCP server polls `GET /api/internal/mcp-exposed-agents`
+  (existing `X-Internal-Secret` path, ~20s, `tools/dynamic-agents.ts`
+  reconciler), diffs an `agentName→toolName` map, and calls FastMCP
+  `addTool`/`removeTool`. FastMCP fans `notifications/tools/list_changed` to live
+  sessions, so a connected client sees/loses the tool within ~one poll. The
+  reconciler is **fail-open** (mutates only on a valid 200; keeps last-known set
+  on error/parse-failure/timeout) and holds an in-flight mutex so startup-sync
+  and the interval can't race.
+- **Slug = single backend source of truth.** `services/agent_service/mcp_tool_names.py::compute_tool_names`
+  computes the deterministic, collision-free name over the **full set** (sorted;
+  `_<sha1(name)[:4]>` suffix on agent-vs-agent base-slug collision). The MCP
+  server consumes it verbatim and applies one final guard against its own
+  built-in tool names. The per-agent GET uses the same helper so UI and MCP never
+  diverge.
+- **Description = cheap metadata** — generated from the agent name + the
+  `trinity.template` Docker label (no `template.yaml` container read; works for
+  stopped agents; tolerates missing label → name-only).
+- **Visibility** mirrors operator tools: dedicated tools register with the
+  `connectorDenied` `canAccess` gate (hidden from connector-scoped keys, ent#46
+  isolation preserved). The shared `chat_with_agent` body is extracted into
+  `tools/chat.ts::runAgentChat`, reused by both `chat_with_agent` and every
+  dedicated tool — no logic fork (preserves #946 pull routing, parallel/self-task
+  paths, idempotency tokens, #914 gateway-timeout recovery). The audit row binds
+  the target agent via `withAudit(..., boundTargetId)` since dedicated tools carry
+  no `agent_name` param.
+- `mcp_exposed` is surfaced on `GET /api/agents` / MCP `list_agents`. Dual-track
+  migration (SQLite `agent_ownership_mcp_exposed` + Alembic
+  `0009_agent_ownership_mcp_exposed`).
+
 ---
 
 ## API Endpoints
@@ -616,6 +655,8 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 | POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH transport and dispatch breakers to closed (#921, #526) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
+| GET | `/api/agents/{name}/mcp-exposed` | MCP-exposure flag + the deterministic `tool_name` the MCP server would register. See [MCP Exposure](#mcp-exposure--dedicated-dynamic-tools-846) (#846) |
+| PUT | `/api/agents/{name}/mcp-exposed` | Owner-only; toggle exposing the agent as a dedicated `chat_with_<slug>` MCP tool (`{enabled}`). System agent → 403. No restart — MCP server picks it up on its next poll (#846) |
 
 **Note**: Route ordering is critical — static routes (`/context-stats`, `/autonomy-status`) must be defined BEFORE the `/{name}` catch-all (Invariant #4).
 
@@ -924,6 +965,7 @@ CREATE TABLE agent_ownership (
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in
+    mcp_exposed INTEGER DEFAULT 0,                 -- #846: dedicated chat_with_<slug> MCP tool opt-in
     deleted_at TEXT,                               -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)

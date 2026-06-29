@@ -3333,6 +3333,49 @@ endpoint — reports flow agent → MCP → backend.
 
 ---
 
+## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)
+
+**Description**: A per-agent owner-toggled flag (`mcp_exposed`, default off) that publishes
+an agent as a first-class MCP tool. When enabled, the Trinity MCP server dynamically
+registers a dedicated `chat_with_<slug>` tool — functionally identical to `chat_with_agent`
+with the agent name pre-filled — so a curated, well-known agent surfaces as a named tool
+instead of requiring `list_agents` + `chat_with_agent`. Toggling adds/removes the tool at
+runtime with **no MCP-server restart**. The flag publishes a surface only; execution always
+runs the same access gate, so ownership/sharing is never bypassed.
+
+- **FR-1 — Toggle**: `agent_ownership.mcp_exposed INTEGER DEFAULT 0`; owner-only `GET`/`PUT
+  /api/agents/{name}/mcp-exposed`. PUT refuses the system agent (403). Getter/setter both guard
+  `deleted_at IS NULL` (a soft-deleted agent can never be flipped exposed). Dual-track migration
+  (SQLite `agent_ownership_mcp_exposed` + Alembic `0009`).
+- **FR-2 — Canonical slug (single backend source of truth)**: the backend computes the
+  deterministic, collision-free `tool_name` over the full exposed set (sorted; sanitized
+  `chat_with_<slug>`; `_<sha1(name)[:4]>` suffix on agent-vs-agent base-slug collision). The
+  per-agent GET and the internal poll endpoint use the same helper, so UI and MCP never
+  diverge.
+- **FR-3 — Internal poll endpoint**: `GET /api/internal/mcp-exposed-agents` (`X-Internal-Secret`)
+  returns `{agent_name, tool_name, description}` per exposed agent. `description` is generated
+  from cheap Docker `trinity.template` label metadata (no container read; works for stopped
+  agents).
+- **FR-4 — Refresh = poll**: the MCP server polls the internal endpoint (~20s), diffs an
+  `agentName→toolName` map, and calls FastMCP `addTool`/`removeTool`; FastMCP fans
+  `notifications/tools/list_changed` to live sessions. The reconciler is **fail-open** (mutate
+  only on a valid 200; keep last-known set otherwise) and holds an in-flight mutex. A final
+  guard skips any `tool_name` colliding with a built-in tool.
+- **FR-5 — No logic fork**: the `chat_with_agent` body is extracted into a shared
+  `runAgentChat`, reused by `chat_with_agent` and every dedicated tool (preserves #946 pull
+  routing, parallel/self-task paths, idempotency tokens, #914 gateway-timeout recovery, access
+  denial). Dedicated tools register with the `connectorDenied` visibility gate and bind their
+  audit target (no `agent_name` param).
+- **FR-6 — Surfacing**: `mcp_exposed` is exposed on `GET /api/agents` / MCP `list_agents`. A
+  Settings-tab toggle ("Expose via MCP") shows the computed tool name and up-to-poll-interval
+  latency copy.
+
+**Deferred**: WS push (poll latency ≤20s is fine for an owner-toggled flag); a partial index on
+`mcp_exposed`; tool-name stability across an agent rename (rename re-slugs); multi-replica MCP
+servers (each replica polls + reconciles independently).
+
+---
+
 ## Out of Scope
 
 - Multi-tenant deployment (single org only)

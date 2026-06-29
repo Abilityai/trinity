@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-06-29 | #846 | feat(mcp): per-agent opt-in exposure as a dedicated `chat_with_<slug>` tool (dynamic register, poll-reconciled) | [mcp-agent-exposure.md](feature-flows/mcp-agent-exposure.md) |
 | 2026-06-28 | #1155 | feat(loops): per-loop cost budget (`max_cost_usd`) iteration-boundary hard stop | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1157 | feat(reliability): no-progress / doom-loop detection for sequential loops | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1085 | feat(reliability): correlated-failure / thundering-herd controls for re-delivery | [redelivery-governor.md](feature-flows/redelivery-governor.md) |
@@ -166,6 +167,7 @@
 |------|----------|-------------|
 | MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 62 MCP tools for agent orchestration |
 | MCP Git Tools | [mcp-git-tools.md](feature-flows/mcp-git-tools.md) | Deterministic git tools over MCP + request-id audit correlation (#905) |
+| MCP Agent Exposure | [mcp-agent-exposure.md](feature-flows/mcp-agent-exposure.md) | Per-agent opt-in dedicated `chat_with_<slug>` MCP tool, dynamically poll-reconciled (#846) |
 | Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 | Write User Memory | [write-user-memory.md](feature-flows/write-user-memory.md) | Per-user memory write MCP tool (MEM-001, #888) |
