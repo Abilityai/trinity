@@ -21,6 +21,7 @@ from models import (
     ApiKeyTest,
     ApiKeyUpdate,
     GitHubTemplatesUpdate,
+    MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
     SlackConnectRequest,
@@ -49,6 +50,11 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL_KEY,
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
+    MAX_PARALLEL_TASKS_CEILING_KEY,
+    MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+    MAX_PARALLEL_TASKS_CEILING_MIN,
+    MAX_PARALLEL_TASKS_CEILING_MAX,
+    get_max_parallel_tasks_ceiling,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -1408,6 +1414,88 @@ async def update_agent_default_access_policy(
     }
 
 
+# ============================================================================
+# Max Parallel Tasks Ceiling (#506 — fleet-wide per-agent concurrency cap)
+# ============================================================================
+
+@router.get("/max-parallel-tasks-ceiling")
+async def get_max_parallel_tasks_ceiling_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the fleet-wide ceiling on any single agent's max_parallel_tasks (#506).
+
+    Admin-only. Owners pick a per-agent value within this ceiling.
+    Registered before the `/{key}` catch-all (Invariant #4).
+    """
+    require_admin(current_user)
+
+    return {
+        "value": get_max_parallel_tasks_ceiling(),
+        "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+        "min": MAX_PARALLEL_TASKS_CEILING_MIN,
+        "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
+@router.put("/max-parallel-tasks-ceiling")
+async def update_max_parallel_tasks_ceiling_setting(
+    body: MaxParallelTasksCeilingUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set the fleet-wide ceiling on per-agent max_parallel_tasks (#506).
+
+    Admin-only. Validates MIN ≤ value ≤ MAX (1–32). The clamp applies at
+    runtime (CapacityManager facade + bypasses); stored per-agent values are
+    never rewritten. Existing agents above the new ceiling are clamped on the
+    next admit.
+    """
+    require_admin(current_user)
+
+    if (
+        not isinstance(body.value, int)
+        or body.value < MAX_PARALLEL_TASKS_CEILING_MIN
+        or body.value > MAX_PARALLEL_TASKS_CEILING_MAX
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"max_parallel_tasks_ceiling must be an integer between "
+                f"{MAX_PARALLEL_TASKS_CEILING_MIN} and {MAX_PARALLEL_TASKS_CEILING_MAX}"
+            ),
+        )
+
+    db.set_setting(MAX_PARALLEL_TASKS_CEILING_KEY, str(body.value))
+
+    # SEC-001: audit this fleet-wide capacity change (mirrors the access-policy
+    # default audit path) — it caps concurrency for every agent on the host.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": MAX_PARALLEL_TASKS_CEILING_KEY,
+            "action": "update",
+            "value": body.value,
+        },
+    )
+
+    return {
+        "success": True,
+        "value": get_max_parallel_tasks_ceiling(),
+        "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+        "min": MAX_PARALLEL_TASKS_CEILING_MIN,
+        "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -1448,6 +1536,18 @@ async def update_setting(
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
     require_admin(current_user)
+
+    # #506: the fleet ceiling must go through the dedicated range-validated
+    # route; block the generic PUT so it can't be written to junk/out-of-range
+    # (same pattern as the skills_library_url SSRF special-case below).
+    if key == MAX_PARALLEL_TASKS_CEILING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "max_parallel_tasks_ceiling must be set via "
+                "PUT /api/settings/max-parallel-tasks-ceiling (range-validated 1–32)"
+            ),
+        )
 
     # Validate URL-based settings to prevent SSRF (SEC-179)
     if key == "skills_library_url" and body.value:
