@@ -1,25 +1,16 @@
 """Unit tests for the #506 max_parallel_tasks ceiling helpers.
 
 Covers the getter's parse/error fallback and the clamp helpers, in isolation
-from the settings DB (the `get_setting` call is monkeypatched). Mirrors the
-src/backend-on-path bootstrap used by the other unit tests.
+from the settings DB (the `get_setting` call is monkeypatched).
+
+`src/backend` is put on sys.path and the backend `utils` package is preloaded by
+tests/unit/conftest.py before collection, so this file needs no module-level
+sys.path / sys.modules bootstrap of its own (which would also trip the #762
+sys.modules-pollution lint).
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-# Bootstrap src/backend on sys.path (mirrors test_capacity_manager.py).
-_THIS = Path(__file__).resolve()
-_BACKEND = _THIS.parent.parent.parent / "src" / "backend"
-_BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
-while _BACKEND_STR in sys.path:
-    sys.path.remove(_BACKEND_STR)
-sys.path.insert(0, _BACKEND_STR)
 
 pytestmark = pytest.mark.unit
 
