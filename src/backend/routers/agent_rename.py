@@ -5,9 +5,8 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
-from models import User
+from models import RenameAgentRequest, User
 from database import db
 from dependencies import get_current_user
 from services.docker_service import get_agent_container
@@ -33,11 +32,6 @@ def set_filtered_websocket_manager(ws_manager):
     """Set the filtered WebSocket manager for /ws/events (Trinity Connect)."""
     global filtered_manager
     filtered_manager = ws_manager
-
-
-class RenameAgentRequest(BaseModel):
-    """Request body for agent rename."""
-    new_name: str
 
 
 @router.put("/{agent_name}/rename")

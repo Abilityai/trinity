@@ -6,14 +6,12 @@ REST endpoints for the platform image generation service.
 
 import base64
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from dependencies import get_current_user
-from models import User
+from models import ImageGenerateRequest, User
 from config import GEMINI_TEXT_MODEL
 from services.image_generation_service import (
     get_image_generation_service,
@@ -23,13 +21,6 @@ from services.image_generation_prompts import VALID_ASPECT_RATIOS, VALID_USE_CAS
 
 router = APIRouter(prefix="/api/images", tags=["images"])
 logger = logging.getLogger(__name__)
-
-
-class ImageGenerateRequest(BaseModel):
-    prompt: str
-    use_case: Optional[str] = "general"
-    aspect_ratio: Optional[str] = "1:1"
-    refine_prompt: Optional[bool] = True
 
 
 @router.post("/generate")

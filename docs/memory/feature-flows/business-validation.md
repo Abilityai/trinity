@@ -76,7 +76,7 @@ class BusinessStatus(str, Enum):
 |-------|------|---------|
 | Backend | `src/backend/services/validation_service.py` | Core validation logic |
 | Backend | `src/backend/routers/internal.py` | `/validate-execution` endpoint |
-| Backend | `src/backend/routers/schedules.py` | Schedule/execution response models |
+| Backend | `src/backend/models.py` | Schedule/execution response models (centralized per Invariant #14, #654) |
 | Backend | `src/backend/db/schedules.py` | DB operations for validation |
 | Backend | `src/backend/models.py` | BusinessStatus enum |
 | Scheduler | `src/scheduler/service.py` | Triggers validation after execution |

@@ -1,24 +1,15 @@
 """SSH access endpoints for Trinity agents."""
 import time
-from typing import Optional
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
-from models import User
+from models import SshAccessRequest, User
 from dependencies import require_admin
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
-
-
-class SshAccessRequest(BaseModel):
-    """Request body for SSH access."""
-    ttl_hours: float = 4.0
-    auth_method: str = "key"  # "key" for SSH key, "password" for ephemeral password
-    public_key: Optional[str] = None  # Required for key auth — client-supplied OpenSSH public key
 
 
 @router.post("/{agent_name}/ssh-access")

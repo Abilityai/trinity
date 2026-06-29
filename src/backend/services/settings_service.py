@@ -57,6 +57,9 @@ OPS_SETTINGS_DEFAULTS = {
     # often), so default is shorter than the agent window. "0"
     # disables the sweep.
     "schedule_soft_delete_retention_days": "30",
+    # Issue #918: retention for agent_reports. Rows older than this many days
+    # are deleted by the cleanup sweep. "0" disables the sweep.
+    "agent_reports_retention_days": "90",
 }
 
 # Descriptions for each ops setting
@@ -75,6 +78,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
+    "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
 }
 
 

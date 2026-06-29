@@ -154,6 +154,10 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("monitoring_alert_cooldowns",   "agent_name",        Policy.CASCADE),
     AgentRef("agent_dashboard_values",       "agent_name",        Policy.CASCADE),
     AgentRef("agent_dashboard_cache",        "agent_name",        Policy.CASCADE),
+    # #918 — agent-published reports may hold sensitive domain payloads; wipe on
+    # delete and re-key on rename so a reused agent name can't inherit another
+    # tenant's reports (cross-tenant disclosure).
+    AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
 
     # --- Channel adapters (encrypted bot tokens — security-relevant) -------
     AgentRef("slack_channel_agents",         "agent_name",        Policy.CASCADE),

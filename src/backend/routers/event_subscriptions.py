@@ -13,7 +13,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from models import EmitEventRequest
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
@@ -355,11 +355,6 @@ async def delete_event_subscription(
 # ============================================================================
 # Event Emission Endpoint
 # ============================================================================
-
-class EmitEventRequest(BaseModel):
-    """Request body for emitting an event."""
-    event_type: str  # Namespaced event type (e.g., "prediction.resolved")
-    payload: Optional[dict] = None  # Structured data
 
 
 @router.post("/events", response_model=AgentEvent, status_code=201)

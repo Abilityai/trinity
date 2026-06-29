@@ -1,5 +1,28 @@
 # Feature: Task Execution Service (EXEC-024)
 
+> **Updated 2026-06-27 (#792, SUB-003 switch-retry):** `execute_task` now retries the
+> triggering execution **once** after a successful SUB-003 subscription auto-switch, so a
+> one-shot trigger (manual `…/schedules/{id}/trigger`, webhook, MCP `trigger_agent_schedule`)
+> recovers instead of landing FAILED (interactive chat already retried client-side; recurring
+> cron recovers next tick). Because `agent_post_with_retry` **returns** the response (never
+> `raise_for_status`), a 429/auth is interceptable **pre-raise**, adjacent to the #678 502 block,
+> and falls through to the single shared success-parse path by reassigning `response` — no
+> duplication. New module helpers: `classify_switch_failure(response)` maps the response to the
+> full SUB-003 surface (`429`→rate_limit; `503/401/403/402` or `is_auth_failure` body→auth; else
+> None); `_extract_agent_error(response, fallback)` is the shared body→`(msg, metadata)` extractor
+> reused by the `except httpx.HTTPError` handler; `_salvage_attempt_cost(metadata)` feeds the #678
+> R2 `previous_attempt_cost` rollup. The retry is guarded by a dedicated
+> `subscription_switch_attempted` local (NOT `retry_count`, which #678 owns — so the two retry
+> reasons never suppress each other) hoisted above the first agent call; the same flag gates the
+> `except`-handler switch block so a cascade (retry still failing) does NOT switch a second time.
+> The retry **is** the readiness probe — a small `_SWITCH_RETRY_DELAY_S` pre-delay only, no
+> circuit-aware `/health` poll (would poison the transport breaker on cold start), no trust in
+> `restart_result`'s string status; the retry timeout is capped to the **remaining** original
+> budget (`min(remaining, _AUTO_RETRY_MAX_TIMEOUT_S)`). Same `execution_id` ⇒ #1084 `effect_guard`
+> dedups wired sinks. Boundaries (follow-ups): the #1083 `DISPATCH_ASYNC` path routes 429s through
+> the result-callback (bypasses this sync path); a concurrent switch-lock *loser* (gets `None`)
+> doesn't retry. Tests: `tests/unit/test_792_subscription_retry.py`.
+
 > **Updated 2026-05-30 (#526, RELIABILITY-007):** This service is the single
 > point where the per-agent **dispatch** circuit breaker records execution
 > outcomes (full mechanics in [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md)).
@@ -283,6 +306,7 @@ Slot TTL: Dynamic (agent timeout + 5 min buffer). See parallel-capacity.md for d
 | Execution start | `ActivityType.CHAT_START` | After slot acquired (line 203) |
 | Execution success | `complete_activity(status="completed")` | After response persisted (line 297) |
 | Execution failure | `complete_activity(status="failed")` | On any exception (lines 332, 374, 398) |
+| Terminal applier close | `complete_activity(status=activity_state_for_terminal(envelope.status))` | `apply_result` won-CAS failure branch + the SUCCESS-lost-CAS-to-cancel reconcile branch — a CANCELLED terminal closes the dispatch activity as `cancelled`, not `failed` (#1332) |
 
 ### WebSocket Broadcasts
 

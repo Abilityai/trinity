@@ -91,8 +91,10 @@ class TestApplyResultHonorsStatus:
         assert result.error == "Execution cancelled by user"
         # cost salvaged from metadata so the cancelled row records real spend.
         assert mdb.update_execution_status.call_args.kwargs["cost"] == 0.05
-        # Activity still completes FAILED; a cancel is not an AUTH failure → no breaker.
-        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
+        # #1332: the dispatch activity closes as CANCELLED (not FAILED) so a
+        # user-cancel doesn't pollute activity-derived views. A cancel is not an
+        # AUTH failure → no breaker outcome recorded.
+        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.CANCELLED
         mrec.assert_not_awaited()
 
     def test_failed_envelope_still_failed_regression(self):

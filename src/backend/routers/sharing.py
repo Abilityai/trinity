@@ -7,9 +7,8 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
-from models import User
+from models import AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
@@ -64,34 +63,6 @@ async def _notify_access_request_approval(
 
 router = APIRouter(prefix="/api/agents", tags=["sharing"])
 
-
-# ---------------------------------------------------------------------------
-# Models for unified access control (Issue #311)
-# ---------------------------------------------------------------------------
-
-class AccessPolicy(BaseModel):
-    require_email: bool
-    open_access: bool
-    group_auth_mode: str = "none"  # 'none' or 'any_verified'
-
-
-class AccessPolicyUpdate(BaseModel):
-    require_email: bool
-    open_access: bool
-    group_auth_mode: str = "none"  # 'none' or 'any_verified'
-
-
-class AccessRequest(BaseModel):
-    id: str
-    agent_name: str
-    email: str
-    channel: str | None = None
-    requested_at: str
-    status: str
-
-
-class AccessRequestDecision(BaseModel):
-    approve: bool
 
 # WebSocket manager will be injected from main.py
 manager = None

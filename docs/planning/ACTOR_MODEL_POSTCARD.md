@@ -68,8 +68,9 @@ reply  → { in_reply_to, content, <typed terminal-reason — see below> }
 
 - `session_id` — Claude Code session UUID; resolved **server-side** from
   `agent_sessions.cached_claude_session_id` (the SESSION_TAB pattern). Unifies
-  the old `continue_session` / `resume_session_id` / `create_new_session` /
-  `user_message` / `inject_result` task fields (demotion map #8–#13).
+  the old `save_to_session` / `chat_session_id` / `resume_session_id` /
+  `create_new_session` / `user_message` task fields (demotion map #8–#12).
+  (#13 `inject_result` is folded into `causation_id`, above — not `session_id`.)
 - `file_ids` — out-of-band references into the FILES-001 shared-files volume;
   replaces inline file bytes (demotion map #3).
 - `task_overrides` — explicit quarantine sub-object for the few genuinely
@@ -98,7 +99,12 @@ auth-substring classifier was re-patched 5+ times across three hand-synced
 container copies, because every new kill/OOM shape that happened to carry an
 auth substring re-triggered a false subscription switch. The platform reads a
 **typed field** instead of guessing. (The concrete backend enum today is
-`TaskExecutionErrorCode`; this taxonomy is the contract it must satisfy.)
+`TaskExecutionErrorCode` =
+`{TIMEOUT, CAPACITY, AUTH, BILLING, AGENT_ERROR, NETWORK, CIRCUIT_OPEN,
+RECONCILED, LEASE_EXPIRED}`; this taxonomy is the contract it must satisfy. The
+contract additionally pins `OOM` and `MAX_TURNS` — distinct failure shapes the
+agent should report rather than collapse into `AGENT_ERROR` — so the enum grows
+to meet the contract, not the other way round.)
 
 Pinning this taxonomy is a **coordination-contract requirement**, not an agent
 implementation detail — it is the highest-value half of #945.
@@ -141,13 +147,17 @@ original AC "agent writes a journal entry per processed message" is **dropped**
 as an artifact of the pre-pivot design.)
 
 **Completion signalling for the pilot is polling, not events.** Verified against
-the current backend: `schedule_execution_completed` is **named in a docstring**
-(`main.py` `/ws/events`) but is **never emitted**. The caller therefore learns a
-result by **polling `get_execution_result`** (the existing
-`queued → running → success/failed` path, including the #914 `queued_timeout`
-contract). The pull pilot makes **polling the contract**; it does not subscribe
-to a non-emitted event. Hardening a completion event into a first-class
-agent-consumable channel is deferred (out of scope for #946).
+the current backend: `schedule_execution_completed` IS emitted — but only by the
+**scheduler** (`src/scheduler/service.py`, several `_publish_event` sites) for
+*schedule-triggered* runs, and **no agent-facing path consumes it** (no
+`mcp-server`/`frontend` subscriber; `main.py` `/ws/events` only names it in a
+docstring). Crucially it is **not** emitted on the agent→agent MCP path the #946
+pilot uses. The caller therefore learns a result by **polling
+`get_execution_result`** (the existing `queued → running → success/failed` path,
+including the #914 `queued_timeout` contract). The pull pilot makes **polling the
+contract**; it does not subscribe to an event that doesn't reach it. Hardening a
+completion event into a first-class agent-consumable channel is deferred (out of
+scope for #946).
 
 **The contract, stated honestly.** The platform guarantees **at-least-once
 delivery with an idempotent coordination boundary**. It cannot make a third

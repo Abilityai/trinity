@@ -19,12 +19,10 @@ Deployment prerequisite:
 """
 
 import logging
-from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
 
 from adapters.transports.twilio_webhook import (
     backfill_webhook_urls,
@@ -32,7 +30,7 @@ from adapters.transports.twilio_webhook import (
 )
 from database import db
 from dependencies import OwnedAgentByName, get_current_user
-from models import User
+from models import User, WhatsAppBindingResponse, WhatsAppConfigureRequest, WhatsAppTestRequest
 from services.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
@@ -87,30 +85,6 @@ async def handle_twilio_webhook(webhook_secret: str, request: Request):
 # =========================================================================
 
 auth_router = APIRouter(prefix="/api/agents", tags=["whatsapp"])
-
-
-class WhatsAppBindingResponse(BaseModel):
-    agent_name: str
-    configured: bool = False
-    account_sid: Optional[str] = None
-    from_number: Optional[str] = None
-    messaging_service_sid: Optional[str] = None
-    display_name: Optional[str] = None
-    is_sandbox: bool = False
-    webhook_url: Optional[str] = None
-    warning: Optional[str] = None
-
-
-class WhatsAppConfigureRequest(BaseModel):
-    account_sid: str
-    auth_token: str
-    from_number: str
-    messaging_service_sid: Optional[str] = None
-
-
-class WhatsAppTestRequest(BaseModel):
-    to_number: Optional[str] = None
-    message: str = "Hello from Trinity! Your WhatsApp integration is configured correctly."
 
 
 def _validate_from_number(from_number: str) -> str:

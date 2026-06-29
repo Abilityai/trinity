@@ -6,10 +6,14 @@ Authorization via allow_proactive flag on agent_sharing.
 """
 
 import logging
-from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from models import (
+    ProactiveShareUpdate,
+    ProactiveSharesResponse,
+    SendMessageRequest,
+    SendMessageResponse,
+)
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName
@@ -26,70 +30,6 @@ from services.proactive_message_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["messages"])
-
-
-# =============================================================================
-# Request/Response Models
-# =============================================================================
-
-
-class SendMessageRequest(BaseModel):
-    """Request to send a proactive message to a user."""
-    recipient_email: EmailStr = Field(
-        ...,
-        description="Verified email of the recipient. Must be in agent_sharing with allow_proactive=1."
-    )
-    text: str = Field(
-        ...,
-        min_length=1,
-        max_length=4096,
-        description="Message content (max 4096 characters)"
-    )
-    channel: Literal["auto", "telegram", "slack", "web"] = Field(
-        default="auto",
-        description="Target channel. 'auto' tries channels in order: telegram -> slack -> web"
-    )
-    reply_to_thread: bool = Field(
-        default=False,
-        description="Continue in last thread if one exists (channel-dependent)"
-    )
-    execution_id: Optional[str] = Field(
-        default=None,
-        max_length=200,
-        description=(
-            "The execution this send belongs to (effect-scoped idempotency, #1084). "
-            "A re-delivery of the same turn dedupes to one send per (recipient, channel). "
-            "Fail-open when absent."
-        ),
-    )
-    dedup_label: str = Field(
-        default="",
-        max_length=200,
-        description=(
-            "Optional discriminator (#1084) to intentionally send two distinct "
-            "messages to the same recipient in one turn. Default → at-most-one."
-        ),
-    )
-
-
-class SendMessageResponse(BaseModel):
-    """Response from sending a proactive message."""
-    success: bool
-    channel: str
-    message_id: Optional[str] = None
-    error: Optional[str] = None
-
-
-class ProactiveShareUpdate(BaseModel):
-    """Request to update allow_proactive flag for a share."""
-    email: EmailStr
-    allow_proactive: bool
-
-
-class ProactiveSharesResponse(BaseModel):
-    """List of emails with proactive messaging enabled."""
-    agent_name: str
-    emails: list[str]
 
 
 # =============================================================================

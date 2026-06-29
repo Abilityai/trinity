@@ -24,11 +24,10 @@ from fastapi import (
     Query,
     status,
 )
-from pydantic import BaseModel, Field
 
 from database import db
 from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
-from models import User
+from models import User, VoipBindingResponse, VoipCallRequest, VoipConfigureRequest, VoipEnabledRequest
 from services import idempotency_service
 from services.settings_service import settings_service
 from services.voip_service import voip_service, normalize_e164
@@ -38,39 +37,6 @@ logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/api/agents", tags=["voip"])
 public_router = APIRouter(tags=["voip-public"])
-
-
-# ── Request/Response models ──────────────────────────────────────────────────
-
-class VoipConfigureRequest(BaseModel):
-    account_sid: str
-    auth_token: str
-    from_number: str
-    daily_call_cap: Optional[int] = None
-
-
-class VoipBindingResponse(BaseModel):
-    agent_name: str
-    configured: bool
-    account_sid: Optional[str] = None
-    from_number: Optional[str] = None
-    daily_call_cap: Optional[int] = None
-    display_name: Optional[str] = None
-    enabled: Optional[bool] = None
-
-
-class VoipCallRequest(BaseModel):
-    to_number: str
-    context: Optional[str] = None
-    process_transcript: bool = True
-    # Effect-scoped idempotency (#1084): a re-delivery of the same turn replays
-    # the original call instead of placing a second PSTN call. Fail-open absent.
-    execution_id: Optional[str] = Field(default=None, max_length=200)
-    dedup_label: str = Field(default="", max_length=200)
-
-
-class VoipEnabledRequest(BaseModel):
-    enabled: bool
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

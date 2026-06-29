@@ -103,6 +103,33 @@
             />
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Total wall-clock limit; checked between runs. Must be ≥ the per-run timeout.</p>
           </div>
+
+          <!-- Max cost (USD budget) #1155 -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Max cost (USD)</label>
+            <input
+              v-model.number="form.max_cost_usd"
+              type="number"
+              min="0.01"
+              step="0.01"
+              placeholder="no budget"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-action-primary-500"
+            />
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Hard USD budget; checked between runs (the current run always finishes).</p>
+          </div>
+
+          <!-- No-progress threshold (doom-loop detection) #1157 -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">No-progress threshold</label>
+            <input
+              v-model.number="form.no_progress_threshold"
+              type="number"
+              min="0"
+              placeholder="3"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-action-primary-500"
+            />
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Stops after this many identical responses in a row (default 3). Set 0 to disable.</p>
+          </div>
         </div>
 
         <!-- Model -->
@@ -244,6 +271,12 @@
             {{ formatSeconds(loop.elapsed_seconds) }} / {{ formatSeconds(loop.max_duration_seconds) }} elapsed
           </div>
 
+          <!-- Cost budget (#1155) -->
+          <div v-if="loop.max_cost_usd" class="text-xs text-gray-600 dark:text-gray-400">
+            <span class="font-medium text-gray-500 dark:text-gray-400">Budget:</span>
+            {{ formatCost(loop.total_cost) }} / {{ formatCost(loop.max_cost_usd) }} spent
+          </div>
+
           <!-- Per-run table -->
           <div>
             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Runs</p>
@@ -322,6 +355,8 @@ const defaultForm = () => ({
   delay_seconds: 0,
   timeout_per_run: null,
   max_duration_seconds: null,
+  max_cost_usd: null,
+  no_progress_threshold: 3,
   model: '',
   allowed_tools: null,
 })
@@ -376,6 +411,11 @@ async function submit() {
   if (form.delay_seconds) payload.delay_seconds = form.delay_seconds
   if (form.timeout_per_run) payload.timeout_per_run = form.timeout_per_run
   if (form.max_duration_seconds) payload.max_duration_seconds = form.max_duration_seconds
+  if (form.max_cost_usd) payload.max_cost_usd = form.max_cost_usd
+  // 0 is the disable sentinel — a truthy guard would drop it, so send explicitly.
+  if (form.no_progress_threshold !== null && form.no_progress_threshold !== undefined && form.no_progress_threshold !== '') {
+    payload.no_progress_threshold = form.no_progress_threshold
+  }
   if (form.model) payload.model = form.model
   if (form.allowed_tools !== null) payload.allowed_tools = form.allowed_tools
 
@@ -420,6 +460,8 @@ function formatStopReason(reason) {
     stop_signal_matched: 'stop signal matched',
     user_stopped: 'stopped by user',
     deadline_exceeded: 'deadline exceeded',
+    budget_exhausted: 'budget exhausted',
+    no_progress: 'no progress — identical responses',
     error: 'error',
     interrupted: 'interrupted',
   }

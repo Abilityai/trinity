@@ -12,11 +12,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
 
 from database import db
 from dependencies import get_current_user
-from models import User
+from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
 from services.image_generation_service import get_image_generation_service
@@ -90,10 +89,6 @@ def _get_style_for_agent(agent_name: str) -> str:
     """Deterministically pick a visual style from the agent name."""
     h = hash(agent_name)
     return _DEFAULT_AVATAR_STYLES[h % len(_DEFAULT_AVATAR_STYLES)]
-
-
-class AvatarGenerateRequest(BaseModel):
-    identity_prompt: str
 
 
 async def _get_prompt_from_template(agent_name: str) -> Optional[str]:

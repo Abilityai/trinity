@@ -11,10 +11,8 @@ import os
 import secrets
 import httpx
 import logging
-from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from database import (
     db,
@@ -27,7 +25,7 @@ from database import (
     PublicChatMessage
 )
 from dependencies import get_current_user
-from models import User
+from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -38,20 +36,6 @@ from services.platform_prompt_service import (
     summarize_user_memory_background,
 )
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
-
-
-class PublicChatHistoryResponse(BaseModel):
-    """Response model for chat history endpoint."""
-    messages: List[dict]
-    session_id: str
-    message_count: int
-
-
-class ClearSessionResponse(BaseModel):
-    """Response model for clear session endpoint."""
-    cleared: bool
-    new_session_id: Optional[str] = None
-
 
 
 logger = logging.getLogger(__name__)

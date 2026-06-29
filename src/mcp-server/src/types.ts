@@ -339,3 +339,30 @@ export interface CompatibilityReport {
   static_ran_at?: string | null;
   message?: string | null;
 }
+
+// Agent workspace file browser (#919 — agent-pipeline introspection reads
+// these via the existing GET /api/agents/{name}/files surface).
+
+/**
+ * One node in the recursive file tree returned by
+ * `GET /api/agents/{name}/files`. Directories carry `children`; files carry
+ * `size`. `path` is relative to `/home/developer`; `modified` is an ISO-8601
+ * mtime string (used as the tie-breaker for latest-instance selection).
+ */
+export interface AgentFileNode {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  size?: number;
+  modified?: string;
+  children?: AgentFileNode[];
+  file_count?: number;
+}
+
+export interface AgentFileTreeResponse {
+  base_path: string;
+  requested_path: string;
+  tree: AgentFileNode[];
+  total_files: number;
+  show_hidden: boolean;
+}

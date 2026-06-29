@@ -24,6 +24,7 @@ import type {
   OperatorQueueItem,
   OperatorQueueListResponse,
   CompatibilityReport,
+  AgentFileTreeResponse,
 } from "./types.js";
 
 /**
@@ -35,6 +36,30 @@ const DEBUG = process.env.DEBUG_MCP_CLIENT === 'true' || process.env.NODE_ENV ==
 function debugLog(...args: any[]) {
   if (DEBUG) {
     console.log('[DEBUG]', ...args);
+  }
+}
+
+/**
+ * Typed error thrown by `request()` on a non-2xx response (#905). Carries the
+ * HTTP status and the conflict-classification headers the git endpoints set
+ * (`X-Conflict-Type`/`X-Conflict-Class`), so a tool can branch on the conflict
+ * type (e.g. "use chat_with_agent") without parsing the free-form detail string.
+ *
+ * Backward-compatible: `.message` keeps the historical `API error (<status>): <body>`
+ * shape, so existing callers/tests that match on the message still work, and
+ * `instanceof Error` holds.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly conflictType?: string;
+  readonly conflictClass?: string;
+
+  constructor(status: number, body: string, headers?: Headers) {
+    super(`API error (${status}): ${body}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.conflictType = headers?.get("X-Conflict-Type") ?? undefined;
+    this.conflictClass = headers?.get("X-Conflict-Class") ?? undefined;
   }
 }
 
@@ -148,14 +173,19 @@ export class TrinityClient {
   }
 
   /**
-   * Public request method for custom API calls
+   * Shared transport: auth header + single 401-reauth-retry + error mapping,
+   * returning the raw `Response` so callers choose how to decode the body
+   * (#919: the JSON `request` path and the plain-text `downloadAgentFile`
+   * path differ only in `.json()` vs `.text()` — they must not duplicate the
+   * auth/retry/error logic).
    */
-  async request<T>(
+  private async _fetch(
     method: string,
     path: string,
     body?: unknown,
-    isRetry: boolean = false
-  ): Promise<T> {
+    isRetry: boolean = false,
+    requestId?: string
+  ): Promise<Response> {
     if (!this.token) {
       throw new Error("Not authenticated. Call authenticate() first or setToken().");
     }
@@ -166,6 +196,14 @@ export class TrinityClient {
 
     if (body) {
       headers["Content-Type"] = "application/json";
+    }
+
+    // #905: forward a caller-supplied correlation id. The backend's
+    // add_request_id middleware adopts an incoming X-Request-ID, so the
+    // server-side audit row (e.g. git_operation) carries the SAME id the MCP
+    // tool stamps on its own mcp_operation audit row — making the two joinable.
+    if (requestId) {
+      headers["X-Request-ID"] = requestId;
     }
 
     // Security: Log requests without exposing tokens in production
@@ -186,14 +224,31 @@ export class TrinityClient {
       const success = await this.reauthenticate();
       if (success) {
         console.log("Re-authentication successful, retrying request...");
-        return this.request<T>(method, path, body, true);
+        return this._fetch(method, path, body, true, requestId);
       }
     }
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`API error (${response.status}): ${error}`);
+      // #905: typed error so callers can branch on .status / .conflictType
+      // without parsing the message. Message shape is unchanged for back-compat.
+      throw new ApiError(response.status, error, response.headers);
     }
+
+    return response;
+  }
+
+  /**
+   * Public request method for custom API calls
+   */
+  async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    isRetry: boolean = false,
+    requestId?: string
+  ): Promise<T> {
+    const response = await this._fetch(method, path, body, isRetry, requestId);
 
     // Handle 204 No Content (e.g., successful DELETE)
     if (response.status === 204) {
@@ -777,6 +832,54 @@ export class TrinityClient {
   }
 
   // ============================================================================
+  // Agent Workspace Files (#919 — pipeline introspection read surface)
+  // ============================================================================
+
+  /**
+   * Recursively list files under a workspace directory via the existing
+   * `GET /api/agents/{name}/files` surface (no new backend endpoint). Returns
+   * a hierarchical tree; `path` values are relative to `/home/developer` and
+   * each node carries an ISO-8601 `modified` mtime. A missing directory
+   * surfaces as a 404 (mapped to `API error (404): …`) — callers decide
+   * whether that means "empty" or "not found".
+   *
+   * @param name - Agent name
+   * @param path - Directory to list (relative to home, e.g. `.trinity/pipelines`)
+   * @param showHidden - Include dot-prefixed entries (default true here: the
+   *   pipeline paths live under the hidden `.trinity` directory)
+   */
+  async listAgentFiles(
+    name: string,
+    path: string,
+    showHidden: boolean = true
+  ): Promise<AgentFileTreeResponse> {
+    return this.request<AgentFileTreeResponse>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/files` +
+        `?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`
+    );
+  }
+
+  /**
+   * Download a single workspace file as plain text via the existing
+   * `GET /api/agents/{name}/files/download` surface. Uses the shared `_fetch`
+   * (auth + 401-retry + error mapping) but reads the body as text rather than
+   * JSON — the download endpoint returns `PlainTextResponse`.
+   *
+   * @param name - Agent name
+   * @param path - File path (relative to home, e.g.
+   *   `.trinity/pipelines/demo.yaml`)
+   */
+  async downloadAgentFile(name: string, path: string): Promise<string> {
+    const response = await this._fetch(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/files/download` +
+        `?path=${encodeURIComponent(path)}`
+    );
+    return response.text();
+  }
+
+  // ============================================================================
   // Fan-Out (FANOUT-001)
   // ============================================================================
 
@@ -1187,6 +1290,36 @@ export class TrinityClient {
     return this.request(
       "POST",
       "/api/notifications",
+      data
+    );
+  }
+
+  /**
+   * Publish a structured agent report (#918). The path agent is the calling
+   * agent (resolved from the auth context by the report tool); the backend
+   * self-gates an agent-scoped key to itself.
+   */
+  async createReport(
+    agentName: string,
+    data: {
+      report_type: string;
+      title: string;
+      payload: Record<string, unknown>;
+      display_hint?: string;
+      schema_version?: number;
+      period_start?: string;
+      period_end?: string;
+    }
+  ): Promise<{
+    id: string;
+    agent_name: string;
+    report_type: string;
+    title: string;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reports`,
       data
     );
   }
@@ -1836,6 +1969,8 @@ export class TrinityClient {
       delay_seconds?: number;
       timeout_per_run?: number;
       max_duration_seconds?: number;
+      max_cost_usd?: number;
+      no_progress_threshold?: number;
       model?: string;
       allowed_tools?: string[];
     }
@@ -1935,5 +2070,79 @@ export class TrinityClient {
       skipped: string[];
       bytes_received: number;
     }>;
+  }
+
+  // ============================================================================
+  // Git Sync (#905) — direct, deterministic (non-LLM) git operations
+  // ============================================================================
+
+  /** Live git status for an agent (branch, remote, changes, sync_status). */
+  async getGitStatus(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/status`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Stage, commit, and push agent changes to the working branch. */
+  async gitSync(
+    name: string,
+    body: { message?: string; paths?: string[]; strategy?: string },
+    requestId?: string,
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/sync`,
+      body,
+      false,
+      requestId,
+    );
+  }
+
+  /** Recent commit history for an agent. */
+  async getGitLog(name: string, limit: number, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/log?limit=${encodeURIComponent(String(limit))}`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Pull latest changes from GitHub with the given conflict strategy. */
+  async gitPull(name: string, strategy: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/pull`,
+      { strategy },
+      false,
+      requestId,
+    );
+  }
+
+  /** Persisted git sync-state row (#389) for an agent. */
+  async getGitSyncState(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/git/sync-state`,
+      undefined,
+      false,
+      requestId,
+    );
+  }
+
+  /** Destructive recovery: adopt origin/main, preserving instance state (#384). */
+  async resetToMainPreserveState(name: string, requestId?: string): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/agents/${encodeURIComponent(name)}/git/reset-to-main-preserve-state`,
+      undefined,
+      false,
+      requestId,
+    );
   }
 }

@@ -1,6 +1,5 @@
 """Agent file management, info, and folder endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
 from models import User
 from database import db
@@ -27,7 +26,14 @@ from services.agent_service import (
     get_file_sharing_status_logic,
     set_file_sharing_status_logic,
 )
-from models import ShareFileMcpRequest, ShareFileResponse, SharedFileInfo, SharedFilesList
+from models import (
+    CreateFolderRequest,
+    FileUpdateRequest,
+    ShareFileMcpRequest,
+    ShareFileResponse,
+    SharedFileInfo,
+    SharedFilesList,
+)
 from services.agent_shared_files_service import (
     create_share,
     build_download_url,
@@ -211,11 +217,6 @@ async def delete_agent_file_endpoint(
     return await delete_agent_file_logic(agent_name, path, current_user, request)
 
 
-class FileUpdateRequest(BaseModel):
-    """Request body for file updates."""
-    content: str
-
-
 @router.put("/{agent_name}/files")
 async def update_agent_file_endpoint(
     agent_name: str,
@@ -231,11 +232,6 @@ async def update_agent_file_endpoint(
         body: Request body with content
     """
     return await update_agent_file_logic(agent_name, path, body.content, current_user, request)
-
-
-class CreateFolderRequest(BaseModel):
-    """Request body for folder creation."""
-    path: str
 
 
 @router.post("/{agent_name}/files/mkdir")

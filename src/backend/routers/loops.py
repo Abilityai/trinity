@@ -12,11 +12,17 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
-from pydantic import BaseModel, Field, field_validator
 
 from database import db
 from dependencies import get_authorized_agent, get_current_user
-from models import User
+from models import (
+    LoopRunResponse,
+    LoopStatusResponse,
+    StartLoopRequest,
+    StartLoopResponse,
+    StopLoopResponse,
+    User,
+)
 from services.loop_service import get_loop_service
 
 logger = logging.getLogger(__name__)
@@ -29,90 +35,14 @@ loop_router = APIRouter(prefix="/api/loops", tags=["loops"])
 
 
 # ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-
-MAX_RUNS_LIMIT = 100
-MAX_MESSAGE_LEN = 100_000
-MAX_DELAY_SECONDS = 3600
-MAX_TIMEOUT_PER_RUN = 7200
-MAX_STOP_SIGNAL_LEN = 200
-MAX_DURATION_SECONDS = 604_800  # 7 days — hard ceiling on the wall-clock deadline
-# Fallback per-run timeout used for deadline validation when neither
-# timeout_per_run nor an agent-specific timeout is available.
-DEFAULT_PER_RUN_TIMEOUT = 3600
-
-
-class StartLoopRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LEN)
-    max_runs: int = Field(..., ge=1, le=MAX_RUNS_LIMIT)
-    stop_signal: Optional[str] = Field(default=None, max_length=MAX_STOP_SIGNAL_LEN)
-    delay_seconds: int = Field(default=0, ge=0, le=MAX_DELAY_SECONDS)
-    timeout_per_run: Optional[int] = Field(default=None, ge=10, le=MAX_TIMEOUT_PER_RUN)
-    # #1156: optional loop-level wall-clock deadline. NULL = unbounded
-    # (max_runs is still the hard stop). Lower bound vs the per-run timeout
-    # is validated in the endpoint (needs the agent's configured timeout).
-    max_duration_seconds: Optional[int] = Field(default=None, ge=1, le=MAX_DURATION_SECONDS)
-    model: Optional[str] = None
-    allowed_tools: Optional[List[str]] = None
-
-    @field_validator("stop_signal")
-    @classmethod
-    def _normalize_stop_signal(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None  # empty after strip → fixed mode
-
-
-class StartLoopResponse(BaseModel):
-    loop_id: str
-    status: str
-    agent_name: str
-    max_runs: int
-
-
-class LoopRunResponse(BaseModel):
-    run_number: int
-    execution_id: Optional[str] = None
-    status: str
-    response_preview: Optional[str] = None
-    cost: Optional[float] = None
-    duration_ms: Optional[int] = None
-    error: Optional[str] = None
-    started_at: str
-    completed_at: Optional[str] = None
-
-
-class LoopStatusResponse(BaseModel):
-    loop_id: str
-    agent_name: str
-    status: str
-    max_runs: int
-    runs_completed: int
-    stop_reason: Optional[str] = None
-    last_response: Optional[str] = None
-    error: Optional[str] = None
-    runs: List[LoopRunResponse]
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    # #1156: wall-clock deadline (NULL = unbounded) + elapsed since started_at
-    # (frozen at completed_at once terminal). Both NULL before the loop runs.
-    max_duration_seconds: Optional[int] = None
-    elapsed_seconds: Optional[int] = None
-
-
-class StopLoopResponse(BaseModel):
-    loop_id: str
-    status: str  # "stopping" | "already_done"
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 RESPONSE_PREVIEW_CHARS = 500
+
+# Fallback per-run timeout used for deadline validation when neither
+# timeout_per_run nor an agent-specific timeout is available (#1156).
+DEFAULT_PER_RUN_TIMEOUT = 3600
 
 
 def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
@@ -140,6 +70,10 @@ def _elapsed_seconds(loop: dict) -> Optional[int]:
 
 def _build_status_response(loop: dict) -> LoopStatusResponse:
     runs_raw = db.list_loop_runs(loop["id"])
+    # #1155: total_cost is computed on read (no stored column to drift) — the
+    # sum of every run's cost (NULL→0). sum(()) is 0.0, so a zero-run loop
+    # reports 0.0 verbatim with no None special-case.
+    total_cost = sum((r["cost"] or 0.0) for r in runs_raw)
     runs: List[LoopRunResponse] = []
     for r in runs_raw:
         response_preview = None
@@ -171,6 +105,9 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
         completed_at=loop["completed_at"],
         max_duration_seconds=loop.get("max_duration_seconds"),
         elapsed_seconds=_elapsed_seconds(loop),
+        max_cost_usd=loop.get("max_cost_usd"),
+        total_cost=total_cost,
+        no_progress_threshold=loop.get("no_progress_threshold"),
     )
 
 
@@ -229,6 +166,8 @@ async def start_loop(
         delay_seconds=payload.delay_seconds,
         timeout_per_run=payload.timeout_per_run,
         max_duration_seconds=payload.max_duration_seconds,
+        max_cost_usd=payload.max_cost_usd,
+        no_progress_threshold=payload.no_progress_threshold,
         model=payload.model,
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,

@@ -18,95 +18,23 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 from database import db
 from dependencies import require_admin
-from models import User
+from models import (
+    AuditCalendarResponse,
+    AuditHeatmapResponse,
+    AuditLogEntry,
+    AuditLogListResponse,
+    AuditLogStatsResponse,
+    AuditVerifyResponse,
+    User,
+)
 from services.platform_audit_service import platform_audit_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/audit-log", tags=["audit-log"])
-
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
-
-
-class AuditLogEntry(BaseModel):
-    """Single audit log row as returned to API clients."""
-
-    id: int
-    event_id: str
-    event_type: str
-    event_action: str
-    actor_type: str
-    actor_id: Optional[str] = None
-    actor_email: Optional[str] = None
-    actor_ip: Optional[str] = None
-    mcp_key_id: Optional[str] = None
-    mcp_key_name: Optional[str] = None
-    mcp_scope: Optional[str] = None
-    target_type: Optional[str] = None
-    target_id: Optional[str] = None
-    timestamp: str
-    details: Optional[dict] = None
-    request_id: Optional[str] = None
-    source: str
-    endpoint: Optional[str] = None
-    previous_hash: Optional[str] = None
-    entry_hash: Optional[str] = None
-    created_at: Optional[str] = None
-
-
-class AuditLogListResponse(BaseModel):
-    """Paginated list response."""
-
-    entries: List[AuditLogEntry]
-    total: int
-    limit: int
-    offset: int
-
-
-class AuditLogStatsResponse(BaseModel):
-    """Aggregate counts."""
-
-    total: int
-    by_event_type: dict = Field(default_factory=dict)
-    by_actor_type: dict = Field(default_factory=dict)
-
-
-class AuditHeatmapCell(BaseModel):
-    """Single populated bucket in the 7×24 dow×hour heatmap."""
-
-    dow: int = Field(..., ge=0, le=6, description="Weekday (0=Sunday)")
-    hour: int = Field(..., ge=0, le=23, description="Hour 0–23 UTC")
-    count: int = Field(..., ge=0)
-
-
-class AuditHeatmapResponse(BaseModel):
-    """Sparse 7×24 dow×hour heatmap. Zero-count cells omitted."""
-
-    cells: List[AuditHeatmapCell]
-    total: int
-    max_count: int
-
-
-class AuditCalendarDay(BaseModel):
-    """Single populated day in the calendar heatmap."""
-
-    date: str = Field(..., description="UTC date, ISO 'YYYY-MM-DD'")
-    count: int = Field(..., ge=0)
-
-
-class AuditCalendarResponse(BaseModel):
-    """Sparse per-day calendar heatmap (GitHub-style). Quiet days omitted."""
-
-    days: List[AuditCalendarDay]
-    total: int
-    max_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -174,14 +102,6 @@ async def audit_log_calendar(
 # ---------------------------------------------------------------------------
 # Phase 4: Hash chain verification
 # ---------------------------------------------------------------------------
-
-
-class AuditVerifyResponse(BaseModel):
-    """Hash chain verification result."""
-
-    valid: bool
-    checked: int
-    first_invalid_id: Optional[int] = None
 
 
 @router.post("/verify", response_model=AuditVerifyResponse)
@@ -279,6 +199,7 @@ async def list_audit_log(
     source: Optional[str] = Query(None, description="Filter by source (api/mcp/scheduler/system)"),
     start_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive lower bound"),
     end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
+    request_id: Optional[str] = Query(None, description="Filter by request correlation id (joins MCP + backend rows, #905)"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _admin: User = Depends(require_admin),
@@ -293,6 +214,7 @@ async def list_audit_log(
         "source": source,
         "start_time": start_time,
         "end_time": end_time,
+        "request_id": request_id,
     }
     entries = db.get_audit_entries(limit=limit, offset=offset, **filters)
     total = db.count_audit_entries(**filters)

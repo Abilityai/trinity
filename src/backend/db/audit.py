@@ -79,6 +79,7 @@ class PlatformAuditOperations:
         source: Optional[str] = None,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> List[Any]:
         """Build a list of Core WHERE conditions from optional filters."""
         conditions: List[Any] = []
@@ -98,6 +99,10 @@ class PlatformAuditOperations:
             conditions.append(audit_log.c.timestamp >= start_time)
         if end_time:
             conditions.append(audit_log.c.timestamp <= end_time)
+        # #905: filter by request correlation id so an MCP `mcp_operation` row and
+        # the backend `git_operation` row it triggered can be retrieved together.
+        if request_id:
+            conditions.append(audit_log.c.request_id == request_id)
         return conditions
 
     def get_audit_entries(
@@ -110,13 +115,14 @@ class PlatformAuditOperations:
         source: Optional[str] = None,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
+        request_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Query audit entries with optional filters, newest first."""
         conditions = self._filter_conditions(
             event_type, actor_type, actor_id, target_type,
-            target_id, source, start_time, end_time,
+            target_id, source, start_time, end_time, request_id,
         )
         stmt = (
             select(audit_log)
@@ -138,11 +144,12 @@ class PlatformAuditOperations:
         source: Optional[str] = None,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> int:
         """Return total count for a filter (independent of limit/offset)."""
         conditions = self._filter_conditions(
             event_type, actor_type, actor_id, target_type,
-            target_id, source, start_time, end_time,
+            target_id, source, start_time, end_time, request_id,
         )
         stmt = select(func.count()).select_from(audit_log).where(and_(*conditions))
         with get_engine().connect() as conn:
