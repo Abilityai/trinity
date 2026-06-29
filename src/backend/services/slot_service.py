@@ -9,7 +9,8 @@ Key Pattern:
 - agent:slot:{name}:{execution_id} (HASH) - Slot metadata (auto-expires)
 
 Slot Rules:
-- Each agent has configurable max_parallel_tasks (1-10, default 3)
+- Each agent has configurable max_parallel_tasks (1..fleet ceiling, default 3;
+  ceiling is the admin-set `max_parallel_tasks_ceiling`, default 10 — #506)
 - Parallel /task endpoint respects capacity limits
 - Return 429 when at capacity
 - Slots auto-expire after 30 minutes (safety net)

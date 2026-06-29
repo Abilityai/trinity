@@ -158,7 +158,12 @@ class BacklogService:
             return False
 
         slots = self._slots()
-        max_parallel = db.get_max_parallel_tasks(agent_name)
+        # #506: facade bypass — clamp to the fleet ceiling here (this path
+        # calls slots.acquire_slot directly, skipping CapacityManager.acquire).
+        # The same `max_parallel` local is reused by the real_slot re-acquire
+        # at :193, so clamping once covers both.
+        from services.settings_service import get_effective_max_parallel_tasks
+        max_parallel = get_effective_max_parallel_tasks(agent_name)
         effective_timeout = db.get_execution_timeout(agent_name)
 
         # Sentinel execution_id for the slot — replaced by the real one after
