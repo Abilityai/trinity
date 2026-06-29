@@ -617,12 +617,19 @@ class TestBacklogDrain:
         tests/unit/test_506_max_parallel_ceiling.py.
         """
         from services.backlog_service import BacklogService
-        import services.settings_service as ss
 
         fake_db.max_parallel_tasks = 9  # raw stored value drain must NOT use
-        monkeypatch.setattr(
-            ss, "get_effective_max_parallel_tasks", lambda _name: 2
+        # Install a stub `services.settings_service` directly in sys.modules
+        # (same technique as the `fake_db` fixture for `database`). drain_next
+        # does a call-time `from services.settings_service import
+        # get_effective_max_parallel_tasks`, so this is what it resolves —
+        # immune to the module-identity gotcha where a `monkeypatch.setattr`
+        # on a separately-imported `ss` lands on a different object than the
+        # one backlog re-resolves from sys.modules under some test orderings.
+        fake_ss = types.SimpleNamespace(
+            get_effective_max_parallel_tasks=lambda _name: 2
         )
+        monkeypatch.setitem(sys.modules, "services.settings_service", fake_ss)
 
         svc = BacklogService()
         fake_db.queued_count_value = 1
