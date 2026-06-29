@@ -169,9 +169,26 @@
         </template>
       </ChatMessages>
 
-      <!-- Error message -->
-      <div v-if="error" class="mx-6 mb-2 p-3 rounded-lg bg-status-danger-100 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800">
+      <!-- Error message. role/aria-live so an error landing minutes after the
+           click (async reattach outcome, #1376) is announced to screen readers. -->
+      <div
+        v-if="error"
+        role="alert"
+        aria-live="assertive"
+        class="mx-6 mb-2 p-3 rounded-lg bg-status-danger-100 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800"
+      >
         <p class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
+      </div>
+
+      <!-- Neutral notice (#1376 D6): polling gave up but the turn may still be
+           running — a status, not an error. No danger styling. -->
+      <div
+        v-else-if="notice"
+        role="status"
+        aria-live="polite"
+        class="mx-6 mb-2 p-3 rounded-lg bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700"
+      >
+        <p class="text-sm text-gray-600 dark:text-gray-300">{{ notice }}</p>
       </div>
 
       <!-- Input area -->
@@ -289,6 +306,9 @@ const turnInFlight = computed(() =>
 const turnError = computed(() =>
   currentSessionId.value ? sessionsStore.errorForSession(currentSessionId.value) : null,
 )
+const turnNotice = computed(() =>
+  currentSessionId.value ? sessionsStore.noticeForSession(currentSessionId.value) : null,
+)
 const fallbackNotice = computed(() =>
   currentSessionId.value ? sessionsStore.fallbackNoticeForSession(currentSessionId.value) : false,
 )
@@ -300,6 +320,8 @@ const loading = computed(
 // Unified `error` for the template: turn error takes precedence (it's
 // what the user just acted on); fall back to non-turn errors.
 const error = computed(() => turnError.value || localError.value)
+// Neutral async-status notice (#1376): only the turn poller sets this.
+const notice = computed(() => turnNotice.value)
 
 const currentSessionLabel = computed(() => {
   if (!currentSessionId.value) return 'No session'
@@ -451,6 +473,12 @@ async function onSubmit(text, files = []) {
   loadingText.value = 'Thinking...'
   const sid = currentSessionId.value
 
+  // Long-wait copy (#1376 D7): after ~75s flip the spinner text so a
+  // multi-minute wait doesn't imply normal latency. Cleared on completion.
+  const longWaitTimer = setTimeout(() => {
+    loadingText.value = 'Still working… this may take a while.'
+  }, 75000)
+
   try {
     // sendMessage manages inFlight + error + fallbackNotice on the store,
     // keyed by sessionId. The template's computed `loading`/`error`/
@@ -464,7 +492,13 @@ async function onSubmit(text, files = []) {
   } catch {
     // Store has already populated errorBySession[sid] with a friendly message.
   } finally {
-    loadingText.value = 'Thinking...'
+    clearTimeout(longWaitTimer)
+    // If the turn was handed off to the reattach poller (#1376) it's still in
+    // flight, so keep the long-wait copy instead of snapping back to "Thinking…"
+    // for the duration of the poll. Reset only once the turn is actually done.
+    if (!sessionsStore.isInFlight(sid)) {
+      loadingText.value = 'Thinking...'
+    }
   }
 }
 
