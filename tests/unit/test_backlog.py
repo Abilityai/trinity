@@ -601,18 +601,28 @@ class TestBacklogDrain:
         assert len(fake_slots.acquire_calls) == 1
         assert len(fake_slots.release_calls) == 1
 
-    async def test_drain_clamps_slot_acquire_to_ceiling(
+    async def test_drain_uses_effective_cap_for_slot_acquire(
         self, fake_db, fake_slots, monkeypatch
     ):
-        """#506: the backlog-drain bypass acquires the slot under the EFFECTIVE
-        cap (stored clamped to the fleet ceiling), not the raw stored value.
+        """#506: the backlog-drain bypass sizes the slot acquire from the
+        EFFECTIVE cap (``get_effective_max_parallel_tasks`` = stored clamped to
+        the fleet ceiling), not the raw stored ``max_parallel_tasks``.
+
+        Patch the exact function ``drain_next`` imports so the test is hermetic
+        — independent of the settings DB, the ceiling-read chain, ``from
+        database import db`` resolution, and any cross-test stubbing of the
+        ``services.settings_service`` module in ``sys.modules``. The raw stored
+        cap is 9 and the effective cap is 2; asserting 2 (not 9) proves drain
+        uses the clamped value. The clamp math itself is covered directly in
+        tests/unit/test_506_max_parallel_ceiling.py.
         """
         from services.backlog_service import BacklogService
         import services.settings_service as ss
 
-        # Stored cap 9, ceiling 2 → drain must acquire with max_parallel_tasks=2.
-        fake_db.max_parallel_tasks = 9
-        monkeypatch.setattr(ss, "get_max_parallel_tasks_ceiling", lambda: 2)
+        fake_db.max_parallel_tasks = 9  # raw stored value drain must NOT use
+        monkeypatch.setattr(
+            ss, "get_effective_max_parallel_tasks", lambda _name: 2
+        )
 
         svc = BacklogService()
         fake_db.queued_count_value = 1
