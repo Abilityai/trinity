@@ -648,6 +648,11 @@ class MaxParallelTasksCeilingUpdate(BaseModel):
     value: int
 
 
+class AgentCapacityUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
+    max_parallel_tasks: int
+
+
 # ---------------------------------------------------------------------------
 # Fleet Executions (EXEC-022 / Issue #18)
 # ---------------------------------------------------------------------------
