@@ -43,6 +43,47 @@ LOC); summary table:
 `get_capacity_manager()` returns a process-wide singleton.
 `reset_capacity_manager()` exists for tests.
 
+## Fleet-wide ceiling on `max_parallel_tasks` (#506)
+
+Per-agent `max_parallel_tasks` is a **two-tier** model: an admin sets a
+fleet-wide ceiling (`max_parallel_tasks_ceiling` in `system_settings`, default
+10, range 1–32; generic key/value → **no migration**), owners pick a per-agent
+value within it (`PUT /api/agents/{name}/capacity` validates against the live
+ceiling, not a hardcoded 10). Admin endpoints: `GET/PUT
+/api/settings/max-parallel-tasks-ceiling` (range-validated, audit-logged); the
+generic catch-all `PUT /{key}` is blocked for this key (422).
+
+The clamp is **runtime / clamp-on-use** — the stored value is never rewritten,
+only the *effective* admit limit (`min(stored, ceiling)`) is capped. The helpers
+live in `settings_service.py`:
+
+| Helper | Used by |
+|--------|---------|
+| `get_max_parallel_tasks_ceiling()` | reads the setting; fail-open to default 10 on any read error; read-side range-clamps a stray out-of-range stored value into `[1,32]` (defense-in-depth so a `0` can't fail-close the fleet / a `999` can't defeat the cap); **no per-process cache** (backend runs `--workers 2`, so a TTL cache would let a stale worker admit above a just-lowered ceiling) |
+| `clamp_to_ceiling(n)` | the `CapacityManager` facade — clamped at the top of `acquire()` and inside `get_slot_state()` / `get_all_states()`, covering chat ×3, `task_execution_service`, the dashboard, and any future facade reader |
+| `get_effective_max_parallel_tasks(agent)` | the two genuine facade-bypasses: `backlog_service.drain_next` (the `real_slot` re-acquire reuses the same clamped local) and `agent_call_limiter` |
+
+Canary **B-02** compares slot count against the **effective** cap (snapshot
+carries `effective_max_parallel`) so a lowered ceiling doesn't false-fire;
+**S-02** (no overbooking) keeps the stored cap as a valid upper bound (clamping
+only lowers ZCARD vs stored). The `agent_config` GET surfaces `ceiling` +
+`effective_max_parallel_tasks`; `available_slots` is computed from the effective
+value (`available + active = effective`).
+
+*Known limitation:* `agent_call_limiter` freezes its per-agent semaphore cap at
+first access — a live agent's semaphore doesn't shrink on a ceiling/cap drop
+until process restart (new agents get the clamped cap immediately). Semaphore
+resize is out of scope.
+
+**Frontend surfaces.** Admin sets the ceiling in `views/Settings.vue` ("Fleet
+capacity ceiling", range `ceilingMin`–`ceilingMax`) via
+`stores/settings.js` `getMaxParallelTasksCeiling()` / `setMaxParallelTasksCeiling(value)`.
+Owners pick the per-agent value in `components/CapacityPanel.vue` ("Parallel
+Capacity", `:max="ceiling"`) via `stores/agents.js`
+`getAgentCapacity(name)` / `setAgentCapacity(name, n)` — the panel reads
+`ceiling`/`effective_max_parallel_tasks` from the one `GET .../capacity` call,
+so it renders the bound without the admin-only settings GET.
+
 ## Overflow policies
 
 Three modes selected per call via the `overflow_policy` keyword:
@@ -106,7 +147,7 @@ recording at the execution terminals live in
 
 `src/backend/routers/chat.py` (chat endpoint):
 
-1. Resolve `max_parallel_tasks` from agent ownership row.
+1. Resolve `max_parallel_tasks` from agent ownership row. (Callers pass the **stored** value; `acquire` clamps it to the fleet ceiling internally — #506.)
 2. `await capacity.acquire(agent_name=..., execution_id=..., max_concurrent=N, overflow_policy="queue_in_memory", source=USER, message=...)`.
 3. On `state="admitted"` or `"queued_in_memory"`, proceed to call the agent container. (The in-memory queue position is informational; the agent serializes Claude subprocess execution itself.)
 4. On `CapacityFull(reason="in_memory_full")` → 429 to client.

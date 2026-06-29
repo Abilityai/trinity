@@ -566,6 +566,45 @@ Trinity is autonomous agent orchestration and infrastructure — sovereign infra
   - Identity captured at enqueue and replayed at drain (no re-auth, matches scheduler pattern)
 - **Flow**: `docs/memory/feature-flows/persistent-task-backlog.md`
 
+### 10.8.1 Fleet-Wide Parallel-Capacity Ceiling (#506)
+- **Status**: ✅ Implemented (2026-06-29)
+- **GitHub Issue**: #506
+- **Description**: Two-tier model for per-agent `max_parallel_tasks` (CAPACITY-001). An
+  **admin** sets a fleet-wide **ceiling** (`max_parallel_tasks_ceiling`, default 10, range
+  1–32); **owners** pick a per-agent value within that ceiling. Closes the gap where the
+  per-agent write validated against a hardcoded `10`, letting one owner saturate the host,
+  and the value was not deployment-tunable (small VPS vs large box). The ceiling is stored in
+  the generic `system_settings` key/value store — **no DB migration** (no `migrations.py` /
+  Alembic entry).
+- **Key Features**:
+  - Admin endpoints `GET/PUT /api/settings/max-parallel-tasks-ceiling` (range-validated 1–32,
+    admin-only, audit-logged). The generic catch-all `PUT /{key}` is **blocked** for this key
+    (422 → dedicated route) so the range can't be bypassed.
+  - Per-agent `PUT /api/agents/{name}/capacity` validates against the live ceiling, not a
+    constant. The GET response returns `max_parallel_tasks` (stored), `ceiling`, and
+    `effective_max_parallel_tasks` = `min(stored, ceiling)`; `available_slots` is computed from
+    the effective value.
+  - **Runtime clamp (clamp-on-use, never rewrite stored)**: the `CapacityManager` facade
+    (`acquire` / `get_slot_state` / `get_all_states`) clamps the cap to the ceiling — covering
+    chat ×3, `task_execution_service`, the dashboard, and any future facade reader — plus the
+    two genuine facade-bypasses (`backlog_service` drain, `agent_call_limiter`). The getter is
+    fail-open (a settings-read failure defaults to 10 rather than crashing dispatch) and
+    read-side range-clamps a stray out-of-range stored value into `[1,32]` (defense-in-depth: a
+    `0` can't fail-close the fleet, a `999` can't defeat the host cap); no
+    per-process cache (backend runs `--workers 2`), so a lowered ceiling applies instantly and
+    consistently across workers.
+  - Canary B-02 (no-queued-without-slots-full) compares slot count against the **effective**
+    cap so a lowered ceiling doesn't false-fire; S-02 (no overbooking) intentionally keeps the
+    stored cap as a valid upper bound.
+  - Owner UI: per-agent "Parallel Capacity" card in the agent Settings tab (input bounded by
+    the ceiling, shows `active/effective`, warns when stored > ceiling). Admin UI: "Fleet
+    Capacity" section in Settings → General.
+- **Known limitation**: `agent_call_limiter` caches its per-agent semaphore cap at first
+  access and never re-reads it — a *live* agent's semaphore does not shrink when the ceiling
+  (or its own `max_parallel_tasks`) drops until process restart. Pre-existing behavior for
+  per-agent edits, not a regression; new agents get the clamped cap immediately. Semaphore
+  resize is out of scope.
+
 ### 10.9 Business Task Validation (VALIDATE-001)
 - **Status**: ✅ Implemented (2026-04-14)
 - **Requirement ID**: VALIDATE-001

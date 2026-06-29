@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |
 | 2026-06-28 | #1155 | feat(loops): per-loop cost budget (`max_cost_usd`) iteration-boundary hard stop | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1157 | feat(reliability): no-progress / doom-loop detection for sequential loops | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1085 | feat(reliability): correlated-failure / thundering-herd controls for re-delivery | [redelivery-governor.md](feature-flows/redelivery-governor.md) |
