@@ -14,6 +14,10 @@
     credential — "connect a Claude subscription" → Settings → Integrations
 -->
 <template>
+  <!-- Teleport to <body> so the overlay escapes the Dashboard's nested layout
+       stacking contexts — otherwise z-index alone can't keep header chrome
+       (e.g. the time-range control) from poking through the dim backdrop. -->
+  <Teleport to="body">
   <!-- create step: hand off to the real creation modal -->
   <CreateAgentModal
     v-if="step === 'create'"
@@ -137,6 +141,7 @@
       </div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <script setup>
