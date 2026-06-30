@@ -32,6 +32,7 @@ export const useSessionsStore = defineStore('sessions', {
     // Keying turn state by sessionId scopes it to the actual conversation.
     inFlightBySession: {},       // sessionId -> bool (a turn is running)
     errorBySession: {},          // sessionId -> string|null (last turn error)
+    noticeBySession: {},         // sessionId -> string|null (neutral async status, #1376)
     fallbackNoticeBySession: {}, // sessionId -> bool (resume fallback fired)
     pollTimerBySession: {},      // sessionId -> setTimeout handle (private)
     pollWatchersBySession: {},   // sessionId -> int (ref-count, private)
@@ -56,6 +57,7 @@ export const useSessionsStore = defineStore('sessions', {
     messagesFor: (state) => (sessionId) => state.messagesBySession[sessionId] || [],
     isInFlight: (state) => (sessionId) => !!state.inFlightBySession[sessionId],
     errorForSession: (state) => (sessionId) => state.errorBySession[sessionId] || null,
+    noticeForSession: (state) => (sessionId) => state.noticeBySession[sessionId] || null,
     fallbackNoticeForSession: (state) => (sessionId) => !!state.fallbackNoticeBySession[sessionId],
   },
 
@@ -202,7 +204,28 @@ export const useSessionsStore = defineStore('sessions', {
 
       this.inFlightBySession[sessionId] = true
       this.errorBySession[sessionId] = null
+      this.noticeBySession[sessionId] = null
       this.fallbackNoticeBySession[sessionId] = false
+
+      // Baseline for reattach success-detection. A pre-persistence failure
+      // (e.g. a file-upload 502 raised at sessions.py:205, BEFORE the user
+      // row is persisted at :217, or a request dropped before it landed)
+      // leaves the session ending in the PREVIOUS turn's assistant reply —
+      // so "last message is assistant" is NOT a safe success signal. Only a
+      // NEW assistant beyond this baseline proves THIS turn landed.
+      const baselineAssistantCount = (this.messagesBySession[sessionId] || []).filter(
+        (m) => m.role === 'assistant',
+      ).length
+      // User-row baseline: lets the genuine-failure path tell a pre-persistence
+      // drop (server has no row for this turn) from a post-persistence failure
+      // (server has the row) so the optimistic row is only restored when the
+      // reconcile GET actually wiped it (#1376).
+      const baselineUserCount = (this.messagesBySession[sessionId] || []).filter(
+        (m) => m.role === 'user',
+      ).length
+      // Set in the catch when we hand the turn off to the poller; guards the
+      // `finally` so the spinner isn't blanked between catch and the first tick.
+      let handedOff = false
 
       const existing = this.messagesBySession[sessionId] || []
       this.messagesBySession[sessionId] = [
@@ -214,6 +237,11 @@ export const useSessionsStore = defineStore('sessions', {
           timestamp: new Date().toISOString(),
         },
       ]
+      // Snapshot the optimistic list (incl. the user row just appended). The
+      // catch-path reconcile calls loadSession, which REPLACES messagesBySession
+      // with server truth — on a pre-persistence failure that truth lacks the
+      // user's row, so we restore this snapshot to keep the message visible.
+      const optimisticSnapshot = this.messagesBySession[sessionId]
 
       try {
         const body = { message: text }
@@ -258,6 +286,58 @@ export const useSessionsStore = defineStore('sessions', {
 
         return r.data
       } catch (e) {
+        // A 429 means another turn already holds the session lock — THIS message
+        // was rejected, not severed mid-flight. `turn_in_progress` would reflect
+        // the OTHER turn, so reconciling here would wrongly attach to it and
+        // silently drop this send. Skip reconcile; surface the real error (#1376).
+        const isConcurrencyReject = e.response?.status === 429
+
+        // The turn endpoint is synchronous; an intermediary (e.g. Cloudflare's
+        // ~100s edge timeout) can sever the socket while the backend keeps
+        // running. Reconcile against authoritative server state before
+        // declaring failure — a backend 502, a Cloudflare 524, and a browser
+        // ECONNABORTED are all resolved the same way: by server truth (#1376).
+        if (!isConcurrencyReject) {
+          try {
+            const data = await this.loadSession(agentName, sessionId)
+            const session = data?.session
+            const msgs = data?.messages || []
+            const newAssistant =
+              msgs.filter((m) => m.role === 'assistant').length > baselineAssistantCount
+
+            // Check success BEFORE the in-flight handoff. The assistant row is
+            // persisted INSIDE the inflight sentinel, so a reconcile GET can see
+            // assistant-present AND sentinel-still-set. Handing off here would let
+            // startPolling recompute its baseline from the just-loaded assistant
+            // (loadSession already merged it into messagesBySession) and then
+            // false-fail with "No reply came back" when the sentinel clears.
+            // Mirrors the poller's own assistantLanded-before-!inProgress order.
+            if (newAssistant) {
+              return data // a NEW reply already landed — genuine success
+            }
+            if (session?.turn_in_progress) {
+              handedOff = true
+              this.inFlightBySession[sessionId] = true // keep spinner; no flicker
+              this.startPolling(agentName, sessionId)
+              return data // still running — no error
+            }
+            // turn not in flight AND no new reply → real failure. If the server
+            // never persisted this turn's user row (pre-persistence drop), the
+            // reconcile GET above overwrote our optimistic row — restore it so
+            // the typed message stays visible alongside the error (#1376).
+            const reconciledUsers = (this.messagesBySession[sessionId] || []).filter(
+              (m) => m.role === 'user',
+            ).length
+            if (reconciledUsers <= baselineUserCount) {
+              this.messagesBySession[sessionId] = optimisticSnapshot
+            }
+          } catch {
+            // GET also failed (network down) — fall through to surface the
+            // original error. The optimistic row is untouched (loadSession only
+            // overwrites messagesBySession on a successful GET).
+          }
+        }
+
         const detail = e.response?.data?.detail
         let msg
         if (typeof detail === 'string') {
@@ -270,7 +350,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.errorBySession[sessionId] = msg
         throw e
       } finally {
-        this.inFlightBySession[sessionId] = false
+        if (!handedOff) this.inFlightBySession[sessionId] = false
       }
     },
 
@@ -285,10 +365,27 @@ export const useSessionsStore = defineStore('sessions', {
         (this.pollWatchersBySession[sessionId] || 0) + 1
       if (this.pollTimerBySession[sessionId]) return // already polling
 
-      const initialMsgCount = (this.messagesBySession[sessionId] || []).length
+      // Only a NEW assistant beyond this baseline proves the in-flight turn
+      // landed (mirrors the catch-path baseline; a trailing assistant from a
+      // prior turn is not a success signal).
+      const baselineAssistantCount = (this.messagesBySession[sessionId] || []).filter(
+        (m) => m.role === 'assistant',
+      ).length
+      const startedAt = Date.now()
       let attempts = 0
       const BACKOFF_MS = [2000, 2000, 2000, 5000, 5000, 5000, 15000, 15000, 15000]
-      const MAX_ATTEMPTS = 60 // ~22 min total: 3×2 + 3×5 + 54×15
+      // Wall-clock deadline, not an attempt count: background-tab timer
+      // throttling makes "N attempts × 15s" a bad clock. Covers the sentinel
+      // TTL (_LOCK_TTL_FALLBACK=7230s, sessions.py:176) + slack. The high
+      // attempt floor stays only as a pure leak guard. The window override is
+      // a test seam only (e2e drives the deadline branch deterministically);
+      // production always uses the 7260000 default.
+      const deadlineOverride =
+        typeof window !== 'undefined' && Number.isFinite(window.__TRINITY_SESSION_POLL_DEADLINE_MS__)
+          ? window.__TRINITY_SESSION_POLL_DEADLINE_MS__
+          : null
+      const DEADLINE_MS = deadlineOverride !== null ? deadlineOverride : 7260000 // ~2h1m
+      const MAX_ATTEMPTS = 2000 // leak guard only; the deadline is the real bound
 
       const tick = async () => {
         if (!this.pollWatchersBySession[sessionId]) return // stopped externally
@@ -299,36 +396,46 @@ export const useSessionsStore = defineStore('sessions', {
           const session = data?.session
           const messages = data?.messages || []
           const inProgress = !!session?.turn_in_progress
-          const newMessages = messages.length > initialMsgCount
-          const lastIsAssistant =
-            messages.length > 0 && messages[messages.length - 1]?.role === 'assistant'
+          const assistantLanded =
+            messages.filter((m) => m.role === 'assistant').length > baselineAssistantCount
 
-          // Stop conditions:
-          //   1. Sentinel cleared (turn finished, lock released)
-          //   2. Assistant message landed (covers slow lock release —
-          //      backend INSERT races the DEL of the in-flight sentinel,
-          //      so a newly-arrived assistant reply is a terminal signal
-          //      even while sentinel still reads true).
-          if (!inProgress || (newMessages && lastIsAssistant)) {
+          if (assistantLanded) {
+            // success — a new reply landed (covers slow lock release: the
+            // backend INSERT races the DEL of the in-flight sentinel, so a
+            // newly-arrived assistant reply is terminal even if sentinel still
+            // reads true).
             this._stopPollingTimer(sessionId)
             this.inFlightBySession[sessionId] = false
-            // Watcher count cleared too; clear so a future activation can
-            // restart polling cleanly.
+            delete this.pollWatchersBySession[sessionId]
+            return
+          }
+          if (!inProgress) {
+            // Sentinel cleared with no new reply → the turn failed or produced
+            // nothing. Never stop silently — a severed-then-failed turn must
+            // surface an error (Finding 1).
+            this._stopPollingTimer(sessionId)
+            this.inFlightBySession[sessionId] = false
+            this.errorBySession[sessionId] =
+              "No reply came back — your message was sent but the agent didn't respond."
             delete this.pollWatchersBySession[sessionId]
             return
           }
         } catch (e) {
-          // Transient — keep polling unless we've hit MAX_ATTEMPTS.
+          // Transient — keep polling unless we've hit the deadline/leak guard.
           // eslint-disable-next-line no-console
           console.warn('[sessions] poll tick failed:', e)
         }
 
         attempts++
-        if (attempts >= MAX_ATTEMPTS) {
+        if (Date.now() - startedAt > DEADLINE_MS || attempts >= MAX_ATTEMPTS) {
+          // At the deadline the app only knows polling gave up — NOT that the
+          // turn failed. Route through the neutral notice channel, not
+          // errorBySession: a red error box for a maybe-still-running turn
+          // would reintroduce the very false-failure #1376 kills (D6).
           this._stopPollingTimer(sessionId)
           this.inFlightBySession[sessionId] = false
-          this.errorBySession[sessionId] =
-            'Turn took longer than expected — refresh to check status.'
+          this.noticeBySession[sessionId] =
+            'Still checking in the background. Refresh to see the latest status.'
           delete this.pollWatchersBySession[sessionId]
           return
         }
@@ -368,6 +475,7 @@ export const useSessionsStore = defineStore('sessions', {
       delete this.pollWatchersBySession[sessionId]
       delete this.inFlightBySession[sessionId]
       delete this.errorBySession[sessionId]
+      delete this.noticeBySession[sessionId]
       delete this.fallbackNoticeBySession[sessionId]
     },
   },
