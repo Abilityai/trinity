@@ -95,6 +95,7 @@ agent_ownership = Table(
     Column("group_auth_mode", Text),
     Column("voice_system_prompt", Text),
     Column("voice_name", Text),
+    Column("public_channel_model", Text),  # #894: per-agent public-channel model override (NULL = platform default)
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),

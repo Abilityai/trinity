@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "date": "2026-06-29",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "AndriiPasternak31/issue-1376",
+  "base": "origin/dev@5eaf7779",
+  "phases_run": [0, 1, 7, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "new_admin_endpoints": 0,
+    "new_file_uploads": 0,
+    "new_websocket_channels": 0,
+    "new_external_integrations": 0,
+    "changed_files": [
+      "src/frontend/src/stores/sessions.js",
+      "src/frontend/src/components/SessionPanel.vue",
+      "src/frontend/e2e/session-tab.spec.js",
+      "docs/memory/feature-flows.md",
+      "docs/memory/feature-flows/session-tab.md"
+    ]
+  },
+  "findings": [],
+  "observations": [
+    {
+      "id": "OBS-1",
+      "title": "Documented e2e test seam in production poller (window.__TRINITY_SESSION_POLL_DEADLINE_MS__)",
+      "severity": "INFO",
+      "file": "src/frontend/src/stores/sessions.js:347",
+      "rationale": "Self-scoped client-only deadline override; no cross-user/privilege impact. Excluded under missing-hardening-without-concrete-vulnerability."
+    }
+  ],
+  "supply_chain_summary": "No dependency or lockfile changes in diff.",
+  "filter_stats": {
+    "candidates": 1,
+    "passed_gate": 0,
+    "demoted_to_observation": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 1
+  },
+  "trend": "first-audit-this-diff"
+}

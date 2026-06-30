@@ -432,6 +432,8 @@ class ChannelMessageRouter:
                 source_user_email=source_email,
                 timeout_seconds=None,  # Uses agent's configured timeout (TIMEOUT-001)
                 allowed_tools=public_allowed_tools,
+                # #894: per-agent public-channel model override (None → platform default).
+                model=db.get_public_channel_model(agent_name),
                 system_prompt=memory_system_prompt,
                 images=image_data or None,
             )
