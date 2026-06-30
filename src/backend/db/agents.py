@@ -430,3 +430,32 @@ class AgentOperations(
                 .values(voice_name=voice_name or None)
             )
             return result.rowcount > 0
+
+    def get_public_channel_model(self, agent_name: str) -> Optional[str]:
+        """Per-agent model override for public-facing channels (#894).
+
+        Returns the persisted model id, or ``None`` when unset OR when the
+        persisted value is not a currently-valid public-channel model (a model
+        removed after it was saved). ``None`` ⇒ the caller inherits the platform
+        default — same defense-in-depth posture as ``get_voice_name`` (#28).
+        """
+        from services.settings_service import is_valid_public_channel_model
+
+        stmt = select(agent_ownership.c.public_channel_model).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        value = row["public_channel_model"] if row else None
+        return value if (value and is_valid_public_channel_model(value)) else None
+
+    def set_public_channel_model(self, agent_name: str, model: Optional[str]) -> bool:
+        """Set/clear the per-agent public-channel model override (None clears it)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(public_channel_model=model or None)
+            )
+            return result.rowcount > 0

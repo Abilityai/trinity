@@ -699,6 +699,16 @@ class CircuitBreakerConfigUpdate(BaseModel):
     enabled: bool
 
 
+class PublicChannelModelUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/public-channel-model (#894).
+
+    ``model`` is the Claude model id to use for public-facing channels (public
+    link, Slack/Telegram/WhatsApp, x402). ``None`` or empty string clears the
+    override so the agent inherits the platform default.
+    """
+    model: Optional[str] = None
+
+
 class ExecutionResultEnvelope(BaseModel):
     """Body for POST /api/agents/{name}/executions/{id}/result (#1083).
 

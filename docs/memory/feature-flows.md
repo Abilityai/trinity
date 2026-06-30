@@ -16,6 +16,7 @@
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
+| 2026-06-29 | #894 | feat(channels): per-agent **public-channel model override** — owners pick the Claude model for public-facing chats (public link, Slack/Telegram/WhatsApp, x402) via the Sharing tab; additive NULL `agent_ownership.public_channel_model` (NULL→platform default), owner-only `GET`/`PUT /api/agents/{name}/public-channel-model`. Epic #1079. | [public-channel-model.md](feature-flows/public-channel-model.md) |
 | 2026-06-28 | #1155 | feat(loops): per-loop cost budget (`max_cost_usd`) iteration-boundary hard stop | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1157 | feat(reliability): no-progress / doom-loop detection for sequential loops | [run-agent-loop.md](feature-flows/run-agent-loop.md) |
 | 2026-06-28 | #1085 | feat(reliability): correlated-failure / thundering-herd controls for re-delivery | [redelivery-governor.md](feature-flows/redelivery-governor.md) |
@@ -205,6 +206,7 @@
 
 | Flow | Document | Description |
 |------|----------|-------------|
+| Public-Channel Model | [public-channel-model.md](feature-flows/public-channel-model.md) | Per-agent model override for public-facing channels (#894) |
 | Autonomy Mode | [autonomy-mode.md](feature-flows/autonomy-mode.md) | Agent autonomous operation toggle |
 | AutonomyToggle Component | [autonomy-toggle-component.md](feature-flows/autonomy-toggle-component.md) | Reusable Vue toggle component |
 | Read-Only Mode | [read-only-mode.md](feature-flows/read-only-mode.md) | Code protection via hooks (CFG-007) |

@@ -1,9 +1,10 @@
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from models import User
+from models import User, PublicChannelModelUpdate
 from database import db
 from dependencies import get_current_user
+from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
     get_agent_api_key_setting_logic,
@@ -544,6 +545,94 @@ async def set_agent_timeout(
         "agent_name": agent_name,
         "execution_timeout_seconds": timeout_seconds,
         "execution_timeout_minutes": timeout_seconds // 60,
+    }
+
+
+# ============================================================================
+# Public-Channel Model Override (#894)
+# ============================================================================
+
+@router.get("/{agent_name}/public-channel-model")
+async def get_public_channel_model(
+    agent_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Get the per-agent model override for public-facing channels (#894).
+
+    Public-facing = public chat link, Slack/Telegram/WhatsApp channels, and x402
+    paid chat. The override is owner-set; NULL means inherit the platform
+    default. Returns the raw override, the resolved (effective) model, and the
+    selectable list.
+    """
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    override = db.get_public_channel_model(agent_name)
+    platform_default = settings_service.get_platform_default_model()
+    return {
+        "agent_name": agent_name,
+        "public_channel_model": override,                       # None = inherit
+        "resolved_model": override or platform_default,
+        "is_overridden": override is not None,
+        "platform_default": platform_default,
+        "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
+    }
+
+
+@router.put("/{agent_name}/public-channel-model")
+async def set_public_channel_model(
+    agent_name: str,
+    body: PublicChannelModelUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set or clear the per-agent public-channel model override (owner-only, #894).
+
+    A null/empty ``model`` clears the override (inherit the platform default);
+    a non-empty value must be a currently-selectable model (422 otherwise).
+    """
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only owners can change the public-channel model")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    model = (body.model or "").strip() or None
+    if model is not None and not settings_service.is_valid_public_channel_model(model):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_public_channel_model",
+                "message": f"{model!r} is not a selectable public-channel model.",
+                "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
+            },
+        )
+
+    if not db.set_public_channel_model(agent_name, model):
+        raise HTTPException(status_code=500, detail="Failed to update public-channel model")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="update_public_channel_model",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"public_channel_model": model},  # None = cleared
+    )
+
+    platform_default = settings_service.get_platform_default_model()
+    return {
+        "message": "Public-channel model updated",
+        "agent_name": agent_name,
+        "public_channel_model": model,
+        "resolved_model": model or platform_default,
+        "is_overridden": model is not None,
     }
 
 
