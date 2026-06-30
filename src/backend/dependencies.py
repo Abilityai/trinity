@@ -1,7 +1,9 @@
 """
 FastAPI dependencies for the Trinity backend.
 """
-from datetime import datetime, timedelta
+import logging
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Annotated
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
@@ -10,6 +12,53 @@ from passlib.context import CryptContext
 from models import User
 from config import SECRET_KEY, ALGORITHM
 from database import db
+from redis_breaker_util import get_breaker_redis
+
+logger = logging.getLogger(__name__)
+
+# JWT revocation (#187): a logged-out token's `jti` is stored in Redis until it
+# would have expired anyway, so the 7-day token can be killed early. Fail-open
+# — if Redis is unreachable the check is skipped (a revoked token would then
+# pass until natural expiry), matching the platform-wide fail-open posture; the
+# threat (UnderDefense 3.3.4) is Low/CVSS 2.0 and backend restarts already
+# rotate SECRET_KEY (invalidating every token).
+_JWT_REVOKED_PREFIX = "jwt:revoked:"
+
+
+def revoke_token_jti(jti: str, exp_ts: Optional[int]) -> None:
+    """Blacklist a token's `jti` until its own expiry (best-effort, fail-open).
+
+    TTL is the token's remaining lifetime, so the key self-expires exactly when
+    the token would — no unbounded growth, no separate sweep.
+    """
+    if not jti:
+        return
+    r = get_breaker_redis()
+    if r is None:
+        return
+    now = int(datetime.now(timezone.utc).timestamp())
+    ttl = (int(exp_ts) - now) if exp_ts else 0
+    if ttl <= 0:
+        return  # already expired — nothing to revoke
+    try:
+        r.setex(f"{_JWT_REVOKED_PREFIX}{jti}", ttl, "1")
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_token_jti failed (fail-open): {exc}")
+
+
+def is_token_revoked(jti: Optional[str]) -> bool:
+    """True if this `jti` was revoked via logout. Fail-open → False on no jti
+    (legacy token minted before #187) or Redis error."""
+    if not jti:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        return False
+    try:
+        return r.exists(f"{_JWT_REVOKED_PREFIX}{jti}") > 0
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] is_token_revoked failed (fail-open): {exc}")
+        return False
 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -73,7 +122,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
         expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({
         "exp": expire,
-        "mode": mode  # Track auth mode to prevent dev/prod token mixing
+        "mode": mode,  # Track auth mode to prevent dev/prod token mixing
+        "jti": secrets.token_urlsafe(16),  # #187: per-token id for revocation
     })
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -141,6 +191,10 @@ def decode_token(token: str) -> Optional[dict]:
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
             return None
 
+        # #187 — a token revoked via logout is no longer valid (also for WS).
+        if is_token_revoked(payload.get("jti")):
+            return None
+
         # Get full user record from database
         user = db.get_user_by_username(username)
         if not user:
@@ -180,6 +234,10 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # authorizes /api/enterprise/2fa/login/*; the second factor must be
         # completed there to obtain a real access token.
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
+            raise credentials_exception
+
+        # #187 — reject a token revoked via logout.
+        if is_token_revoked(payload.get("jti")):
             raise credentials_exception
 
         user = db.get_user_by_username(username)

@@ -756,7 +756,8 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
 | POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
-| GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) |
+| POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
+| GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |
 | GET | `/api/users/me` | Current user |
 | PUT | `/api/users/me/email` | Bind a sign-in email to the caller's own account (#82 transition; 409 if taken). No verification email sent |
 | GET | `/api/users` | List users with roles (admin-only; exposes `suspended_at` read-only) (ROLE-001) |
@@ -1640,6 +1641,7 @@ CREATE INDEX idx_agent_reports_created ON agent_reports(created_at);  -- retenti
 | **Admin** (secondary) | Password → `POST /api/token` | JWT with `mode: "admin"` |
 
 - Email whitelist controls who can login via email; admin login always available for 'admin'.
+- **JWT revocation on logout** (#187): every access token carries a random `jti`; `POST /api/auth/logout` writes `jwt:revoked:{jti}` to Redis with a TTL equal to the token's remaining life, and `get_current_user` / `decode_token` (WS) / `/api/auth/validate` (nginx) reject a revoked `jti`. Closes the "exfiltrated 7-day token survives logout" gap (pentest 3.3.4). Fail-open (Redis down or a legacy no-`jti` token → not revoked), so the check can never lock out a valid session; backend restart still rotates `SECRET_KEY` and invalidates everything. Token-lifetime reduction + refresh tokens deferred (separate issue).
 - **4-tier role hierarchy** (ROLE-001): `user` < `operator` < `creator` < `admin`. Agent creation requires `creator`+. Enforced via `require_role()` in `dependencies.py`.
 - **Whitelist-driven role on first login** (#314): new email users inherit the `default_role` on their `email_whitelist` row (fallback `user`). Callsites pass explicit intent — `/share` and access-request approvals → `user` (chat-only grant); public `/api/access/request` self-signup → `user`; admin whitelist UI → caller-specified. Owners promote collaborators explicitly via `PUT /api/users/{username}/role`. Closes a privilege escalation where any access grant silently promoted the recipient to `creator`.
 - **Public self-signup is default-OFF** (trinity-enterprise#10): the unauthenticated `POST /api/access/request` returns **403** unless an operator opts in via `PUBLIC_ACCESS_REQUESTS_ENABLED` (env) or the `public_access_requests_enabled` system setting. When off it never auto-whitelists, so the email whitelist stays authoritative against self-enrollment. Login-code requests for already-whitelisted emails are unaffected.
