@@ -176,7 +176,7 @@
 - `compatibility/` - Agent compatibility validation package (spec/collector/static_checks/ai_checks/fixes) — see [Agent Compatibility Validation](#agent-compatibility-validation-668)
 
 *Auth & Credentials:*
-- `credential_encryption.py` - AES-256-GCM encryption for `.credentials.enc` and DB-persisted tokens (CRED-002, Invariant #12)
+- `credential_encryption.py` - AES-256-GCM encryption for `.credentials.enc` and DB-persisted tokens (CRED-002, Invariant #12). Supports **online key rotation** (#267): an optional decrypt-only `CREDENTIAL_ENCRYPTION_KEY_SECONDARY` (the previous key) keeps old-key ciphertext readable while new writes use the primary; `rewrap()` + `scripts/deploy/rotate-credential-key.py` re-encrypt persisted DB secrets onto the new key (runbook `docs/migrations/CREDENTIAL_KEY_ROTATION.md`)
 - `subscription_service.py` - Subscription management (SUB-002)
 - `ssh_service.py` - Ephemeral SSH credential generation
 - `email_service.py` - Email sending for verification codes
