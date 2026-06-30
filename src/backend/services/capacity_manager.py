@@ -238,6 +238,14 @@ class CapacityManager:
             CapacityFull: if at capacity AND overflow store is also full
                           (or overflow_policy="reject").
         """
+        # ---- #506: clamp the per-agent cap to the fleet-wide ceiling -----
+        # Single runtime clamp point for every facade caller (chat ×3,
+        # task_execution_service, …). "Clamp on use, never rewrite stored":
+        # the agent keeps its chosen max_parallel_tasks; only the effective
+        # admit limit is capped here.
+        from services.settings_service import clamp_to_ceiling
+        max_concurrent = clamp_to_ceiling(max_concurrent)
+
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow
         # branch → no backlog poisoning. Per-agent opt-in short-circuits the
@@ -422,8 +430,16 @@ class CapacityManager:
     async def get_all_states(
         self, agent_capacities: Dict[str, int]
     ) -> Dict[str, Dict[str, int]]:
-        """Bulk capacity meter for the dashboard."""
-        return await self._slots.get_all_slot_states(agent_capacities)
+        """Bulk capacity meter for the dashboard.
+
+        #506: each stored cap is clamped to the fleet ceiling so the dashboard
+        reports the effective limit (available + active == effective).
+        """
+        from services.settings_service import clamp_to_ceiling
+        clamped = {
+            name: clamp_to_ceiling(cap) for name, cap in agent_capacities.items()
+        }
+        return await self._slots.get_all_slot_states(clamped)
 
     async def get_slot_state(self, agent_name: str, max_concurrent: int):
         """Detailed slot view for the per-agent capacity endpoint.
@@ -432,8 +448,14 @@ class CapacityManager:
         message_preview, duration_seconds per slot). Kept as a thin
         pass-through so the agent_config router doesn't need to know about
         the underlying primitive.
+
+        #506: clamps the cap to the fleet ceiling so available_slots reflects
+        the effective admit limit.
         """
-        return await self._slots.get_slot_state(agent_name, max_concurrent)
+        from services.settings_service import clamp_to_ceiling
+        return await self._slots.get_slot_state(
+            agent_name, clamp_to_ceiling(max_concurrent)
+        )
 
     # ------------------------------------------------------------------
     # Cleanup / emergency

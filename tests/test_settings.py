@@ -1216,3 +1216,83 @@ class TestAgentDefaultResources:
             assert get_response.json()["memory"] == original["memory"]
         finally:
             api_client.put(self.ENDPOINT, json={"cpu": original["cpu"]})
+
+
+class TestMaxParallelTasksCeiling:
+    """Tests for GET/PUT /api/settings/max-parallel-tasks-ceiling (#506).
+
+    Fleet-wide ceiling on any single agent's max_parallel_tasks. Admin-gated;
+    range-validated 1–32 via the dedicated route. The generic PUT /{key} is
+    blocked for this key.
+    """
+
+    ENDPOINT = "/api/settings/max-parallel-tasks-ceiling"
+
+    def test_get_requires_auth(self, unauthenticated_client: TrinityApiClient):
+        """GET requires authentication."""
+        response = unauthenticated_client.get(self.ENDPOINT, auth=False)
+        assert_status(response, 401)
+
+    def test_put_requires_auth(self, unauthenticated_client: TrinityApiClient):
+        """PUT requires authentication."""
+        response = unauthenticated_client.put(self.ENDPOINT, json={"value": 5}, auth=False)
+        assert_status(response, 401)
+
+    def test_get_returns_shape(self, api_client: TrinityApiClient):
+        """GET returns {value, default, min, max}."""
+        response = api_client.get(self.ENDPOINT)
+        assert_status(response, 200)
+        data = assert_json_response(response)
+        assert_has_fields(data, ["value", "default", "min", "max"])
+        assert data["min"] == 1
+        assert data["max"] == 32
+        assert data["default"] == 10
+
+    def test_put_within_range_persists(self, api_client: TrinityApiClient):
+        """PUT within 1–32 succeeds and GET reflects it."""
+        original = api_client.get(self.ENDPOINT).json()["value"]
+        try:
+            response = api_client.put(self.ENDPOINT, json={"value": 7})
+            assert_status(response, 200)
+            assert response.json()["value"] == 7
+            # Verify persisted across a fresh GET
+            assert api_client.get(self.ENDPOINT).json()["value"] == 7
+        finally:
+            api_client.put(self.ENDPOINT, json={"value": original})
+
+    def test_put_min_boundary(self, api_client: TrinityApiClient):
+        """PUT value=1 (lower bound) is accepted."""
+        original = api_client.get(self.ENDPOINT).json()["value"]
+        try:
+            response = api_client.put(self.ENDPOINT, json={"value": 1})
+            assert_status(response, 200)
+            assert response.json()["value"] == 1
+        finally:
+            api_client.put(self.ENDPOINT, json={"value": original})
+
+    def test_put_max_boundary(self, api_client: TrinityApiClient):
+        """PUT value=32 (upper bound) is accepted."""
+        original = api_client.get(self.ENDPOINT).json()["value"]
+        try:
+            response = api_client.put(self.ENDPOINT, json={"value": 32})
+            assert_status(response, 200)
+            assert response.json()["value"] == 32
+        finally:
+            api_client.put(self.ENDPOINT, json={"value": original})
+
+    def test_put_zero_rejected(self, api_client: TrinityApiClient):
+        """PUT value=0 (below min) returns 400."""
+        response = api_client.put(self.ENDPOINT, json={"value": 0})
+        assert_status(response, 400)
+
+    def test_put_above_max_rejected(self, api_client: TrinityApiClient):
+        """PUT value=33 (above max) returns 400."""
+        response = api_client.put(self.ENDPOINT, json={"value": 33})
+        assert_status(response, 400)
+
+    def test_generic_put_blocked(self, api_client: TrinityApiClient):
+        """The catch-all PUT /{key} cannot write the ceiling key (422)."""
+        response = api_client.put(
+            "/api/settings/max_parallel_tasks_ceiling", json={"value": "999"}
+        )
+        assert_status(response, 422)

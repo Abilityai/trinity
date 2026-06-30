@@ -127,6 +127,11 @@ def _load_settings_module():
         AGENT_DEFAULT_REQUIRE_EMAIL_KEY="agent_default_require_email",  # #1129
         AGENT_DEFAULT_REQUIRE_EMAIL=True,
         get_agent_default_require_email=MagicMock(return_value=True),
+        MAX_PARALLEL_TASKS_CEILING_KEY="max_parallel_tasks_ceiling",  # #506
+        MAX_PARALLEL_TASKS_CEILING_DEFAULT=10,
+        MAX_PARALLEL_TASKS_CEILING_MIN=1,
+        MAX_PARALLEL_TASKS_CEILING_MAX=32,
+        get_max_parallel_tasks_ceiling=MagicMock(return_value=10),
     )
     # settings.py module-level imports VALID_CPU/VALID_MEMORY from the
     # container-spec module (#1197); stub it so the standalone load completes.

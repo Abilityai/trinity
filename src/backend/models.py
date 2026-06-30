@@ -639,6 +639,20 @@ class AgentDefaultAccessPolicyUpdate(BaseModel):
     require_email: Optional[bool] = None
 
 
+class MaxParallelTasksCeilingUpdate(BaseModel):
+    """Body for PUT /api/settings/max-parallel-tasks-ceiling (#506).
+
+    Range (1–32) is enforced in the router so an out-of-range value returns a
+    400 with a descriptive message rather than a generic 422.
+    """
+    value: int
+
+
+class AgentCapacityUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
+    max_parallel_tasks: int
+
+
 # ---------------------------------------------------------------------------
 # Fleet Executions (EXEC-022 / Issue #18)
 # ---------------------------------------------------------------------------

@@ -167,6 +167,14 @@ class AgentSnapshot:
     # (#226 bug class). Empty dict means the per-slot read was skipped
     # this cycle (Redis unavailable); the check skips silently.
     slot_ttls: Dict[str, int] = field(default_factory=dict)
+    # #506: stored `max_parallel` clamped to the fleet ceiling. S-01/S-02/S-03
+    # keep using the raw `max_parallel` (clamping only lowers ZCARD vs stored,
+    # so the no-overbooking bound stays valid), but B-02 must compare slot
+    # count to the EFFECTIVE cap — under a lower ceiling an effective-full +
+    # queued agent would otherwise read as "free slots → drain stalled" and
+    # false-fire. None ⇒ fall back to `max_parallel` (test constructors that
+    # predate the ceiling).
+    effective_max_parallel: Optional[int] = None
 
 
 @dataclass
@@ -368,6 +376,20 @@ def _collect_queued_count_via_service(agent_name: str) -> Optional[int]:
             agent_name,
         )
         return None
+
+
+def _clamp_to_ceiling(stored_max_parallel: int) -> int:
+    """Clamp a stored per-agent cap to the fleet ceiling for B-02 (#506).
+
+    Defensive: if the settings read fails (settings_service / database
+    unavailable under unit-test stubs), fall back to the stored value so the
+    snapshot never crashes — B-02 then behaves exactly as before the ceiling.
+    """
+    try:
+        from services.settings_service import clamp_to_ceiling
+        return clamp_to_ceiling(stored_max_parallel)
+    except Exception:  # pragma: no cover - defensive, exercised via stubbing
+        return stored_max_parallel
 
 
 def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
@@ -604,11 +626,13 @@ def collect_snapshot() -> Snapshot:
         # check against the snapshot's own queued id-list count.
         queued_via_service = _collect_queued_count_via_service(name)
 
+        stored_max_parallel = int(row["max_parallel_tasks"])
         snap.agents.append(
             AgentSnapshot(
                 name=name,
                 is_system=bool(row["is_system"]),
-                max_parallel=int(row["max_parallel_tasks"]),
+                max_parallel=stored_max_parallel,
+                effective_max_parallel=_clamp_to_ceiling(stored_max_parallel),
                 execution_timeout_seconds=int(row["execution_timeout_seconds"]),
                 slot_ids=redis_state["by_agent"].get(name, set()),
                 slot_scores=redis_state["scores"].get(name, {}),

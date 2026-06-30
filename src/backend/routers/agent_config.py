@@ -1,7 +1,7 @@
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from models import User, PublicChannelModelUpdate
+from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
 from dependencies import get_current_user
 from services import settings_service
@@ -358,13 +358,19 @@ async def get_agent_capacity(
 
     Returns:
     - agent_name: Name of the agent
-    - max_parallel_tasks: Maximum parallel tasks allowed (1-10)
+    - max_parallel_tasks: Stored, editable per-agent cap (1..fleet ceiling)
+    - ceiling: Admin-set fleet-wide ceiling (#506)
+    - effective_max_parallel_tasks: min(stored, ceiling) — the runtime limit
     - active_slots: Number of currently running executions
-    - available_slots: Remaining capacity
+    - available_slots: Remaining capacity (computed from the effective cap)
     - slots: List of active slot details
     """
     from db_models import AgentCapacity, SlotInfo
     from services.capacity_manager import get_capacity_manager
+    from services.settings_service import (
+        get_max_parallel_tasks_ceiling,
+        clamp_to_ceiling,
+    )
 
     # Check access
     if not db.can_user_access_agent(current_user.username, agent_name):
@@ -374,10 +380,19 @@ async def get_agent_capacity(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Get max_parallel_tasks from database
+    # Get max_parallel_tasks from database (stored, editable per-agent value).
     max_tasks = db.get_max_parallel_tasks(agent_name)
 
+    # #506: two-tier model — the stored value is clamped to the fleet ceiling
+    # at runtime. Surface ceiling + effective so the owner panel (which can't
+    # call the admin settings GET) renders the bound and a "exceeds ceiling"
+    # warning from this one call.
+    ceiling = get_max_parallel_tasks_ceiling()
+    effective = clamp_to_ceiling(max_tasks)
+
     # CAPACITY-CONSOLIDATE (#428): per-agent slot state via CapacityManager.
+    # get_slot_state clamps internally, so available_slots is already computed
+    # from the effective cap (available + active == effective).
     capacity = get_capacity_manager()
     slot_state = await capacity.get_slot_state(agent_name, max_tasks)
 
@@ -396,6 +411,8 @@ async def get_agent_capacity(
     return AgentCapacity(
         agent_name=agent_name,
         max_parallel_tasks=max_tasks,
+        ceiling=ceiling,
+        effective_max_parallel_tasks=effective,
         active_slots=slot_state.active_slots,
         available_slots=slot_state.available_slots,
         slots=slots
@@ -405,17 +422,20 @@ async def get_agent_capacity(
 @router.put("/{agent_name}/capacity")
 async def set_agent_capacity(
     agent_name: str,
-    body: dict,
+    body: AgentCapacityUpdate,
     current_user: User = Depends(get_current_user)
 ):
     """
     Set the parallel execution capacity for an agent.
 
     Body:
-    - max_parallel_tasks: Maximum parallel tasks (1-10)
+    - max_parallel_tasks: Maximum parallel tasks (1..fleet ceiling, #506)
 
-    Only agent owners can modify capacity settings.
+    Only agent owners can modify capacity settings. The upper bound is the
+    admin-set fleet ceiling (default 10), not a hardcoded 10.
     """
+    from services.settings_service import get_max_parallel_tasks_ceiling
+
     # Only owners can change capacity
     if not db.can_user_share_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="Only owners can change capacity settings")
@@ -424,15 +444,15 @@ async def set_agent_capacity(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    max_tasks = body.get("max_parallel_tasks")
-    if max_tasks is None:
-        raise HTTPException(status_code=400, detail="max_parallel_tasks is required")
+    max_tasks = body.max_parallel_tasks
 
-    # Validate range
-    if not isinstance(max_tasks, int) or max_tasks < 1 or max_tasks > 10:
+    # #506: validate against the admin-configured fleet ceiling, not a
+    # hardcoded 10. Owners pick a per-agent value within the ceiling.
+    ceiling = get_max_parallel_tasks_ceiling()
+    if not isinstance(max_tasks, int) or max_tasks < 1 or max_tasks > ceiling:
         raise HTTPException(
             status_code=400,
-            detail="max_parallel_tasks must be an integer between 1 and 10"
+            detail=f"max_parallel_tasks must be an integer between 1 and {ceiling}"
         )
 
     # Update database
