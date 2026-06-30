@@ -59,7 +59,7 @@
                 Regenerate
               </button>
               <button type="button" @click="revokeKey" :disabled="busy"
-                class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-status-error-600 hover:bg-status-error-700 disabled:opacity-50">
+                class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-status-danger-600 hover:bg-status-danger-700 disabled:opacity-50">
                 Revoke
               </button>
             </div>
@@ -112,7 +112,7 @@
         </div>
       </div>
 
-      <p v-if="message" class="text-xs" :class="messageError ? 'text-status-error-600' : 'text-status-success-600'">{{ message }}</p>
+      <p v-if="message" class="text-xs" :class="messageError ? 'text-status-danger-600' : 'text-status-success-600'">{{ message }}</p>
     </div>
   </div>
 </template>
