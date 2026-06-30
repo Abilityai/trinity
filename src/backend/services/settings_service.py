@@ -23,6 +23,25 @@ _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0
 
+# #894: current-gen models an agent owner may select as a per-agent override for
+# public-facing channels. Mirrors the current presets in
+# `frontend/src/components/ModelSelector.vue` (kept in sync by hand — there is no
+# shared model registry across the Python/Vue boundary). A model removed from
+# this set after it was saved is treated as unset (→ platform default) by
+# `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
+PUBLIC_CHANNEL_MODELS = frozenset({
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+})
+
+
+def is_valid_public_channel_model(model: str) -> bool:
+    """True if `model` is a selectable per-agent public-channel override (#894)."""
+    return model in PUBLIC_CHANNEL_MODELS
+
 
 # ============================================================================
 # Ops Settings Configuration - moved from routers/settings.py
