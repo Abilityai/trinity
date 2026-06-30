@@ -3,11 +3,13 @@ import { test, expect, request } from '@playwright/test'
 /**
  * Session tab e2e (SESSION_TAB_2026-04 Phase 3.6).
  *
- * Drives the new Session tab end-to-end against a live Trinity stack:
- *   - flag OFF → tab hidden
- *   - flag ON  → tab visible, "+ New Session" + send-message round-trips
+ * Drives the Session surface end-to-end against a live Trinity stack. Since
+ * #1112 the standalone "Session" tab is gone — session mode is the Chat tab's
+ * session-mode toggle, reached directly via ?tab=session:
+ *   - flag OFF → the "Session mode" toggle is hidden (Chat falls back to legacy)
+ *   - flag ON  → ?tab=session renders SessionPanel, "+ New Session" + send round-trips
  *   - "Reset memory" modal flow
- *   - tab switching back to Chat doesn't lose Session state
+ *   - toggling session mode off/back doesn't lose the Session surface
  *
  * The flag is flipped via the platform's settings API (admin-only) using
  * a fresh authenticated APIRequestContext so we don't pollute the
@@ -73,29 +75,29 @@ test.describe('session tab', () => {
   // Flag-OFF assertion is intentionally separate so it doesn't pay the
   // cost of starting Claude. We flip it off, navigate, assert hidden,
   // flip back on for the rest of the suite.
-  test('@interactive tab is hidden when feature flag is off', async ({ page }) => {
+  test('@interactive session-mode toggle is hidden when feature flag is off', async ({ page }) => {
     const headers = { Authorization: `Bearer ${token}` }
     await api.delete(`/api/settings/${FLAG_KEY}`, { headers })
     try {
-      await page.goto(`/agents/${TEST_AGENT}`)
-      // Wait for the agent header to render so the tab row is mounted.
+      await page.goto(`/agents/${TEST_AGENT}?tab=session`)
+      // Wait for the tab row to mount.
       await expect(page.getByRole('button', { name: 'Tasks' })).toBeVisible({ timeout: 15000 })
-      await expect(page.getByRole('button', { name: 'Session' })).toHaveCount(0)
+      // #1112: with the flag off, `sessionAvailable` is false, so the Chat tab's
+      // "Session mode" toggle is not rendered and the tab falls back to the
+      // legacy stateless ChatPanel (no separate "Session" tab button exists).
+      await expect(page.getByText('Session mode', { exact: true })).toHaveCount(0)
     } finally {
       await api.put(`/api/settings/${FLAG_KEY}`, { headers, data: { value: 'true' } })
     }
   })
 
-  test('@interactive tab appears, sends a turn, and reset-memory clears the cache', async ({ page }) => {
-    await page.goto(`/agents/${TEST_AGENT}`)
-
-    // Session tab must appear between Chat and the next tab.
-    const sessionTab = page.getByRole('button', { name: 'Session', exact: true })
-    await expect(sessionTab).toBeVisible({ timeout: 15000 })
-    await sessionTab.click()
+  test('@interactive session mode sends a turn, and reset-memory clears the cache', async ({ page }) => {
+    // #1112: the Session surface is the Chat tab's session-mode toggle;
+    // ?tab=session lands directly in session mode (SessionPanel renders).
+    await page.goto(`/agents/${TEST_AGENT}?tab=session`)
 
     // Empty state copy from SessionPanel.
-    await expect(page.getByText('+ New Session')).toBeVisible()
+    await expect(page.getByText('+ New Session')).toBeVisible({ timeout: 15000 })
     await expect(page.getByText(/conversation memory will persist/i)).toBeVisible()
 
     // Create a session — dropdown label flips from "No session" to a relative time.
@@ -120,22 +122,27 @@ test.describe('session tab', () => {
     await expect(page.getByRole('heading', { name: /Reset session memory\?/ })).toBeHidden()
   })
 
-  test('@interactive switching to Chat tab and back preserves session messages', async ({ page }) => {
-    // Reuse the agent + session created above by re-navigating; SessionPanel
-    // re-fetches the session list on mount and auto-selects the most recent.
-    await page.goto(`/agents/${TEST_AGENT}`)
-    await page.getByRole('button', { name: 'Session', exact: true }).click()
-    // Wait for at least one session row by looking for either the empty state
-    // or a session-ready empty (the auto-select picks the most recent).
-    await expect(page.getByText(/Session ready|Start a session/i)).toBeVisible({ timeout: 10000 })
+  test('@interactive toggling session mode off and back preserves the Session surface', async ({ page }) => {
+    // #1112: "switch to Chat and back" is now the Chat tab's session-mode toggle
+    // (SessionPanel ↔ legacy ChatPanel) rather than a separate "Session" tab button.
+    await page.goto(`/agents/${TEST_AGENT}?tab=session`)
+    // Session mode renders SessionPanel — its "+ New Session" affordance is present.
+    await expect(page.getByRole('button', { name: '+ New Session' })).toBeVisible({ timeout: 15000 })
 
-    await page.getByRole('button', { name: 'Chat', exact: true }).click()
-    // ChatPanel renders its own header — assert the New Chat button.
+    // The session-mode toggle is the role=switch sibling of the "Session mode"
+    // label — scoped so it doesn't collide with the header autonomy/read-only
+    // switches that also use role="switch".
+    const sessionToggle = page
+      .getByText('Session mode', { exact: true })
+      .locator('xpath=following-sibling::button[@role="switch"]')
+
+    // Toggle OFF → legacy ChatPanel (its "New Chat" affordance).
+    await sessionToggle.click()
     await expect(page.getByRole('button', { name: /New Chat/ })).toBeVisible({ timeout: 10000 })
 
-    await page.getByRole('button', { name: 'Session', exact: true }).click()
-    // Session header must still show its "+ New Session" affordance.
-    await expect(page.getByRole('button', { name: '+ New Session' })).toBeVisible()
+    // Toggle back ON → SessionPanel again (state survives the in-place swap).
+    await sessionToggle.click()
+    await expect(page.getByRole('button', { name: '+ New Session' })).toBeVisible({ timeout: 10000 })
   })
 })
 
