@@ -214,7 +214,7 @@
 - `transports/slack_webhook.py` - HTTP webhook transport (production fallback)
 - `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow; outbound voice replies via `sendVoice` when TTS enabled (epic #24/#25, shared `tts_service`)
 - `transports/telegram_webhook.py` - Telegram Bot API webhook (inbound POST + setWebhook registration)
-- `whatsapp_adapter.py` - DMs via Twilio (WHATSAPP-001); media downloads SSRF-gated to the `*.twilio.com` domain suffix; `/login`/`/logout`/`/whoami` commands + markdown→WhatsApp syntax conversion (#467)
+- `whatsapp_adapter.py` - DMs via Twilio (WHATSAPP-001); media downloads SSRF-gated to the `*.twilio.com` domain suffix; `/login`/`/logout`/`/whoami` commands + markdown→WhatsApp syntax conversion (#467); outbound voice replies as an `audio/ogg` note via the #1315 Twilio `MediaUrl` path when TTS enabled (epic #24/trinity-enterprise#56, shared `tts_service`; hosted via `create_share_from_bytes(require_sharing_enabled=False)` so it's gated only by its own voice toggle)
 - `transports/twilio_webhook.py` - Twilio webhook: HMAC-SHA1 signature validation, MessageSid dedup, form-encoded body
 - `transports/twilio_media_stream.py` + `transports/voip_audio.py` - VoIP Media Streams bridge (a voice transport, NOT a text `ChannelAdapter`) — see [VoIP](#voip-telephony-voip-001-1056)
 

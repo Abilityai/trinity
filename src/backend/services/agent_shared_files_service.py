@@ -460,6 +460,7 @@ def create_share_from_bytes(
     display_name: str,
     expires_in: Optional[int] = None,
     created_by: Optional[str] = None,
+    require_sharing_enabled: bool = True,
 ) -> dict:
     """
     Persist already-in-memory bytes as a public share and mint a download URL —
@@ -471,11 +472,17 @@ def create_share_from_bytes(
     that deliver media by URL (Twilio fetches the public ``?sig=`` URL
     server-side) instead of uploading bytes directly.
 
+    ``require_sharing_enabled=False`` skips the per-agent file-sharing toggle for
+    internally-generated media that has its OWN feature gate — e.g. WhatsApp voice
+    replies (trinity-enterprise#56), which must host a transient audio note for
+    Twilio to fetch and are already gated by ``tts_voice_replies_enabled``. The
+    MIME-blocklist / quota / disk protections still apply.
+
     Raises ``HTTPException`` (403 gate / 400 expiry / 413 quota / 507 disk /
     400 MIME-blocked) exactly like ``create_share`` — callers must isolate it so
     one rejected file never aborts a whole response.
     """
-    if not db.get_file_sharing_enabled(agent_name):
+    if require_sharing_enabled and not db.get_file_sharing_enabled(agent_name):
         raise HTTPException(status_code=403, detail="FEATURE_DISABLED: file sharing is not enabled for this agent")
 
     expires_in = _validate_expires_in(expires_in)
