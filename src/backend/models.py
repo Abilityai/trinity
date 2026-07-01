@@ -723,6 +723,25 @@ class McpExposedUpdate(BaseModel):
     enabled: bool
 
 
+class VoiceRepliesUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25).
+
+    Shared agent-level outbound-voice config: when ``enabled``, channel adapters
+    speak the agent's reply via the shared TTS service using ``voice_id``
+    (an ElevenLabs voice id). ``voice_id`` is required when enabling.
+    """
+    enabled: bool
+    voice_id: Optional[str] = None
+
+    @field_validator("voice_id")
+    @classmethod
+    def _strip_voice_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
 class PublicChannelModelUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/public-channel-model (#894).
 

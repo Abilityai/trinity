@@ -96,6 +96,8 @@ TABLES = {
             file_sharing_enabled INTEGER DEFAULT 0,
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
+            tts_voice_replies_enabled INTEGER DEFAULT 0,
+            tts_voice_id TEXT,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)

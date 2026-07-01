@@ -661,6 +661,12 @@ class DatabaseManager:
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
+    def get_tts_config(self, agent_name: str):
+        return self._agent_ops.get_tts_config(agent_name)
+
+    def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
+        return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
+
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================

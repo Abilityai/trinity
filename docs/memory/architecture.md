@@ -189,6 +189,7 @@
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
+- `tts_service.py` - Shared outbound-voice TTS layer (epic #24): ElevenLabs synth → ffmpeg OGG/Opus transcode; shared char cost-cap; fail-soft (any error → text fallback). Consumed by channel adapters (Telegram #25 first; Slack #26 / WhatsApp trinity-enterprise#56 reuse it)
 - `agent_shared_files_service.py` - Outbound file sharing — see [Outbound File Sharing](#outbound-file-sharing-files-001)
 - `loop_service.py` - Sequential agent loop runner — see [Sequential Agent Loops](#sequential-agent-loops-740-ui-1106)
 - `voip_service.py` - VoIP outbound-call orchestration — see [VoIP](#voip-telephony-voip-001-1056)
@@ -211,7 +212,7 @@
 - `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`
 - `transports/slack_socket.py` - Socket Mode: N concurrent WebSockets per `SLACK_SOCKET_CONNECTION_COUNT` (default 2, range 1–10), per-client watchdog, envelope-ID dedup ring (#244)
 - `transports/slack_webhook.py` - HTTP webhook transport (production fallback)
-- `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow
+- `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow; outbound voice replies via `sendVoice` when TTS enabled (epic #24/#25, shared `tts_service`)
 - `transports/telegram_webhook.py` - Telegram Bot API webhook (inbound POST + setWebhook registration)
 - `whatsapp_adapter.py` - DMs via Twilio (WHATSAPP-001); media downloads SSRF-gated to the `*.twilio.com` domain suffix; `/login`/`/logout`/`/whoami` commands + markdown→WhatsApp syntax conversion (#467)
 - `transports/twilio_webhook.py` - Twilio webhook: HMAC-SHA1 signature validation, MessageSid dedup, form-encoded body
@@ -649,6 +650,7 @@ never bypassed.
 | GET/PUT | `/api/agents/{name}/read-only` | Read-only mode status / toggle (blocks source file writes) |
 | GET/PUT | `/api/agents/{name}/timeout` | Execution timeout (60–7200s, default 3600s, #665). PUT 400 `agent_timeout_below_active_schedules` if the new cap drops below any non-deleted schedule's `timeout_seconds` (#929) |
 | GET/PUT | `/api/agents/{name}/public-channel-model` | Per-agent model override for **public-facing** channels — public link, Slack/Telegram/WhatsApp, x402 (#894). GET returns raw override + resolved model + selectable list; PUT owner-only, whitelist-validated (422), NULL clears → platform default. Resolved at `public.py`/`message_router.py`/`paid.py` (override → platform default → fallback); the owner's own chats/schedules are unaffected |
+| GET/PUT | `/api/agents/{name}/voice-replies` | Shared agent-level outbound-voice (TTS) config (epic #24/#25). GET returns `{enabled, voice_id, available}` (`available` = platform `ELEVENLABS_API_KEY` set); PUT owner-only, requires `voice_id` when enabling. When on, channel adapters speak replies via `tts_service` → OGG/Opus voice note, text fallback on failure/over cap |
 | GET/PUT | `/api/agents/{name}/guardrails` | Per-agent guardrails config / overrides (GUARD-001) |
 | GET/PUT | `/api/agents/{name}/file-sharing` | Outbound file-sharing status + quota / owner-only toggle (returns `restart_required`) (FILES-001) |
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key) |
@@ -978,6 +980,8 @@ CREATE TABLE agent_ownership (
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in
     mcp_exposed INTEGER DEFAULT 0,                 -- #846: dedicated chat_with_<slug> MCP tool opt-in
+    tts_voice_replies_enabled INTEGER DEFAULT 0,   -- epic #24/#25: outbound voice replies (shared agent-level)
+    tts_voice_id TEXT,                             -- epic #24/#25: ElevenLabs voice id for spoken replies
     deleted_at TEXT,                               -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
