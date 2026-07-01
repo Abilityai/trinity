@@ -2072,7 +2072,7 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
   - iOS PWA meta tags: `apple-mobile-web-app-capable`, status bar style, touch icons
   - Start URL: `/m` (auto-loads mobile admin)
   - Shortcuts: Agents tab, Ops tab
-- **Reference**: DGX Sparky PWA implementation (`~/Dropbox/Agents/dgx/sparky-ui/`) for patterns
+- **Reference**: DGX Sparky PWA implementation (internal DGX project, not in this repo) for patterns
 
 ### 27.6 Mobile CSS Optimizations
 - **Status**: ⏳ Not Started
