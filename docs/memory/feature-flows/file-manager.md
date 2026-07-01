@@ -283,6 +283,18 @@ watch(() => props.previewData, async (data) => {
 }, { immediate: true })
 ```
 
+> **CSP dependency (#1400).** Every preview type renders a `blob:` URL
+> (`URL.createObjectURL`), so each depends on the Content-Security-Policy allowing
+> `blob:` in the directive that governs its load: text/download → `connect-src`
+> (the `fetch(data.url)` above), `<img>` → `img-src`, `<video>/<audio>` →
+> `media-src`, PDF `<embed>` → `object-src` **and** `frame-src` (Chrome renders
+> the embedded PDF in an internal viewer frame). `blob:` is **not** covered by
+> `'self'` — it must be listed explicitly per directive, in **both**
+> `src/frontend/security-headers.conf` (prod nginx) and
+> `src/frontend/vite.config.js` (dev). A missing scheme surfaces here as
+> "Failed to load text content" (text) or a silently blank pane (media/PDF).
+> Guarded by `tests/unit/test_1400_csp_blob_preview.py`.
+
 ### Store Actions
 
 **File**: `src/frontend/src/stores/agents.js`
