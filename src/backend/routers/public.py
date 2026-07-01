@@ -602,6 +602,8 @@ async def public_chat(
         triggered_by="public",
         source_user_email=source_email,
         timeout_seconds=900,
+        # #894: per-agent public-channel model override (None → platform default).
+        model=db.get_public_channel_model(agent_name),
         system_prompt=memory_system_prompt,
         images=_pub_image_data,
     )
@@ -923,6 +925,8 @@ async def _execute_public_chat_background(
             source_user_email=source_email,
             timeout_seconds=900,
             execution_id=execution_id,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
             system_prompt=memory_system_prompt,
             images=images or [],
         )

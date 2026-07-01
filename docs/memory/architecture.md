@@ -106,6 +106,7 @@
 - `agent_dashboard.py` - Agent-defined dashboard (dashboard.yaml)
 - `alerts.py` - Cost threshold alerts
 - `notifications.py` - Agent notifications
+- `reports.py` - Agent-published structured reports (#918) — see [Agent Reports](#agent-reports-918)
 - `operator_queue.py` - Operating Room queue (OPS-001)
 - `ops.py` - Operating Room sync service
 - `logs.py` - Container log endpoints
@@ -150,7 +151,7 @@
 - `operator_intake_service.py` - Fire-and-forget, once-per-install opt-in operator intake POST at first-run; owns `installation_id` (trinity-enterprise#38)
 
 *Execution & Scheduling:*
-- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry (see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
+- `task_execution_service.py` - Unified task execution lifecycle: slot mgmt, activity tracking, sanitization (EXEC-024); #678 reader-race auto-retry + #792 SUB-003 switch-retry (pre-raise 429/auth interception → single retry with the same execution_id after a successful subscription switch, so one-shot triggers recover instead of FAILED; see [task-execution-service.md](feature-flows/task-execution-service.md)); records dispatch-breaker outcomes (see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)); hosts `apply_result` + the 202 dispatch path (see [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083))
 - `capacity_manager.py` - Unified capacity facade for admit/release/status — see [Capacity & Backlog](#capacity--backlog-428)
 - `slot_service.py` - Internal to `CapacityManager`: atomic N-ary capacity counter (Redis ZSET, dynamic per-agent TTL) (CAPACITY-001)
 - `backlog_service.py` - Internal to `CapacityManager`: persistent SQLite FIFO overflow store with drain-on-release (BACKLOG-001)
@@ -238,13 +239,13 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 **Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days" while the persistent `AgentHeader` owns "now + cost" (no duplicate live gauges). Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`.
 
-**Collaboration Dashboard** (`views/AgentCollaboration.vue`, `components/AgentNode.vue`, `stores/collaborations.js`): Vue Flow node graph of agent-to-agent communication — draggable status-colored nodes, edges animated 3s on collaboration, real-time activity feed, replay with time-range filtering, localStorage node positions. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed).
+**Collaboration Dashboard** (`views/AgentCollaboration.vue`, `components/AgentNode.vue`, `stores/collaborations.js`): Vue Flow node graph of agent-to-agent communication — draggable status-colored nodes, edges animated 3s on collaboration, real-time activity feed, replay with time-range filtering, localStorage node positions. Detection: the backend chat endpoint accepts `X-Source-Agent` and broadcasts `agent_collaboration` WS events; `activity_service` broadcasts `agent_activity` (`activity_type`: chat_start/chat_end/tool_call/schedule_start/schedule_end/agent_collaboration; `activity_state`: started/completed/failed/cancelled — a user-cancelled terminal is recorded as `cancelled`, distinct from `failed`, #1332).
 
 ### MCP Server (`src/mcp-server/`)
 
 FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: Bearer` header; FastMCP `authenticate` callback validates keys against the backend and stores an `McpAuthContext` in session: `{userId, userEmail, keyName, agentName?, scope: "user"|"agent", mcpApiKey}`. Agent-to-agent collaboration uses agent-scoped keys for access control.
 
-**Tools** across 21 tool modules (`src/tools/`):
+**Tools** across 22 tool modules (`src/tools/`):
 
 | Module | Tools | Description |
 |--------|-------|-------------|
@@ -267,8 +268,10 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
+| `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
+| `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint. Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
 
 ### Vector Log Aggregator (`config/vector.yaml`)
 
@@ -349,6 +352,8 @@ A Trinity **harness IS an `AgentRuntime`** — the pluggable execution engine in
 
 `run_maintenance()` every 60s: expires stale queued tasks (>24h), drains orphans after restart, runs the #526 breaker-aware backstop, and on each successful sweep writes a unix-timestamp heartbeat to Redis `canary:drain_tick_at` (read by canary B-02; written at sweep END so a mid-sweep crash leaves the cursor stale and trips the check).
 
+**Fleet-wide ceiling (#506):** per-agent `max_parallel_tasks` is a two-tier model — an admin sets a fleet-wide ceiling (`max_parallel_tasks_ceiling` in `system_settings`, default 10, range 1–32; no migration), owners pick within it. The runtime clamp is **clamp-on-use** (`settings_service.clamp_to_ceiling`, no per-process cache — `--workers 2` consistency): the `CapacityManager` facade clamps inside `acquire` / `get_slot_state` / `get_all_states` (covering chat ×3, `task_execution_service`, the dashboard, and any future facade reader), and the two genuine facade-bypasses (`backlog_service` drain, `agent_call_limiter`) clamp via `get_effective_max_parallel_tasks`. Stored values are never rewritten; only the *effective* admit limit is capped. The getter is fail-open (settings-read failure → default 10, never crashes dispatch) and read-side range-clamps a stray out-of-range stored value into `[1,32]` (so a `0` can't fail-close the fleet and a `999` can't defeat the cap). Canary **B-02** compares against the **effective** cap (so a lowered ceiling doesn't false-fire); **S-02** keeps the stored cap as a valid upper bound. The `agent_config` GET surfaces `ceiling` + `effective_max_parallel_tasks` for the owner UI. *Known limitation:* `agent_call_limiter` freezes its per-agent semaphore cap at first access — a live agent's semaphore doesn't shrink on a ceiling/cap drop until restart (new agents get the clamped cap immediately).
+
 **Status-as-projection (#1082):** `schedule_executions.status` is a CAS-guarded *projection* of an execution's terminal event — the agent process registry is the runtime authority for "is running"; no backend reader treats `status='running'` as standalone authority (cleanup-watchdog readers use it as a candidate filter, then confirm against the registry/Redis before any destructive write). In `db/schedules.py` every `update(schedule_executions)` writing `status` carries a status precondition in its `WHERE` (incl. `update_execution_to_queued`'s `AND status == RUNNING` guard, closing the E-02 phantom-reversal gap); kept by `tests/unit/test_schedule_status_observability.py`. **Not yet covered (#1082 follow-up):** the standalone scheduler (`src/scheduler/`) writes the same DB with raw-SQL, non-CAS status writers — a late backend `SUCCESS` can still be clobbered on the retry-failure path. See [status-as-projection.md](feature-flows/status-as-projection.md).
 
 ### Circuit Breakers (transport + dispatch, #526)
@@ -372,11 +377,29 @@ Removes backend-thread pinning for autonomous turns by construction: an eligible
 
 - **Terminal applier** (`task_execution_service.apply_result`): the single point that finalizes an execution — shared by the inline sync path and the callback. Derives every persisted field from a normalized `TerminalEnvelope` and **gates ALL side-effects on the CAS bool** (`db.update_execution_status` → bool): a CAS-lost write (replay / late callback) completes no activity, records no breaker outcome, and releases no slot. `slot_service.release_slot` also gates the BACKLOG-001 drain on the ZREM result, so a replayed release can't admit past `max_parallel_tasks`.
 - **Durable async marker**: `mark_execution_dispatched(async_dispatch=True)` writes `claude_session_id='dispatched_async'` (both sentinels non-NULL, so the no-session sweep / E-05 treat them identically). The callback finalizes **only** RUNNING rows carrying it (fail-closed cross-path guard — never terminal-writes a sync/interactive execution mid-await).
-- **Callback endpoint** (`routers/agents.py`, `POST /api/agents/{name}/executions/{id}/result`): agent's own MCP key (mirrors `authorize_heartbeat`) + ownership (404) + marker gate (409) + idempotent replay (an **authoritative** terminal — SUCCESS/CANCELLED/SKIPPED — short-circuits `{replayed:true}`; a FAILED row falls through so a late SUCCESS can still overwrite a reaper `LEASE_EXPIRED` via the CAS, Codex #2) + body-size 413 caps. On accept → `apply_result(..., release_slot=True)`, closing the activity via the filtered `get_open_activity_id_for_execution` (chat/schedule_start + `started`, never a shared-eid tool_call row).
+- **Callback endpoint** (`routers/agents.py`, `POST /api/agents/{name}/executions/{id}/result`): agent's own MCP key (mirrors `authorize_heartbeat`) + ownership (404) + marker gate (409) + idempotent replay (an **authoritative** terminal — SUCCESS/CANCELLED/SKIPPED — short-circuits `{replayed:true}`; a FAILED row falls through so a late SUCCESS can still overwrite a reaper `LEASE_EXPIRED` via the CAS, Codex #2) + body-size 413 caps + the #1085 re-delivery-governor gate (**503 + Retry-After** when the shared-cause pause is armed or a fleet/per-agent re-delivery cap is exceeded — placed after replay-ACK/marker-409 so only an accepted async terminal is throttled; 503 is retryable, never a drop). On accept → `apply_result(..., release_slot=True)`, closing the activity via the filtered `get_open_activity_id_for_execution` (chat/schedule_start + `started`, never a shared-eid tool_call row).
 - **Agent side** (`agent_server/services/result_callback.py`): `try_spawn_async` gates on async + Claude + execution_id + callback creds; `_run_and_report` runs the headless turn, builds the typed envelope (success → `completed`; HTTPException → status-mapped `error_code`/`terminal_reason`, metadata salvaged from the structured 502 body), **persists** it to `~/.trinity/pending-results/<eid>.json`, and delivers with capped backoff up to the lease deadline (dispatch + `timeout + SLOT_TTL_BUFFER`), deleting on a 2xx / permanent 4xx. A strong-ref `_inflight` set defeats the asyncio GC footgun; a **startup sweep** (`main.py`) re-sends leftover envelopes so a crash/restart mid-callback doesn't lose completed work (a late SUCCESS still overwrites a reaper `LEASE_EXPIRED` via CAS).
 - **Lease reaper** (`cleanup_service`): an expired lease (no callback before the slot TTL) FAILs the row with the `lease_expired` tag (`TaskExecutionErrorCode.LEASE_EXPIRED`) and closes its open activity. The stale-execution sweep uses each agent's `timeout + SLOT_TTL_BUFFER` window (not the flat 120-min default) so a legitimately-running max-timeout async turn isn't failed early.
 
 **v1 boundaries**: lease-expiry = FAIL (not re-queue); async empty-result = FAIL (the #678 inline auto-retry stays sync-only); SUB-003 auto-switch stays inline-only (the breaker still protects the fleet); 504/503 async failures write a null-cost row until `execute_headless_task` exposes `ctx.metadata` on those paths (T8 / #1201 fast-follow).
+
+### Correlated-Failure / Thundering-Herd Controls (#1085)
+
+Makes the live #1083 re-delivery path safe at fleet scale (and structured as
+reusable primitives the future pull-mode re-delivery, Epic #1045/#1081, consumes
+unchanged). A backend restart re-sends ~N persisted terminal envelopes plus
+in-flight callback retries; without controls they hammer the callback endpoint in
+lockstep. Three primitives — **jitter**, **re-delivery rate caps**, and a
+**shared-cause pause** — all **fail-open**; the backend controls are
+**default-OFF** behind one master flag (`REDELIVERY_GOVERNOR_ENABLED`). No DB
+schema change (all state is Redis). Details in [redelivery-governor.md](feature-flows/redelivery-governor.md).
+
+- **Jitter (agent-side, unflagged)** — `agent_server/services/result_callback.py`. `_deliver` uses **decorrelated jitter** (`min(cap, uniform(base, prev*3))`, AWS pattern: self-paces *and* spreads, vs lockstep exponential) and honors a server `Retry-After` as a **floor**. `resend_pending_results` adds a one-shot **initial jitter** (≤60s) so a restart smears the t≈0 sweep burst over a minute, plus a small per-envelope jitter. Backend loop periods in `main.py` (capacity maintenance) are jittered so replicas don't realign. The jitter helper is duplicated agent-side, **not** vendored — Invariant #5 governs mirrored API/policy contracts, not utility math (the backend never inspects the agent's backoff).
+- **Re-delivery rate caps (backend)** — the callback endpoint gates, after the fail-closed checks + replay-ACK + marker-409, on two `services/rate_limiter.check` keys: `redelivery:fleet` (≈10/s) and `redelivery:agent:{name}`. Over-limit → **503 + Retry-After** (NOT 429 — 503 ∉ `result_callback._PERMANENT_STATUSES`, so a throttled callback stays persisted and retries; the startup sweep + lease reaper are the never-drop backstops).
+- **Shared-cause pause (`services/redelivery_governor.py`)** — a leaf service over the shared fail-open breaker Redis client (`redis_breaker_util.get_breaker_redis`), singleton `get_redelivery_governor()`. `apply_result` records AUTH/BILLING terminals **on the CAS-`won` branch only** (no replay double-count) into a Redis ZSET (`governor:corr_failures`, member=agent_name) — **counting distinct agents, not events** (`ZCARD`), so one crash-looping agent can't arm it. At `≥ CORRELATED_FAILURE_THRESHOLD` distinct agents it sets `governor:pause` with a TTL (`CORRELATED_PAUSE_TTL_SECONDS=300`, well under the lease window) — **auto-expiry, no explicit unpause** (no stuck-pause failure mode). Three read points, all flag-gated: the callback endpoint → 503 while paused; the lease reaper (`cleanup_service._sweep_stale_slots`) → hold off (keep async rows RUNNING, not FAILED→LEASE_EXPIRED, so a throttled-then-resumed callback still lands); the capacity drain (`capacity_manager.run_maintenance`) → skip `drain_orphans_all`/breaker-backstop (keep the 24h `expire_stale`).
+- **BILLING populated (#1085)** — `result_callback._STATUS_MAP` now maps an agent `429 → ("billing", "rate_limit")` (the enum existed but was never set) so the detector catches a fleet-wide Claude-API 429 storm alongside AUTH. `terminal_reason` stays `rate_limit`, so the cancel-relabel guard still treats it as auth/rate (never a clean cancellation).
+
+`redelivery_governor_enabled` is surfaced in `GET /api/settings/feature-flags` for operator observability during soak (mirrors `mcp_agent_chat_pull_enabled`; not a UI surface).
 
 ### Heartbeat Liveness (RELIABILITY-004, #307)
 
@@ -427,7 +450,7 @@ Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_su
 
 ### Sequential Agent Loops (#740, UI #1106)
 
-Bounded sequential task execution against one agent. Runner is an in-process `asyncio.Task` spawned by `loop_service.py`; each iteration dispatches through `task_execution_service.execute_task()` with `triggered_by="loop"` and the parent `loop_id` carried on the resulting `schedule_executions` row — iterations go through the standard `capacity_manager` admit/slot path, sharing the agent's `max_parallel_tasks` budget. Message template supports `{{run}}` and `{{previous_response}}`; `max_runs` 1–100 hard cap; optional `stop_signal` (until-mode), `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `model`, `allowed_tools`. Stop is cooperative: `POST /api/loops/{id}/stop` flips an in-process `should_stop` flag; the current iteration finishes and the runner exits with `stop_reason="user_stopped"`. **Wall-clock deadline (#1156):** optional `max_duration_seconds` (≤7 days) measured from `started_at`, checked only at iteration boundaries (before the next run and before/after the inter-run delay, which is capped to the remaining budget) — an in-flight run is never killed mid-turn, so overshoot is bounded by one `timeout_per_run`; expiry stops the loop with `stop_reason="deadline_exceeded"`. Rejected at create (400) when smaller than the effective per-run timeout (`timeout_per_run`, else the agent's `execution_timeout_seconds`). `GET /api/loops/{id}` returns `max_duration_seconds` + computed `elapsed_seconds`. Restart recovery via the cleanup-service startup hook (above); no auto-resume. WS events `loop_run_completed`/`loop_completed`.
+Bounded sequential task execution against one agent. Runner is an in-process `asyncio.Task` spawned by `loop_service.py`; each iteration dispatches through `task_execution_service.execute_task()` with `triggered_by="loop"` and the parent `loop_id` carried on the resulting `schedule_executions` row — iterations go through the standard `capacity_manager` admit/slot path, sharing the agent's `max_parallel_tasks` budget. Message template supports `{{run}}` and `{{previous_response}}`; `max_runs` 1–100 hard cap; optional `stop_signal` (until-mode), `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `model`, `allowed_tools`. Stop is cooperative: `POST /api/loops/{id}/stop` flips an in-process `should_stop` flag; the current iteration finishes and the runner exits with `stop_reason="user_stopped"`. **Wall-clock deadline (#1156):** optional `max_duration_seconds` (≤7 days) measured from `started_at`, checked only at iteration boundaries (before the next run and before/after the inter-run delay, which is capped to the remaining budget) — an in-flight run is never killed mid-turn, so overshoot is bounded by one `timeout_per_run`; expiry stops the loop with `stop_reason="deadline_exceeded"`. Rejected at create (400) when smaller than the effective per-run timeout (`timeout_per_run`, else the agent's `execution_timeout_seconds`). **Cost budget (#1155):** optional `max_cost_usd` (`gt=0`, no upper cap) — an iteration-boundary gate enforced *after* the deadline check: the runner accumulates each completed run's cost (only finite, positive values; NULL/unknown counts as 0 fail-open; NaN/inf ignored so it can't poison the accumulator; both unusable-cost cases WARN under an active budget) and stops *before the next run* with `stop_reason="budget_exhausted"` once accumulated cost meets/exceeds the budget. **No-progress / doom-loop detection (#1157):** optional `no_progress_threshold` (`0` disables; **default 3** for new loops via the API/MCP; NULL ⇒ disabled, so in-flight loops created before this change are unaffected). The runner fingerprints each successful run's full response — SHA-256 of normalized text (`" ".join(text.split())`, so word boundaries are preserved and whitespace-only/empty all collapse to one fingerprint) — and stops the loop with `stop_reason="no_progress"` (status `stopped`) once K consecutive runs share a fingerprint. Counter + last-fingerprint are runner-local (no persistence). Detection is **exact-hash only** (no fuzzy/semantic similarity). The validator rejects `1` (422 — "repeated identical" needs ≥2). **Boundary-only precedence** (per iteration: `user_stopped` → `deadline_exceeded` → `budget_exhausted` → run → `stop_signal_matched` → `no_progress`; natural exit `max_runs_reached`): the current run always finishes, so one run — including the first — can overshoot; a run that crosses the budget but is also the final `max_runs` run or matches `stop_signal` yields those reasons instead, and a pending `user_stopped`/`deadline_exceeded` outranks `no_progress`. `GET /api/loops/{id}` returns `max_duration_seconds` + computed `elapsed_seconds`, plus `max_cost_usd` + `total_cost` (computed on read = sum of `agent_loop_runs.cost`, NULL→0; `0.0` for a zero-run loop). Restart recovery via the cleanup-service startup hook (above); no auto-resume. WS events `loop_run_completed`/`loop_completed`.
 
 **Web UI (#1106):** a **Loops** tab on Agent Detail (`components/LoopsPanel.vue` + agent-scoped `stores/loops.js`; `setAgent(name)` on mount, `clear()` on unmount). The global WS handler routes the fleet-wide loop events to the store, which filters by mounted agent and targeted-refreshes only the affected loop; a 12s backstop poll runs while any loop is `queued`/`running` to recover a missed terminal event. Last full response rendered via `utils/markdown.js` (DOMPurify).
 
@@ -448,6 +471,35 @@ Bounded sequential task execution against one agent. Runner is an in-process `as
 Per-agent opt-in (`agent_ownership.file_sharing_enabled`). The agent writes to `/home/developer/public/` (Docker volume `agent-{name}-public`); on share, the backend extracts the named file via Docker SDK `get_archive` (never mounts the workspace — isolated blast radius) and stores bytes at `/data/agent-files/{file_id}`. `agent_shared_files_service.py` handles path validation, MIME blocklist, quota, extraction, URL building.
 
 Download URL: `{public_chat_url}/api/files/{file_id}?sig={token}` — `?sig=` (NOT `?download_token=`) so the credential sanitizer's `.*TOKEN.*` pattern doesn't redact it in transcripts. Cascades manual per platform convention: agent delete removes rows + files + volume; `rename_agent()` updates `agent_name` across 17 tables. MCP tool `share_file`.
+
+### Agent Reports (#918)
+
+Agent-published structured reports (telemetry / domain results) surfaced on the dashboard
+without reading chat. Three-surface clone of `agent_activities`: `routers/reports.py` →
+`services/report_service.py` (create + broadcast only; reads go router→`db/reports.py`
+directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{name}/reports`.
+
+- **Self-gated create**: `AuthorizedAgent` checks owner-access to the path agent, but an
+  agent-scoped key could otherwise report as a *sibling* agent the owner shares; the endpoint
+  additionally requires `current_user.agent_name == name` for agent-scoped callers (mirrors
+  `authorize_heartbeat`). Payload capped at 256 KB → 413; fields strictly validated in
+  `ReportCreate`. Create is rate-limited per agent (`REPORT_RATE_LIMIT`/30 per 60s, shared
+  `services/rate_limiter.py`, fail-open) so a runaway agent can't flood the table between
+  retention sweeps → 429.
+- **Thin WS trigger**: `/ws` is `SCOPE_ALL` and unfiltered, so the `agent_report` broadcast
+  carries only `{agent_name, report_id, report_type, created_at}` — never `title`/`payload`
+  (which can be sensitive). The frontend store refetches via the access-controlled REST
+  endpoints (the `notifications` pattern). Regression-guarded by
+  `tests/unit/test_918_report_broadcast.py`.
+- **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
+  `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
+- **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
+  `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
+  pick by `display_hint` → `report_type` prefix → JSON, with shape-validation fallback to JSON.
+- **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
+  `agent_reports_retention_days` (default 90, `0` disables) via `db.prune_agent_reports`
+  (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite
+  `agent_reports_table` + Alembic `0006_agent_reports`).
 
 ### Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
 
@@ -513,6 +565,51 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 - **Persistence** (`agent_compatibility_results`, latest-snapshot-per-agent, upsert): STATIC recomputes live; persisted AI verdicts merge in so findings show on every Overview load without re-spending tokens (`?include_ai=true` / "Re-run" forces fresh AI; requirements §41). Cascade/rename via `AGENT_REFS`.
 - **Auto-fix** (`POST .../compatibility/fix`, owner/admin): the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back; G-001 removes a blanket `.claude/` line by exact-line match. **No auto-commit** — uncommitted until next git sync. Creates no execution.
 
+### MCP Exposure — Dedicated Dynamic Tools (#846)
+
+Per-agent owner-toggled flag (`agent_ownership.mcp_exposed`, default 0) that
+publishes an agent as a first-class MCP tool. When enabled, the Trinity MCP
+server **dynamically registers** a dedicated `chat_with_<slug>` tool —
+functionally identical to `chat_with_agent` with the agent name pre-filled —
+**at runtime, no MCP-server restart**. The flag publishes a *surface* only;
+execution always runs the same `checkAgentAccess` gate, so ownership/sharing is
+never bypassed.
+
+- **Refresh = poll, not WS.** The MCP server polls `GET /api/internal/mcp-exposed-agents`
+  (existing `X-Internal-Secret` path, ~20s, `tools/dynamic-agents.ts`
+  reconciler), diffs an `agentName→toolName` map, and calls FastMCP
+  `addTool`/`removeTool`. FastMCP fans `notifications/tools/list_changed` to live
+  sessions, so a connected client sees/loses the tool within ~one poll. The
+  reconciler is **fail-open** (mutates only on a valid 200; keeps last-known set
+  on error/parse-failure/timeout) and holds an in-flight mutex so startup-sync
+  and the interval can't race.
+- **Slug = single backend source of truth.** `services/agent_service/mcp_tool_names.py::compute_tool_names`
+  computes the deterministic, collision-free name over the **full set** (sorted;
+  `_<sha1(name)[:4]>` suffix on agent-vs-agent base-slug collision). The MCP
+  server consumes it verbatim and applies one final guard against its own
+  built-in tool names. The per-agent GET uses the same helper so UI and MCP never
+  diverge.
+- **Description = name-only (metadata-free)** — the dedicated tool's description
+  is advertised **globally** to every non-connector MCP key (FastMCP filters the
+  advertised list by `canAccess`; dedicated tools use only the connector-tier
+  gate), so it must carry no per-agent metadata. The `trinity.template` Docker
+  label is deliberately **excluded**: embedding it leaked the template/repo
+  identifier cross-tenant to callers who cannot access the agent and opened a
+  prompt-injection surface into the advertised description (#846 CSO). The agent
+  name is already intrinsic to the `chat_with_<slug>` tool name, so a name-only
+  description adds no disclosure beyond the name.
+- **Visibility** mirrors operator tools: dedicated tools register with the
+  `connectorDenied` `canAccess` gate (hidden from connector-scoped keys, ent#46
+  isolation preserved). The shared `chat_with_agent` body is extracted into
+  `tools/chat.ts::runAgentChat`, reused by both `chat_with_agent` and every
+  dedicated tool — no logic fork (preserves #946 pull routing, parallel/self-task
+  paths, idempotency tokens, #914 gateway-timeout recovery). The audit row binds
+  the target agent via `withAudit(..., boundTargetId)` since dedicated tools carry
+  no `agent_name` param.
+- `mcp_exposed` is surfaced on `GET /api/agents` / MCP `list_agents`. Dual-track
+  migration (SQLite `agent_ownership_mcp_exposed` + Alembic
+  `0009_agent_ownership_mcp_exposed`).
+
 ---
 
 ## API Endpoints
@@ -551,6 +648,7 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 | POST | `/api/agents/{name}/ssh-access` | Ephemeral SSH credentials (admin-only) |
 | GET/PUT | `/api/agents/{name}/read-only` | Read-only mode status / toggle (blocks source file writes) |
 | GET/PUT | `/api/agents/{name}/timeout` | Execution timeout (60–7200s, default 3600s, #665). PUT 400 `agent_timeout_below_active_schedules` if the new cap drops below any non-deleted schedule's `timeout_seconds` (#929) |
+| GET/PUT | `/api/agents/{name}/public-channel-model` | Per-agent model override for **public-facing** channels — public link, Slack/Telegram/WhatsApp, x402 (#894). GET returns raw override + resolved model + selectable list; PUT owner-only, whitelist-validated (422), NULL clears → platform default. Resolved at `public.py`/`message_router.py`/`paid.py` (override → platform default → fallback); the owner's own chats/schedules are unaffected |
 | GET/PUT | `/api/agents/{name}/guardrails` | Per-agent guardrails config / overrides (GUARD-001) |
 | GET/PUT | `/api/agents/{name}/file-sharing` | Outbound file-sharing status + quota / owner-only toggle (returns `restart_required`) (FILES-001) |
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key) |
@@ -560,12 +658,14 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 | POST | `/api/agents/{name}/data/export` | Export agent `data/` as a tar (owner/admin; `?format=stream`\|`base64`; 413 over cap; per-agent op lock). See [Agent Runtime Data](#agent-runtime-data--data_paths--snapshotexport-1169) (#1169) |
 | POST | `/api/agents/{name}/data/import` | Restore an uploaded tar into agent `data/` via the agent-server restore primitive (owner/admin; `data/**` allowlist + traversal guard; `Idempotency-Key`; op lock) (#1169) |
 | POST | `/api/agents/{name}/heartbeat` | Agent liveness heartbeat — auth and semantics in [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307) |
-| POST | `/api/agents/{name}/executions/{execution_id}/result` | Fire-and-forget terminal callback — agent's own MCP key + ownership + durable async-marker gate; finalizes via `apply_result`. See [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083) (#1083) |
+| POST | `/api/agents/{name}/executions/{execution_id}/result` | Fire-and-forget terminal callback — agent's own MCP key + ownership + durable async-marker gate; finalizes via `apply_result`. 503 + Retry-After when the #1085 re-delivery governor is paused / capped (retryable). See [Fire-and-Forget Dispatch](#fire-and-forget-dispatch-1083) (#1083) |
 | GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (#526) |
 | PUT | `/api/agents/{name}/circuit-breaker` | Enable/disable per-agent dispatch breaker (owner-only); engages only with global `DISPATCH_BREAKER_ENABLED` (#526) |
 | POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH transport and dispatch breakers to closed (#921, #526) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
+| GET | `/api/agents/{name}/mcp-exposed` | MCP-exposure flag + the deterministic `tool_name` the MCP server would register. See [MCP Exposure](#mcp-exposure--dedicated-dynamic-tools-846) (#846) |
+| PUT | `/api/agents/{name}/mcp-exposed` | Owner-only; toggle exposing the agent as a dedicated `chat_with_<slug>` MCP tool (`{enabled}`). System agent → 403. No restart — MCP server picks it up on its next poll (#846) |
 
 **Note**: Route ordering is critical — static routes (`/context-stats`, `/autonomy-status`) must be defined BEFORE the `/{name}` catch-all (Invariant #4).
 
@@ -656,7 +756,8 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
 | POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
-| GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) |
+| POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
+| GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |
 | GET | `/api/users/me` | Current user |
 | PUT | `/api/users/me/email` | Bind a sign-in email to the caller's own account (#82 transition; 409 if taken). No verification email sent |
 | GET | `/api/users` | List users with roles (admin-only; exposes `suspended_at` read-only) (ROLE-001) |
@@ -708,7 +809,7 @@ WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_qu
 ### Platform Audit Log (SEC-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start/end_time, limit, offset) |
+| GET | `/api/audit-log` | Admin | List entries (filters: event_type, actor_type, actor_id, target_type, target_id, source, start/end_time, `request_id` (#905 — joins an MCP `mcp_operation` row to the backend row it triggered), limit, offset) |
 | GET | `/api/audit-log/stats` | Admin | Counts by event_type and actor_type |
 | GET | `/api/audit-log/heatmap` | Admin | Day-of-week × hour-of-day sparse 7×24 grid; honors time + event/actor filters (#941) |
 | GET | `/api/audit-log/calendar` | Admin | Per-day calendar heatmap (sparse `[{date, count}]`); same filters — *when* in calendar time vs the weekly pattern from `/heatmap` (#941) |
@@ -719,7 +820,7 @@ WebSocket events: `operator_queue_new`, `operator_queue_responded`, `operator_qu
 | POST | `/api/audit-log/hash-chain/enable` | Admin | Toggle hash-chain computation for new entries |
 | POST | `/api/internal/audit` | Internal secret | Fire-and-forget write path for MCP tool-call audit |
 
-Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request-ID middleware; MCP tool-call audit via a transparent wrapper (all 66+ tools, zero per-tool code). Storage: append-only `audit_log` table (see schema). `/api/audit-log` is the only audit surface (the old `/api/audit` Process Engine router is gone).
+Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request-ID middleware; MCP tool-call audit via a transparent wrapper (all 66+ tools, zero per-tool code). The wrapper centrally resolves each `mcp_operation` row's `target_id` (from the tool's `agent_name`/`name` param) and `request_id` (a per-call id a tool may stamp on the shared context, e.g. the git tools) — both previously dropped (#905). Storage: append-only `audit_log` table (see schema). `/api/audit-log` is the only audit surface (the old `/api/audit` Process Engine router is gone).
 
 ### Canary (CANARY-001)
 | Method | Path | Auth | Description |
@@ -749,7 +850,7 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 ### Sequential Agent Loops (#740)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/agents/{name}/loops` | JWT/MCP | Start loop; 202 with `{loop_id, status, agent_name, max_runs}`. Body: `message` (template), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `model`, `allowed_tools` |
+| POST | `/api/agents/{name}/loops` | JWT/MCP | Start loop; 202 with `{loop_id, status, agent_name, max_runs}`. Body: `message` (template), `max_runs` (1–100, required), `stop_signal`, `delay_seconds`, `timeout_per_run`, `max_duration_seconds`, `no_progress_threshold` (0 disables; default 3; `1` → 422), `model`, `allowed_tools` |
 | GET | `/api/agents/{name}/loops` | JWT/MCP | List loops (`?status=`, `?limit=` 1–200 default 50) |
 | GET | `/api/loops/{loop_id}` | JWT/MCP | Status + per-run summaries + last full response; 404 unknown, 403 if caller neither initiator nor agent-accessor |
 | POST | `/api/loops/{loop_id}/stop` | JWT/MCP | Graceful stop → `{status: "stopping" \| "already_done"}` |
@@ -758,9 +859,10 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
-| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
+| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
+| GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |
 
 ### Session Tab
 | Method | Path | Description |
@@ -871,9 +973,11 @@ CREATE TABLE agent_ownership (
     group_auth_mode TEXT DEFAULT 'none',
     voice_system_prompt TEXT,
     voice_name TEXT,                               -- #28: persisted Gemini voice (NULL → 'Kore')
+    public_channel_model TEXT,                     -- #894: per-agent model for public channels (NULL → platform default)
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in
+    mcp_exposed INTEGER DEFAULT 0,                 -- #846: dedicated chat_with_<slug> MCP tool opt-in
     deleted_at TEXT,                               -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id),
     FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
@@ -1009,11 +1113,13 @@ CREATE TABLE agent_loops (
     delay_seconds INTEGER NOT NULL DEFAULT 0,
     timeout_per_run INTEGER,                     -- NULL = agent's execution_timeout_seconds
     max_duration_seconds INTEGER,                -- #1156: NULL = no wall-clock deadline (≤7d when set)
+    max_cost_usd REAL,                           -- #1155: NULL = no cost budget (gt=0 when set)
+    no_progress_threshold INTEGER,               -- #1157: NULL = disabled (legacy); 0 = off; ≥2 = stop after K identical responses
     model TEXT,
     allowed_tools TEXT,                          -- JSON array
     status TEXT NOT NULL,                        -- queued | running | completed | stopped | failed | interrupted
     runs_completed INTEGER NOT NULL DEFAULT 0,
-    stop_reason TEXT,                            -- max_runs_reached | stop_signal_matched | user_stopped | deadline_exceeded | error | interrupted
+    stop_reason TEXT,                            -- max_runs_reached | stop_signal_matched | user_stopped | deadline_exceeded | budget_exhausted | no_progress | error | interrupted
     last_response TEXT,
     error TEXT,
     started_by_user_id INTEGER,
@@ -1052,7 +1158,7 @@ CREATE TABLE agent_activities (
     id TEXT PRIMARY KEY,
     agent_name TEXT NOT NULL,
     activity_type TEXT NOT NULL,            -- chat_start, chat_end, tool_call, schedule_start, schedule_end, agent_collaboration
-    activity_state TEXT NOT NULL,           -- started, completed, failed
+    activity_state TEXT NOT NULL,           -- started, completed, failed, cancelled (#1332)
     parent_activity_id TEXT,                -- link to parent activity (tool → chat)
     started_at TEXT NOT NULL,
     completed_at TEXT,
@@ -1491,6 +1597,29 @@ CREATE TABLE agent_compatibility_results (
 );
 ```
 
+**agent_reports** (#918 — see [Agent Reports](#agent-reports-918)). Dual-track migration
+(SQLite `agent_reports_table` + Alembic `0006_agent_reports`). `user_id` = the MCP-key/JWT
+owner who authored the report (not necessarily the agent owner):
+```sql
+CREATE TABLE agent_reports (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_id INTEGER,                     -- author = MCP-key owner (current_user.id)
+    report_type TEXT NOT NULL,           -- namespaced, e.g. 'recon.weekly_summary'
+    title TEXT NOT NULL,
+    payload TEXT NOT NULL,               -- arbitrary JSON, ≤256 KB (413 over cap)
+    display_hint TEXT,                   -- table|kpi|markdown|timeline|json|NULL
+    schema_version INTEGER DEFAULT 1,
+    period_start TEXT,
+    period_end TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX idx_agent_reports_agent   ON agent_reports(agent_name, created_at DESC);
+CREATE INDEX idx_agent_reports_type    ON agent_reports(report_type, created_at DESC);
+CREATE INDEX idx_agent_reports_created ON agent_reports(created_at);  -- retention sweep
+```
+
 ### Redis
 
 - **Credential storage (DEPRECATED — CRED-002)**: credentials moved to encrypted files in agent workspaces (`.env` + `.credentials.enc`); legacy keys (`credentials:{id}:*`, `user:{id}:credentials`, `agent:{name}:credentials`) kept for backward compatibility only.
@@ -1512,6 +1641,7 @@ CREATE TABLE agent_compatibility_results (
 | **Admin** (secondary) | Password → `POST /api/token` | JWT with `mode: "admin"` |
 
 - Email whitelist controls who can login via email; admin login always available for 'admin'.
+- **JWT revocation on logout** (#187): every access token carries a random `jti`; `POST /api/auth/logout` writes `jwt:revoked:{jti}` to Redis with a TTL equal to the token's remaining life, and `get_current_user` / `decode_token` (WS) / `/api/auth/validate` (nginx) reject a revoked `jti`. Closes the "exfiltrated 7-day token survives logout" gap (pentest 3.3.4). Fail-open (Redis down or a legacy no-`jti` token → not revoked), so the check can never lock out a valid session; backend restart still rotates `SECRET_KEY` and invalidates everything. Token-lifetime reduction + refresh tokens deferred (separate issue).
 - **4-tier role hierarchy** (ROLE-001): `user` < `operator` < `creator` < `admin`. Agent creation requires `creator`+. Enforced via `require_role()` in `dependencies.py`.
 - **Whitelist-driven role on first login** (#314): new email users inherit the `default_role` on their `email_whitelist` row (fallback `user`). Callsites pass explicit intent — `/share` and access-request approvals → `user` (chat-only grant); public `/api/access/request` self-signup → `user`; admin whitelist UI → caller-specified. Owners promote collaborators explicitly via `PUT /api/users/{username}/role`. Closes a privilege escalation where any access grant silently promoted the recipient to `creator`.
 - **Public self-signup is default-OFF** (trinity-enterprise#10): the unauthenticated `POST /api/access/request` returns **403** unless an operator opts in via `PUBLIC_ACCESS_REQUESTS_ENABLED` (env) or the `public_access_requests_enabled` system setting. When off it never auto-whitelists, so the email whitelist stays authoritative against self-enrollment. Login-code requests for already-whitelisted emails are unaffected.

@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "date": "2026-06-28",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "AndriiPasternak31/issue-1157",
+  "base": "origin/dev",
+  "feature": "#1157 — no-progress / doom-loop detection for Sequential Agent Loops",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "confidence_gate": "8/10",
+  "attack_surface": {
+    "new_endpoints": 0,
+    "modified_endpoints": 1,
+    "modified_endpoints_detail": "POST /api/agents/{name}/loops (already JWT/MCP auth'd) gains one optional integer field",
+    "modified_mcp_tools": 1,
+    "modified_mcp_tools_detail": "run_agent_loop gains one optional integer param",
+    "new_file_ops": 0,
+    "new_external_calls": 0,
+    "new_secrets": 0,
+    "db_changes": "agent_loops.no_progress_threshold INTEGER (nullable); dual-track SQLite + Alembic 0007"
+  },
+  "findings": [],
+  "supply_chain_summary": {
+    "new_dependencies": 0,
+    "note": "No new imports beyond stdlib hashlib (already ubiquitous in repo)."
+  },
+  "filter_stats": {
+    "candidates_considered": 5,
+    "discarded_sha256_non_crypto": 1,
+    "discarded_dos_resource": 1,
+    "discarded_no_upper_bound_no_impact": 1,
+    "surviving_confidence_gate": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "trend": {
+    "prior_diff_reports": ["cso-diff-2026-06-23", "cso-diff-2026-06-27-792", "cso-diff-2026-06-27-918"],
+    "resolved": 0,
+    "persistent": 0,
+    "new": 0,
+    "direction": "clean — no findings introduced by this diff"
+  }
+}

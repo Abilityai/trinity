@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS agent_activities (
     id TEXT PRIMARY KEY,                           -- UUID
     agent_name TEXT NOT NULL,                      -- Which agent
     activity_type TEXT NOT NULL,                   -- chat_start, tool_call, schedule_start, etc.
-    activity_state TEXT NOT NULL,                  -- started, completed, failed
+    activity_state TEXT NOT NULL,                  -- started, completed, failed, cancelled (#1332)
     parent_activity_id TEXT,                       -- Link to parent (tool -> chat)
     started_at TEXT NOT NULL,                      -- ISO8601 timestamp
     completed_at TEXT,                             -- ISO8601 timestamp
@@ -115,7 +115,14 @@ class ActivityState(str, Enum):
     STARTED = "started"      # Activity in progress
     COMPLETED = "completed"  # Successfully completed
     FAILED = "failed"        # Failed with error
+    CANCELLED = "cancelled"  # User-cancelled terminal, distinct from FAILED (#1332)
 ```
+
+> **#1332:** every activity close-site derives its terminal state from the shared
+> `models.activity_state_for_terminal(status)` helper (SUCCESS→COMPLETED,
+> CANCELLED→CANCELLED, else→FAILED) instead of a hard-coded
+> `COMPLETED if success else FAILED`, so a user-cancelled execution reads as a
+> distinct, non-failure terminal in activity-derived views.
 
 ---
 
@@ -189,7 +196,7 @@ async def track_activity(
 ```python
 async def complete_activity(
     activity_id: str,
-    status: str = "completed",  # or "failed"
+    status: str = "completed",  # or "failed" / "cancelled" (#1332)
     details: Optional[Dict] = None,
     error: Optional[str] = None
 ) -> bool:
@@ -389,7 +396,7 @@ collaboration_activity_id = await activity_service.track_activity(
 
 **Parameters**:
 - `activity_type` (optional): Filter by type (chat_start, tool_call, etc.)
-- `activity_state` (optional): Filter by state (started, completed, failed)
+- `activity_state` (optional): Filter by state (started, completed, failed, cancelled)
 - `limit` (default: 100): Max activities to return
 
 **Authorization**: Uses `AuthorizedAgentByName` dependency - owner, shared, or admin

@@ -156,6 +156,74 @@ class TestOpenToolExceeding:
         }
         assert he._open_tool_exceeding(ctx, 300) == "mcp__x__hang"
 
+    # --- #1369: scope to mcp__*, exempt built-ins, None-safe --------------
+
+    def test_builtin_tool_exempt_even_when_long_open(self):
+        """A long-running built-in (Bash / Task sub-agent) is NOT a stall — it is
+        bounded by execution_timeout, not the per-tool watchdog (#1369)."""
+        for builtin in ("Bash", "Task", "Read", "WebFetch"):
+            ctx = _ctx()
+            ctx.execution_log = [_tool_use_entry("t1", builtin)]
+            ctx.tool_start_times = {"t1": datetime.now() - timedelta(seconds=4000)}
+            assert he._open_tool_exceeding(ctx, 300) is None, builtin
+
+    def test_builtin_open_but_mcp_stalled_flags_only_mcp(self):
+        ctx = _ctx()
+        ctx.execution_log = [
+            _tool_use_entry("b", "Bash"),
+            _tool_use_entry("m", "mcp__srv__call"),
+        ]
+        now = datetime.now()
+        ctx.tool_start_times = {
+            "b": now - timedelta(seconds=4000),   # long Bash, exempt
+            "m": now - timedelta(seconds=400),    # stalled mcp, caught
+        }
+        assert he._open_tool_exceeding(ctx, 300) == "mcp__srv__call"
+
+    def test_blank_or_non_mcp_name_not_flagged(self):
+        """A non-mcp__ name (incl. an empty string) is exempt and must not crash
+        — the `(e.tool or "")` guard keeps a falsy name from raising."""
+        ctx = _ctx()
+        ctx.execution_log = [_tool_use_entry("t1", "")]
+        ctx.tool_start_times = {"t1": datetime.now() - timedelta(seconds=400)}
+        assert he._open_tool_exceeding(ctx, 300) is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_stall_limit_s (env-configurable ceiling, #1369)
+# ---------------------------------------------------------------------------
+
+class TestResolveStallLimit:
+    def test_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("AGENT_TOOL_STALL_LIMIT_S", raising=False)
+        assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S
+
+    def test_default_when_blank(self, monkeypatch):
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "   ")
+        assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S
+
+    def test_valid_override(self, monkeypatch):
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "600")
+        assert he._resolve_stall_limit_s() == 600.0
+
+    def test_invalid_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "not-a-number")
+        assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S
+
+    def test_non_finite_falls_back_to_default(self, monkeypatch):
+        # inf/nan parse as floats but would silently make the watchdog
+        # inert/disabled — they must fall back to the default, not pass through.
+        for bad in ("inf", "-inf", "Infinity", "nan", "NaN"):
+            monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", bad)
+            assert he._resolve_stall_limit_s() == he._STALL_LIMIT_DEFAULT_S, bad
+
+    def test_zero_and_negative_pass_through_as_disabled_sentinel(self, monkeypatch):
+        # <=0 is returned verbatim; the call site (not the helper) gates disable.
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "0")
+        assert he._resolve_stall_limit_s() == 0.0
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "-5")
+        assert he._resolve_stall_limit_s() == -5.0
+
 
 # ---------------------------------------------------------------------------
 # Wait-loop branches via _run_headless_subprocess
@@ -190,10 +258,12 @@ class TestWaitLoop:
         assert any("finalizing early" in r.getMessage() for r in caplog.records)
 
     def test_stall_watchdog_raises_for_open_tool(self, patched_loop, caplog):
-        """An open tool_use with no result for >_STALL_LIMIT_S raises
-        TimeoutExpired well before the budget."""
+        """An open mcp__ tool_use with no result for >stall_limit raises
+        TimeoutExpired well before the budget (#970)."""
         monkeypatch, _term = patched_loop
-        monkeypatch.setattr(he, "_STALL_LIMIT_S", 0.0)
+        # A tiny POSITIVE limit makes the open mcp tool trip immediately.
+        # (0 means *disabled* under #1369 — see the disable-path test.)
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "0.01")
         _install_popen(monkeypatch, _FakePopen([_TOOL_USE_LINE], never_exits=True))
         ctx = _ctx(effective_timeout=30)  # large — must NOT be what fires
 
@@ -205,6 +275,25 @@ class TestWaitLoop:
 
         assert elapsed < 5.0, "stall should fire fast, not at the 30s budget"
         assert any("stalled with no result" in r.getMessage() for r in caplog.records)
+        assert ctx.termination_reason == "stall_no_output"
+
+    def test_stall_watchdog_disabled_falls_to_budget(self, patched_loop, caplog):
+        """#1369: AGENT_TOOL_STALL_LIMIT_S=0 disables the per-tool watchdog; an
+        open mcp__ tool is NOT stall-killed — only the execution_timeout budget
+        bounds it (termination_reason 'max_duration', not 'stall_no_output')."""
+        monkeypatch, _term = patched_loop
+        monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "0")
+        monkeypatch.setattr(he, "_WAIT_POLL_S", 0.1)
+        _install_popen(monkeypatch, _FakePopen([_TOOL_USE_LINE], never_exits=True))
+        ctx = _ctx(effective_timeout=0.3)  # the budget is what must fire
+
+        with caplog.at_level(logging.ERROR, logger=he.logger.name):
+            with pytest.raises(subprocess.TimeoutExpired):
+                he._run_headless_subprocess(ctx)
+
+        assert ctx.termination_reason == "max_duration"
+        assert ctx.stalled_tool is None
+        assert any("timed out after" in r.getMessage() for r in caplog.records)
 
     def test_natural_exit_still_returns_real_code(self, patched_loop):
         """Regression: a process that exits on its own is unchanged."""

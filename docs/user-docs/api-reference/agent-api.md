@@ -80,6 +80,8 @@ Sequential bounded task execution against one agent — see [Agent Loops](../aut
 | `/api/loops/{loop_id}` | GET | Loop status, per-run summaries, last response |
 | `/api/loops/{loop_id}/stop` | POST | Graceful stop (current iteration finishes) |
 
+Start-loop body: `message` (required), `max_runs` (1–100, required), and optional `stop_signal`, `delay_seconds`, `timeout_per_run`, `max_duration_seconds` (wall-clock deadline), `max_cost_usd` (> 0; total USD budget), `model`, `allowed_tools`. The cost budget and the deadline are both **iteration-boundary** stops — checked between runs, so the current run always finishes (one run, including the first, can overshoot). The loop's `stop_reason` is one of `max_runs_reached`, `stop_signal_matched`, `user_stopped`, `deadline_exceeded`, `budget_exhausted`, `error`, or `interrupted`; `GET /api/loops/{loop_id}` also returns `max_cost_usd` and `total_cost` (sum of per-run cost, `0.0` for a zero-run loop).
+
 ### VoIP
 
 Outbound phone calls — flag-gated, off by default. See [VoIP Telephony](../advanced/voip-telephony.md).

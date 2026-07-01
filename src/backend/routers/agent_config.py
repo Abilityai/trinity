@@ -1,9 +1,10 @@
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from models import User
+from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
 from dependencies import get_current_user
+from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
     get_agent_api_key_setting_logic,
@@ -357,13 +358,19 @@ async def get_agent_capacity(
 
     Returns:
     - agent_name: Name of the agent
-    - max_parallel_tasks: Maximum parallel tasks allowed (1-10)
+    - max_parallel_tasks: Stored, editable per-agent cap (1..fleet ceiling)
+    - ceiling: Admin-set fleet-wide ceiling (#506)
+    - effective_max_parallel_tasks: min(stored, ceiling) — the runtime limit
     - active_slots: Number of currently running executions
-    - available_slots: Remaining capacity
+    - available_slots: Remaining capacity (computed from the effective cap)
     - slots: List of active slot details
     """
     from db_models import AgentCapacity, SlotInfo
     from services.capacity_manager import get_capacity_manager
+    from services.settings_service import (
+        get_max_parallel_tasks_ceiling,
+        clamp_to_ceiling,
+    )
 
     # Check access
     if not db.can_user_access_agent(current_user.username, agent_name):
@@ -373,10 +380,19 @@ async def get_agent_capacity(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    # Get max_parallel_tasks from database
+    # Get max_parallel_tasks from database (stored, editable per-agent value).
     max_tasks = db.get_max_parallel_tasks(agent_name)
 
+    # #506: two-tier model — the stored value is clamped to the fleet ceiling
+    # at runtime. Surface ceiling + effective so the owner panel (which can't
+    # call the admin settings GET) renders the bound and a "exceeds ceiling"
+    # warning from this one call.
+    ceiling = get_max_parallel_tasks_ceiling()
+    effective = clamp_to_ceiling(max_tasks)
+
     # CAPACITY-CONSOLIDATE (#428): per-agent slot state via CapacityManager.
+    # get_slot_state clamps internally, so available_slots is already computed
+    # from the effective cap (available + active == effective).
     capacity = get_capacity_manager()
     slot_state = await capacity.get_slot_state(agent_name, max_tasks)
 
@@ -395,6 +411,8 @@ async def get_agent_capacity(
     return AgentCapacity(
         agent_name=agent_name,
         max_parallel_tasks=max_tasks,
+        ceiling=ceiling,
+        effective_max_parallel_tasks=effective,
         active_slots=slot_state.active_slots,
         available_slots=slot_state.available_slots,
         slots=slots
@@ -404,17 +422,20 @@ async def get_agent_capacity(
 @router.put("/{agent_name}/capacity")
 async def set_agent_capacity(
     agent_name: str,
-    body: dict,
+    body: AgentCapacityUpdate,
     current_user: User = Depends(get_current_user)
 ):
     """
     Set the parallel execution capacity for an agent.
 
     Body:
-    - max_parallel_tasks: Maximum parallel tasks (1-10)
+    - max_parallel_tasks: Maximum parallel tasks (1..fleet ceiling, #506)
 
-    Only agent owners can modify capacity settings.
+    Only agent owners can modify capacity settings. The upper bound is the
+    admin-set fleet ceiling (default 10), not a hardcoded 10.
     """
+    from services.settings_service import get_max_parallel_tasks_ceiling
+
     # Only owners can change capacity
     if not db.can_user_share_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="Only owners can change capacity settings")
@@ -423,15 +444,15 @@ async def set_agent_capacity(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    max_tasks = body.get("max_parallel_tasks")
-    if max_tasks is None:
-        raise HTTPException(status_code=400, detail="max_parallel_tasks is required")
+    max_tasks = body.max_parallel_tasks
 
-    # Validate range
-    if not isinstance(max_tasks, int) or max_tasks < 1 or max_tasks > 10:
+    # #506: validate against the admin-configured fleet ceiling, not a
+    # hardcoded 10. Owners pick a per-agent value within the ceiling.
+    ceiling = get_max_parallel_tasks_ceiling()
+    if not isinstance(max_tasks, int) or max_tasks < 1 or max_tasks > ceiling:
         raise HTTPException(
             status_code=400,
-            detail="max_parallel_tasks must be an integer between 1 and 10"
+            detail=f"max_parallel_tasks must be an integer between 1 and {ceiling}"
         )
 
     # Update database
@@ -544,6 +565,94 @@ async def set_agent_timeout(
         "agent_name": agent_name,
         "execution_timeout_seconds": timeout_seconds,
         "execution_timeout_minutes": timeout_seconds // 60,
+    }
+
+
+# ============================================================================
+# Public-Channel Model Override (#894)
+# ============================================================================
+
+@router.get("/{agent_name}/public-channel-model")
+async def get_public_channel_model(
+    agent_name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Get the per-agent model override for public-facing channels (#894).
+
+    Public-facing = public chat link, Slack/Telegram/WhatsApp channels, and x402
+    paid chat. The override is owner-set; NULL means inherit the platform
+    default. Returns the raw override, the resolved (effective) model, and the
+    selectable list.
+    """
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    override = db.get_public_channel_model(agent_name)
+    platform_default = settings_service.get_platform_default_model()
+    return {
+        "agent_name": agent_name,
+        "public_channel_model": override,                       # None = inherit
+        "resolved_model": override or platform_default,
+        "is_overridden": override is not None,
+        "platform_default": platform_default,
+        "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
+    }
+
+
+@router.put("/{agent_name}/public-channel-model")
+async def set_public_channel_model(
+    agent_name: str,
+    body: PublicChannelModelUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set or clear the per-agent public-channel model override (owner-only, #894).
+
+    A null/empty ``model`` clears the override (inherit the platform default);
+    a non-empty value must be a currently-selectable model (422 otherwise).
+    """
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=403, detail="Only owners can change the public-channel model")
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    model = (body.model or "").strip() or None
+    if model is not None and not settings_service.is_valid_public_channel_model(model):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_public_channel_model",
+                "message": f"{model!r} is not a selectable public-channel model.",
+                "available_models": sorted(settings_service.PUBLIC_CHANNEL_MODELS),
+            },
+        )
+
+    if not db.set_public_channel_model(agent_name, model):
+        raise HTTPException(status_code=500, detail="Failed to update public-channel model")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="update_public_channel_model",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"public_channel_model": model},  # None = cleared
+    )
+
+    platform_default = settings_service.get_platform_default_model()
+    return {
+        "message": "Public-channel model updated",
+        "agent_name": agent_name,
+        "public_channel_model": model,
+        "resolved_model": model or platform_default,
+        "is_overridden": model is not None,
     }
 
 

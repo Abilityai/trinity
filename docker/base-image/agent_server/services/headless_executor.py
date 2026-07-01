@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 import threading
@@ -73,23 +74,72 @@ _JSONL_PERSIST_THRESHOLD_S = 600
 # timeout). The stall limit is intentionally generous — "tool running" is
 # not "tool stalled" — so only a genuinely wedged call trips it.
 _WAIT_POLL_S = 2.0
-_STALL_LIMIT_S = 300.0
+
+# #1369: default per-tool stall ceiling (was a flat hard-coded 300s, which
+# killed legitimately long internal MCP calls). Operator-configurable via
+# AGENT_TOOL_STALL_LIMIT_S; <=0 disables the watchdog (the execution_timeout
+# budget stays the backstop). The watchdog is also scoped to opaque MCP
+# (``mcp__*``) tools only — built-ins (Bash/Read/Task/sub-agents) return on
+# their own and are already bounded by execution_timeout_seconds, so a long
+# (progressing) built-in must never be killed here. A genuinely hung built-in
+# or a hang *inside* a Task sub-agent (which surfaces as an open ``Task`` in
+# the parent log) now falls to the execution_timeout backstop rather than this
+# 300s kill — the accepted interim tradeoff (see #1369).
+_STALL_LIMIT_DEFAULT_S = 1800.0
+
+
+def _resolve_stall_limit_s() -> float:
+    """Resolved per-run stall ceiling (seconds).
+
+    Read fresh per run (not a module constant) so it honors the container env
+    and is monkeypatchable in tests. ``AGENT_TOOL_STALL_LIMIT_S`` overrides the
+    default; a missing/blank value uses the default; a non-numeric value falls
+    back to the default with a warning (a typo must not brick the executor).
+    A value ``<= 0`` means *disabled* and is handled at the call site — it is
+    NOT passed into ``_open_tool_exceeding`` (where ``> 0`` would fire instantly).
+    Non-finite values (``inf``/``nan``) parse as floats but would silently make
+    the watchdog inert/disabled, so they fall back to the default too — only a
+    deliberate ``<= 0`` disables.
+    """
+    raw = os.environ.get("AGENT_TOOL_STALL_LIMIT_S")
+    if raw is None or not raw.strip():
+        return _STALL_LIMIT_DEFAULT_S
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = math.nan
+    if not math.isfinite(val):
+        logger.warning(
+            "[Headless Task] Invalid AGENT_TOOL_STALL_LIMIT_S=%r — using default %.0fs",
+            raw, _STALL_LIMIT_DEFAULT_S,
+        )
+        return _STALL_LIMIT_DEFAULT_S
+    return val
 
 
 def _open_tool_exceeding(ctx: HeadlessRunContext, limit_s: float) -> Optional[str]:
-    """Name of a tool_use open (no matching tool_result) for > ``limit_s``, else None.
+    """Name of an ``mcp__*`` tool_use open (no tool_result) for > ``limit_s``, else None.
 
     #970 stall-watchdog signal. Reuses the stream parser's existing
     bookkeeping — ``tool_start_times`` (set on every tool_use) and the
     ``execution_log`` tool_result entries that close them. A hung stdio
     MCP ``tools/call`` never emits a tool_result, so its tool_use stays
     open: the only externally-visible signal that claude is wedged.
+
+    #1369: only ``mcp__*`` tools are considered. Built-ins return on their
+    own and are bounded by execution_timeout, so they are exempt here. The
+    caller must only invoke this with ``limit_s > 0`` (a ``<= 0`` limit would
+    match every open tool).
     """
     log = list(ctx.execution_log)  # snapshot — reader thread mutates concurrently
     completed = {e.id for e in log if e.type == "tool_result"}
     now = datetime.now()
     for e in log:
         if e.type == "tool_use" and e.id not in completed:
+            # Scope to opaque MCP stdio calls; None-safe (a tool_use with no
+            # name must not crash the poll loop).
+            if not (e.tool or "").startswith("mcp__"):
+                continue
             started = ctx.tool_start_times.get(e.id)
             if started and (now - started).total_seconds() > limit_s:
                 return e.tool
@@ -252,10 +302,13 @@ class HeadlessRunContext:
     stdout_exc: List[BaseException] = field(default_factory=list)
     # #1094: which termination path fired, so the terminal 504 carries a
     # distinct reason instead of always claiming the max-duration timeout.
-    #   "stall_no_output" — a tool produced no result for >_STALL_LIMIT_S
+    #   "stall_no_output" — an mcp__ tool produced no result for >stall_limit_s
     #   "max_duration"    — the effective_timeout budget was genuinely exhausted
     termination_reason: Optional[str] = None
     stalled_tool: Optional[str] = None
+    # #1369: the per-run resolved stall ceiling actually applied, so the
+    # terminal-504 wording reports the configured value (not a stale constant).
+    stall_limit_s: float = _STALL_LIMIT_DEFAULT_S
     # #1025 (salvaged from #980): True when the drain returned anything other
     # than "completed" (budget_exceeded / errored / leaked) — a reader thread
     # may still be alive and mutating the shared buffers below, so
@@ -664,11 +717,19 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     #       result instead of burning the budget. The result IS success, so
     #       set return_code=0 — genuine errors were already classified into
     #       metadata.error_type from the stream and are surfaced in finalize.
-    #   (b) stall watchdog — an open tool_use with no tool_result for
-    #       >_STALL_LIMIT_S. Claude Code has no per-MCP-tool timeout, so a
-    #       hung tools/call would otherwise wedge until the full budget.
+    #   (b) stall watchdog — an open mcp__ tool_use with no tool_result for
+    #       >stall_limit (AGENT_TOOL_STALL_LIMIT_S). Claude Code has no per-MCP-
+    #       tool timeout, so a hung tools/call would otherwise wedge until the
+    #       full budget. Scoped to mcp__* and disable-able (#1369).
     #   (c) effective_timeout budget — unchanged backstop.
     deadline = time.monotonic() + ctx.effective_timeout
+    # #1369: resolve the stall ceiling once per run. <=0 disables the per-tool
+    # watchdog (the deadline backstop still applies). Disable is gated HERE, not
+    # by passing 0 down — _open_tool_exceeding's `> limit_s` would otherwise
+    # match every open tool and fire instantly.
+    stall_limit = _resolve_stall_limit_s()
+    ctx.stall_limit_s = stall_limit
+    stall_enabled = stall_limit > 0
     stalled_tool: Optional[str] = None
     try:
         while True:
@@ -684,7 +745,8 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                     _terminate_process_group(process, graceful_timeout=2, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
                     ctx.return_code = 0
                     break
-                stalled_tool = _open_tool_exceeding(ctx, _STALL_LIMIT_S)
+                if stall_enabled:
+                    stalled_tool = _open_tool_exceeding(ctx, stall_limit)
                 if stalled_tool or time.monotonic() >= deadline:
                     raise
     except subprocess.TimeoutExpired:
@@ -697,7 +759,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         else:
             ctx.termination_reason = "max_duration"
         reason = (
-            f"tool '{stalled_tool}' stalled with no result for >{_STALL_LIMIT_S:.0f}s"
+            f"tool '{stalled_tool}' stalled with no result for >{stall_limit:.0f}s"
             if stalled_tool
             else f"timed out after {ctx.effective_timeout}s"
         )
@@ -1174,7 +1236,7 @@ async def execute_headless_task(
                 if ctx.termination_reason == "stall_no_output":
                     logger.error(
                         f"[Headless Task] Task {ctx.task_session_id} killed by stall "
-                        f"watchdog (tool '{ctx.stalled_tool}' silent >{_STALL_LIMIT_S:.0f}s)"
+                        f"watchdog (tool '{ctx.stalled_tool}' silent >{ctx.stall_limit_s:.0f}s)"
                     )
                     raise HTTPException(
                         status_code=504,
@@ -1182,7 +1244,7 @@ async def execute_headless_task(
                             ctx,
                             (
                                 f"Killed: tool '{ctx.stalled_tool}' produced no output "
-                                f"for {_STALL_LIMIT_S:.0f}s (stall watchdog)"
+                                f"for {ctx.stall_limit_s:.0f}s (stall watchdog)"
                             ),
                             "stall_no_output",
                             stalled_tool=ctx.stalled_tool,

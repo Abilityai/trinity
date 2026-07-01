@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "date": "2026-06-27",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev@85546c74",
+  "branch": "AndriiPasternak31/issue-918",
+  "feature": "Agent Reports (#918)",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": [
+      "POST /api/agents/{name}/reports",
+      "GET /api/agents/{name}/reports",
+      "DELETE /api/agents/{name}/reports/{report_id}",
+      "GET /api/reports",
+      "GET /api/reports/stats",
+      "GET /api/reports/{report_id}"
+    ],
+    "new_mcp_tools": ["report"],
+    "new_ws_events": ["agent_report"],
+    "new_tables": ["agent_reports"]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "category": "Broken Access Control (A01)",
+      "phase": "P9/P12",
+      "title": "agent_reports omitted from delete-cascade (AGENT_REFS) and rename_agent -> cross-tenant report disclosure under agent-name reuse",
+      "evidence": [
+        "src/backend/db/agent_cleanup.py:96-180 (AGENT_REFS lacks agent_reports)",
+        "src/backend/db/agent_settings/metadata.py:90-219 (rename_agent list lacks agent_reports; cascade_rename unused)",
+        "src/backend/db/agents.py:123-140 (is_agent_name_reserved checks only agent_ownership)",
+        "src/backend/db/agents.py:326-345 (can_user_access_agent grants new owner)",
+        "src/backend/routers/reports.py:85-94,150-156 (orphaned rows returned, payload exposed)",
+        "tests/unit/test_agent_cleanup_parity.py:118-133 (parity guard RED for agent_reports.agent_name)"
+      ],
+      "exploit": "Rename agent alpha->alpha-v2 (report rows keep agent_name=alpha, orphaned); another tenant creates a new agent named alpha (name immediately free); new owner reads previous tenant's report payloads via GET /api/reports/{id}.",
+      "impact": "Cross-tenant disclosure of agent report payloads on shared instances; secondary report-history loss on rename and orphan accumulation on purge (L-03 cascade invariant violated, not covered by canary).",
+      "recommendation": "Add AgentRef('agent_reports','agent_name',Policy.CASCADE) to AGENT_REFS and include agent_reports in rename_agent (or route rename through cascade_rename); add a #918 cascade/rename test. _EXEMPT alternative keeps the exposure and is not recommended without read-time identity gating."
+    }
+  ],
+  "supply_chain_summary": "No dependency changes in diff.",
+  "filter_stats": {
+    "candidates_examined": 7,
+    "dropped_clean": 6,
+    "reported": 1,
+    "independent_verification": "CONFIRMED by fresh-context subagent"
+  },
+  "totals": {"critical": 0, "high": 1, "medium": 0, "low": 0},
+  "trend": "first_audit_of_918"
+}

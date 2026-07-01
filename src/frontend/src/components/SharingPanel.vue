@@ -96,6 +96,25 @@
       </div>
     </div>
 
+    <!-- Public chat model (#894): governs the model for ALL public-facing
+         conversations (public link, channels, x402) — not the owner's own chats. -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Public chat model</h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+        The Claude model used for public-facing chats (public link, Slack/Telegram/WhatsApp, paid).
+        Your own authenticated chats and scheduled runs are unaffected.
+      </p>
+      <select
+        :value="publicChannelModel"
+        @change="setPublicChannelModel($event.target.value)"
+        :disabled="pcmSaving"
+        class="block w-full sm:w-80 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
+      >
+        <option value="">Use platform default{{ pcmDefault ? ` (${pcmDefault})` : '' }}</option>
+        <option v-for="m in pcmAvailable" :key="m" :value="m">{{ m }}</option>
+      </select>
+    </div>
+
     <!-- Channels: compact summary rows (detailed config moves to dialogs in #19) -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
@@ -122,6 +141,16 @@
           icon="📞"
         >
           <VoipChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+
+        <!-- MCP connector (ent#46) — gated on the mcp_connector entitlement -->
+        <ChannelDisclosure
+          v-if="enterpriseStore.isEntitled('mcp_connector')"
+          title="MCP connector"
+          subtitle="Add this agent to an AI client; playbooks become tools"
+          icon="🔌"
+        >
+          <ConnectorChannelPanel :agent-name="agentName" />
         </ChannelDisclosure>
       </div>
     </div>
@@ -151,12 +180,14 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
+import { useEnterpriseStore } from '../stores/enterprise'
 import ChannelDisclosure from './ChannelDisclosure.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
+import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
@@ -177,6 +208,10 @@ const { showNotification } = useNotification()
 // VoIP channel visibility (#28) — gated on the platform `voip_available` flag.
 const sessionsStore = useSessionsStore()
 sessionsStore.loadFeatureFlags()
+
+// MCP connector visibility (ent#46) — gated on the `mcp_connector` entitlement.
+const enterpriseStore = useEnterpriseStore()
+enterpriseStore.loadFeatureFlags()
 
 const loadAgent = () => {
   emit('agent-updated')
@@ -275,8 +310,52 @@ const formatRequestedAt = (iso) => {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Public-channel model override (#894)
+// ---------------------------------------------------------------------------
+const publicChannelModel = ref('')      // '' = inherit platform default
+const pcmAvailable = ref([])
+const pcmDefault = ref('')
+const pcmSaving = ref(false)
+
+const loadPublicChannelModel = async () => {
+  try {
+    const { data } = await axios.get(
+      `/api/agents/${props.agentName}/public-channel-model`,
+      { headers: authStore.authHeader }
+    )
+    publicChannelModel.value = data.public_channel_model || ''
+    pcmAvailable.value = data.available_models || []
+    pcmDefault.value = data.platform_default || ''
+  } catch (err) {
+    console.error('Failed to load public-channel model:', err)
+  }
+}
+
+const setPublicChannelModel = async (value) => {
+  pcmSaving.value = true
+  try {
+    const { data } = await axios.put(
+      `/api/agents/${props.agentName}/public-channel-model`,
+      { model: value || null },
+      { headers: authStore.authHeader }
+    )
+    publicChannelModel.value = data.public_channel_model || ''
+    showNotification(
+      data.is_overridden ? `Public chat model set to ${data.public_channel_model}` : 'Public chat model reset to platform default',
+      'success'
+    )
+  } catch (err) {
+    console.error('Failed to update public-channel model:', err)
+    showNotification(err.response?.data?.detail?.message || err.response?.data?.detail || 'Failed to update model', 'error')
+    await loadPublicChannelModel()  // re-sync the select to the persisted value
+  } finally {
+    pcmSaving.value = false
+  }
+}
+
 watch(() => props.agentName, async (name) => {
   if (!name) return
-  await Promise.all([loadPolicy(), loadAccessRequests()])
+  await Promise.all([loadPolicy(), loadAccessRequests(), loadPublicChannelModel()])
 }, { immediate: true })
 </script>

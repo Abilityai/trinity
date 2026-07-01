@@ -316,6 +316,17 @@ const fetchTemplates = async () => {
       headers: authStore.authHeader
     })
     templates.value = response.data
+    // If a caller injected an initialTemplate that doesn't exist in this
+    // deploy (e.g. the onboarding wizard prefilling `local:scout` on an
+    // install without that template), fall back to the blank agent so the
+    // form never points at a missing template.
+    if (
+      form.template &&
+      form.template !== 'github-custom' &&
+      !templates.value.some(t => t.id === form.template)
+    ) {
+      form.template = ''
+    }
   } catch (err) {
     console.error('Failed to fetch templates:', err)
     templatesError.value = 'Failed to load templates'

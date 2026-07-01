@@ -100,14 +100,15 @@ def _extract_agent_known_ids(payload: Dict) -> set:
     return ids
 
 
-def _read_retention_settings() -> tuple[int, int, int]:
-    """Read retention windows from ops settings (#772).
+def _read_retention_settings() -> tuple[int, int, int, int]:
+    """Read retention windows from ops settings (#772, #918).
 
     Returns:
         (execution_log_retention_days, execution_row_retention_days,
-         health_check_retention_days). 0 means the sweep is disabled.
-        Invalid (non-integer or negative) values are coerced to 0 so a
-        malformed setting can't accidentally enable an unbounded prune.
+         health_check_retention_days, agent_reports_retention_days).
+        0 means the corresponding sweep is disabled. Invalid (non-integer or
+        negative) values are coerced to 0 so a malformed setting can't
+        accidentally enable an unbounded prune.
     """
     from services.settings_service import OPS_SETTINGS_DEFAULTS
 
@@ -123,6 +124,7 @@ def _read_retention_settings() -> tuple[int, int, int]:
         _read("execution_log_retention_days"),
         _read("execution_row_retention_days"),
         _read("health_check_retention_days"),
+        _read("agent_reports_retention_days"),
     )
 
 
@@ -179,6 +181,8 @@ class CleanupReport:
     soft_deleted_schedules_purged: int = 0
     # RELIABILITY-006 / #525: idempotency keys purged past their 24h TTL
     idempotency_keys_purged: int = 0
+    # Issue #918: agent_reports rows pruned past their retention window
+    agent_reports_pruned: int = 0
 
     @property
     def total(self) -> int:
@@ -188,7 +192,8 @@ class CleanupReport:
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
-                self.soft_deleted_schedules_purged + self.idempotency_keys_purged)
+                self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
+                self.agent_reports_pruned)
 
     def to_dict(self) -> Dict:
         return {
@@ -207,6 +212,7 @@ class CleanupReport:
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
             "idempotency_keys_purged": self.idempotency_keys_purged,
+            "agent_reports_pruned": self.agent_reports_pruned,
             "total": self.total,
         }
 
@@ -376,7 +382,29 @@ class CleanupService:
         """3. Reclaim stale Redis slots + fail their execution records.
 
         (#219, #226, #378 — see _process_stale_slot_reclaims docstring.)
+
+        #1085: while the re-delivery governor's shared-cause pause is armed, hold
+        off this destructive sweep entirely. During a fleet outage an async row's
+        callback is being throttled/held (not lost) — failing it to LEASE_EXPIRED
+        now would race the throttled-then-resumed callback. The pause TTL (300s)
+        stays well under the lease window (timeout + SLOT_TTL_BUFFER), and a late
+        SUCCESS still corrects any reaper FAIL via the apply_result CAS — but the
+        hold-off avoids the churn. Fail-open: governor degrades to not-paused.
         """
+        try:
+            import config
+
+            if config.REDELIVERY_GOVERNOR_ENABLED:
+                from services.redelivery_governor import get_redelivery_governor
+
+                if get_redelivery_governor().should_hold_reaper():
+                    logger.info(
+                        "[Cleanup] stale-slot reaper held — re-delivery paused (#1085)"
+                    )
+                    return
+        except Exception as e:  # noqa: BLE001 — never block the sweep on a gate error
+            logger.debug("[Cleanup] governor reaper-gate skipped: %s", e)
+
         try:
             capacity = get_capacity_manager()
 
@@ -450,10 +478,10 @@ class CleanupService:
         spans multiple cycles instead of holding the write lock end-to-end.
         """
         try:
-            log_days, row_days, hc_days = _read_retention_settings()
+            log_days, row_days, hc_days, reports_days = _read_retention_settings()
         except Exception as e:
             logger.error(f"[Cleanup] Error reading retention settings: {e}")
-            log_days = row_days = hc_days = 0
+            log_days = row_days = hc_days = reports_days = 0
 
         if log_days > 0:
             try:
@@ -499,6 +527,21 @@ class CleanupService:
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning health checks: {e}")
+
+        if reports_days > 0:
+            try:
+                pruned = db.prune_agent_reports(
+                    retention_days=reports_days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.agent_reports_pruned = pruned
+                if pruned > 0:
+                    logger.info(
+                        f"[Cleanup] Deleted {pruned} agent_reports rows "
+                        f"older than {reports_days} days (#918)"
+                    )
+            except Exception as e:
+                logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
 
     def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
         """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
@@ -620,7 +663,8 @@ class CleanupService:
                            + report.health_checks_pruned
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
-                           + report.idempotency_keys_purged)
+                           + report.idempotency_keys_purged
+                           + report.agent_reports_pruned)
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

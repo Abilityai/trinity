@@ -325,6 +325,17 @@ class SubscriptionOperations:
 
         return [self._row_to_subscription(row) for row in rows]
 
+    def has_any_subscription(self) -> bool:
+        """Cheap existence check — does ANY subscription exist?
+
+        Used by the hot ``/api/settings/feature-flags`` path (onboarding's
+        ``claude_auth_configured``) to avoid materializing + decrypting every
+        subscription row just to test presence.
+        """
+        stmt = select(func.count()).select_from(subscription_credentials)
+        with get_engine().connect() as conn:
+            return (conn.execute(stmt).scalar() or 0) > 0
+
     def list_subscriptions_with_agents(self, owner_id: Optional[int] = None) -> List[SubscriptionWithAgents]:
         """
         List subscriptions with their assigned agents.

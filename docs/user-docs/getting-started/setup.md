@@ -137,5 +137,8 @@ The following endpoints do not require authentication:
 
 ## See Also
 
+- [Quick Start](quick-start.md) -- After setup, a **guided onboarding wizard** opens on
+  your first Dashboard visit to launch your first agent (relaunch any time at
+  `http://localhost/?onboarding=1`).
 - [Overview](../overview.md) -- Platform overview and core concepts.
 - [Creating Agents](../agents/creating-agents.md) -- Deploy your first agent.

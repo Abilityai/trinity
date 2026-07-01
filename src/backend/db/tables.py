@@ -95,9 +95,11 @@ agent_ownership = Table(
     Column("group_auth_mode", Text),
     Column("voice_system_prompt", Text),
     Column("voice_name", Text),
+    Column("public_channel_model", Text),  # #894: per-agent public-channel model override (NULL = platform default)
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),
+    Column("mcp_exposed", Integer),
     Column("deleted_at", Text),
 )
 
@@ -234,6 +236,8 @@ agent_loops = Table(
     Column("delay_seconds", Integer),
     Column("timeout_per_run", Integer),
     Column("max_duration_seconds", Integer),  # #1156 — wall-clock deadline
+    Column("max_cost_usd", Float),  # #1155 — per-loop USD cost budget
+    Column("no_progress_threshold", Integer),  # #1157 — doom-loop detection (NULL = disabled)
     Column("model", Text),
     Column("allowed_tools", Text),
     Column("status", Text),
@@ -364,6 +368,22 @@ agent_activities = Table(
     Column("related_execution_id", Text),
     Column("details", Text),
     Column("error", Text),
+    Column("created_at", Text),
+)
+
+agent_reports = Table(
+    "agent_reports",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("user_id", Integer),
+    Column("report_type", Text),
+    Column("title", Text),
+    Column("payload", Text),
+    Column("display_hint", Text),
+    Column("schema_version", Integer),
+    Column("period_start", Text),
+    Column("period_end", Text),
     Column("created_at", Text),
 )
 

@@ -114,6 +114,234 @@ async function checkAgentAccess(
 }
 
 /**
+ * Resolve the Trinity client for a request.
+ * When requireApiKey is true, REQUIRES the MCP API key from the auth context.
+ * When requireApiKey is false, uses the base client (backward compatibility).
+ *
+ * Module-level so both createChatTools and the dedicated-tool path
+ * (runAgentChat, #846) share one implementation.
+ */
+function resolveClient(
+  baseClient: TrinityClient,
+  requireApiKey: boolean,
+  authContext?: McpAuthContext
+): TrinityClient {
+  if (requireApiKey) {
+    if (!authContext?.mcpApiKey) {
+      throw new Error("MCP API key authentication required but no API key found in request context");
+    }
+    const userClient = new TrinityClient(baseClient.getBaseUrl());
+    userClient.setToken(authContext.mcpApiKey);
+    return userClient;
+  }
+  return baseClient;
+}
+
+/**
+ * Parameters for a single chat_with_agent-style call (agent name bound
+ * separately). Mirrors the chat_with_agent schema minus `agent_name`.
+ */
+export interface RunAgentChatParams {
+  message: string;
+  parallel?: boolean;
+  model?: string;
+  allowed_tools?: string[];
+  system_prompt?: string;
+  timeout_seconds?: number;
+  async?: boolean;
+  inject_result?: boolean;
+  chat_session_id?: string;
+}
+
+/**
+ * The shared chat_with_agent execution body (#846).
+ *
+ * Single source of truth for chatting with one agent — used verbatim by the
+ * `chat_with_agent` tool AND every dynamically-registered dedicated
+ * `chat_with_<slug>` tool, so there is NO logic fork. Preserves every existing
+ * routing decision: the #946 pull-routing branch, self-task / parallel paths,
+ * idempotency route tokens (#525/#946 D8), the #914 gateway-timeout receipt,
+ * sourceAgent collaboration tagging, and access denial via checkAgentAccess.
+ */
+export async function runAgentChat(
+  baseClient: TrinityClient,
+  requireApiKey: boolean,
+  agentChatPullEnabled: boolean,
+  agent_name: string,
+  params: RunAgentChatParams,
+  context: any
+): Promise<string> {
+  const {
+    message,
+    parallel,
+    model,
+    allowed_tools,
+    system_prompt,
+    timeout_seconds,
+    async: asyncMode,
+    inject_result,
+    chat_session_id,
+  } = params;
+
+  // Get auth context from FastMCP session. Read unconditionally (mirrors
+  // operator_queue.ts) so the #946 scope-based pull routing is decidable
+  // in tests; behaviour-equivalent in production (see chat_with_agent note).
+  const authContext = context?.session as McpAuthContext | undefined;
+
+  // Get authenticated client for this request
+  const apiClient = resolveClient(baseClient, requireApiKey, authContext);
+
+  const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
+
+  if (!accessCheck.allowed) {
+    console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
+    return JSON.stringify({
+      error: "Access denied",
+      reason: accessCheck.reason,
+      caller: authContext?.agentName || authContext?.userId,
+      target: agent_name,
+    }, null, 2);
+  }
+
+  // Pass source agent for collaboration tracking
+  const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
+
+  // SELF-EXEC-001: Detect self-call (agent calling itself)
+  const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
+
+  // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
+  // durable async /task path instead of the synchronous held /chat. Gated
+  // on the MCP-side flag (MCP_AGENT_CHAT_PULL_ENABLED) AND scope='agent'
+  // AND non-self. Parallel calls already use /task, so this only affects
+  // the sequential branch below.
+  //
+  // Why self-task is EXCLUDED (Codex finding, deliberate asymmetry from
+  // scope='agent'): a self-task carries inject_result / chat_session_id
+  // semantics (SELF-EXEC-001) that write the result back into the caller's
+  // OWN chat session — an interactive contract a fire-and-forget /task
+  // receipt would silently break. scope='user' (human-facing) stays
+  // synchronous for the same reason: the pilot's blast radius is
+  // agent→agent delegation only, never a human's chat turn.
+  const usePullRouting =
+    !parallel &&
+    agentChatPullEnabled &&
+    authContext?.scope === "agent" &&
+    !isSelfTask;
+
+  // Log collaboration or self-task
+  if (authContext?.scope === "agent") {
+    if (isSelfTask) {
+      console.log(`[Self-Task] ${authContext.agentName} calling itself (${parallel ? 'parallel' : 'sequential'}, inject_result=${inject_result})`);
+    } else {
+      console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name} (${parallel ? 'parallel' : 'sequential'})`);
+    }
+  }
+
+  // Build MCP key info for execution origin tracking (AUDIT-001)
+  const mcpKeyInfo = authContext ? {
+    keyId: authContext.keyId,
+    keyName: authContext.keyName,
+  } : undefined;
+
+  // #946 (D8): the dispatch ROUTE is part of the idempotency identity.
+  // The backend derives the same `agent:{name}` idempotency scope for BOTH
+  // /chat and /task, so a sequential agent→agent call dispatched as sync
+  // /chat (flag OFF) vs async /task (flag ON) must NOT share a key — else a
+  // flag flip mid-soak could replay a wrong-shape snapshot across endpoints.
+  // The pull-routed sequential call therefore gets a distinct token, while
+  // a transport retry WITHIN one mode keeps the same key (still dedupes).
+  // Today's parallel / self-task / scope='user' tokens are unchanged, so no
+  // in-flight key is invalidated on deploy.
+  const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
+
+  // RELIABILITY-006 (#525): deterministic key so a transport retry of this
+  // exact call dedupes at the backend.
+  const idempotencyKey = deriveMcpIdempotencyKey([
+    sourceAgent || authContext?.userId,
+    agent_name,
+    routeToken,
+    model,
+    asyncMode ? "async" : "sync",
+    message,
+  ]);
+
+  // Use parallel task mode or sequential chat mode based on parameter
+  if (parallel) {
+    // Parallel task mode - stateless, no queue
+    const modeDesc = asyncMode ? 'async (fire-and-forget)' : 'sync';
+    const taskDesc = isSelfTask ? 'self-task' : 'parallel task';
+    console.log(`[Parallel Task] Sending ${taskDesc} to ${agent_name} (${modeDesc})`);
+    const response = await apiClient.task(
+      agent_name,
+      message,
+      {
+        model,
+        allowed_tools,
+        system_prompt,
+        timeout_seconds,
+        async_mode: asyncMode,
+        // SELF-EXEC-001: Pass inject_result and chat_session_id for self-tasks
+        inject_result: isSelfTask ? inject_result : undefined,
+        chat_session_id: isSelfTask ? chat_session_id : undefined,
+      },
+      sourceAgent,
+      mcpKeyInfo,
+      idempotencyKey
+    );
+    return JSON.stringify(response, null, 2);
+  }
+
+  // #946 pull pilot: agent→agent sequential call routed through the
+  // durable async /task path. Returns an immediate {accepted|queued,
+  // execution_id} receipt; the caller polls get_execution_result
+  // (polling is the contract — the backend emits no completion event).
+  // Only async_mode is forwarded: model/allowed_tools/system_prompt are
+  // parallel-only and were never applied in sequential mode, so omitting
+  // them preserves sequential semantics (agent defaults). The idempotency
+  // key carries the pull route token (D8), so this can't collide with the
+  // sync /chat snapshot under the shared agent:{name} scope.
+  if (usePullRouting) {
+    console.log(`[Agent Chat Pull #946] Routing ${sourceAgent} -> ${agent_name} via async /task`);
+    const receipt = await apiClient.task(
+      agent_name,
+      message,
+      { async_mode: true },
+      sourceAgent,
+      mcpKeyInfo,
+      idempotencyKey
+    );
+    return JSON.stringify(receipt, null, 2);
+  }
+
+  // Sequential chat mode - uses queue, maintains context
+  const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
+
+  // #914: MCP-server gateway timeout — task still running on agent.
+  // Surface the structured receipt so the caller polls rather than retries.
+  if ('status' in response && response.status === 'queued_timeout') {
+    console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
+    return JSON.stringify(response, null, 2);
+  }
+
+  // Check if response is a queue status (agent busy)
+  if ('queue_status' in response) {
+    console.log(`[Queue Full] Agent '${agent_name}' is busy, queue is full`);
+    return JSON.stringify({
+      status: "agent_busy",
+      agent: agent_name,
+      queue_status: response.queue_status,
+      retry_after_seconds: response.retry_after,
+      message: `Agent '${agent_name}' is currently busy. The execution queue is full. ` +
+        `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
+        `Consider using parallel=true for independent tasks.`,
+      details: response.details,
+    }, null, 2);
+  }
+
+  return JSON.stringify(response, null, 2);
+}
+
+/**
  * Create chat tools with the given client
  * @param client - Base Trinity client (provides base URL, no auth when requireApiKey=true)
  * @param requireApiKey - Whether API key authentication is enabled
@@ -132,20 +360,8 @@ export function createChatTools(
    * When requireApiKey is true, REQUIRES MCP API key from auth context
    * When requireApiKey is false, uses the base client (backward compatibility)
    */
-  const getClient = (authContext?: McpAuthContext): TrinityClient => {
-    if (requireApiKey) {
-      // MCP API key is REQUIRED - no fallback
-      if (!authContext?.mcpApiKey) {
-        throw new Error("MCP API key authentication required but no API key found in request context");
-      }
-      // Create new client instance authenticated with user's MCP API key
-      const userClient = new TrinityClient(client.getBaseUrl());
-      userClient.setToken(authContext.mcpApiKey);
-      return userClient;
-    }
-    // API key auth disabled - use base client (backward compatibility)
-    return client;
-  };
+  const getClient = (authContext?: McpAuthContext): TrinityClient =>
+    resolveClient(client, requireApiKey, authContext);
 
   return {
     // ========================================================================
@@ -267,166 +483,27 @@ export function createChatTools(
         },
         context: any
       ) => {
-        // Get auth context from FastMCP session. Read unconditionally (mirrors
-        // operator_queue.ts) so the #946 scope-based pull routing is decidable
-        // in tests: in production this is behaviour-equivalent — with
-        // requireApiKey=false FastMCP installs no authenticate callback, so the
-        // session carries no scope/mcpApiKey and getClient() still returns the
-        // base client; agent-scoped keys only exist on the requireApiKey=true
-        // path, where this was already `context?.session`.
-        const authContext = context?.session;
-
-        // Get authenticated client for this request
-        const apiClient = getClient(authContext);
-
-        const accessCheck = await checkAgentAccess(apiClient, authContext, agent_name);
-
-        if (!accessCheck.allowed) {
-          console.log(`[Access Denied] ${authContext?.agentName || authContext?.userId || "unknown"} -> ${agent_name}: ${accessCheck.reason}`);
-          return JSON.stringify({
-            error: "Access denied",
-            reason: accessCheck.reason,
-            caller: authContext?.agentName || authContext?.userId,
-            target: agent_name,
-          }, null, 2);
-        }
-
-        // Pass source agent for collaboration tracking
-        const sourceAgent = authContext?.scope === "agent" ? authContext.agentName : undefined;
-
-        // SELF-EXEC-001: Detect self-call (agent calling itself)
-        const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
-
-        // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
-        // durable async /task path instead of the synchronous held /chat. Gated
-        // on the MCP-side flag (MCP_AGENT_CHAT_PULL_ENABLED) AND scope='agent'
-        // AND non-self. Parallel calls already use /task, so this only affects
-        // the sequential branch below.
-        //
-        // Why self-task is EXCLUDED (Codex finding, deliberate asymmetry from
-        // scope='agent'): a self-task carries inject_result / chat_session_id
-        // semantics (SELF-EXEC-001) that write the result back into the caller's
-        // OWN chat session — an interactive contract a fire-and-forget /task
-        // receipt would silently break. scope='user' (human-facing) stays
-        // synchronous for the same reason: the pilot's blast radius is
-        // agent→agent delegation only, never a human's chat turn.
-        const usePullRouting =
-          !parallel &&
-          agentChatPullEnabled &&
-          authContext?.scope === "agent" &&
-          !isSelfTask;
-
-        // Log collaboration or self-task
-        if (authContext?.scope === "agent") {
-          if (isSelfTask) {
-            console.log(`[Self-Task] ${authContext.agentName} calling itself (${parallel ? 'parallel' : 'sequential'}, inject_result=${inject_result})`);
-          } else {
-            console.log(`[Agent Collaboration] ${authContext.agentName} -> ${agent_name} (${parallel ? 'parallel' : 'sequential'})`);
-          }
-        }
-
-        // Build MCP key info for execution origin tracking (AUDIT-001)
-        const mcpKeyInfo = authContext ? {
-          keyId: authContext.keyId,
-          keyName: authContext.keyName,
-        } : undefined;
-
-        // #946 (D8): the dispatch ROUTE is part of the idempotency identity.
-        // The backend derives the same `agent:{name}` idempotency scope for BOTH
-        // /chat and /task, so a sequential agent→agent call dispatched as sync
-        // /chat (flag OFF) vs async /task (flag ON) must NOT share a key — else a
-        // flag flip mid-soak could replay a wrong-shape snapshot across endpoints.
-        // The pull-routed sequential call therefore gets a distinct token, while
-        // a transport retry WITHIN one mode keeps the same key (still dedupes).
-        // Today's parallel / self-task / scope='user' tokens are unchanged, so no
-        // in-flight key is invalidated on deploy.
-        const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
-
-        // RELIABILITY-006 (#525): deterministic key so a transport retry of this
-        // exact call dedupes at the backend.
-        const idempotencyKey = deriveMcpIdempotencyKey([
-          sourceAgent || authContext?.userId,
+        // #846: delegate to the shared body so chat_with_agent and every
+        // dedicated chat_with_<slug> tool run identical routing/idempotency/
+        // access/timeout logic — no fork.
+        return runAgentChat(
+          client,
+          requireApiKey,
+          agentChatPullEnabled,
           agent_name,
-          routeToken,
-          model,
-          asyncMode ? "async" : "sync",
-          message,
-        ]);
-
-        // Use parallel task mode or sequential chat mode based on parameter
-        if (parallel) {
-          // Parallel task mode - stateless, no queue
-          const modeDesc = asyncMode ? 'async (fire-and-forget)' : 'sync';
-          const taskDesc = isSelfTask ? 'self-task' : 'parallel task';
-          console.log(`[Parallel Task] Sending ${taskDesc} to ${agent_name} (${modeDesc})`);
-          const response = await apiClient.task(
-            agent_name,
+          {
             message,
-            {
-              model,
-              allowed_tools,
-              system_prompt,
-              timeout_seconds,
-              async_mode: asyncMode,
-              // SELF-EXEC-001: Pass inject_result and chat_session_id for self-tasks
-              inject_result: isSelfTask ? inject_result : undefined,
-              chat_session_id: isSelfTask ? chat_session_id : undefined,
-            },
-            sourceAgent,
-            mcpKeyInfo,
-            idempotencyKey
-          );
-          return JSON.stringify(response, null, 2);
-        }
-
-        // #946 pull pilot: agent→agent sequential call routed through the
-        // durable async /task path. Returns an immediate {accepted|queued,
-        // execution_id} receipt; the caller polls get_execution_result
-        // (polling is the contract — the backend emits no completion event).
-        // Only async_mode is forwarded: model/allowed_tools/system_prompt are
-        // parallel-only and were never applied in sequential mode, so omitting
-        // them preserves sequential semantics (agent defaults). The idempotency
-        // key carries the pull route token (D8), so this can't collide with the
-        // sync /chat snapshot under the shared agent:{name} scope.
-        if (usePullRouting) {
-          console.log(`[Agent Chat Pull #946] Routing ${sourceAgent} -> ${agent_name} via async /task`);
-          const receipt = await apiClient.task(
-            agent_name,
-            message,
-            { async_mode: true },
-            sourceAgent,
-            mcpKeyInfo,
-            idempotencyKey
-          );
-          return JSON.stringify(receipt, null, 2);
-        }
-
-        // Sequential chat mode - uses queue, maintains context
-        const response = await apiClient.chat(agent_name, message, sourceAgent, mcpKeyInfo, idempotencyKey);
-
-        // #914: MCP-server gateway timeout — task still running on agent.
-        // Surface the structured receipt so the caller polls rather than retries.
-        if ('status' in response && response.status === 'queued_timeout') {
-          console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
-          return JSON.stringify(response, null, 2);
-        }
-
-        // Check if response is a queue status (agent busy)
-        if ('queue_status' in response) {
-          console.log(`[Queue Full] Agent '${agent_name}' is busy, queue is full`);
-          return JSON.stringify({
-            status: "agent_busy",
-            agent: agent_name,
-            queue_status: response.queue_status,
-            retry_after_seconds: response.retry_after,
-            message: `Agent '${agent_name}' is currently busy. The execution queue is full. ` +
-              `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
-              `Consider using parallel=true for independent tasks.`,
-            details: response.details,
-          }, null, 2);
-        }
-
-        return JSON.stringify(response, null, 2);
+            parallel,
+            model,
+            allowed_tools,
+            system_prompt,
+            timeout_seconds,
+            async: asyncMode,
+            inject_result,
+            chat_session_id,
+          },
+          context
+        );
       },
     },
 

@@ -87,6 +87,9 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
@@ -94,8 +97,26 @@ services:
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
+      # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
+      # it must reach the backend here or the .env lever is inert (#1039 class).
+      # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
+      - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # Correlated-failure / thundering-herd controls (#1085) — re-delivery
+      # governor. Backend-only; all fail-open and inert until the master flag is
+      # on. Prod compose launches standalone (no env_file merge), so the .env
+      # levers only reach the container when wired here.
+      - REDELIVERY_GOVERNOR_ENABLED=${REDELIVERY_GOVERNOR_ENABLED:-false}
+      - REDELIVERY_FLEET_LIMIT=${REDELIVERY_FLEET_LIMIT:-600}
+      - REDELIVERY_FLEET_WINDOW_SECONDS=${REDELIVERY_FLEET_WINDOW_SECONDS:-60}
+      - REDELIVERY_AGENT_LIMIT=${REDELIVERY_AGENT_LIMIT:-20}
+      - REDELIVERY_AGENT_WINDOW_SECONDS=${REDELIVERY_AGENT_WINDOW_SECONDS:-60}
+      - CORRELATED_FAILURE_THRESHOLD=${CORRELATED_FAILURE_THRESHOLD:-20}
+      - CORRELATED_FAILURE_WINDOW_SECONDS=${CORRELATED_FAILURE_WINDOW_SECONDS:-120}
+      - CORRELATED_PAUSE_TTL_SECONDS=${CORRELATED_PAUSE_TTL_SECONDS:-300}
+      - REDELIVERY_PAUSE_RETRY_AFTER_SECONDS=${REDELIVERY_PAUSE_RETRY_AFTER_SECONDS:-30}
       # OpenTelemetry Configuration (Optional)
       - OTEL_ENABLED=${OTEL_ENABLED:-0}
       - OTEL_COLLECTOR_ENDPOINT=${OTEL_COLLECTOR_ENDPOINT:-http://trinity-otel-collector:4317}

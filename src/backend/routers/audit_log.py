@@ -199,6 +199,7 @@ async def list_audit_log(
     source: Optional[str] = Query(None, description="Filter by source (api/mcp/scheduler/system)"),
     start_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive lower bound"),
     end_time: Optional[str] = Query(None, description="ISO 8601 UTC inclusive upper bound"),
+    request_id: Optional[str] = Query(None, description="Filter by request correlation id (joins MCP + backend rows, #905)"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _admin: User = Depends(require_admin),
@@ -213,6 +214,7 @@ async def list_audit_log(
         "source": source,
         "start_time": start_time,
         "end_time": end_time,
+        "request_id": request_id,
     }
     entries = db.get_audit_entries(limit=limit, offset=offset, **filters)
     total = db.count_audit_entries(**filters)

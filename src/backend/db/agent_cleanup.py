@@ -154,6 +154,10 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("monitoring_alert_cooldowns",   "agent_name",        Policy.CASCADE),
     AgentRef("agent_dashboard_values",       "agent_name",        Policy.CASCADE),
     AgentRef("agent_dashboard_cache",        "agent_name",        Policy.CASCADE),
+    # #918 — agent-published reports may hold sensitive domain payloads; wipe on
+    # delete and re-key on rename so a reused agent name can't inherit another
+    # tenant's reports (cross-tenant disclosure).
+    AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
 
     # --- Channel adapters (encrypted bot tokens — security-relevant) -------
     AgentRef("slack_channel_agents",         "agent_name",        Policy.CASCADE),
@@ -178,7 +182,30 @@ AGENT_REFS: List[AgentRef] = [
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
     AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
              extra_filter="scope = 'agent'"),
+    # Connector-scoped keys (ent#46) are also per-agent: rename WITH the agent,
+    # wipe on purge. Edition-agnostic (inert in OSS-only builds — none exist),
+    # and security-relevant: an orphaned connector key must not survive its agent
+    # (else a future same-name agent could be reached by a leaked old snippet).
+    AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,
+             extra_filter="scope = 'connector'"),
 ]
+
+
+# Entitled-module agent-scoped tables (ent#46). An entitled module that owns
+# an agent-scoped table (e.g. `enterprise_connectors`) registers it here so the
+# OSS delete + rename paths keep its rows aligned with the agent. Empty in
+# OSS-only builds. Handled via raw `text()` keyed by table NAME — NOT through
+# `AGENT_REFS`, because `cascade_delete`/`cascade_rename` resolve Table objects
+# from the OSS `db.tables.metadata`, which can't see a private enterprise table
+# (appending one there would KeyError and break agent deletion).
+EXTRA_AGENT_REFS: List[tuple] = []  # list[(table_name, agent_name_column)]
+
+
+def register_agent_owned_table(table: str, column: str = "agent_name") -> None:
+    """Idempotently register an entitled-module agent-scoped table so the OSS
+    delete + rename paths sweep/re-key it with its agent."""
+    if (table, column) not in EXTRA_AGENT_REFS:
+        EXTRA_AGENT_REFS.append((table, column))
 
 
 # Chained-via-link tables: these don't have an `agent_name` column but
@@ -292,6 +319,20 @@ def cascade_delete(conn, agent_name: str) -> Dict[str, int]:
         if result.rowcount > 0:
             key = f"{ref.table}:{ref.column}" if _multi_column(ref.table) else ref.table
             deleted[key] = deleted.get(key, 0) + result.rowcount
+
+    # Entitled-module agent-scoped tables (ent#46), resolved by NAME via raw
+    # text() — these aren't in the OSS metadata, so `_table()` can't build a
+    # statement for them. Table/column come from code (not user input); the
+    # agent name is bound. Absent tables (OSS-only / partial installs) skipped.
+    for table, column in EXTRA_AGENT_REFS:
+        if not _table_exists(conn, table):
+            continue
+        result = conn.execute(
+            sa_text(f"DELETE FROM {table} WHERE {column} = :name"),
+            {"name": agent_name},
+        )
+        if result.rowcount and result.rowcount > 0:
+            deleted[table] = deleted.get(table, 0) + result.rowcount
 
     return deleted
 

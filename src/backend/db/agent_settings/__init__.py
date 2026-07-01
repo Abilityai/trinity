@@ -10,6 +10,7 @@ Each module provides a mixin class that AgentOperations inherits from:
 - MetadataMixin: Batch queries, rename operations
 - GitPATMixin: Per-agent GitHub PAT management (#347)
 - FileSharingMixin: Per-agent outbound file-sharing toggle (FILES-001)
+- McpExposureMixin: Per-agent MCP-exposure toggle (#846)
 """
 
 from .sharing import SharingMixin
@@ -21,6 +22,7 @@ from .metadata import MetadataMixin
 from .access_policy import AccessPolicyMixin
 from .git_pat import GitPATMixin
 from .file_sharing import FileSharingMixin
+from .mcp_exposure import McpExposureMixin
 
 __all__ = [
     'SharingMixin',
@@ -32,4 +34,5 @@ __all__ = [
     'AccessPolicyMixin',
     'GitPATMixin',
     'FileSharingMixin',
+    'McpExposureMixin',
 ]

@@ -25,11 +25,13 @@ test.describe('smoke', () => {
   })
 
   test('@smoke operating room page loads', async ({ page }) => {
+    // #1109/#1134: /operating-room is a legacy redirect to /operations.
+    // Navigating the old path also covers the redirect itself.
     await page.goto('/operating-room')
-    // Either a queue list, filters, an empty state, or the title.
-    await expect(
-      page.getByText(/operating|queue|priority|all types|no items/i).first()
-    ).toBeVisible({ timeout: 10000 })
+    await expect(page).toHaveURL(/\/operations/, { timeout: 10000 })
+    await expect(page.getByRole('heading', { name: 'Operations' })).toBeVisible({ timeout: 10000 })
+    // Tab strip confirms the view mounted (not just the route resolved).
+    await expect(page.getByRole('button', { name: 'Needs Response' })).toBeVisible()
   })
 
   test('@smoke templates page loads', async ({ page }) => {

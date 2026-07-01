@@ -601,6 +601,44 @@ class TestBacklogDrain:
         assert len(fake_slots.acquire_calls) == 1
         assert len(fake_slots.release_calls) == 1
 
+    async def test_drain_uses_effective_cap_for_slot_acquire(
+        self, fake_db, fake_slots, monkeypatch
+    ):
+        """#506: the backlog-drain bypass sizes the slot acquire from the
+        EFFECTIVE cap (``get_effective_max_parallel_tasks`` = stored clamped to
+        the fleet ceiling), not the raw stored ``max_parallel_tasks``.
+
+        Patch the exact function ``drain_next`` imports so the test is hermetic
+        — independent of the settings DB, the ceiling-read chain, ``from
+        database import db`` resolution, and any cross-test stubbing of the
+        ``services.settings_service`` module in ``sys.modules``. The raw stored
+        cap is 9 and the effective cap is 2; asserting 2 (not 9) proves drain
+        uses the clamped value. The clamp math itself is covered directly in
+        tests/unit/test_506_max_parallel_ceiling.py.
+        """
+        from services.backlog_service import BacklogService
+
+        fake_db.max_parallel_tasks = 9  # raw stored value drain must NOT use
+        # Install a stub `services.settings_service` directly in sys.modules
+        # (same technique as the `fake_db` fixture for `database`). drain_next
+        # does a call-time `from services.settings_service import
+        # get_effective_max_parallel_tasks`, so this is what it resolves —
+        # immune to the module-identity gotcha where a `monkeypatch.setattr`
+        # on a separately-imported `ss` lands on a different object than the
+        # one backlog re-resolves from sys.modules under some test orderings.
+        fake_ss = types.SimpleNamespace(
+            get_effective_max_parallel_tasks=lambda _name: 2
+        )
+        monkeypatch.setitem(sys.modules, "services.settings_service", fake_ss)
+
+        svc = BacklogService()
+        fake_db.queued_count_value = 1
+        fake_db.claim_next_return = None  # stop after the sentinel acquire
+
+        await svc.drain_next("alpha")
+        assert fake_slots.acquire_calls, "expected a sentinel slot acquire"
+        assert fake_slots.acquire_calls[0]["max_parallel_tasks"] == 2
+
     async def test_drain_corrupt_metadata_marks_failed(self, fake_db, fake_slots):
         from services.backlog_service import BacklogService
 

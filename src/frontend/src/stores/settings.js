@@ -63,6 +63,27 @@ export const useSettingsStore = defineStore('settings', {
     },
 
     /**
+     * #506: Fleet-wide ceiling on per-agent max_parallel_tasks.
+     * Returns { value, default, min, max }. Admin-only.
+     */
+    async getMaxParallelTasksCeiling() {
+      const response = await axios.get('/api/settings/max-parallel-tasks-ceiling')
+      return response.data
+    },
+
+    /**
+     * #506: Set the fleet-wide max_parallel_tasks ceiling (1–32).
+     * Uses the dedicated range-validated endpoint (the generic updateSetting
+     * bypasses range validation and is blocked for this key). Admin-only.
+     */
+    async setMaxParallelTasksCeiling(value) {
+      const response = await axios.put('/api/settings/max-parallel-tasks-ceiling', {
+        value,
+      })
+      return response.data
+    },
+
+    /**
      * Get a specific setting by key.
      */
     async getSetting(key) {

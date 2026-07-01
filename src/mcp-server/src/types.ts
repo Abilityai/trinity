@@ -11,6 +11,7 @@ export interface Agent {
     memory: string;
   };
   container_id?: string;
+  mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
 }
 
 export interface AgentConfig {
@@ -67,8 +68,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   userEmail?: string;    // Email of the key owner
   keyId?: string;        // MCP API key ID (AUDIT-001: for execution origin tracking)
   keyName: string;       // Name of the MCP API key
-  agentName?: string;    // Agent name if scope is 'agent' or 'system' (for agent-to-agent)
-  scope: "user" | "agent" | "system"; // Key scope: user=human, agent=regular agent, system=system agent (bypasses all permissions)
+  agentName?: string;    // Agent name if scope is 'agent', 'system', or 'connector'
+  scope: "user" | "agent" | "system" | "connector"; // user=human, agent=regular agent, system=bypasses all permissions, connector=end-user consumption key bound to one agent (ent#46)
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
 }
 

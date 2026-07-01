@@ -48,6 +48,11 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
     for agent in snapshot.agents:
         real_slots = {sid for sid in agent.slot_ids if not sid.startswith(DRAIN_PREFIX)}
         slot_count = len(real_slots)
+        # #506: intentionally the STORED cap, not the effective (ceiling-clamped)
+        # one. The runtime clamp only ever lowers the admit limit vs the stored
+        # value, so ZCARD can never exceed the stored cap — checking against
+        # stored stays a valid upper bound and avoids a spurious violation while
+        # already-admitted slots drain down toward a just-lowered ceiling.
         cap = agent.max_parallel
         if slot_count <= cap:
             continue
