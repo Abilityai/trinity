@@ -154,6 +154,14 @@ class SlackAdapter(ChannelAdapter):
             if not success:
                 logger.warning(f"[SLACK] File upload failed for {f.filename}: {error}")
 
+        # Voice-out (epic #24 / #26): if the agent has spoken replies enabled,
+        # deliver the reply as an uploaded MP3 audio clip (Slack renders it as an
+        # inline player). Strictly additive — any miss returns False and we fall
+        # through to the text message below. Real file uploads above are unaffected.
+        if agent_name and response.text and response.text.strip():
+            if await self._maybe_send_voice(bot_token, channel_id, response.text, agent_name, thread_id):
+                return
+
         formatted_text = self.format_response(response.text)
 
         await slack_service.send_message(
@@ -164,6 +172,54 @@ class SlackAdapter(ChannelAdapter):
             icon_url=avatar_url,
             thread_ts=thread_id,
         )
+
+    def _plain_for_tts(self, text: str) -> str:
+        """Strip markdown markup so the spoken reply doesn't read out asterisks,
+        backticks, or raw link URLs."""
+        t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [label](url) -> label
+        t = re.sub(r"[*_`#>~]", "", t)
+        return t.strip()
+
+    async def _maybe_send_voice(
+        self,
+        bot_token: str,
+        channel_id: str,
+        text: str,
+        agent_name: str,
+        thread_id: Optional[str],
+    ) -> bool:
+        """Try to deliver ``text`` as a Slack voice clip (epic #24 / #26).
+
+        Returns True only when an audio clip was actually uploaded. Any miss —
+        feature off, no voice id, TTS unavailable, over the cost cap,
+        provider error, or a failed upload — returns False so the caller falls
+        back to a text message. Never raises. Slack renders MP3 as an inline
+        player, so no OGG transcode is needed here.
+        """
+        try:
+            cfg = db.get_tts_config(agent_name)
+        except Exception as e:
+            logger.warning(f"[SLACK] voice-out config lookup failed for {agent_name}: {e}")
+            return False
+        if not cfg.get("enabled") or not cfg.get("voice_id"):
+            return False
+
+        import services.tts_service as tts_service
+
+        mp3 = await tts_service.synthesize_mp3(self._plain_for_tts(text), cfg["voice_id"])
+        if not mp3:
+            return False
+
+        success, error = await slack_service.upload_file(
+            bot_token=bot_token,
+            channel=channel_id,
+            filename="voice.mp3",
+            content=mp3,
+            thread_ts=thread_id,
+        )
+        if not success:
+            logger.warning(f"[SLACK] voice clip upload failed: {error}")
+        return success
 
     async def indicate_processing(self, message: NormalizedMessage) -> None:
         """Add ⏳ reaction to the user's message."""

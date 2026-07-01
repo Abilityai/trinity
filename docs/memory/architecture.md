@@ -209,7 +209,7 @@
 
 - `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
 - `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895)
-- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`
+- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`; outbound voice replies as an inline MP3 clip via the Slack Files upload flow (`slack_service.upload_file`) when TTS enabled (epic #24/#26, shared `tts_service`; MP3 needs no transcode)
 - `transports/slack_socket.py` - Socket Mode: N concurrent WebSockets per `SLACK_SOCKET_CONNECTION_COUNT` (default 2, range 1–10), per-client watchdog, envelope-ID dedup ring (#244)
 - `transports/slack_webhook.py` - HTTP webhook transport (production fallback)
 - `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow; outbound voice replies via `sendVoice` when TTS enabled (epic #24/#25, shared `tts_service`)
