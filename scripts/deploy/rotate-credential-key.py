@@ -44,7 +44,7 @@ from services.credential_encryption import (  # noqa: E402
 )
 
 # (table, primary-key column, encrypted column) — keep in sync with Invariant #12.
-SECRET_COLUMNS = [
+ENCRYPTED_COLUMNS = [
     ("subscription_credentials", "id", "encrypted_credentials"),
     ("nevermined_agent_config", "id", "encrypted_credentials"),
     ("agent_git_config", "id", "github_pat_encrypted"),
@@ -80,17 +80,17 @@ def rotate(apply: bool) -> int:
     total_migrated = total_skipped = 0
 
     with engine.begin() as conn:
-        for table, pk, col in SECRET_COLUMNS:
+        for table, pk, col in ENCRYPTED_COLUMNS:
             if not _table_exists(conn, table):
                 print(f"  {table:28} — absent, skipped")
                 continue
             rows = conn.execute(
-                text(f"SELECT {pk} AS pk, {col} AS secret FROM {table} WHERE {col} IS NOT NULL")
+                text(f"SELECT {pk} AS pk, {col} AS enc_value FROM {table} WHERE {col} IS NOT NULL")
             ).mappings().all()
             migrated = skipped = 0
             for row in rows:
                 try:
-                    rewrapped = svc.rewrap(row["secret"])
+                    rewrapped = svc.rewrap(row["enc_value"])
                 except Exception as e:
                     skipped += 1
                     print(f"    [skip] {table}.{pk}={row['pk']}: not a readable envelope ({e})")
