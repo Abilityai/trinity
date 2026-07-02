@@ -1953,7 +1953,7 @@ INFO: 172.28.0.6:57454 - "GET /api/agents/context-stats HTTP/1.1" 200 OK        
 - `src/frontend/src/views/AgentCollaboration.vue` - Renamed to Dashboard.vue (2025-12-07)
 
 ### Documentation
-- **Requirements**: `.claude/memory/requirements.md` (REQ-9.6)
+- **Requirements**: `docs/memory/requirements/core-agent.md` (§9 Agent Collaboration, REQ-9.6)
 - **Vue Flow Docs**: https://vueflow.dev/
 - **WebSocket API**: MDN WebSocket Documentation
 
