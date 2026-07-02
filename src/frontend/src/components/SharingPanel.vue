@@ -142,6 +142,16 @@
         >
           <VoipChannelPanel :agent-name="agentName" />
         </ChannelDisclosure>
+
+        <!-- MCP connector (ent#46) — gated on the mcp_connector entitlement -->
+        <ChannelDisclosure
+          v-if="enterpriseStore.isEntitled('mcp_connector')"
+          title="MCP connector"
+          subtitle="Add this agent to an AI client; playbooks become tools"
+          icon="🔌"
+        >
+          <ConnectorChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
       </div>
     </div>
 
@@ -215,12 +225,14 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
+import { useEnterpriseStore } from '../stores/enterprise'
 import ChannelDisclosure from './ChannelDisclosure.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
+import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
@@ -241,6 +253,10 @@ const { showNotification } = useNotification()
 // VoIP channel visibility (#28) — gated on the platform `voip_available` flag.
 const sessionsStore = useSessionsStore()
 sessionsStore.loadFeatureFlags()
+
+// MCP connector visibility (ent#46) — gated on the `mcp_connector` entitlement.
+const enterpriseStore = useEnterpriseStore()
+enterpriseStore.loadFeatureFlags()
 
 const loadAgent = () => {
   emit('agent-updated')

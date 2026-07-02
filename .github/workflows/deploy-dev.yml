@@ -12,7 +12,7 @@ jobs:
     steps:
       - name: Connect to Tailscale
         # SHA-pinned to mitigate supply-chain hijack of the v2 floating tag.
-        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.2
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
         with:
           authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
 

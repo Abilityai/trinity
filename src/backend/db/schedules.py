@@ -1934,68 +1934,75 @@ class ScheduleOperations:
         cap = _PERCENTILE_ROWSET_CAP
         FAILED_STATES = (TaskExecutionStatus.FAILED, "error")
 
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        # #300/#1115: ported to SQLAlchemy Core so the summary works on both
+        # SQLite and PostgreSQL (the earlier raw-sqlite path NameError'd on the
+        # dropped get_db_connection import, and the bare-column-with-MAX last-run
+        # trick is SQLite-only — replaced by a portable ROW_NUMBER window below).
+        se = schedule_executions.c
+        sch = agent_schedules.c
+        base_where = and_(se.agent_name == agent_name, se.started_at > cutoff)
 
-            # Schedules (non-deleted) — the authoritative row set so a
-            # zero-run schedule still appears.
-            cursor.execute(
-                """
-                SELECT id, name, message, cron_expression, enabled
-                FROM agent_schedules
-                WHERE agent_name = ? AND deleted_at IS NULL
-                ORDER BY created_at ASC
-                """,
-                (agent_name,),
-            )
-            schedule_rows = cursor.fetchall()
+        # Schedules (non-deleted) — the authoritative row set so a
+        # zero-run schedule still appears.
+        q_sched = (
+            select(sch.id, sch.name, sch.message, sch.cron_expression, sch.enabled)
+            .where(and_(sch.agent_name == agent_name, sch.deleted_at.is_(None)))
+            .order_by(sch.created_at.asc())
+        )
 
-            # One grouped aggregate for every schedule's executions in window.
-            cursor.execute(
-                """
-                SELECT
-                    schedule_id,
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-                    SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
-                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
-                    SUM(COALESCE(cost, 0)) AS cost_total,
-                    AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) AS avg_duration_ms,
-                    AVG(CASE WHEN context_used IS NOT NULL THEN context_used END) AS context_avg
-                FROM schedule_executions
-                WHERE agent_name = ? AND started_at > ?
-                GROUP BY schedule_id
-                """,
-                (agent_name, cutoff),
+        # One grouped aggregate for every schedule's executions in window.
+        # AVG skips NULLs natively, matching the prior CASE-wrapped AVG.
+        q_agg = (
+            select(
+                se.schedule_id,
+                func.count().label("total"),
+                func.sum(case((se.status == "success", 1), else_=0)).label("success_count"),
+                func.sum(case((se.status.in_(("failed", "error")), 1), else_=0)).label("failed_count"),
+                func.sum(case((se.status == "cancelled", 1), else_=0)).label("cancelled_count"),
+                func.sum(func.coalesce(se.cost, 0)).label("cost_total"),
+                func.avg(se.duration_ms).label("avg_duration_ms"),
+                func.avg(se.context_used).label("context_avg"),
             )
-            agg_by_sched = {r["schedule_id"]: r for r in cursor.fetchall()}
+            .where(base_where)
+            .group_by(se.schedule_id)
+        )
 
-            # Last-run outcome per schedule. SQLite's bare-column-with-MAX
-            # rule returns the row holding the max started_at.
-            cursor.execute(
-                """
-                SELECT schedule_id, MAX(started_at) AS last_run_at, status AS last_status
-                FROM schedule_executions
-                WHERE agent_name = ? AND started_at > ?
-                GROUP BY schedule_id
-                """,
-                (agent_name, cutoff),
+        # Last-run outcome per schedule — portable ROW_NUMBER window (replaces
+        # SQLite's bare-column-with-MAX, which errors on PostgreSQL) keeping the
+        # in-window semantics of the original query.
+        _last_rn = func.row_number().over(
+            partition_by=se.schedule_id, order_by=se.started_at.desc()
+        ).label("rn")
+        _last_subq = (
+            select(
+                se.schedule_id,
+                se.started_at.label("last_run_at"),
+                se.status.label("last_status"),
+                _last_rn,
             )
-            last_by_sched = {r["schedule_id"]: r for r in cursor.fetchall()}
+            .where(base_where)
+            .subquery()
+        )
+        q_last = select(
+            _last_subq.c.schedule_id,
+            _last_subq.c.last_run_at,
+            _last_subq.c.last_status,
+        ).where(_last_subq.c.rn == 1)
 
-            # Tool-call totals — bounded JSON parse over newest rows agent-wide
-            # (cap + 1 to detect sampling), attributed back per schedule.
-            cursor.execute(
-                """
-                SELECT schedule_id, tool_calls
-                FROM schedule_executions
-                WHERE agent_name = ? AND started_at > ? AND tool_calls IS NOT NULL
-                ORDER BY started_at DESC
-                LIMIT ?
-                """,
-                (agent_name, cutoff, cap + 1),
-            )
-            tool_rows = cursor.fetchall()
+        # Tool-call totals — bounded JSON parse over newest rows agent-wide
+        # (cap + 1 to detect sampling), attributed back per schedule.
+        q_tools = (
+            select(se.schedule_id, se.tool_calls)
+            .where(and_(base_where, se.tool_calls.isnot(None)))
+            .order_by(se.started_at.desc())
+            .limit(cap + 1)
+        )
+
+        with get_engine().connect() as conn:
+            schedule_rows = conn.execute(q_sched).mappings().all()
+            agg_by_sched = {r["schedule_id"]: r for r in conn.execute(q_agg).mappings().all()}
+            last_by_sched = {r["schedule_id"]: r for r in conn.execute(q_last).mappings().all()}
+            tool_rows = conn.execute(q_tools).mappings().all()
 
         tool_calls_sampled = len(tool_rows) > cap
         tool_total_by_sched: Dict[str, int] = defaultdict(int)

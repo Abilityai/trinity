@@ -129,6 +129,25 @@ class ChannelAdapter(ABC):
         Returns agent name, or None if no agent is configured for this channel/user.
         """
 
+    async def enrich_message(self, message: NormalizedMessage) -> None:
+        """
+        Enrich a parsed message with async-fetched sender/channel identity (#350).
+
+        ``parse_message`` is synchronous and, on some channels (Slack), the raw
+        event carries only opaque IDs — resolving a display name / channel name
+        needs an async API call. The router calls this once after resolving the
+        agent, so an adapter can populate ``message.metadata`` in place with:
+          - ``channel_name`` — human channel name (drives the ``[Channel: #x]``
+            context prefix; presence gates that prefix, so DMs stay clean)
+          - ``sender_display_name`` / ``sender_username`` — attribution
+
+        Default: no-op — channels whose event already carries identity
+        (Telegram) need nothing here. Override in concrete adapters. Must be
+        best-effort (never raise): the router still handles the message if
+        enrichment fails.
+        """
+        return None
+
     async def indicate_processing(self, message: NormalizedMessage) -> None:
         """
         Show a processing indicator to the user.

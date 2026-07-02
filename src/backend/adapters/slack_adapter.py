@@ -243,6 +243,42 @@ class SlackAdapter(ChannelAdapter):
 
         return None
 
+    async def enrich_message(self, message: NormalizedMessage) -> None:
+        """Resolve sender display name (+ channel name for channel messages) so
+        the agent knows who is speaking (#350).
+
+        Slack events carry only opaque IDs (``U123``/``C123``); this fetches the
+        display identity via the Web API and writes it into ``message.metadata``.
+        ``channel_name`` is set only for non-DM (channel) messages — its presence
+        is what makes the router prepend the ``[Channel: #x]`` context, so DMs
+        stay clean. Best-effort: any failure leaves the bare IDs in place.
+        """
+        try:
+            team_id = message.metadata.get("team_id")
+            if not team_id:
+                return
+            bot_token = db.get_slack_workspace_bot_token(team_id)
+            if not bot_token:
+                return
+
+            if message.sender_id:
+                user_info = await slack_service.get_user_info(bot_token, message.sender_id)
+                if user_info:
+                    display = user_info.get("real_name") or user_info.get("display_name")
+                    if display:
+                        message.metadata["sender_display_name"] = display
+                    if user_info.get("name"):
+                        message.metadata["sender_username"] = user_info["name"]
+
+            # Channel name only for channel (non-DM) messages — gates the
+            # [Channel: #x] prefix; DMs intentionally have no channel context.
+            if not message.metadata.get("is_dm") and message.channel_id:
+                channel_info = await slack_service.get_channel_info(bot_token, message.channel_id)
+                if channel_info and channel_info.get("name"):
+                    message.metadata["channel_name"] = channel_info["name"]
+        except Exception as e:  # noqa: BLE001 — enrichment is best-effort (#350)
+            logger.debug(f"[SlackAdapter] enrich_message failed: {e}", exc_info=True)
+
     # =========================================================================
     # Slack-specific: message parsing
     # =========================================================================

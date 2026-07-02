@@ -2154,6 +2154,12 @@ class TelegramGroupMessageRequest(BaseModel):
     message: str
 
 
+class SlackChannelMessageRequest(BaseModel):
+    """Request model for proactive Slack channel messaging (#350)."""
+    message: str
+    thread_ts: Optional[str] = None  # optionally reply in an existing thread
+
+
 # =============================================================================
 # Users Models (routers/users.py)
 # =============================================================================

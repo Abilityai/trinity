@@ -90,6 +90,7 @@ services:
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
       # Agent auth master (#1159) - backend derives each agent's in-container

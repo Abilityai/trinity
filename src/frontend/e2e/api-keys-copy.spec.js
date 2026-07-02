@@ -18,9 +18,28 @@ import { test, expect } from '@playwright/test'
 const MCP_KEYS_ROUTE = '/settings?tab=mcp-keys'
 
 test.describe('@smoke api-keys copy buttons (#677, #859)', () => {
-  test.beforeEach(async ({ context }) => {
+  test.beforeEach(async ({ context, page }) => {
     // Headless browsers gate clipboard read by default — opt in for the test.
     await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+
+    // #1134: McpKeysTab's onMounted fires POST /api/mcp/keys/ensure-default;
+    // when no user-scoped key exists it auto-creates "Default MCP Key" and
+    // opens the "Your MCP API Key is Ready!" modal at an arbitrary point
+    // mid-test — both modals are `fixed z-10 inset-0`, so the auto-modal
+    // lands on top and intercepts the Create click. Neutralize the race:
+    // call ensure-default ourselves, then reload — the remounted page's own
+    // ensure-default is a guaranteed no-op, so the auto-modal can never
+    // appear during the test body.
+    await page.goto(MCP_KEYS_ROUTE)
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    if (token) {
+      await page.request
+        .post('/api/mcp/keys/ensure-default', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        .catch(() => {})
+    }
+    await page.reload()
   })
 
   test('Copy Config button writes MCP JSON to clipboard', async ({ page }) => {

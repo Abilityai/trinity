@@ -134,6 +134,8 @@ omit it), and (b) **fail-closed-when-absent** (no execution_id → refuse the
 effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 #1045/#1081**, not doc-only-and-forget.
 
+> **Reframed (v2, 2026-07-01).** `TARGET_ARCHITECTURE.md` reframes the pull-mode side-effect rollout from a **per-agent** gate to **per-effect**: read/analysis-only + reversible + capability-confined-irreversible effects default on; only irreversible-**un-confineable** effects wait, via the **async operator queue** (#1402). `effect_guard` (this doc) is the reversible/backend-sink slice; general recovery is **retry-with-prior-trace** (#1401). The (a)/(b) trusted-injection requirement above still applies to the *confined-irreversible* tool-side gate.
+
 ## Failure Modes
 
 | Codepath | Realistic failure | Handling | User-visible |

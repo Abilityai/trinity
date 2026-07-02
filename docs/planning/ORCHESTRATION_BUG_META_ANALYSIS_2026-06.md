@@ -5,6 +5,8 @@
 **Method:** 11 per-family forensic analyzers (each reading the actual issue bodies, merge diffs, and owning code), each pressure-tested by an adversarial verifier, feeding 4 cross-cutting synthesis lenses. Raw outputs preserved in Part II (synthesis lenses) and the Appendix (per-family forensic reports).
 **Companion:** `TARGET_ARCHITECTURE.md` §Coordination Model. This analysis drove the 2026-06-06 result-contract tightenings in that document.
 
+> **Update 2026-07-01 — #1084 approach reframed (v2).** References below to "#1084 as *the gate*" and the `{execution_id}:{effect_ordinal}` universal-sink key describe the **Direction-A** thinking as of this 2026-06 analysis. `TARGET_ARCHITECTURE.md` v2 replaces universal sink-keying with **retry-with-prior-trace** (#1401) + **deterministic tool-side gates** on capability-confined irreversible rails + an **async operator human-gate** (#1402), gating **per-effect not per-agent**; #1084 is no longer *the* gate on pull default-on. Kept as a point-in-time snapshot — the analysis body is unchanged.
+
 ---
 
 ## The one-sentence finding
