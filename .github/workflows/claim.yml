@@ -34,6 +34,19 @@ jobs:
               return;
             }
 
+            // Incubation hard gate — an idea that isn't greenlit can't be claimed
+            // into development. Do NOT silently strip the label here: promotion out
+            // of incubation is a deliberate, separate decision (/groom or manual swap).
+            if (issue.labels.some(l => l.name === 'status-incubating')) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `@${commenter} ⛔ This issue is in **incubation** (\`status-incubating\`) — an idea not yet greenlit for development, so it can't be claimed.\n\nPromote it first (swap to \`status-ready\`) via \`/groom\` (Readiness Triage) or:\n\`\`\`\ngh issue edit ${issue.number} --add-label status-ready --remove-label status-incubating\n\`\`\`\nthen \`/claim\` again.`
+              });
+              return;
+            }
+
             // Assign the commenter
             await github.rest.issues.addAssignees({
               owner: context.repo.owner,
@@ -49,6 +62,20 @@ jobs:
               issue_number: issue.number,
               labels: ['status-in-progress']
             });
+
+            // Strip the status-ready gate label — the issue is now in progress,
+            // not merely "ready to pick up". (status-incubating can't be present:
+            // the guard above already returned for incubating issues.)
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                name: 'status-ready'
+              });
+            } catch (e) {
+              // Label might not be present, that's fine
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,

@@ -19,7 +19,9 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0009_agent_ownership_public_channel_model"
-down_revision = "0008_agent_loops_max_cost"
+# #1420: rechained onto the alembic_version widen so the column is VARCHAR(255)
+# before this 41-char revision id is stamped (was 0008_agent_loops_max_cost).
+down_revision = "0008a_widen_alembic_version"
 branch_labels = None
 depends_on = None
 

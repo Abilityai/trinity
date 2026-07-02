@@ -118,6 +118,9 @@ def auth_module(monkeypatch):
     config_mod.ACCESS_TOKEN_EXPIRE_MINUTES = 60
     config_mod.EMAIL_AUTH_ENABLED = False
     config_mod.REDIS_URL = "redis://stub"
+    # auth.py grew a PUBLIC_ACCESS_REQUESTS_ENABLED dependency (trinity-enterprise#10);
+    # keep this stub in sync or its import fails under HEAD.
+    config_mod.PUBLIC_ACCESS_REQUESTS_ENABLED = False
     stubs["config"] = config_mod
 
     database_mod = types.ModuleType("database")

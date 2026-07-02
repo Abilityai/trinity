@@ -24,6 +24,7 @@ from models import (
     ExecutionResultEnvelope,
     HeartbeatPayload,
     McpExposedUpdate,
+    VoiceRepliesUpdate,
     TaskExecutionStatus,
     User,
 )
@@ -841,6 +842,66 @@ async def set_mcp_exposed_endpoint(
         "agent_name": agent_name,
         "enabled": body.enabled,
         "tool_name": resolve_tool_name(agent_name, exposed_names),
+    }
+
+
+# ============================================================================
+# Outbound voice replies (TTS) — shared agent-level config (epic #24 / #25)
+# ============================================================================
+
+
+@router.get("/{agent_name}/voice-replies")
+async def get_voice_replies_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """Shared per-agent outbound-voice config (epic #24 / #25).
+
+    Returns the toggle + configured ElevenLabs voice id, plus ``available`` —
+    whether the platform has TTS configured at all (``ELEVENLABS_API_KEY``) — so
+    the UI can show an inactive state instead of a dead toggle.
+    """
+    import services.tts_service as tts_service
+
+    cfg = db.get_tts_config(agent_name)
+    return {
+        "agent_name": agent_name,
+        "enabled": cfg["enabled"],
+        "voice_id": cfg["voice_id"],
+        "available": tts_service.is_available(),
+    }
+
+
+@router.put("/{agent_name}/voice-replies")
+async def set_voice_replies_endpoint(
+    agent_name: OwnedAgentByName,
+    body: VoiceRepliesUpdate,
+    current_user: CurrentUser,
+):
+    """Enable/disable spoken replies and set the ElevenLabs voice id (owner-only).
+
+    Enabling requires a ``voice_id``. When on, channel adapters (Telegram first)
+    speak replies via the shared TTS service, falling back to text on any failure
+    or when the reply exceeds the shared cost cap.
+    """
+    if body.enabled and not body.voice_id:
+        raise HTTPException(status_code=400, detail="voice_id is required to enable voice replies")
+
+    db.set_tts_config(agent_name, body.enabled, body.voice_id)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="voice_replies_config",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={"enabled": body.enabled, "has_voice_id": bool(body.voice_id)},
+    )
+    cfg = db.get_tts_config(agent_name)
+    return {
+        "agent_name": agent_name,
+        "enabled": cfg["enabled"],
+        "voice_id": cfg["voice_id"],
     }
 
 

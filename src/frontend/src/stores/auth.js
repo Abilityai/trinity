@@ -352,7 +352,16 @@ export const useAuthStore = defineStore('auth', {
     },
 
     // Logout
-    logout() {
+    async logout() {
+      // #187: revoke the token server-side first so an exfiltrated copy stops
+      // working immediately. Best-effort — never block local logout if the
+      // call fails (the Authorization header is still set at this point).
+      try {
+        await axios.post('/api/auth/logout')
+      } catch (e) {
+        // ignore — proceed to clear local state regardless
+      }
+
       this.token = null
       this.user = null
       this.isAuthenticated = false

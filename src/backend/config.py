@@ -233,6 +233,15 @@ VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 DEFAULT_VOICE_NAME = "Kore"
 GEMINI_VOICE_NAMES = ("Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir", "Gacrux")
 
+# Outbound voice messages across channels (epic #24). Shared TTS layer used by
+# the channel adapters (Telegram #25 first) to speak agent replies. ElevenLabs is
+# the provider; the key gates the whole feature (empty ⇒ voice-out unavailable,
+# adapters fall back to text). TTS_MAX_CHARS is the shared cost guardrail — a
+# reply longer than this is delivered as text instead of paying to synthesize it.
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
+TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
+
 # Gemini text/audio models (#1130). Hardcoded `gemini-2.0-flash` was retired by
 # Google (404 NOT_FOUND) with no config escape hatch — these env overrides make
 # the next model retirement a config change instead of a code change. Same `or`

@@ -13,7 +13,14 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import create_engine, pool
+from sqlalchemy import String, create_engine, pool
+
+# #1420: Alembic's default ``alembic_version.version_num`` is VARCHAR(32), but
+# Trinity's descriptive ``NNNN_<table>_<change>`` revision ids exceed that (e.g.
+# ``0009_agent_ownership_public_channel_model`` = 41). Configure the auto-created
+# version table wide so fresh PostgreSQL builds never truncation-fail the stamp;
+# existing DBs (already created at 32) are widened by the 0008a migration.
+_VERSION_TABLE_COLUMN_TYPE = String(255)
 
 # src/backend is normally on sys.path (PYTHONPATH) at runtime; make the env
 # importable when alembic is invoked from the src/backend dir too.
@@ -45,6 +52,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        version_table_column_type=_VERSION_TABLE_COLUMN_TYPE,  # #1420
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -57,6 +65,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            version_table_column_type=_VERSION_TABLE_COLUMN_TYPE,  # #1420
         )
         with context.begin_transaction():
             context.run_migrations()

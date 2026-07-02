@@ -49,8 +49,10 @@ def downgrade() -> None:
     op.execute("DROP SCHEMA public CASCADE")
     op.execute("CREATE SCHEMA public")
     op.execute(
+        # #1420: VARCHAR(255), matching env.py's version_table_column_type — the
+        # 32-char default can't hold Trinity's descriptive revision ids.
         "CREATE TABLE alembic_version ("
-        "version_num VARCHAR(32) NOT NULL, "
+        "version_num VARCHAR(255) NOT NULL, "
         "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
     )
     # Re-seed the row Alembic is mid-removing: its post-downgrade bookkeeping

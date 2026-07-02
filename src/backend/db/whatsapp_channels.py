@@ -272,6 +272,42 @@ class WhatsAppChannelOperations:
             row = conn.execute(stmt).mappings().first()
         return row["verified_email"] if row and row["verified_email"] else None
 
+    def list_clients_for_agent(self, agent_name: str) -> List[dict]:
+        """External WhatsApp clients who have messaged this agent (#20 roster).
+
+        Joins the agent's binding to its chat links. ``identity`` is the
+        E.164-style ``whatsapp:+...`` phone the user messaged from.
+        """
+        stmt = (
+            select(
+                whatsapp_chat_links.c.wa_user_phone,
+                whatsapp_chat_links.c.wa_user_name,
+                whatsapp_chat_links.c.verified_email,
+                whatsapp_chat_links.c.message_count,
+                whatsapp_chat_links.c.last_active,
+            )
+            .select_from(
+                whatsapp_chat_links.join(
+                    whatsapp_bindings,
+                    whatsapp_chat_links.c.binding_id == whatsapp_bindings.c.id,
+                )
+            )
+            .where(whatsapp_bindings.c.agent_name == agent_name)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        clients = []
+        for row in rows:
+            clients.append({
+                "channel": "whatsapp",
+                "identity": row["wa_user_phone"],
+                "display_name": row["wa_user_name"] or None,
+                "verified_email": row["verified_email"] or None,
+                "message_count": row["message_count"] or 0,
+                "last_active": row["last_active"],
+            })
+        return clients
+
     def increment_message_count(self, chat_link_id: int) -> None:
         now = utc_now_iso()
         stmt = (

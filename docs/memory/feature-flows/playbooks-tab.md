@@ -396,13 +396,13 @@ def scan_skills_directory(skills_dir: Path) -> List[SkillInfo]:
 │  │  PlaybooksPanel.vue │  Display:                                         │
 │  │  (render skills)    │  - Grid of skill cards                           │
 │  └──────────┬──────────┘  - Name, description, automation badge           │
-│             │              - Run / Edit buttons                            │
+│             │              - Run / Edit & Run buttons                      │
 │             │                                                               │
 │  ═══════════╪═══════════════════════════════════════════════════════════  │
 │  One-Click  │  Run with Instructions                                       │
 │  ═══════════╪═══════════════════════════════════════════════════════════  │
 │             │                                                               │
-│  Click "Run" button                    Click "Edit" button                 │
+│  Click "Run" button                    Click "Edit & Run" button           │
 │         │                                      │                           │
 │         ▼                                      ▼                           │
 │  POST /api/agents/{name}/task          emit('run-with-instructions')      │

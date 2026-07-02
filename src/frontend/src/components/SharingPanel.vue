@@ -181,6 +181,61 @@
         >
           <VoipChannelPanel :agent-name="agentName" />
         </ChannelDisclosure>
+
+        <!-- MCP connector (ent#46) — gated on the mcp_connector entitlement -->
+        <ChannelDisclosure
+          v-if="enterpriseStore.isEntitled('mcp_connector')"
+          title="MCP connector"
+          subtitle="Add this agent to an AI client; playbooks become tools"
+          icon="🔌"
+        >
+          <ConnectorChannelPanel :agent-name="agentName" />
+        </ChannelDisclosure>
+      </div>
+    </div>
+
+    <!-- Client Roster (#20) — external channel users (read-only) -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
+        Client roster <span class="font-normal text-gray-500 dark:text-gray-400">— who's reaching this agent</span>
+      </h4>
+      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+        External users who have messaged this agent through a channel (Telegram, WhatsApp). Read-only.
+      </p>
+
+      <div v-if="clients.length === 0" class="text-center py-6 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
+        <p class="text-sm">No external clients yet</p>
+        <p class="text-xs mt-1">Users who message via Telegram or WhatsApp will appear here.</p>
+      </div>
+
+      <div v-else class="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+        <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+          <thead class="bg-gray-50 dark:bg-gray-900/50">
+            <tr class="text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+              <th class="px-4 py-2">Client</th>
+              <th class="px-4 py-2">Channel</th>
+              <th class="px-4 py-2">Verified email</th>
+              <th class="px-4 py-2 text-right">Messages</th>
+              <th class="px-4 py-2">Last active</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+            <tr v-for="client in clients" :key="`${client.channel}:${client.identity}`">
+              <td class="px-4 py-2 text-gray-900 dark:text-gray-100">
+                <span class="font-medium">{{ client.display_name || client.identity }}</span>
+                <span v-if="client.display_name" class="block text-xs text-gray-500 dark:text-gray-400">{{ client.identity }}</span>
+              </td>
+              <td class="px-4 py-2">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 capitalize">{{ client.channel }}</span>
+              </td>
+              <td class="px-4 py-2 text-gray-600 dark:text-gray-300">
+                {{ client.verified_email || '—' }}
+              </td>
+              <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-200">{{ client.message_count }}</td>
+              <td class="px-4 py-2 text-gray-500 dark:text-gray-400">{{ formatLastActive(client.last_active) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -210,12 +265,14 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
+import { useEnterpriseStore } from '../stores/enterprise'
 import ChannelDisclosure from './ChannelDisclosure.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
+import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({
@@ -237,6 +294,10 @@ const { showNotification } = useNotification()
 const sessionsStore = useSessionsStore()
 const agentsStore = useAgentsStore()
 sessionsStore.loadFeatureFlags()
+
+// MCP connector visibility (ent#46) — gated on the `mcp_connector` entitlement.
+const enterpriseStore = useEnterpriseStore()
+enterpriseStore.loadFeatureFlags()
 
 const loadAgent = () => {
   emit('agent-updated')
@@ -301,6 +362,33 @@ const savePublicPrompt = async () => {
 const clearPublicPrompt = async () => {
   publicPrompt.value = ''
   await savePublicPrompt()
+}
+
+// ---------------------------------------------------------------------------
+// External client roster (#20)
+// ---------------------------------------------------------------------------
+const clients = ref([])
+
+const loadClients = async () => {
+  try {
+    const { data } = await axios.get(
+      `/api/agents/${props.agentName}/clients`,
+      { headers: authStore.authHeader }
+    )
+    clients.value = data
+  } catch (err) {
+    console.error('Failed to load client roster:', err)
+    clients.value = []
+  }
+}
+
+const formatLastActive = (iso) => {
+  if (!iso) return 'never'
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
 }
 
 const loadPolicy = async () => {
@@ -425,6 +513,6 @@ const setPublicChannelModel = async (value) => {
 
 watch(() => props.agentName, async (name) => {
   if (!name) return
-  await Promise.all([loadPolicy(), loadAccessRequests(), loadPublicChannelModel(), loadPublicPrompt()])
+  await Promise.all([loadPolicy(), loadAccessRequests(), loadPublicChannelModel(), loadClients(), loadPublicPrompt()])
 }, { immediate: true })
 </script>

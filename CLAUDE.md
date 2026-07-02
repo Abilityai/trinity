@@ -110,7 +110,7 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 ## Rules of Engagement
 
 ### 1. Requirements-Driven Development
-- Update `docs/memory/requirements.md` **BEFORE** implementing new features
+- Update the relevant area file under `docs/memory/requirements/` **BEFORE** implementing new features (the [`requirements.md`](docs/memory/requirements.md) index maps areas → files and states the write-path rule)
 - All features must trace back to documented requirements
 - Never add features without requirements update first
 
@@ -130,7 +130,7 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 Documentation requirements scale with change type (change history is tracked via git commits):
 - **Bug fix**: Descriptive commit message only
 - **Feature / API change**: `architecture.md` or `feature-flows/` as needed
-- **New capability**: `requirements.md` + `feature-flows/`
+- **New capability**: `docs/memory/requirements/<area>.md` (index: `requirements.md`) + `feature-flows/`
 
 ### 5. Security First (PUBLIC REPO)
 - **This is a public repository** - assume all commits are visible worldwide
@@ -155,7 +155,7 @@ Follow methodology guides in `.claude/skills/`:
 Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
 
 ### 8. Agent-Defined Pipelines (Trinity ≠ DAG engine)
-Long-running multi-stage work inside agents (perception → synthesis → publish → measure, etc.) is **owned by the agent**, not by Trinity. The agent runs a heartbeat skill that advances stages, retries failures, and escalates via the operator queue. Trinity's only contribution is a standardized **read surface** — agents publish `~/.trinity/pipelines/<id>.yaml` (definition) and `~/.trinity/pipeline-state/<id>/<instance>.json` (state); Trinity exposes these via thin MCP tools (`list_agent_pipelines`, `get_agent_pipeline_state`) that wrap the existing `agent_files` router. **Do not** add a DAG executor, pipeline state tables, or backend transition logic — those belong in the agent. See requirements §34 and issue #919.
+Long-running multi-stage work inside agents (perception → synthesis → publish → measure, etc.) is **owned by the agent**, not by Trinity. The agent runs a heartbeat skill that advances stages, retries failures, and escalates via the operator queue. Trinity's only contribution is a standardized **read surface** — agents publish `~/.trinity/pipelines/<id>.yaml` (definition) and `~/.trinity/pipeline-state/<id>/<instance>.json` (state); Trinity exposes these via thin MCP tools (`list_agent_pipelines`, `get_agent_pipeline_state`) that wrap the existing `agent_files` router. **Do not** add a DAG executor, pipeline state tables, or backend transition logic — those belong in the agent. See `docs/memory/requirements/scheduling.md` (Agent-Defined Pipelines, formerly §34) and issue #919.
 
 ### 9. Dual-Track DB Migrations (SQLite + PostgreSQL) — #1183
 Trinity supports **both** SQLite (default) and PostgreSQL, on **separate migration systems**. **Every schema change requires TWO migrations:**
@@ -171,9 +171,9 @@ Also update the table DDL in `src/backend/db/schema.py` / `db/tables.py` so fres
 
 | File | Purpose |
 |------|---------|
-| `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** - All features |
+| `docs/memory/requirements.md` | **SINGLE SOURCE OF TRUTH** — index over per-area files in `docs/memory/requirements/` (split from the former monolith, #1406). All features |
 | @docs/memory/architecture.md | **Current system design** — describes what is built today (~1000 lines max) |
-| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
+| `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). **v2 (2026-07-01):** side-effect handling reframed to **retry-with-prior-trace recovery** + **deterministic tool-side gates on capability-confined irreversible rails** (Direction B); pull default-on now gates per-effect not per-agent (#1401 recovery trace + injection, #1402 async operator-queue human-gate). v1 archived at `docs/archive/plans/TARGET_ARCHITECTURE_v1_2026-06-06.md`. Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` | **Archived (historical)** — completed Sprint A–D′ execution-reliability plan (all shipped). Superseded 2026-06-05 by the pull-coordination direction in `TARGET_ARCHITECTURE.md`. Read for background on the slot/backlog/cleanup machinery. |
 | GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. **Two trackers:** bugs/refactor/docs in public `abilityai/trinity`, features/epics in private `abilityai/trinity-enterprise` (see `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing). |
@@ -363,7 +363,7 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 - **SDLC & Development Workflow**: `.claude/DEVELOPMENT_WORKFLOW.md` ← Start here for dev process
 - **Orchestration Reliability Plan (archived)**: `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` ← Sprint A–D′ historical record; superseded by `docs/planning/TARGET_ARCHITECTURE.md` (pull coordination) as the active execution-stack direction
 - **Full Architecture**: @docs/memory/architecture.md
-- **All Requirements**: `.claude/memory/requirements.md`
+- **All Requirements**: `docs/memory/requirements.md` (index) → per-area files in `docs/memory/requirements/`
 - **Current Roadmap**: https://github.com/abilityai/trinity/issues (public bugs) + private `abilityai/trinity-enterprise` (features/epics) — use `/roadmap` to see both
 - **Recent Changes**: `git log --oneline --since="2 weeks ago"`
 - **Agent Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`

@@ -8,7 +8,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
-RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg && rm -rf /var/lib/apt/lists/*
 
 # Build-time provenance (#926). Each arg is forwarded by docker-compose
 # `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.

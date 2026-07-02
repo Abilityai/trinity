@@ -31,23 +31,30 @@ if "utils.helpers" not in sys.modules:
     sys.modules["utils.helpers"] = _helpers
 
 
-# Stub heavy dependencies before importing the service under test so we don't
-# need docker / redis / a live DB to import it. We bypass `services/__init__.py`
-# entirely by loading the service module directly from its file path.
+# Stub heavy dependencies so the service module loads without docker / redis /
+# a live DB, bypassing services/__init__.py. These stubs are installed ONLY for
+# the duration of the `service` fixture (via patch.dict), never permanently:
+# a permanent sys.modules install of the fake `services` package leaks into
+# later test modules — e.g. test_whatsapp_adapter then fails importing
+# container_get_archive from services.docker_utils against the fake namespace
+# (#211 sys.modules-pollution fix).
 _fake_database = types.ModuleType("database")
 _fake_database.db = MagicMock()
-sys.modules.setdefault("database", _fake_database)
 
 _fake_services_pkg = types.ModuleType("services")
 _fake_services_pkg.__path__ = [os.path.join(_backend_path, "services")]
-sys.modules["services"] = _fake_services_pkg
 
 _fake_docker_service = types.ModuleType("services.docker_service")
 _fake_docker_service.list_all_agents_fast = MagicMock(return_value=[])
 # #1264: github_pat_propagation_service now imports get_agent_container at module
 # top, so the stub must expose it for the fresh module load to succeed.
 _fake_docker_service.get_agent_container = MagicMock(return_value=None)
-sys.modules["services.docker_service"] = _fake_docker_service
+
+_STUB_MODULES = {
+    "database": _fake_database,
+    "services": _fake_services_pkg,
+    "services.docker_service": _fake_docker_service,
+}
 
 
 def _load_service():
@@ -77,10 +84,29 @@ def cleanup_after_test():
 
 @pytest.fixture
 def service():
-    """Fresh service module with stubs in place."""
-    if "services.github_pat_propagation_service" in sys.modules:
-        del sys.modules["services.github_pat_propagation_service"]
-    return _load_service()
+    """Fresh service module loaded under confined sys.modules stubs.
+
+    The heavy-dependency stubs are installed only for this fixture, and exactly
+    the keys we touch are restored on teardown. This is a deliberate per-key
+    save/restore rather than ``patch.dict(sys.modules, ...)``: patch.dict does a
+    global ``sys.modules.clear()`` + rebuild on exit, which corrupts unrelated
+    real modules (e.g. ``services.docker_utils`` for the later
+    test_whatsapp_adapter file → ``cannot import container_get_archive ...
+    (unknown location)``). Scoping the restore to our own keys keeps the fake
+    ``services`` package from leaking without disturbing anything else (#211).
+    """
+    _stub_keys = (*_STUB_MODULES, "services.github_pat_propagation_service")
+    _saved = {k: sys.modules.get(k) for k in _stub_keys}
+    sys.modules.update(_STUB_MODULES)
+    sys.modules.pop("services.github_pat_propagation_service", None)
+    try:
+        yield _load_service()
+    finally:
+        for k in _stub_keys:
+            if _saved[k] is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = _saved[k]
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +168,7 @@ def _agent(name: str, status: str = "running"):
 def _make_async_client(read_responses: dict, inject_responses: dict):
     """Build an AsyncMock httpx.AsyncClient that routes per-URL."""
 
-    async def _get(url, params=None, timeout=None):
+    async def _get(url, params=None, timeout=None, headers=None):
         agent = url.split("http://agent-")[1].split(":")[0]
         resp = read_responses[agent]
         r = MagicMock()
@@ -150,7 +176,7 @@ def _make_async_client(read_responses: dict, inject_responses: dict):
         r.json = MagicMock(return_value=resp)
         return r
 
-    async def _post(url, json=None, timeout=None):
+    async def _post(url, json=None, timeout=None, headers=None):
         agent = url.split("http://agent-")[1].split(":")[0]
         behavior = inject_responses[agent]
         if isinstance(behavior, Exception):

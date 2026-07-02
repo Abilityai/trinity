@@ -24,13 +24,23 @@ const devSecurityHeaders = {
   // Vite injects HMR client + inline module preloads; 'unsafe-inline' on
   // script-src is needed in dev only. Production CSP in security-headers.conf
   // is stricter (no script 'unsafe-inline').
+  //
+  // blob: note (#1400): connect-src, media-src, object-src and frame-src MUST
+  // include blob: so the Files-tab preview/download can fetch(URL.createObjectURL
+  // (blob)) and render blob: URLs via <img>/<video>/<audio> and PDF <embed>. The
+  // PDF <embed> needs BOTH object-src (element) and frame-src (Chrome renders the
+  // embedded PDF in an internal viewer frame). Keep in sync with the mirrored
+  // production CSP in security-headers.conf.
   'Content-Security-Policy':
     "default-src 'self'; " +
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
     "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data: blob:; " +
+    "media-src 'self' blob:; " +
     "font-src 'self'; " +
-    "connect-src 'self' ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +
+    "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +
+    "object-src 'self' blob:; " +
+    "frame-src 'self' blob:; " +
     "frame-ancestors 'self'; " +
     "base-uri 'self'; " +
     "form-action 'self'",

@@ -163,9 +163,13 @@ scope for #946).
 delivery with an idempotent coordination boundary**. It cannot make a third
 party's email/payment API exactly-once: lease re-delivery re-runs a whole turn,
 re-emitting any irreversible external effect the first attempt performed. The
-fix is an **effect-scoped idempotency key** `{execution_id}:{effect_ordinal}`
-threaded through every outbound sink — tracked as **#1084**, the gate that keeps
-pull read/analysis-only-agents-first. Agent→agent `chat_with_agent` (the #946
+fix is agent-side recovery, not universal sink-keying — **`TARGET_ARCHITECTURE.md`
+v2** reframes #1084 to **retry-with-prior-trace** (#1401) + **deterministic
+tool-side gates** on capability-confined irreversible rails + an **async operator
+human-gate** (#1402), gating **per-effect not per-agent**. (The earlier plan — an
+`{execution_id}:{effect_ordinal}` key threaded through every outbound sink, #1084
+as *the* gate — is superseded; the envelope/result contract in this postcard is
+unchanged.) Agent→agent `chat_with_agent` (the #946
 pilot's only routed call) has **no irreversible external effect**, so #1084 is
 not needed for this pilot.
 

@@ -26,14 +26,14 @@
     "axios": "^1.18.1",
     "chart.js": "^4.4.7",
     "dompurify": "^3.4.11",
-    "js-yaml": "^5.1.0",
+    "js-yaml": "^5.2.0",
     "marked": "^18.0.5",
-    "mermaid": "^11.15.0",
+    "mermaid": "^11.16.0",
     "monaco-editor": "^0.55.1",
     "pinia": "^3.0.4",
     "qrcode": "^1.5.4",
     "uplot": "^1.6.32",
-    "vue": "^3.5.38",
+    "vue": "^3.5.39",
     "vue-chartjs": "^5.3.2",
     "vue-router": "^4.5.0"
   },
@@ -42,10 +42,10 @@
     "@tailwindcss/typography": "^0.5.20",
     "@types/js-yaml": "^4.0.9",
     "@vitejs/plugin-vue": "^6.0.7",
-    "autoprefixer": "^10.5.1",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.17",
-    "vite": "^8.1.0"
+    "autoprefixer": "^10.5.2",
+    "postcss": "^8.5.16",
+    "tailwindcss": "^3.4.19",
+    "vite": "^8.1.2"
   },
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.62.2",

@@ -10,15 +10,15 @@ Fresh PG builds already get the column because ``0001_baseline`` iterates
 stamped at an earlier revision and never re-running baseline — also picks the
 column up on ``alembic upgrade head``.
 
-Revision ID: 0011_agent_ownership_public_channel_prompt
-Revises: 0010_agent_ownership_mcp_exposed
+Revision ID: 0012_agent_ownership_public_channel_prompt
+Revises: 0011_agent_ownership_tts_voice
 Create Date: 2026-06-25
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0011_agent_ownership_public_channel_prompt"
-down_revision = "0010_agent_ownership_mcp_exposed"
+revision = "0012_agent_ownership_public_channel_prompt"
+down_revision = "0011_agent_ownership_tts_voice"
 branch_labels = None
 depends_on = None
 

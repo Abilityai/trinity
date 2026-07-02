@@ -20,7 +20,15 @@ from config import (
     REDIS_URL,
 )
 from database import db
-from dependencies import authenticate_user, create_access_token
+from dependencies import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    is_token_revoked,
+    oauth2_scheme,
+    revoke_token_jti,
+)
+from models import User
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +381,7 @@ async def validate_token(request: Request):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         user = db.get_user_by_username(username) if username else None
-        if username is None or user is None:
+        if username is None or user is None or is_token_revoked(payload.get("jti")):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
@@ -386,6 +394,28 @@ async def validate_token(request: Request):
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"}
         )
+
+
+@router.post("/api/auth/logout")
+async def logout(
+    current_user: User = Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+):
+    """Revoke the caller's JWT so it can no longer be used (#187).
+
+    `get_current_user` guarantees the bearer is a valid, non-revoked session
+    token (an MCP API key authenticates too, but carries no `jti` — logging out
+    a key is a no-op here; keys are revoked via key management). We then stamp
+    its `jti` into the Redis blacklist until the token's own expiry, so an
+    exfiltrated 7-day token stops working immediately on logout. Idempotent.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        # Not a JWT (e.g. an MCP API key) — nothing to revoke by jti.
+        return {"status": "logged_out"}
+    revoke_token_jti(payload.get("jti"), payload.get("exp"))
+    return {"status": "logged_out"}
 
 
 # =========================================================================
