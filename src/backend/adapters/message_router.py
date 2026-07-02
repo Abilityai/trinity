@@ -128,6 +128,38 @@ def _format_group_sender(message: NormalizedMessage) -> str:
     return "\n".join(parts)
 
 
+def _format_channel_identity(message: NormalizedMessage) -> str:
+    """Format channel + sender identity for a non-group channel message (#350).
+
+    Driven by metadata an adapter's ``enrich_message`` populated
+    (``channel_name`` / ``sender_display_name`` / ``sender_username``). Returns
+    a prefix like::
+
+        [Channel: #engineering]
+        [From: John Smith (@johndoe)]
+
+    Gated on ``channel_name`` presence, so this fires only for channel messages
+    (Slack #channel), never DMs or channels without enrichment (empty string ⇒
+    context unchanged).
+    """
+    channel_name = message.metadata.get("channel_name")
+    if not channel_name:
+        return ""
+
+    parts = [f"[Channel: #{channel_name}]"]
+    display = message.metadata.get("sender_display_name")
+    username = message.metadata.get("sender_username")
+    if display and username:
+        parts.append(f"[From: {display} (@{username})]")
+    elif display:
+        parts.append(f"[From: {display}]")
+    elif username:
+        parts.append(f"[From: @{username}]")
+    else:
+        parts.append(f"[From: User {message.sender_id}]")
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Simple in-memory rate limiter with periodic pruning
 # ---------------------------------------------------------------------------
@@ -262,6 +294,11 @@ class ChannelMessageRouter:
             return
         agent_name, bot_token = resolved
 
+        # 2a. Enrich with async-fetched sender/channel identity (#350). No-op on
+        # channels whose event already carries identity (Telegram); Slack fills
+        # in display name + channel name here. Best-effort — never raises.
+        await adapter.enrich_message(message)
+
         # 2b. Transcribe Telegram voice notes in place (no-op elsewhere).
         message = await self._maybe_transcribe_voice(adapter, message, bot_token, channel)
 
@@ -313,6 +350,12 @@ class ChannelMessageRouter:
             context_prompt = f"{sender_context}\n\n{message.text}"
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
+            # #350: prepend channel + sender identity for channel (non-DM)
+            # messages so the agent knows who is speaking. Empty for DMs and
+            # un-enriched channels → context unchanged.
+            identity_prefix = _format_channel_identity(message)
+            if identity_prefix:
+                context_prompt = f"{identity_prefix}\n\n{context_prompt}"
         logger.debug(f"[ROUTER:{channel}] Step 7 - context built ({len(context_prompt)} chars, group={is_group})")
 
         # 7b. Handle file uploads — download via adapter, copy into agent container.

@@ -207,8 +207,8 @@
 **Channel Adapters (`adapters/`)** — pluggable external messaging (SLACK-002, Invariant #9):
 
 - `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
-- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895)
-- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`
+- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895); calls the adapter's async `enrich_message` hook then prepends a `[Channel: #x]\n[From: …]` identity prefix for enriched channel (non-DM) messages (#350)
+- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`; `enrich_message` resolves sender display name + channel name via `users.info`/`conversations.info` so the agent sees who/where (best-effort, #350)
 - `transports/slack_socket.py` - Socket Mode: N concurrent WebSockets per `SLACK_SOCKET_CONNECTION_COUNT` (default 2, range 1–10), per-client watchdog, envelope-ID dedup ring (#244)
 - `transports/slack_webhook.py` - HTTP webhook transport (production fallback)
 - `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow
@@ -262,7 +262,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `notifications.ts` (1) | `send_notification` | Agent-to-platform notifications |
 | `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001) |
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
-| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
+| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging — Telegram (#349) and Slack channels (#350); `channel_type: telegram\|slack`, Slack send accepts optional `thread_ts` |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 | `files.ts` (1) | `share_file` | Publish file from `/home/developer/public/`, return download URL (FILES-001) |
 | `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |

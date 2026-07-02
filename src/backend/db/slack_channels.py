@@ -320,6 +320,31 @@ class SlackChannelOperations:
             return None
         return self._row_to_channel_agent(row)
 
+    def get_channels_for_agent(self, agent_name: str) -> List[dict]:
+        """All channel bindings for an agent across every workspace (#350).
+
+        Powers the MCP ``list_channel_groups`` discovery + proactive-send target
+        validation. Cross-workspace (no ``team_id`` filter), so an agent bound in
+        multiple Slack workspaces sees them all.
+        """
+        stmt = (
+            select(
+                slack_channel_agents.c.id,
+                slack_channel_agents.c.team_id,
+                slack_channel_agents.c.slack_channel_id,
+                slack_channel_agents.c.slack_channel_name,
+                slack_channel_agents.c.agent_name,
+                slack_channel_agents.c.is_dm_default,
+                slack_channel_agents.c.created_by,
+                slack_channel_agents.c.created_at,
+            )
+            .where(slack_channel_agents.c.agent_name == agent_name)
+            .order_by(slack_channel_agents.c.created_at.asc())
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [self._row_to_channel_agent(row) for row in rows]
+
     def unbind_agent(self, team_id: str, agent_name: str) -> bool:
         """Remove an agent's channel binding.
 

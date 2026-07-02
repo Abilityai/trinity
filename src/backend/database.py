@@ -1857,6 +1857,9 @@ class DatabaseManager:
     def get_slack_channel_for_agent(self, team_id, agent_name):
         return self._slack_channel_ops.get_channel_for_agent(team_id, agent_name)
 
+    def get_slack_channels_for_agent(self, agent_name):
+        return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
 
