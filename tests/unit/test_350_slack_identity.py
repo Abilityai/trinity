@@ -22,7 +22,7 @@ if str(_BACKEND) not in sys.path:
 pytestmark = pytest.mark.unit
 
 from adapters.base import NormalizedMessage  # noqa: E402
-from adapters.message_router import _format_channel_identity  # noqa: E402
+from adapters.message_router import _agent_avatar_url, _format_channel_identity  # noqa: E402
 
 
 def _msg(metadata: dict) -> NormalizedMessage:
@@ -131,6 +131,40 @@ def test_enrich_best_effort_swallows_errors():
         _run(adapter.enrich_message(msg))
     # Nothing crashed; identity simply absent for the failed call.
     assert "sender_display_name" not in msg.metadata
+
+
+# ---------------------------------------------------------------------------
+# _agent_avatar_url — best-effort bot icon (#292)
+# ---------------------------------------------------------------------------
+
+def test_avatar_url_with_cache_bust():
+    with patch("adapters.message_router.settings_service") as mock_settings, \
+         patch("adapters.message_router.db") as mock_db:
+        mock_settings.get_public_chat_url.return_value = "https://trinity.example.com/"
+        mock_db.get_avatar_identity.return_value = {"updated_at": "2026-07-02T10:00:00Z"}
+        url = _agent_avatar_url("research-agent")
+    assert url == "https://trinity.example.com/api/agents/research-agent/avatar?v=20260702100000"
+
+
+def test_avatar_url_without_updated_at_has_no_version():
+    with patch("adapters.message_router.settings_service") as mock_settings, \
+         patch("adapters.message_router.db") as mock_db:
+        mock_settings.get_public_chat_url.return_value = "https://trinity.example.com"
+        mock_db.get_avatar_identity.return_value = None
+        url = _agent_avatar_url("sales-ops")
+    assert url == "https://trinity.example.com/api/agents/sales-ops/avatar"
+
+
+def test_avatar_url_none_when_no_public_base():
+    with patch("adapters.message_router.settings_service") as mock_settings:
+        mock_settings.get_public_chat_url.return_value = ""
+        assert _agent_avatar_url("a") is None
+
+
+def test_avatar_url_best_effort_on_error():
+    with patch("adapters.message_router.settings_service") as mock_settings:
+        mock_settings.get_public_chat_url.side_effect = RuntimeError("boom")
+        assert _agent_avatar_url("a") is None
 
 
 def test_enrich_no_token_is_noop():

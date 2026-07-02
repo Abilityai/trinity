@@ -160,6 +160,34 @@ def _format_channel_identity(message: NormalizedMessage) -> str:
     return "\n".join(parts)
 
 
+def _agent_avatar_url(agent_name: str) -> Optional[str]:
+    """Best-effort public URL to an agent's avatar for a channel bot icon (#292).
+
+    Slack (and any channel supporting a per-message icon) needs a publicly
+    fetchable URL. Returns None when no public base URL is configured; a
+    private/unreachable base is harmless — the channel simply falls back to its
+    default icon. Cache-busts with ``avatar_updated_at`` when available so the
+    channel refetches after an avatar change. The avatar endpoint 404s cleanly
+    for avatar-less agents, so we don't gate on existence.
+    """
+    try:
+        base = settings_service.get_public_chat_url()
+        if not base:
+            return None
+        url = f"{base.rstrip('/')}/api/agents/{agent_name}/avatar"
+        identity = db.get_avatar_identity(agent_name)
+        updated_at = identity.get("updated_at") if identity else None
+        if updated_at:
+            # digits-only cache-bust token from the ISO timestamp
+            ver = "".join(ch for ch in str(updated_at) if ch.isdigit())
+            if ver:
+                url = f"{url}?v={ver}"
+        return url
+    except Exception:  # noqa: BLE001 — icon is best-effort, never blocks a reply
+        logger.debug("[#292] avatar URL build failed for %s", agent_name, exc_info=True)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Simple in-memory rate limiter with periodic pruning
 # ---------------------------------------------------------------------------
@@ -593,6 +621,12 @@ class ChannelMessageRouter:
 
         logger.debug(f"[ROUTER:{channel}] Step 12 - sending response")
         response_metadata = {"bot_token": bot_token, "agent_name": agent_name}
+        # #292: hand the agent's avatar to channels that render a per-message bot
+        # icon (Slack `icon_url`). Best-effort — None when the agent has no
+        # avatar or no public base URL is set; adapters ignore it otherwise.
+        avatar_url = _agent_avatar_url(agent_name)
+        if avatar_url:
+            response_metadata["agent_avatar_url"] = avatar_url
         if is_group:
             response_metadata["is_group"] = True
         await adapter.send_response(
