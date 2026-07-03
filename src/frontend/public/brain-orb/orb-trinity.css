@@ -1,0 +1,47 @@
+/* Trinity brain-orb overrides — #58 static-render foundation.
+ * Loaded AFTER styles.css. Two jobs, both prod-CSP-clean (script-src/font-src 'self'):
+ *   1. Vendor JetBrains Mono locally (the Google Fonts <link> was dropped).
+ *   2. Hide the voice / scope / KB-action surfaces whose backend (the local voice
+ *      proxy) is deferred to a later epic child. The renderer JS stays verbatim —
+ *      these panels simply never render, and their now-neutralized fetches no-op. */
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./vendor/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./vendor/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+
+/* KB-action surfaces (capture · connect) — #61 Phase 4a. Enabled ONLY when the host
+ * set body.brain-orb-write, which orb.js adds after the broker confirms owner + write
+ * flag + the agent's action hook (GET /actions → 200). Without it the A key / dock chip
+ * can't reveal a non-functional panel. run_skill (exec) + transcript capture are Phase 4b
+ * (trinity-enterprise#66). #58 Phase 2: the scope panel (S) is separately enabled. */
+body:not(.brain-orb-write) #actions,
+body:not(.brain-orb-write) #inspActions {
+  display: none !important;
+}
+
+/* #60 Phase 3: the client-held voice tile (V) is enabled ONLY when the host set
+ * body.brain-orb-voice (platform flag + agent capability). Without it the tile
+ * stays hidden so the V key / dock chip can't reveal a non-functional panel. */
+body:not(.brain-orb-voice) #voiceTile {
+  display: none !important;
+}
+
+/* Matching keyboard-hint rows in the controls legend: voice(2) / actions(11).
+ * scope(8) stays visible now that scope control is live. The voice hint follows
+ * the voice-tile gate; the actions hint follows the write-surface gate (#61 Phase 4a).
+ * Markup is frozen (verbatim orb), so positional selectors are stable. */
+body:not(.brain-orb-voice) #controls > div:nth-child(2),
+body:not(.brain-orb-write) #controls > div:nth-child(11) {
+  display: none !important;
+}

@@ -104,6 +104,9 @@
           to <code class="font-mono">{{ binding.from_number }}</code>. Check your Twilio Console → Messaging → Try WhatsApp for the keyword.
         </p>
       </div>
+
+      <!-- Voice replies (epic #24 / trinity-enterprise#56) — shared agent-level TTS control -->
+      <VoiceRepliesControl :agent-name="agentName" class="mt-2" />
     </div>
 
     <!-- Disconnected State — Credentials Form -->
@@ -187,6 +190,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '../api'
+import VoiceRepliesControl from './VoiceRepliesControl.vue'
 
 const props = defineProps({
   agentName: {

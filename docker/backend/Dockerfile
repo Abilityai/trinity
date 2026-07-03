@@ -8,7 +8,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
-RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg && rm -rf /var/lib/apt/lists/*
 
 # Build-time provenance (#926). Each arg is forwarded by docker-compose
 # `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.
@@ -59,7 +59,7 @@ RUN pip install --no-cache-dir \
     psutil==6.1.1 \
     payments-py==1.2.1 \
     Pillow==11.1.0 \
-    google-genai==1.12.1 \
+    google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
     aiohttp \
     slackify-markdown \

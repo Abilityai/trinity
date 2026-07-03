@@ -185,6 +185,21 @@
               🔐 Admin Login
             </button>
           </div>
+
+          <!-- #32 — Enterprise SSO (OIDC). Buttons appear only when the `sso`
+               feature is entitled and at least one provider is enabled.
+               Full-page nav to the backend login endpoint → IdP → callback. -->
+          <div v-if="!codeSent && ssoProviders.length" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700 space-y-2">
+            <p class="text-xs text-center text-gray-500 dark:text-gray-400">Or sign in with</p>
+            <a
+              v-for="p in ssoProviders"
+              :key="p.id"
+              :href="`/api/enterprise/sso/login/${p.id}`"
+              class="w-full flex justify-center py-2 px-4 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            >
+              🔑 {{ p.name }}
+            </a>
+          </div>
         </div>
 
         <!-- Admin Login: Password Only (username is fixed as 'admin') -->
@@ -275,6 +290,7 @@ const showAdminLogin = ref(false)
 const mfaCode = ref('')
 const mfaEnroll = ref(null)            // provisioning payload during forced enrollment
 const mfaRecoveryCodes = ref([])
+const ssoProviders = ref([])           // #32 — enabled SSO IdPs (login buttons)
 const mfaMode = computed(() =>
   authStore.mfaChallenge?.enrollmentRequired ? 'enroll' : 'verify'
 )
@@ -379,6 +395,23 @@ onMounted(async () => {
     router.push('/')
     return
   }
+
+  // #32 — handle an SSO (OIDC) callback redirect: the backend lands us back at
+  // /login with the result in the URL fragment. Consume it, then strip it from
+  // the address bar so a refresh/back can't replay it.
+  if (window.location.hash.includes('sso=')) {
+    const params = new URLSearchParams(window.location.hash.slice(1))
+    history.replaceState(null, '', window.location.pathname + window.location.search)
+    const res = await authStore.completeSsoLogin(params)
+    if (res.ok && !res.mfa) {
+      router.push('/')
+      return
+    }
+    // mfa → the existing 2FA challenge UI takes over; error → authError shows.
+  }
+
+  // Populate SSO login buttons (no-op / empty in OSS-only builds).
+  ssoProviders.value = await authStore.fetchSsoProviders()
 })
 
 // Handle admin login (username 'admin' OR the admin's registered email — #82 Phase 1)

@@ -62,6 +62,9 @@
           </button>
         </div>
       </div>
+
+      <!-- Voice replies (epic #24 / #26) — shared agent-level TTS control -->
+      <VoiceRepliesControl :agent-name="agentName" class="mt-4" />
     </div>
 
     <!-- Unbound State -->
@@ -92,6 +95,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
+import VoiceRepliesControl from './VoiceRepliesControl.vue'
 
 const props = defineProps({
   agentName: {

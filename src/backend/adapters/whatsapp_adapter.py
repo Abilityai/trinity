@@ -319,13 +319,24 @@ class WhatsAppAdapter(ChannelAdapter):
         # Persist + classify outbound files (per-file isolated; never raises).
         media_urls, fallback_links = self._prepare_outbound_media(agent_name, response.files)
 
+        # Voice-out (epic #24 / trinity-enterprise#56): if the agent has spoken
+        # replies enabled, deliver the reply text as a WhatsApp voice note (audio
+        # media) instead of text. Strictly additive — any failure returns False
+        # and the reply falls through to the text path below. Real file
+        # attachments + download links are still delivered regardless.
+        agent_text = response.text or ""
+        voice_sent = False
+        if agent_text.strip():
+            voice_sent = await self._maybe_send_voice(
+                account_sid, auth_token, binding, channel_id, agent_text, agent_name
+            )
+
         # Build the text body: convert the agent's markdown FIRST, then append any
         # download links verbatim. Links must NOT pass through markdown conversion
         # — a `__` in a `?sig=` token (base64url alphabet) would be mis-rendered as
         # *bold* and corrupt the URL.
         body_parts: List[str] = []
-        agent_text = response.text or ""
-        if agent_text.strip():
+        if agent_text.strip() and not voice_sent:
             body_parts.append(self._markdown_to_whatsapp(agent_text))
         if fallback_links:
             body_parts.append("\n".join(f"📎 {name}: {url}" for name, url in fallback_links))
@@ -362,6 +373,73 @@ class WhatsAppAdapter(ChannelAdapter):
                     "likely outside the 24h session window (63016) or unsupported media",
                     _mask_phone(channel_id),
                 )
+
+    def _plain_for_tts(self, text: str) -> str:
+        """Strip markdown markup so the spoken reply doesn't read out asterisks,
+        backticks, or raw link URLs."""
+        t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [label](url) -> label
+        t = re.sub(r"[*_`#>~]", "", t)
+        return t.strip()
+
+    async def _maybe_send_voice(
+        self,
+        account_sid: str,
+        auth_token: str,
+        binding: dict,
+        to_number: str,
+        text: str,
+        agent_name: str,
+    ) -> bool:
+        """Try to deliver ``text`` as a WhatsApp voice note (epic #24 / #56).
+
+        Returns True only when a voice note was actually sent. Any miss — feature
+        off, no voice id, TTS unavailable, over the cost cap, provider/transcode
+        error, hosting failure, or a rejected Twilio media send — returns False so
+        the caller falls back to text. Never raises.
+        """
+        try:
+            cfg = db.get_tts_config(agent_name)
+        except Exception as e:
+            logger.warning("[WHATSAPP] voice-out config lookup failed for %s: %s", agent_name, e)
+            return False
+        if not cfg.get("enabled") or not cfg.get("voice_id"):
+            return False
+
+        import services.tts_service as tts_service
+
+        ogg = await tts_service.synthesize_voice_note(self._plain_for_tts(text), cfg["voice_id"])
+        if not ogg:
+            return False
+
+        # Host the transient voice note for Twilio to fetch. Voice-out has its own
+        # feature gate, so this bypasses the file-sharing toggle (MIME/quota/disk
+        # protections still apply). Isolated — any failure → text fallback.
+        try:
+            share = create_share_from_bytes(
+                agent_name,
+                ogg,
+                display_name="voice.ogg",
+                expires_in=_OUTBOUND_MEDIA_EXPIRES_IN,
+                created_by=agent_name,
+                require_sharing_enabled=False,
+            )
+        except Exception as e:
+            logger.warning("[WHATSAPP] voice note hosting failed for %s: %s", agent_name, e)
+            return False
+        url = share.get("url") or ""
+        if not url:
+            return False
+
+        result = await self._send_message(
+            account_sid=account_sid,
+            auth_token=auth_token,
+            from_number=binding["from_number"],
+            messaging_service_sid=binding.get("messaging_service_sid"),
+            to_number=to_number,
+            body="",
+            media_url=url,
+        )
+        return result is not None
 
     def _prepare_outbound_media(
         self, agent_name: str, files: List["OutboundFile"]

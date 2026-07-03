@@ -32,6 +32,7 @@ from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
+    build_public_channel_caller_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
@@ -604,7 +605,10 @@ async def public_chat(
         timeout_seconds=900,
         # #894: per-agent public-channel model override (None → platform default).
         model=db.get_public_channel_model(agent_name),
-        system_prompt=memory_system_prompt,
+        # #1205: per-agent public/channel custom-instructions fragment.
+        system_prompt=build_public_channel_caller_prompt(
+            agent_name, memory_system_prompt
+        ),
         images=_pub_image_data,
     )
 
@@ -927,7 +931,10 @@ async def _execute_public_chat_background(
             execution_id=execution_id,
             # #894: per-agent public-channel model override (None → platform default).
             model=db.get_public_channel_model(agent_name),
-            system_prompt=memory_system_prompt,
+            # #1205: per-agent public/channel custom-instructions fragment.
+            system_prompt=build_public_channel_caller_prompt(
+                agent_name, memory_system_prompt
+            ),
             images=images or [],
         )
 

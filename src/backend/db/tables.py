@@ -96,10 +96,13 @@ agent_ownership = Table(
     Column("voice_system_prompt", Text),
     Column("voice_name", Text),
     Column("public_channel_model", Text),  # #894: per-agent public-channel model override (NULL = platform default)
+    Column("public_channel_system_prompt", Text),  # #1205: per-agent public/channel custom instructions
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
+    Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
+    Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("deleted_at", Text),
 )
 

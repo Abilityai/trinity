@@ -2,7 +2,11 @@
   <div :class="isFullscreenTab ? 'h-screen overflow-hidden flex flex-col bg-gray-100 dark:bg-gray-900' : 'min-h-screen bg-gray-100 dark:bg-gray-900'">
     <NavBar />
 
-    <main :class="['max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
+    <!-- #954: w-full keeps <main> at its max width in BOTH layout modes. Without it,
+         the fullscreen (Chat) mode makes the root a flex column, and `mx-auto`'s auto
+         inline margins override align-items:stretch on the flex item — collapsing
+         <main> to content width and shifting/narrowing the whole card on tab switch. -->
+    <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
       <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
         <div v-if="loading" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
@@ -67,6 +71,7 @@
             :emotion-avatar-url="emotionAvatarUrl"
             :voice-available="sessionsStore.voiceAvailable"
             :workspace-available="sessionsStore.workspaceAvailable"
+            :brain-available="sessionsStore.brainOrbAvailable && hasBrainOrb"
           />
 
           <!-- Tabs -->
@@ -82,6 +87,11 @@
             <!-- Info Tab Content -->
             <div v-if="activeTab === 'info'" class="p-6">
               <InfoPanel :agent-name="agent.name" :agent-status="agent.status" @item-click="handleInfoItemClick" />
+            </div>
+
+            <!-- Brain Tab Content (#60) — settings + launch, not an auto-jump -->
+            <div v-if="activeTab === 'brain'" class="p-6">
+              <BrainPanel :name="agent.name" :running="agent.status === 'running'" />
             </div>
 
             <!-- Tasks Tab Content -->
@@ -309,6 +319,7 @@ import SettingsPanel from '../components/settings/SettingsPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
+import BrainPanel from '../components/BrainPanel.vue'
 import ResourceModal from '../components/ResourceModal.vue'
 import AvatarGenerateModal from '../components/AvatarGenerateModal.vue'
 import LogsPanel from '../components/LogsPanel.vue'
@@ -374,6 +385,9 @@ const emotionCycleTimer = ref(null)
 const taskPrefillMessage = ref('')
 const schedulePrefillMessage = ref('')
 const hasDashboard = ref(false)
+// #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
+// agent's template.yaml declares the generalizable `brain-orb` capability token.
+const hasBrainOrb = ref(false)
 
 // Tags state (ORG-001)
 const agentTags = ref([])
@@ -730,6 +744,12 @@ const visibleTabs = computed(() => {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 
+  // Brain Orb tab (#58) — platform flag AND per-agent capability. Selecting it
+  // navigates to the dedicated /agents/:name/brain route (handled by a watcher).
+  if (sessionsStore.brainOrbAvailable && hasBrainOrb.value) {
+    tabs.push({ id: 'brain', label: 'Brain' })
+  }
+
   tabs.push(
     { id: 'reports', label: 'Reports' },  // #918 agent-published reports
     { id: 'schedules', label: 'Schedules' },
@@ -958,6 +978,27 @@ async function checkDashboardExists() {
   hasDashboard.value = false
 }
 
+// #58 — detect the per-agent Brain Orb capability from template.yaml's
+// `capabilities:` list (surfaced by GET /api/agents/{name}/info). Generalizable:
+// any agent declaring the `brain-orb` token qualifies — never a hardcoded name.
+async function checkBrainOrbCapability() {
+  if (!agent.value?.name || agent.value?.status !== 'running') {
+    hasBrainOrb.value = false
+    return
+  }
+  try {
+    const info = await agentsStore.getAgentInfo(agent.value.name)
+    const caps = Array.isArray(info?.capabilities) ? info.capabilities : []
+    hasBrainOrb.value = caps.includes('brain-orb')
+  } catch {
+    hasBrainOrb.value = false
+  }
+}
+
+// #60: the Brain tab is now an in-page settings panel (BrainPanel) with a launch
+// button — no longer an auto-jump to the full-page orb (that was confusing). The
+// header brain logo and the panel's "Open Brain Orb" button do the route hop.
+
 // Load auth status (subscription vs API key)
 async function loadAuthStatus() {
   if (!agent.value?.name) return
@@ -1130,7 +1171,7 @@ onMounted(async () => {
     loadAvailableSubscriptions(),
     sessionsStore.loadFeatureFlags(),  // SESSION_TAB_2026-04 Phase 3
     loadTokenStats(),
-    ...(agent.value?.status === 'running' ? [checkDashboardExists()] : [])
+    ...(agent.value?.status === 'running' ? [checkDashboardExists(), checkBrainOrbCapability()] : [])
   ])
   startEmotionCycling()
   startAllPolling()
@@ -1159,9 +1200,10 @@ onActivated(async () => {
   // Reload emotions and restart cycling (AVATAR-002)
   await loadAvailableEmotions()
   startEmotionCycling()
-  // Re-check for dashboard if agent is running
+  // Re-check for dashboard + brain-orb capability if agent is running
   if (agent.value?.status === 'running') {
     await checkDashboardExists()
+    await checkBrainOrbCapability()
   }
 
   // Handle tab query param (EXEC-023: Continue as Chat navigation)

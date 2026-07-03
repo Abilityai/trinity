@@ -300,6 +300,38 @@ export const useAuthStore = defineStore('auth', {
       this.mfaChallenge = null
     },
 
+    // #32 — enabled SSO providers for the login page (id + name only). Returns
+    // [] in OSS builds (endpoint 404s when the `sso` module isn't entitled).
+    async fetchSsoProviders() {
+      try {
+        const r = await axios.get('/api/enterprise/sso/public-providers')
+        return r.data?.providers || []
+      } catch (e) {
+        return []
+      }
+    },
+
+    // Complete an SSO (OIDC) login from the callback URL fragment the backend
+    // redirects to: `/login#sso=ok&access_token=…`, `…sso=mfa&challenge_token=…`,
+    // or `…sso=error&reason=…` (#32). Reuses the same finalize / 2FA-challenge
+    // paths as password/email login. Returns {ok, mfa?}.
+    async completeSsoLogin(params) {
+      const status = params.get('sso')
+      if (status === 'ok') {
+        await this._finalizeLogin(params.get('access_token'))
+        return { ok: true }
+      }
+      if (status === 'mfa') {
+        this._setMfaChallenge({
+          challenge_token: params.get('challenge_token'),
+          enrollment_required: params.get('enroll') === '1',
+        })
+        return { ok: true, mfa: true }
+      }
+      this.authError = params.get('reason') || 'SSO login failed'
+      return { ok: false }
+    },
+
     // Complete login by verifying a TOTP or recovery code against the
     // outstanding challenge. Returns true on success.
     async verifyMfaCode(code) {

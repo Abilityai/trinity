@@ -1004,6 +1004,22 @@ def _migrate_agent_ownership_public_channel_model(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_public_channel_prompt(cursor, conn):
+    """Add public_channel_system_prompt column to agent_ownership (#1205).
+
+    Per-agent custom instructions appended to the system prompt for
+    public-facing conversations only (public links, Slack/Telegram/WhatsApp
+    channels, x402 paid chat). Text-surface counterpart of voice_system_prompt.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "public_channel_system_prompt",
+        "ALTER TABLE agent_ownership ADD COLUMN public_channel_system_prompt TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -2576,6 +2592,31 @@ def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_tts_voice(cursor, conn):
+    """epic #24 / #25 — outbound voice replies (shared agent-level config).
+
+    Adds ``tts_voice_replies_enabled INTEGER DEFAULT 0`` and ``tts_voice_id TEXT``
+    to ``agent_ownership``. When enabled with a voice id, channel adapters speak
+    the agent's reply via the shared ``services/tts_service.py`` (ElevenLabs →
+    OGG/Opus). Shared per-agent primitive (no per-channel column sprawl) consumed
+    by Telegram (#25) first, then Slack (#26) and WhatsApp (trinity-enterprise#56).
+    Default OFF. Mirrored by Alembic 0011_agent_ownership_tts_voice for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "tts_voice_replies_enabled",
+        "ALTER TABLE agent_ownership ADD COLUMN tts_voice_replies_enabled INTEGER DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "tts_voice_id",
+        "ALTER TABLE agent_ownership ADD COLUMN tts_voice_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_no_progress(cursor, conn):
     """#1157 — no-progress / doom-loop detection.
 
@@ -2720,4 +2761,6 @@ MIGRATIONS = [
     ("agent_loops_max_cost", _migrate_agent_loops_max_cost),
     ("agent_ownership_public_channel_model", _migrate_agent_ownership_public_channel_model),
     ("agent_ownership_mcp_exposed", _migrate_agent_ownership_mcp_exposed),
+    ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
+    ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
 ]

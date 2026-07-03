@@ -23,6 +23,7 @@ from .access_policy import AccessPolicyMixin
 from .git_pat import GitPATMixin
 from .file_sharing import FileSharingMixin
 from .mcp_exposure import McpExposureMixin
+from .tts import TtsMixin
 
 __all__ = [
     'SharingMixin',
@@ -35,4 +36,5 @@ __all__ = [
     'GitPATMixin',
     'FileSharingMixin',
     'McpExposureMixin',
+    'TtsMixin',
 ]

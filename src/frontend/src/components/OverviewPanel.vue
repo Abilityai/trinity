@@ -30,6 +30,9 @@ const executionsStore = useExecutionsStore()
 
 const agentName = computed(() => props.agent?.name)
 const isRunning = computed(() => props.agent?.status === 'running')
+// #1409: admins get an actionable CTA in the empty health state; others get
+// plain guidance (only admins can enable the monitoring loop).
+const isAdmin = computed(() => authStore.role === 'admin')
 
 // Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107).
 // An *analogous cool* ramp (indigo → violet → blue → sky → cyan → teal →
@@ -333,8 +336,14 @@ onMounted(() => {
         <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       </div>
 
-      <div v-else-if="!hasExecutions" class="py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        No executions in the last {{ window }}.
+      <div v-else-if="!hasExecutions" class="py-12 px-6 text-center">
+        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 3v18h18M7 15l4-4 3 3 5-6" />
+        </svg>
+        <p class="text-sm font-medium text-gray-700 dark:text-gray-300">No runs in the last {{ window }}</p>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
+          Executions show up here after this agent runs a chat, schedule, or task.
+        </p>
       </div>
 
       <div v-else class="p-5 grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -461,9 +470,25 @@ onMounted(() => {
           <TrendLineChart :dates="healthTrend.dates" :series="latencySeries" :y-min="0" :height="120" :value-format="(v) => (v == null ? '—' : v + 'ms')" :axis-format="(v) => v + 'ms'" />
         </div>
       </div>
-      <p v-else class="text-xs text-gray-400 py-1">
-        No health data available — the monitoring service may be off.
-      </p>
+      <div v-else class="py-8 px-6 text-center">
+        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12h4l3 8 4-16 3 8h4" />
+        </svg>
+        <p class="text-sm font-medium text-gray-700 dark:text-gray-300">No health data yet</p>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
+          Fleet-health monitoring is off, so uptime and latency aren't being recorded for this agent.
+        </p>
+        <router-link
+          v-if="isAdmin"
+          :to="{ path: '/operations', query: { tab: 'health' } }"
+          class="mt-3 inline-flex items-center text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+        >
+          Enable it in Operations → Health →
+        </router-link>
+        <p v-else class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+          An admin can enable it in Operations → Health.
+        </p>
+      </div>
     </div>
 
     <!-- 5. Recent activity -->

@@ -661,6 +661,12 @@ class DatabaseManager:
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
+    def get_tts_config(self, agent_name: str):
+        return self._agent_ops.get_tts_config(agent_name)
+
+    def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
+        return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
+
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
@@ -765,6 +771,11 @@ class DatabaseManager:
 
     def set_voice_name(self, agent_name: str, voice_name):
         return self._agent_ops.set_voice_name(agent_name, voice_name)
+    def get_public_channel_system_prompt(self, agent_name: str):
+        return self._agent_ops.get_public_channel_system_prompt(agent_name)
+
+    def set_public_channel_system_prompt(self, agent_name: str, prompt):
+        return self._agent_ops.set_public_channel_system_prompt(agent_name, prompt)
 
     def get_public_channel_model(self, agent_name: str):
         return self._agent_ops.get_public_channel_model(agent_name)
@@ -1857,6 +1868,9 @@ class DatabaseManager:
     def get_slack_channel_for_agent(self, team_id, agent_name):
         return self._slack_channel_ops.get_channel_for_agent(team_id, agent_name)
 
+    def get_slack_channels_for_agent(self, agent_name):
+        return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
 
@@ -1902,6 +1916,9 @@ class DatabaseManager:
 
     def increment_telegram_message_count(self, chat_link_id):
         return self._telegram_channel_ops.increment_message_count(chat_link_id)
+
+    def list_telegram_clients_for_agent(self, agent_name):
+        return self._telegram_channel_ops.list_clients_for_agent(agent_name)
 
     def get_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.get_verified_email(binding_id, telegram_user_id)
@@ -1995,6 +2012,9 @@ class DatabaseManager:
 
     def increment_whatsapp_message_count(self, chat_link_id):
         return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
+
+    def list_whatsapp_clients_for_agent(self, agent_name):
+        return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
 
     # =========================================================================
     # VoIP Telephony (delegated to db/voip.py) - VOIP-001 (#1056)

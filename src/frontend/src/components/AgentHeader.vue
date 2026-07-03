@@ -156,6 +156,23 @@
         </div>
         <!-- Right: Primary Actions -->
         <div class="flex items-center space-x-3">
+          <!-- Brain Orb logo (#60) — opens the agent's self-rendering mind page -->
+          <button
+            v-if="brainAvailable"
+            @click="goToBrain"
+            :disabled="agent.status !== 'running'"
+            class="flex items-center justify-center w-8 h-8 rounded-full transition-colors"
+            :class="agent.status === 'running'
+              ? 'text-state-autonomous-500 dark:text-state-autonomous-400 hover:bg-state-autonomous-50 dark:hover:bg-state-autonomous-900/30 border border-state-autonomous-300 dark:border-state-autonomous-600'
+              : 'text-gray-300 dark:text-gray-600 border border-gray-200 dark:border-gray-700 cursor-not-allowed'"
+            title="Open Brain Orb — the agent's self-rendering mind"
+          >
+            <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="9" stroke-width="1.6" />
+              <path stroke-width="1.4" stroke-linecap="round" d="M3 12h18" opacity="0.7" />
+              <path stroke-width="1.4" stroke-linecap="round" d="M12 3c3.2 2.4 3.2 15.6 0 18M12 3c-3.2 2.4-3.2 15.6 0 18" opacity="0.7" />
+            </svg>
+          </button>
           <!-- Workspace button (voice + canvas, BETA) -->
           <button
             v-if="workspaceAvailable"
@@ -575,6 +592,12 @@ const props = defineProps({
   workspaceAvailable: {
     type: Boolean,
     default: false
+  },
+  // #60 — Brain Orb: platform flag AND the agent's brain-orb capability (resolved
+  // in AgentDetail). Gates the header logo that opens the orb page.
+  brainAvailable: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -600,6 +623,10 @@ const router = useRouter()
 
 function goToWorkspace() {
   router.push(`/agents/${props.agent.name}/workspace`)
+}
+
+function goToBrain() {
+  router.push({ name: 'AgentBrainOrb', params: { name: props.agent.name } })
 }
 
 // Name editing functions
