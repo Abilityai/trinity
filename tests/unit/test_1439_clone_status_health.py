@@ -10,17 +10,96 @@ Three surfaces:
    it clones into a home-volume temp dir and tar-merges, clears stale markers on
    the success/restart/shallow paths, and preserves the PAT-in-logs redaction.
 """
+import importlib.util
 import json
 import os
+import sys
+import types
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND = _REPO_ROOT / "src" / "backend"
 _STARTUP_SH = _REPO_ROOT / "docker" / "base-image" / "startup.sh"
-_INFO_PY = _REPO_ROOT / "docker" / "base-image" / "agent_server" / "routers" / "info.py"
+_INFO_PY = _BACKEND.parent.parent / "docker" / "base-image" / "agent_server" / "routers" / "info.py"
+
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
 
 # ---------------------------------------------------------------------------
-# 1. Backend aggregation — clone_status=failed => UNHEALTHY + fixed issue
+# Hermetic monitoring_service load (#762 escape hatch).
+#
+# `from services import monitoring_service` is order-fragile under
+# pytest-randomly: sys.modules pollution left by earlier tests corrupts the
+# module (or its lazy deps) and the aggregation tests fail intermittently
+# (regression-diff #1439). Load monitoring_service.py standalone via importlib —
+# the same pattern tests/integration/test_monitoring_service.py uses — stubbing
+# its load-time deps and restoring them after, so these pure aggregate_health
+# tests are deterministic regardless of test order.
+# ---------------------------------------------------------------------------
+_STUBBED_MODULE_NAMES = [
+    "database",
+    "services.agent_auth",
+    "services.docker_service",
+    "services.docker_utils",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot/restore stubbed names so per-test mutations never leak (#762)."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
+def _load_monitoring_service():
+    """exec monitoring_service.py under a unique name, isolated from pollution."""
+    saved = {k: sys.modules.get(k) for k in _STUBBED_MODULE_NAMES}
+
+    fake_db = types.ModuleType("database")
+    fake_db.db = MagicMock()
+    sys.modules["database"] = fake_db
+
+    fake_auth = types.ModuleType("services.agent_auth")
+    fake_auth.agent_httpx_client = MagicMock()
+    sys.modules["services.agent_auth"] = fake_auth
+
+    sys.modules["services.docker_service"] = types.ModuleType("services.docker_service")
+    sys.modules["services.docker_utils"] = types.ModuleType("services.docker_utils")
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "monitoring_service_1439_under_test",
+            str(_BACKEND / "services" / "monitoring_service.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+_MS = _load_monitoring_service()
+
+
+# ---------------------------------------------------------------------------
+# 1. Backend aggregation — clone_status=failed => UNHEALTHY + fixed issue.
+#    Statuses compared as strings (AgentHealthStatus is a str-enum) to avoid
+#    any cross-load enum-identity issues.
 # ---------------------------------------------------------------------------
 
 def _make_inputs(clone_status=None, runtime_available=True):
@@ -44,35 +123,24 @@ def _make_inputs(clone_status=None, runtime_available=True):
 
 class TestCloneStatusAggregation:
     def test_clone_failed_is_unhealthy(self):
-        from services import monitoring_service
-        from db_models import AgentHealthStatus
-
-        status, issues = monitoring_service.aggregate_health(*_make_inputs(clone_status="failed"))
-        assert status == AgentHealthStatus.UNHEALTHY
+        status, issues = _MS.aggregate_health(*_make_inputs(clone_status="failed"))
+        assert status == "unhealthy"  # AgentHealthStatus is a str-enum (value compare)
         assert "Agent identity clone failed" in issues
 
     def test_clone_ok_is_healthy(self):
-        from services import monitoring_service
-        from db_models import AgentHealthStatus
-
-        status, issues = monitoring_service.aggregate_health(*_make_inputs(clone_status="ok"))
-        assert status == AgentHealthStatus.HEALTHY
+        status, issues = _MS.aggregate_health(*_make_inputs(clone_status="ok"))
+        assert status == "healthy"
         assert issues == []
 
     def test_clone_none_is_healthy(self):
         # Older agent images omit the key → None → must never flip a healthy agent.
-        from services import monitoring_service
-        from db_models import AgentHealthStatus
-
-        status, _ = monitoring_service.aggregate_health(*_make_inputs(clone_status=None))
-        assert status == AgentHealthStatus.HEALTHY
+        status, _ = _MS.aggregate_health(*_make_inputs(clone_status=None))
+        assert status == "healthy"
 
     def test_issue_string_is_injection_safe(self):
         # The surfaced issue is a fixed server constant — no '; ' that could
         # forge extra rows in the '; '-joined issues serialization (security review).
-        from services import monitoring_service
-
-        _, issues = monitoring_service.aggregate_health(*_make_inputs(clone_status="failed"))
+        _, issues = _MS.aggregate_health(*_make_inputs(clone_status="failed"))
         assert all("; " not in i for i in issues)
 
     def test_business_model_has_clone_status_field(self):
@@ -193,5 +261,5 @@ class TestStartupShCloneRace:
 
     def test_clone_tmp_gitignored(self):
         # Defense-in-depth: a crash-orphaned temp clone must never be committed.
-        gi = (_REPO_ROOT / "src" / "backend" / "services" / "git_service.py").read_text()
+        gi = (_BACKEND / "services" / "git_service.py").read_text()
         assert ".trinity-clone-tmp/" in gi
