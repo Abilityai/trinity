@@ -8,11 +8,10 @@ Internal fleet traffic (chat_with_agent MCP tool) bypasses this entirely.
 import base64
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from models import PaidChatRequest
 
 from database import db
 from services.nevermined_payment_service import (
@@ -20,14 +19,10 @@ from services.nevermined_payment_service import (
     NEVERMINED_AVAILABLE,
 )
 from services.task_execution_service import get_task_execution_service
+from services.platform_prompt_service import build_public_channel_caller_prompt
 
 router = APIRouter(prefix="/api/paid", tags=["paid"])
 logger = logging.getLogger(__name__)
-
-
-class PaidChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
 
 
 @router.get("/{agent_name}/info")
@@ -178,7 +173,10 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             agent_name=agent_name,
             message=request_body.message,
             triggered_by="paid",
+            system_prompt=build_public_channel_caller_prompt(agent_name),  # #1205
             resume_session_id=request_body.session_id,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
         )
     except Exception as e:
         logger.error(f"Task execution failed for paid request on {agent_name}: {e}")
@@ -220,13 +218,18 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             },
         )
 
-    # Step 4: Settle payment (on success only)
-    settle_result = await payment_service.settle_payment(
+    # Step 4: Settle payment (on success only). Effect-scoped guard (#1084) so a
+    # retried paid chat reusing the same Nevermined agent_request_id settles
+    # exactly once. The terminal-turn guard above (failed execution → no settle)
+    # is the outer layer and is preserved; the agent_request_id native token
+    # remains the real on-chain exactly-once guarantee.
+    settle_result = await payment_service.settle_payment_once(
+        config=config,
         nvm_api_key=nvm_api_key,
         nvm_environment=config.nvm_environment,
-        config=config,
         access_token=access_token,
         agent_request_id=verify_result.agent_request_id,
+        execution_id=exec_result.execution_id,
         base_url=base_url,
     )
 

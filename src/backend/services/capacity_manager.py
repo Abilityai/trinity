@@ -238,6 +238,14 @@ class CapacityManager:
             CapacityFull: if at capacity AND overflow store is also full
                           (or overflow_policy="reject").
         """
+        # ---- #506: clamp the per-agent cap to the fleet-wide ceiling -----
+        # Single runtime clamp point for every facade caller (chat ×3,
+        # task_execution_service, …). "Clamp on use, never rewrite stored":
+        # the agent keeps its chosen max_parallel_tasks; only the effective
+        # admit limit is capped here.
+        from services.settings_service import clamp_to_ceiling
+        max_concurrent = clamp_to_ceiling(max_concurrent)
+
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow
         # branch → no backlog poisoning. Per-agent opt-in short-circuits the
@@ -422,8 +430,16 @@ class CapacityManager:
     async def get_all_states(
         self, agent_capacities: Dict[str, int]
     ) -> Dict[str, Dict[str, int]]:
-        """Bulk capacity meter for the dashboard."""
-        return await self._slots.get_all_slot_states(agent_capacities)
+        """Bulk capacity meter for the dashboard.
+
+        #506: each stored cap is clamped to the fleet ceiling so the dashboard
+        reports the effective limit (available + active == effective).
+        """
+        from services.settings_service import clamp_to_ceiling
+        clamped = {
+            name: clamp_to_ceiling(cap) for name, cap in agent_capacities.items()
+        }
+        return await self._slots.get_all_slot_states(clamped)
 
     async def get_slot_state(self, agent_name: str, max_concurrent: int):
         """Detailed slot view for the per-agent capacity endpoint.
@@ -432,8 +448,14 @@ class CapacityManager:
         message_preview, duration_seconds per slot). Kept as a thin
         pass-through so the agent_config router doesn't need to know about
         the underlying primitive.
+
+        #506: clamps the cap to the fleet ceiling so available_slots reflects
+        the effective admit limit.
         """
-        return await self._slots.get_slot_state(agent_name, max_concurrent)
+        from services.settings_service import clamp_to_ceiling
+        return await self._slots.get_slot_state(
+            agent_name, clamp_to_ceiling(max_concurrent)
+        )
 
     # ------------------------------------------------------------------
     # Cleanup / emergency
@@ -498,8 +520,29 @@ class CapacityManager:
         missing-heartbeat state during the boot window.
         """
         await self._backlog.expire_stale(max_age_hours=max_age_hours)
-        await self._backlog.drain_orphans_all()
-        await self._backstop_open_breaker_backlog()
+
+        # #1085: while the re-delivery governor's shared-cause pause is armed,
+        # skip the active orphan drain + the breaker-backstop re-fail. Both push
+        # backlog forward / fail queued rows — during a fleet outage we hold that
+        # pressure back so a throttled-then-resumed callback still lands. The 24h
+        # `expire_stale` above is the slow safety net and always runs. Fail-open:
+        # governor degrades to not-paused, so a Redis blip resumes normal drain.
+        paused = False
+        try:
+            import config
+
+            if config.REDELIVERY_GOVERNOR_ENABLED:
+                from services.redelivery_governor import get_redelivery_governor
+
+                paused = get_redelivery_governor().should_hold_reaper()
+        except Exception as e:  # noqa: BLE001 — never block maintenance on a gate error
+            logger.debug("[Capacity] governor drain-gate skipped: %s", e)
+
+        if paused:
+            logger.info("[Capacity] orphan drain + breaker-backstop held — re-delivery paused (#1085)")
+        else:
+            await self._backlog.drain_orphans_all()
+            await self._backstop_open_breaker_backlog()
         try:
             self._redis.set("canary:drain_tick_at", str(time.time()))
         except Exception as e:  # pragma: no cover - defensive

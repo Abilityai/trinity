@@ -240,7 +240,7 @@ class TestActivityCreation:
             # Verify agent name matches
             assert activity["agent_name"] == agent_name
             # Activity state should be valid
-            assert activity["activity_state"] in ["started", "completed", "failed"]
+            assert activity["activity_state"] in ["started", "completed", "failed", "cancelled"]
 
 
 class TestActivityTypes:

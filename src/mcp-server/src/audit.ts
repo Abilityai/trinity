@@ -27,7 +27,33 @@ interface AuditEntry {
   actor_agent_name?: string;
   target_type?: string;
   target_id?: string;
+  request_id?: string;
   details?: Record<string, unknown>;
+}
+
+/**
+ * Audit-wrapper call context (#905). The session is the MCP auth context; a
+ * tool may also stamp a per-call `requestId` here (e.g. the git tools) — the
+ * wrapper then carries it onto the `mcp_operation` row so it joins the backend
+ * row created by the same forwarded X-Request-ID.
+ */
+export interface ToolCallContext {
+  session?: McpAuthContext;
+  requestId?: string;
+}
+
+/**
+ * Resolve the audit target_id from a tool's params. Most agent-scoped tools
+ * take the agent as `agent_name`; a few use `name`. Defensive — returns
+ * undefined when neither is a string, so non-agent tools log no target.
+ */
+export function resolveTargetId(params: unknown): string | undefined {
+  if (params && typeof params === "object") {
+    const p = params as Record<string, unknown>;
+    if (typeof p.agent_name === "string") return p.agent_name;
+    if (typeof p.name === "string") return p.name;
+  }
+  return undefined;
 }
 
 /**
@@ -68,7 +94,9 @@ export function logToolCall(
   authContext: McpAuthContext | undefined,
   durationMs: number,
   success: boolean,
-  errorMessage?: string
+  errorMessage?: string,
+  targetId?: string,
+  requestId?: string
 ): void {
   const details: Record<string, unknown> = {
     tool: toolName,
@@ -79,10 +107,11 @@ export function logToolCall(
     details.error = errorMessage;
   }
 
-  // Determine target from tool name convention
-  // Many tools take agent_name as first param — but we don't have params here.
-  // The tool name itself is the key audit signal for MCP operations.
-
+  // #905: target_id (the agent the tool acted on, resolved from params) and
+  // request_id (the per-call correlation id a tool forwarded as X-Request-ID)
+  // were both previously dropped — "we don't have params here". The wrapper now
+  // passes them through so the row attributes the action AND joins to the
+  // backend row triggered by the same id.
   const entry: AuditEntry = {
     event_type: "mcp_operation",
     event_action: "tool_call",
@@ -91,6 +120,9 @@ export function logToolCall(
     mcp_key_name: authContext?.keyName,
     mcp_scope: authContext?.scope,
     actor_agent_name: authContext?.agentName,
+    target_type: targetId ? "agent" : undefined,
+    target_id: targetId,
+    request_id: requestId,
     details,
   };
 
@@ -109,19 +141,26 @@ export function logToolCall(
  */
 export function withAudit<T>(
   toolName: string,
-  execute: (params: T, context?: { session?: McpAuthContext }) => Promise<string>
-): (params: T, context?: { session?: McpAuthContext }) => Promise<string> {
-  return async (params: T, context?: { session?: McpAuthContext }) => {
+  execute: (params: T, context?: ToolCallContext) => Promise<string>,
+  boundTargetId?: string
+): (params: T, context?: ToolCallContext) => Promise<string> {
+  return async (params: T, context?: ToolCallContext) => {
     const start = Date.now();
     const authContext = context?.session;
+    // #846: dedicated chat_with_<slug> tools carry no `agent_name` param — the
+    // target agent is bound into the tool at registration. Fall back to that
+    // bound id so the audit row still attributes the action to the right agent.
+    const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
       const result = await execute(params, context);
-      logToolCall(toolName, authContext, Date.now() - start, true);
+      // Read requestId AFTER execute: a tool (e.g. git.ts) stamps it on the
+      // shared context object so this row carries the same id it forwarded.
+      logToolCall(toolName, authContext, Date.now() - start, true, undefined, targetId, context?.requestId);
       return result;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      logToolCall(toolName, authContext, Date.now() - start, false, msg);
+      logToolCall(toolName, authContext, Date.now() - start, false, msg, targetId, context?.requestId);
       throw error;
     }
   };

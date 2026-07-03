@@ -1,0 +1,87 @@
+{
+  "version": "1.0",
+  "date": "2026-06-25",
+  "mode": "diff",
+  "scope": "branch changes vs origin/dev (issue #1131 — DOCKER_GID detection fix)",
+  "confidence_gate": "8/10 (daily)",
+  "branch": "AndriiPasternak31/autoplan-issue-1131",
+  "base": "origin/dev",
+  "phases_run": [0, 1, 2, 3, 4, 5, 7, 9, 12, 13, 14],
+  "files_in_scope": [
+    ".env.example",
+    ".github/workflows/container-security.yml",
+    "docker-compose.yml",
+    "docker-compose.prod.yml",
+    "scripts/deploy/start.sh",
+    "src/backend/services/docker_service.py",
+    "tests/deploy/test_docker_gid.sh",
+    "tests/unit/test_docker_service_list_fast.py"
+  ],
+  "attack_surface": {
+    "new_public_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "new_internal_endpoints": 0,
+    "new_ci_jobs": 1,
+    "new_host_scripts_touched": 1,
+    "secrets_introduced": 0
+  },
+  "findings": [],
+  "non_findings_reviewed": [
+    {
+      "id": "NF-1",
+      "category": "Supply chain",
+      "surface": "scripts/deploy/start.sh:_probe_docker_gid()",
+      "note": "Probe runs `docker run --rm -v /var/run/docker.sock:... alpine stat ...` with an unpinned `alpine` tag and the docker socket mounted. Operator-run deploy script, not attacker-reachable; the operator already trusts the daemon and the images `compose up` pulls. Excluded (hard-exclusion #5, missing hardening / no exploit path). Optional hardening: pin alpine by digest.",
+      "confidence": 3
+    },
+    {
+      "id": "NF-2",
+      "category": "Privilege",
+      "surface": "DOCKER_GID=0 outcome on Docker Desktop / Colima / rootless",
+      "note": "Probe now correctly resolves GID 0 (root group) on Docker-Desktop-class runtimes, so the backend joins supplementary group 0 to reach a root:root-owned socket. Not an added escalation: docker-socket access is already root-equivalent by design (Invariant #11), and reaching a root-group-owned socket as non-root REQUIRES group-0 membership — there is no lower-privilege alternative. Native Linux prod is unchanged (probe returns the non-zero host docker GID). Excluded.",
+      "confidence": 2
+    },
+    {
+      "id": "NF-3",
+      "category": "Injection",
+      "surface": "scripts/deploy/start.sh sed write-back",
+      "note": "`sed -i.bak \"s/^DOCKER_GID=$/DOCKER_GID=${detected}/\"` — `${detected}` is numeric-only on both source paths (`tr -dc '0-9'` probe; numeric GID field via `cut -d: -f3`). No injection. Verified.",
+      "confidence": 9
+    },
+    {
+      "id": "NF-4",
+      "category": "Information disclosure",
+      "surface": "src/backend/services/docker_service.py warn",
+      "note": "Swallow site changed from print() to throttled logger.warning(..., e). The exception is a Docker socket/permission error (PermissionError / docker.errors.APIError) — no credentials or env in the message. Net security improvement (silent swallow -> Vector-observable). Excluded.",
+      "confidence": 9
+    },
+    {
+      "id": "NF-5",
+      "category": "CI/CD",
+      "surface": ".github/workflows/container-security.yml verify-docker-gid-detection job",
+      "note": "Triggered on `pull_request` (NOT pull_request_target) with a top-level `permissions:` block; runs a hermetic shimmed bash test, no secrets, no `${{ github.event.* }}` in run steps. `actions/checkout@v6` is first-party/unpinned (MEDIUM per FP rule) and consistent with the entire existing workflow — not introduced by this diff. Excluded.",
+      "confidence": 8
+    }
+  ],
+  "filter_stats": {
+    "candidates_considered": 5,
+    "passed_confidence_gate": 0,
+    "hard_excluded": 4,
+    "verified_safe": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "trend": {
+    "prior_diff_reports": true,
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "direction": "clean — no findings in scope"
+  },
+  "verdict": "PASS — no reportable security findings at the 8/10 daily gate. Infra correctness + observability fix; no new attack surface, secrets, injection, auth, or disclosure."
+}

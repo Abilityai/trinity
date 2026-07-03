@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "date": "2026-06-28",
+  "mode": "daily",
+  "scope": "--diff (#1085 correlated-failure / thundering-herd controls)",
+  "base_ref": "origin/dev (859f66ca)",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "modified_endpoints": 1,
+    "modified_endpoint_detail": "POST /api/agents/{name}/executions/{id}/result — added 503+Retry-After governor gate AFTER existing auth/ownership/replay/marker checks",
+    "new_services": 1,
+    "new_service_detail": "services/redelivery_governor.py (157 LOC, Redis-backed, fail-open)",
+    "new_config_flags": 8,
+    "new_redis_keys": ["governor:corr_failures (ZSET)", "governor:pause (STRING TTL)", "redelivery:fleet (rate-limit)", "redelivery:agent:{name} (rate-limit)"]
+  },
+  "findings": [],
+  "non_findings_verified": [
+    {
+      "claim": "Malicious agent cannot weaponize the shared-cause pause",
+      "status": "CONFIRMED (independent fresh-context verifier)",
+      "reason": "Detector counts DISTINCT agents (ZSET member=agent_name, ZCARD); one identity contributes at most 1; threshold 20. agent_name is server-side (apply_result param), pinned to the caller's own agent-scoped key via authorize_heartbeat. Recording is CAS-won-gated (no replay double-count). Even 20 compromised identities only delay (never drop) terminals behind an auto-expiring 300s fail-open pause; feature default-OFF."
+    }
+  ],
+  "filter_stats": {
+    "candidates_considered": 6,
+    "excluded_dos_resource": 1,
+    "excluded_docs_only": 4,
+    "excluded_non_security_random_for_jitter": 1,
+    "reached_confidence_gate": 0
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "No prior #1085 report; extends #1083 (cso-2026-06-19-1083-diff.md). No regressions to the #1083 callback hardening — the governor gate is correctly sequenced AFTER auth/ownership/marker. Finding-2 (auth/rate never relabeled cancelled) from cso-2026-06-22 is now mirrored at the backend boundary AND BILLING(429) is wired into the detector.",
+  "verdict": "CLEAR — no security findings at the 8/10 daily gate. Defensive reliability feature; new attack surface minimal and correctly gated behind authentication; all controls fail-open and default-OFF."
+}

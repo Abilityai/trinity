@@ -108,6 +108,42 @@ export function createLoopTools(
           .describe(
             "Per-iteration timeout in seconds (defaults to agent's configured execution_timeout_seconds)."
           ),
+        max_duration_seconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(604_800)
+          .optional()
+          .describe(
+            "Optional loop-level wall-clock deadline in seconds (1–604800 = up to 7 days). " +
+              "Checked at each iteration boundary; an in-flight run is never killed mid-turn. " +
+              "When the deadline passes the loop stops with stop_reason='deadline_exceeded'. " +
+              "Must be >= timeout_per_run (or the agent's execution timeout when unset). " +
+              "Omit for no time bound (max_runs still applies)."
+          ),
+        max_cost_usd: z
+          .number()
+          .gt(0)
+          .optional()
+          .describe(
+            "Optional per-loop USD cost budget. Checked at each iteration boundary " +
+              "(between runs) — the current run always finishes, so one run (including " +
+              "the first) can overshoot. Runs reporting no cost count as 0 toward the " +
+              "budget. When accumulated cost meets/exceeds the budget the loop stops " +
+              "with stop_reason='budget_exhausted'. Omit for no budget (max_runs still applies)."
+          ),
+        no_progress_threshold: z
+          .number()
+          .int()
+          .min(0)
+          .refine((v) => v !== 1, "must be 0 (disabled) or >= 2")
+          .optional()
+          .describe(
+            "Stop the loop after K consecutive runs that produce an identical " +
+              "response (doom-loop / no-progress detection). 0 disables; default 3. " +
+              "Detection is exact-hash on the normalized response text. Set 0 for " +
+              "loops that legitimately repeat identical confirmations."
+          ),
         model: z
           .string()
           .optional()
@@ -125,6 +161,9 @@ export function createLoopTools(
           stop_signal?: string;
           delay_seconds?: number;
           timeout_per_run?: number;
+          max_duration_seconds?: number;
+          max_cost_usd?: number;
+          no_progress_threshold?: number;
           model?: string;
           allowed_tools?: string[];
         },
@@ -146,6 +185,9 @@ export function createLoopTools(
             stop_signal: params.stop_signal,
             delay_seconds: params.delay_seconds,
             timeout_per_run: params.timeout_per_run,
+            max_duration_seconds: params.max_duration_seconds,
+            max_cost_usd: params.max_cost_usd,
+            no_progress_threshold: params.no_progress_threshold,
             model: params.model,
             allowed_tools: params.allowed_tools,
           });

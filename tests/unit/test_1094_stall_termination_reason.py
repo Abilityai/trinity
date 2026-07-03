@@ -104,7 +104,8 @@ def test_stall_sets_stall_no_output_reason(patched_loop):
     """An open tool_use silent past the stall limit records
     termination_reason='stall_no_output' and the offending tool name."""
     monkeypatch = patched_loop
-    monkeypatch.setattr(he, "_STALL_LIMIT_S", 0.0)
+    # Tiny POSITIVE limit trips the open mcp tool immediately (#1369: 0 disables).
+    monkeypatch.setenv("AGENT_TOOL_STALL_LIMIT_S", "0.01")
     _install_popen(monkeypatch, _FakePopen([_TOOL_USE_LINE], never_exits=True))
     ctx = _ctx(effective_timeout=30)  # large — budget must NOT be what fires
 

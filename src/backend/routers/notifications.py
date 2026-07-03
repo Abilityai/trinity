@@ -8,7 +8,7 @@ Notifications are persisted, broadcast via WebSocket, and queryable via API.
 import json
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from models import DismissAllRequest
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent
@@ -21,11 +21,6 @@ from db_models import (
     NotificationList,
     NotificationAcknowledge
 )
-
-
-class DismissAllRequest(BaseModel):
-    """Body for bulk-dismissing notifications (#1017)."""
-    agent_name: Optional[str] = None
 
 
 router = APIRouter(prefix="/api", tags=["notifications"])

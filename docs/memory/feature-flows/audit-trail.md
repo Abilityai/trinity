@@ -20,6 +20,7 @@ after merge.
 | **Phase 5 v2** | Stats tiles, time-preset chips, drill-down filters, hash-chain verify badge, CSV/JSON export | ✅ #941 v2 |
 | **Phase 5 v3** | Day-of-week × hour-of-day activity heatmap | ✅ #941 v3 |
 | **Phase 5 v3.1** | GitHub-style per-day calendar heatmap with click-to-drill-down | ✅ #941 v3.1 |
+| **Phase 6** | `request_id` correlation (MCP `mcp_operation` ⇄ backend `git_operation` join) + recover `target_id`/`request_id` on the MCP row | ✅ #905 |
 
 ## User Story
 As a platform admin, I want a tamper-evident record of every administrative
@@ -432,6 +433,30 @@ Authenticated via `X-Internal-Secret` header (C-003), same as scheduler.
 All 66+ MCP tools across 14 modules are wrapped automatically. Adding new
 tools to any module requires zero audit code — `addAllTools()` wraps them.
 
+## Phase 6 — Request-ID Correlation + Target Recovery (#905)
+
+Closes two gaps in the MCP `mcp_operation` row, end-to-end. Full flow lives in
+[mcp-git-tools.md](mcp-git-tools.md); the audit-side mechanics:
+
+- **`target_id` + `request_id` recovered** — `withAudit()` previously dropped
+  both ("we don't have params here"). `audit.ts` now resolves the target from
+  params (`resolveTargetId()` → `agent_name ?? name`) and reads a per-call
+  `requestId` off the shared `ToolCallContext`, passing both into
+  `logToolCall()`. So every tool's row attributes the action to a `target_id`,
+  and a tool that mints a correlation id records it.
+- **Cross-surface join** — a git tool mints `requestId = randomUUID()`, stamps
+  it on its `mcp_operation` row, AND forwards it as `X-Request-ID` on the
+  proxied backend call. The backend's request-id middleware adopts the incoming
+  header (rather than minting fresh), so the resulting `git_operation` row
+  carries the **same** id. `GET /api/audit-log?request_id=<id>` returns both
+  rows. (`db/audit.py` `_filter_conditions` gained the `request_id` filter;
+  `routers/audit_log.py` exposes the `request_id` query param;
+  `InternalAuditRequest.request_id` carries it on the MCP write path.)
+- **Symmetric git auditing** — `routers/git.py` `_audit_git()` now logs the
+  **failure** paths of mutating/destructive ops (`sync`/`pull`/
+  `reset_to_main_preserve_state`) too — a 409 conflict / 400 / 500 is no longer
+  silently un-audited. One row per handler exit, success or failure.
+
 ## Phase 4 — Hash Chain + Export (shipped in this PR)
 
 ### Hash Chain Verification
@@ -542,4 +567,4 @@ Run e2e: `cd src/frontend && npm run test:e2e -- audit-dashboard.spec`
 - **Invariant #3** (Schema in schema.py, migrations in migrations.py): both updated together
 - **Invariant #4** (Router registration order): `/stats` before `/{event_id}` in router declaration
 - **Invariant #8** (Auth pattern): every endpoint uses `Depends(require_admin)`
-- **Invariant #15** (Pydantic models centralized): all response models in `routers/audit_log.py` (consistent with other routers that own their response shapes)
+- **Invariant #14** (Pydantic models centralized): all audit response models live in `src/backend/models.py` (`AuditLogEntry`/`AuditLogListResponse`/`AuditLogStatsResponse` at `models.py:947-982`), centralized out of `routers/audit_log.py` per #654

@@ -112,6 +112,7 @@ from db.schedules import ScheduleOperations
 from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
+from db.reports import ReportOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -330,6 +331,7 @@ class DatabaseManager:
         self._chat_ops = ChatOperations()
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
+        self._report_ops = ReportOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -647,6 +649,25 @@ class DatabaseManager:
         return self._agent_ops.get_all_circuit_breaker_enabled()
 
     # =========================================================================
+    # MCP exposure toggle (#846)
+    # =========================================================================
+
+    def get_mcp_exposed(self, agent_name: str) -> bool:
+        return self._agent_ops.get_mcp_exposed(agent_name)
+
+    def set_mcp_exposed(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_mcp_exposed(agent_name, enabled)
+
+    def get_mcp_exposed_agents(self):
+        return self._agent_ops.get_mcp_exposed_agents()
+
+    def get_tts_config(self, agent_name: str):
+        return self._agent_ops.get_tts_config(agent_name)
+
+    def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
+        return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
+
+    # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
 
@@ -750,6 +771,17 @@ class DatabaseManager:
 
     def set_voice_name(self, agent_name: str, voice_name):
         return self._agent_ops.set_voice_name(agent_name, voice_name)
+    def get_public_channel_system_prompt(self, agent_name: str):
+        return self._agent_ops.get_public_channel_system_prompt(agent_name)
+
+    def set_public_channel_system_prompt(self, agent_name: str, prompt):
+        return self._agent_ops.set_public_channel_system_prompt(agent_name, prompt)
+
+    def get_public_channel_model(self, agent_name: str):
+        return self._agent_ops.get_public_channel_model(agent_name)
+
+    def set_public_channel_model(self, agent_name: str, model):
+        return self._agent_ops.set_public_channel_model(agent_name, model)
 
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
@@ -1135,6 +1167,39 @@ class DatabaseManager:
 
     def get_current_activities(self, agent_name: str):
         return self._activity_ops.get_current_activities(agent_name)
+
+    # =========================================================================
+    # Agent Report Methods (#918 — delegated to db/reports.py)
+    # =========================================================================
+
+    def create_report(self, agent_name, user_id, report_type, title, payload,
+                       display_hint=None, schema_version=1,
+                       period_start=None, period_end=None):
+        return self._report_ops.create_report(
+            agent_name, user_id, report_type, title, payload,
+            display_hint, schema_version, period_start, period_end,
+        )
+
+    def get_report(self, report_id: str):
+        return self._report_ops.get_report(report_id)
+
+    def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              limit: int = 50, offset: int = 0):
+        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+
+    def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
+                          search: str = None, limit: int = 50, offset: int = 0):
+        return self._report_ops.get_fleet_reports(
+            agent_names, report_type, hours, search, limit, offset)
+
+    def get_fleet_report_stats(self, agent_names, report_type: str = None, hours: int = None):
+        return self._report_ops.get_fleet_report_stats(agent_names, report_type, hours)
+
+    def delete_report(self, agent_name: str, report_id: str):
+        return self._report_ops.delete_report(agent_name, report_id)
+
+    def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000):
+        return self._report_ops.prune_agent_reports(retention_days, chunk_size)
 
     # =========================================================================
     # Cleanup Operations (for CleanupService)
@@ -1552,6 +1617,9 @@ class DatabaseManager:
     def list_subscriptions(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions(owner_id)
 
+    def has_any_subscription(self):
+        return self._subscription_ops.has_any_subscription()
+
     def list_subscriptions_with_agents(self, owner_id: int = None):
         return self._subscription_ops.list_subscriptions_with_agents(owner_id)
 
@@ -1800,6 +1868,9 @@ class DatabaseManager:
     def get_slack_channel_for_agent(self, team_id, agent_name):
         return self._slack_channel_ops.get_channel_for_agent(team_id, agent_name)
 
+    def get_slack_channels_for_agent(self, agent_name):
+        return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
 
@@ -1845,6 +1916,9 @@ class DatabaseManager:
 
     def increment_telegram_message_count(self, chat_link_id):
         return self._telegram_channel_ops.increment_message_count(chat_link_id)
+
+    def list_telegram_clients_for_agent(self, agent_name):
+        return self._telegram_channel_ops.list_clients_for_agent(agent_name)
 
     def get_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.get_verified_email(binding_id, telegram_user_id)
@@ -1938,6 +2012,9 @@ class DatabaseManager:
 
     def increment_whatsapp_message_count(self, chat_link_id):
         return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
+
+    def list_whatsapp_clients_for_agent(self, agent_name):
+        return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
 
     # =========================================================================
     # VoIP Telephony (delegated to db/voip.py) - VOIP-001 (#1056)

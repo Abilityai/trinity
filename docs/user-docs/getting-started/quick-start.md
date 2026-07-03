@@ -4,6 +4,34 @@ Create and interact with a Trinity agent using the Web UI, API, or MCP tools.
 
 > 📺 **Watch:** [Build an AI Recruiter Agent — zero to deployed](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
+## Guided Onboarding (First Run)
+
+The fastest path: let Trinity guide you. On a **fresh install with no agents yet**,
+a short onboarding wizard opens automatically the first time you reach the Dashboard
+after logging in. It asks one question — *what do you want your first agent to do?* —
+then:
+
+1. Opens the **Create Agent** form with a matching starter template pre-selected.
+2. After the agent is created, walks you to the **Claude subscription** step so your
+   agent can actually think (Settings → Integrations → Claude Subscriptions), or
+   straight to chat if Claude auth is already configured.
+
+You can dismiss it at any time ("Skip for now") — it won't nag you again.
+
+**Relaunch the wizard any time** (e.g. to spin up another agent, or if you skipped it):
+open the Dashboard with the `?onboarding=1` query parameter:
+
+```
+http://localhost/?onboarding=1
+```
+
+This works regardless of how many agents you already have. **Log in first**, then
+open the link (opening it while signed out sends you through the login page, which
+drops the `?onboarding=1` parameter). On a fresh, empty install the Dashboard also
+shows a **Get started** button in the empty state that opens the same wizard.
+
+> Prefer to do it manually? Skip the wizard and follow **How It Works** below.
+
 ## How It Works
 
 1. Open http://localhost and log in as admin.

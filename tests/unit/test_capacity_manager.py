@@ -189,6 +189,58 @@ class TestAcquireAdmitted:
         backlog_service.enqueue.assert_not_awaited()
 
 
+class TestAcquireCeilingClamp:
+    """#506: CapacityManager.acquire clamps max_concurrent to the fleet ceiling.
+
+    Monkeypatches the ceiling getter so the test stays a true unit test (no
+    settings DB). The clamp is the single runtime-enforcement point for every
+    facade caller (chat ×3, task_execution_service, …).
+    """
+
+    def _patch_ceiling(self, monkeypatch, value):
+        from services import settings_service as ss
+        monkeypatch.setattr(ss, "get_max_parallel_tasks_ceiling", lambda: value)
+
+    def test_acquire_clamps_above_ceiling(self, capacity, slot_service, monkeypatch):
+        """max_concurrent=5 with ceiling=2 → slot acquired with max_parallel_tasks=2."""
+        self._patch_ceiling(monkeypatch, 2)
+        result = asyncio.run(capacity.acquire(
+            agent_name="alice",
+            execution_id="exec-1",
+            max_concurrent=5,
+            overflow_policy="reject",
+        ))
+        assert result.state == "admitted"
+        _, kwargs = slot_service.acquire_slot.await_args
+        assert kwargs["max_parallel_tasks"] == 2
+
+    def test_acquire_leaves_below_ceiling_untouched(self, capacity, slot_service, monkeypatch):
+        """max_concurrent=1 with ceiling=10 → unchanged (min(1, 10) == 1)."""
+        self._patch_ceiling(monkeypatch, 10)
+        asyncio.run(capacity.acquire(
+            agent_name="alice",
+            execution_id="exec-1",
+            max_concurrent=1,
+            overflow_policy="reject",
+        ))
+        _, kwargs = slot_service.acquire_slot.await_args
+        assert kwargs["max_parallel_tasks"] == 1
+
+    def test_get_slot_state_clamps(self, capacity, slot_service, monkeypatch):
+        """get_slot_state passes the clamped cap to the underlying slot service."""
+        self._patch_ceiling(monkeypatch, 3)
+        asyncio.run(capacity.get_slot_state("alice", 9))
+        args, _ = slot_service.get_slot_state.await_args
+        assert args == ("alice", 3)
+
+    def test_get_all_states_clamps_each(self, capacity, slot_service, monkeypatch):
+        """get_all_states clamps every agent's cap before the bulk read."""
+        self._patch_ceiling(monkeypatch, 2)
+        asyncio.run(capacity.get_all_states({"alice": 8, "bob": 1}))
+        args, _ = slot_service.get_all_slot_states.await_args
+        assert args[0] == {"alice": 2, "bob": 1}
+
+
 class TestAcquireOverflow:
     """Slot full → behavior depends on overflow_policy."""
 

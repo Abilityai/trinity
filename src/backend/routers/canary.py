@@ -21,7 +21,15 @@ from pydantic import BaseModel, Field
 from canary import INVARIANTS
 from database import db
 from dependencies import require_admin
-from models import User
+from models import (
+    CanaryStatsResponse,
+    CanaryViolation,
+    CanaryViolationListResponse,
+    CycleTransition,
+    CycleViolation,
+    RunCycleResponse,
+    User,
+)
 from services.canary_alerts import severity_rank
 from services.canary_service import canary_service
 
@@ -31,42 +39,10 @@ router = APIRouter(prefix="/api/canary", tags=["canary"])
 
 
 # ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
-
-
-class CanaryViolation(BaseModel):
-    """Single canary_violations row as returned to API clients."""
-
-    id: int
-    invariant_id: str
-    tier: str
-    severity: str
-    snapshot_time: str
-    observed_state: dict = Field(default_factory=dict)
-    signal_query: Optional[str] = None
-    created_at: Optional[str] = None
-
-
-class CanaryViolationListResponse(BaseModel):
-    """Paginated list response."""
-
-    violations: List[CanaryViolation]
-    total: int
-    limit: int
-    offset: int
-
-
-class CanaryStatsResponse(BaseModel):
-    """Aggregate violation counts for dashboard tiles."""
-
-    total: int
-    by_invariant: dict = Field(default_factory=dict)
-    by_severity: dict = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Run-cycle request / response models
+# Run-cycle request model — stays in this router (not models.py) because it
+# evaluates `INVARIANTS` (from the canary library) at class-definition time,
+# and the canary library imports back from models; centralizing it would
+# invert the dependency direction. Allowlisted in test_models_centralized.py.
 # ---------------------------------------------------------------------------
 
 
@@ -80,54 +56,6 @@ class RunCycleRequest(BaseModel):
             f"({sorted(INVARIANTS.keys())})."
         ),
     )
-
-
-class CycleViolation(BaseModel):
-    """One violation persisted during a run-cycle call."""
-
-    id: int
-    invariant_id: str
-    tier: str
-    severity: str
-    snapshot_time: str
-    observed_state: dict
-    signal_query: Optional[str] = None
-
-
-class CycleTransition(BaseModel):
-    """A green→red transition detected this cycle.
-
-    `CanaryService` posts exactly one Slack webhook message per entry,
-    mapping severity to the message styling. Surfaced here so the run-cycle
-    response mirrors what the service actually emitted.
-    """
-
-    invariant_id: str
-    severity: str
-    violations_in_cycle: int
-    previous_violation_at: Optional[str] = Field(
-        None,
-        description=(
-            "snapshot_time of the most recent prior violation for this "
-            "invariant; null if the invariant has never violated before."
-        ),
-    )
-
-
-class RunCycleResponse(BaseModel):
-    """Result of one canary cycle."""
-
-    snapshot_time: str
-    cycle_duration_ms: int
-    # Invariants this cycle attempted (= the request's `invariants` filter,
-    # or all registered ids if unfiltered). Whether each one *fired* is
-    # surfaced via `violations` and `transitions`. Sources that were down
-    # this cycle are listed in `sources_unavailable` — invariants that
-    # depend on them returned no violations regardless of state.
-    checks_run: List[str]
-    sources_unavailable: List[str]
-    violations: List[CycleViolation]
-    transitions: List[CycleTransition]
 
 
 # ---------------------------------------------------------------------------

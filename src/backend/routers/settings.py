@@ -8,14 +8,26 @@ import logging
 import os
 import re
 import httpx
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from models import User, AgentDefaultResourcesUpdate, AgentDefaultAccessPolicyUpdate
+from models import (
+    AgentDefaultAccessPolicyUpdate,
+    AgentDefaultResourcesUpdate,
+    AgentQuotaUpdate,
+    ApiKeyTest,
+    ApiKeyUpdate,
+    GitHubTemplatesUpdate,
+    MaxParallelTasksCeilingUpdate,
+    McpUrlUpdate,
+    OpsSettingsUpdate,
+    SlackConnectRequest,
+    SlackSettingsUpdate,
+    User,
+)
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -38,23 +50,19 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL_KEY,
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
+    MAX_PARALLEL_TASKS_CEILING_KEY,
+    MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+    MAX_PARALLEL_TASKS_CEILING_MIN,
+    MAX_PARALLEL_TASKS_CEILING_MAX,
+    get_max_parallel_tasks_ceiling,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 # ============================================================================
-# API Keys Management - Helper Functions and Models
+# API Keys Management - Helper Functions
 # ============================================================================
-
-class ApiKeyUpdate(BaseModel):
-    """Request body for updating an API key."""
-    api_key: str
-
-
-class ApiKeyTest(BaseModel):
-    """Request body for testing an API key."""
-    api_key: str
 
 
 # Note: get_anthropic_api_key and get_github_pat are now imported from
@@ -74,11 +82,6 @@ def mask_api_key(key: str) -> str:
 
 # Note: OPS_SETTINGS_DEFAULTS and OPS_SETTINGS_DESCRIPTIONS are now imported from
 # services.settings_service for proper architecture
-
-
-class OpsSettingsUpdate(BaseModel):
-    """Request body for updating ops settings."""
-    settings: Dict[str, str]
 
 
 def require_admin(current_user: User):
@@ -128,7 +131,13 @@ async def get_public_feature_flags(
     Auth required (any role) — these flags reveal nothing sensitive but we
     still keep them out of the unauthenticated surface.
     """
-    from config import GEMINI_API_KEY, VOICE_ENABLED, VOIP_ENABLED, MCP_AGENT_CHAT_PULL_ENABLED
+    from config import (
+        GEMINI_API_KEY,
+        VOICE_ENABLED,
+        VOIP_ENABLED,
+        MCP_AGENT_CHAT_PULL_ENABLED,
+        REDELIVERY_GOVERNOR_ENABLED,
+    )
     from services.entitlement_service import entitlement_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     return {
@@ -143,7 +152,19 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # Re-delivery governor (#1085) — default OFF. Observability-only here:
+        # the actual gates live at the callback endpoint / reaper / drain read
+        # points. Lets an operator confirm via the API whether the correlated-
+        # failure controls are armed during a soak. NOT a UI surface.
+        "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
         "platform_default_model": settings_service.get_platform_default_model(),
+        # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
+        # Trinity agents can't think without it, so the first-run wizard uses
+        # this to surface the one hard setup gate. True if a platform-wide
+        # Anthropic key exists (DB or env) OR any Claude subscription is
+        # registered. Non-sensitive: a boolean, never the key itself.
+        "claude_auth_configured": bool(settings_service.get_anthropic_api_key())
+        or db.has_any_subscription(),
         # #847 Phase 0 — enterprise entitlements. Empty list means OSS
         # build (or TRINITY_OSS_ONLY=1). UI uses this to hide
         # enterprise-only tabs cleanly without server-side conditional
@@ -598,13 +619,6 @@ async def get_slack_settings_status(
         raise HTTPException(status_code=500, detail=f"Failed to get Slack settings: {str(e)}")
 
 
-class SlackSettingsUpdate(BaseModel):
-    """Request body for updating Slack settings."""
-    client_id: str = None
-    client_secret: str = None
-    signing_secret: str = None
-
-
 @router.put("/slack")
 async def update_slack_settings(
     body: SlackSettingsUpdate,
@@ -679,12 +693,6 @@ async def delete_slack_settings(
 # ============================================================================
 # Slack Transport Management (Socket Mode / Webhook)
 # ============================================================================
-
-
-class SlackConnectRequest(BaseModel):
-    """Request body for connecting Slack transport."""
-    app_token: Optional[str] = None  # xapp-... for Socket Mode
-    transport_mode: Optional[str] = None  # "socket" or "webhook"
 
 
 @router.get("/slack/status")
@@ -950,17 +958,6 @@ async def remove_email_from_whitelist(
 # GitHub Templates Configuration (TMPL-001)
 # ============================================================================
 
-class GitHubTemplateEntry(BaseModel):
-    """A single GitHub template entry."""
-    github_repo: str
-    display_name: str = ""
-    description: str = ""
-
-
-class GitHubTemplatesUpdate(BaseModel):
-    """Request body for updating GitHub templates."""
-    templates: List[GitHubTemplateEntry]
-
 
 _REPO_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$')
 
@@ -1079,11 +1076,6 @@ async def delete_github_templates(
 MCP_URL_SETTING_KEY = "mcp_external_url"
 
 
-class McpUrlUpdate(BaseModel):
-    """Request body for updating the MCP server URL."""
-    url: str
-
-
 def _get_default_mcp_url(request: Request) -> str:
     """Compute the auto-detected MCP URL from the request hostname."""
     host = request.headers.get("host", "localhost:8080")
@@ -1091,6 +1083,15 @@ def _get_default_mcp_url(request: Request) -> str:
     if hostname in ("localhost", "127.0.0.1"):
         return "http://localhost:8080/mcp"
     return f"http://{hostname}:8080/mcp"
+
+
+def resolve_mcp_url(request: Request) -> str:
+    """Effective MCP URL: the operator-configured override, else auto-detected.
+
+    Public accessor so other modules (e.g. the entitled MCP connector) don't
+    reach into the private helper above.
+    """
+    return db.get_setting_value(MCP_URL_SETTING_KEY) or _get_default_mcp_url(request)
 
 
 def _validate_mcp_url(url: str) -> str:
@@ -1188,12 +1189,6 @@ async def delete_mcp_url(
 # ============================================================================
 # Agent Quota Settings (QUOTA-001)
 # ============================================================================
-
-class AgentQuotaUpdate(BaseModel):
-    """Request body for updating per-role agent quotas."""
-    max_agents_creator: Optional[str] = None
-    max_agents_operator: Optional[str] = None
-    max_agents_user: Optional[str] = None
 
 
 @router.get("/agent-quotas")
@@ -1419,6 +1414,88 @@ async def update_agent_default_access_policy(
     }
 
 
+# ============================================================================
+# Max Parallel Tasks Ceiling (#506 — fleet-wide per-agent concurrency cap)
+# ============================================================================
+
+@router.get("/max-parallel-tasks-ceiling")
+async def get_max_parallel_tasks_ceiling_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the fleet-wide ceiling on any single agent's max_parallel_tasks (#506).
+
+    Admin-only. Owners pick a per-agent value within this ceiling.
+    Registered before the `/{key}` catch-all (Invariant #4).
+    """
+    require_admin(current_user)
+
+    return {
+        "value": get_max_parallel_tasks_ceiling(),
+        "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+        "min": MAX_PARALLEL_TASKS_CEILING_MIN,
+        "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
+@router.put("/max-parallel-tasks-ceiling")
+async def update_max_parallel_tasks_ceiling_setting(
+    body: MaxParallelTasksCeilingUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set the fleet-wide ceiling on per-agent max_parallel_tasks (#506).
+
+    Admin-only. Validates MIN ≤ value ≤ MAX (1–32). The clamp applies at
+    runtime (CapacityManager facade + bypasses); stored per-agent values are
+    never rewritten. Existing agents above the new ceiling are clamped on the
+    next admit.
+    """
+    require_admin(current_user)
+
+    if (
+        not isinstance(body.value, int)
+        or body.value < MAX_PARALLEL_TASKS_CEILING_MIN
+        or body.value > MAX_PARALLEL_TASKS_CEILING_MAX
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"max_parallel_tasks_ceiling must be an integer between "
+                f"{MAX_PARALLEL_TASKS_CEILING_MIN} and {MAX_PARALLEL_TASKS_CEILING_MAX}"
+            ),
+        )
+
+    db.set_setting(MAX_PARALLEL_TASKS_CEILING_KEY, str(body.value))
+
+    # SEC-001: audit this fleet-wide capacity change (mirrors the access-policy
+    # default audit path) — it caps concurrency for every agent on the host.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": MAX_PARALLEL_TASKS_CEILING_KEY,
+            "action": "update",
+            "value": body.value,
+        },
+    )
+
+    return {
+        "success": True,
+        "value": get_max_parallel_tasks_ceiling(),
+        "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
+        "min": MAX_PARALLEL_TASKS_CEILING_MIN,
+        "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -1459,6 +1536,18 @@ async def update_setting(
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
     require_admin(current_user)
+
+    # #506: the fleet ceiling must go through the dedicated range-validated
+    # route; block the generic PUT so it can't be written to junk/out-of-range
+    # (same pattern as the skills_library_url SSRF special-case below).
+    if key == MAX_PARALLEL_TASKS_CEILING_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "max_parallel_tasks_ceiling must be set via "
+                "PUT /api/settings/max-parallel-tasks-ceiling (range-validated 1–32)"
+            ),
+        )
 
     # Validate URL-based settings to prevent SSRF (SEC-179)
     if key == "skills_library_url" and body.value:
@@ -1668,5 +1757,3 @@ async def reset_ops_settings(
 
 
 # Note: get_ops_setting is now imported from services.settings_service
-
-

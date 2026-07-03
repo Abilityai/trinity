@@ -264,3 +264,132 @@ def test_run_finalize_http_error_releases_slot_and_idem_then_503():
     assert "Failed to communicate with agent" in str(exc.value.detail)
     m["cap"].release.assert_awaited_once()   # slot released in finally
     m["isvc"].fail.assert_called_once()      # idem claim released (idem_done False)
+
+
+def test_run_finalize_http_error_on_cancelled_row_closes_activity_cancelled():
+    """#1332: if an operator terminate already set the row CANCELLED and THEN an
+    HTTP error surfaces, the chat activity must close CANCELLED (not FAILED) so a
+    user-cancel doesn't read as a failure in activity-derived views. The handler's
+    error string is not stamped over the cancel, and no FAILED row-write fires."""
+    import httpx
+    from routers.chat import _run_chat_and_finalize
+    from models import ActivityState, TaskExecutionStatus
+
+    act = AsyncMock()
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CHAT, "agent_post_with_retry",
+                      AsyncMock(side_effect=httpx.ConnectError("boom"))), \
+         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
+         patch("services.subscription_auto_switch.handle_subscription_failure",
+               AsyncMock(return_value=None)):
+        # Operator-terminate already flipped the row to CANCELLED.
+        m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.CANCELLED)
+        idem = m["isvc"].begin.return_value
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(_run_chat_and_finalize(
+                name="agent1", request=ChatMessageRequest(message="hi"),
+                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
+                chat_activity_id="ca1", collaboration_activity_id=None,
+                session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
+                queue_result="running", is_queued=False, chat_timeout=3600,
+                idem=idem, capacity=m["cap"],
+            ))
+    assert exc.value.status_code == 503
+    # Chat activity closed CANCELLED, error dropped (not the HTTP error).
+    assert act.await_args_list[0].kwargs["status"] == ActivityState.CANCELLED
+    assert act.await_args_list[0].kwargs["error"] is None
+    # No FAILED write attempted over the CANCELLED row.
+    failed_writes = [
+        c for c in m["db"].update_execution_status.call_args_list
+        if c.kwargs.get("status") == TaskExecutionStatus.FAILED
+    ]
+    assert failed_writes == []
+
+
+def test_run_finalize_budget_exhausted_on_cancelled_row_closes_activity_cancelled():
+    """#1332: same invariant on the budget-exhausted (503) handler — a row already
+    CANCELLED closes the chat activity CANCELLED, not FAILED."""
+    from routers.chat import _run_chat_and_finalize
+    from models import ActivityState, TaskExecutionStatus
+
+    # Raise the exact BackendAgentCallBudgetExhausted class object that
+    # routers.chat bound at import — NOT a fresh `from services.agent_call_limiter
+    # import ...`. test_904_agent_call_limiter.py::test_default_timeout_is_one_hour
+    # does `importlib.reload(services.agent_call_limiter)`, which rebinds the
+    # module's exception class to a new object. Under pytest-randomly orderings
+    # where that test runs first, a fresh import here would yield the post-reload
+    # class, which routers.chat's pre-reload `except BackendAgentCallBudgetExhausted`
+    # cannot catch — the simulated exception would escape uncaught and this test
+    # would fail spuriously. Referencing the handler's own bound class keeps the
+    # test order-independent (and is what the production raiser uses anyway).
+    budget_exc = _CHAT.BackendAgentCallBudgetExhausted(
+        agent_name="agent1", agent_cap=2, global_cap=8, wait_ms=1500,
+    )
+    act = AsyncMock()
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CHAT, "agent_post_with_retry", AsyncMock(side_effect=budget_exc)), \
+         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CHAT, "is_execution_context_enabled", return_value=False):
+        m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.CANCELLED)
+        idem = m["isvc"].begin.return_value
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(_run_chat_and_finalize(
+                name="agent1", request=ChatMessageRequest(message="hi"),
+                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
+                chat_activity_id="ca1", collaboration_activity_id=None,
+                session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
+                queue_result="running", is_queued=False, chat_timeout=3600,
+                idem=idem, capacity=m["cap"],
+            ))
+    assert exc.value.status_code == 503
+    assert act.await_args_list[0].kwargs["status"] == ActivityState.CANCELLED
+    failed_writes = [
+        c for c in m["db"].update_execution_status.call_args_list
+        if c.kwargs.get("status") == TaskExecutionStatus.FAILED
+    ]
+    assert failed_writes == []
+
+
+def test_run_finalize_http_error_on_running_row_still_closes_failed():
+    """#1332 regression guard: a genuine HTTP failure on a still-RUNNING row keeps
+    closing the chat activity FAILED with the error text — the cancel-aware path
+    must not turn real failures into cancels."""
+    import httpx
+    from routers.chat import _run_chat_and_finalize
+    from models import ActivityState, TaskExecutionStatus
+
+    act = AsyncMock()
+    with _env(_idem(replay=False)) as m, \
+         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CHAT, "agent_post_with_retry",
+                      AsyncMock(side_effect=httpx.ConnectError("boom"))), \
+         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
+         patch("services.subscription_auto_switch.handle_subscription_failure",
+               AsyncMock(return_value=None)):
+        m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.RUNNING)
+        idem = m["isvc"].begin.return_value
+        with pytest.raises(HTTPException):
+            asyncio.run(_run_chat_and_finalize(
+                name="agent1", request=ChatMessageRequest(message="hi"),
+                current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
+                triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
+                chat_activity_id="ca1", collaboration_activity_id=None,
+                session=MagicMock(id="s1"), execution=MagicMock(id="cex1"),
+                queue_result="running", is_queued=False, chat_timeout=3600,
+                idem=idem, capacity=m["cap"],
+            ))
+    assert act.await_args_list[0].kwargs["status"] == ActivityState.FAILED
+    assert act.await_args_list[0].kwargs["error"]  # error text preserved
+    failed_writes = [
+        c for c in m["db"].update_execution_status.call_args_list
+        if c.kwargs.get("status") == TaskExecutionStatus.FAILED
+    ]
+    assert len(failed_writes) == 1  # FAILED row-write still fires for a real failure

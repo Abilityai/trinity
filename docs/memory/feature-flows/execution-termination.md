@@ -273,6 +273,17 @@ async def terminate_agent_execution(
     # 2. Proxy termination request to agent container
     # 3. Clear queue state + release capacity slot
     # 4. Update database execution record to "cancelled"
+    # 4b. #1332: close the open dispatch activity as ActivityState.CANCELLED
+    #     (get_open_activity_id_for_execution + complete_activity). The terminate
+    #     path writes the CANCELLED row first and never reaches apply_result, so
+    #     without this the dispatch activity is left `started` until the ~30-min
+    #     stale-activity reaper flips it to FAILED — collapsing a user-cancel into
+    #     a failure in activity-derived views (timeline/replay). Best-effort:
+    #     a close failure is logged, never fails the terminate request.
+    #     The activity state is GATED on the CANCELLED row-write CAS bool: if the
+    #     write LOST (row already terminal via a concurrent path), the activity is
+    #     closed in the row's REAL state via activity_state_for_terminal(existing)
+    #     so the activity never disagrees with the row.
     # 5. Track activity
 ```
 

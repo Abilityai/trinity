@@ -20,12 +20,11 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
 
 from database import db
 from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
-from models import User
+from models import CreateSessionRequest, SessionMessageRequest, User
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.session_cleanup_service import get_session_cleanup_service
 from services.settings_service import is_session_tab_enabled
@@ -43,31 +42,6 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["sessions"])
-
-
-# ---------------------------------------------------------------------------
-# Request / response models
-# ---------------------------------------------------------------------------
-
-
-class CreateSessionRequest(BaseModel):
-    """Optional body for POST /session. All fields optional."""
-
-    subscription_id: Optional[str] = None
-
-
-class SessionMessageRequest(BaseModel):
-    """Body for the turn endpoint."""
-
-    message: str = Field(..., min_length=1)
-    model: Optional[str] = None
-    timeout_seconds: Optional[int] = None
-    # File attachments — same shape as ParallelTaskRequest.files (#364).
-    # Images become vision blocks for the model; non-images are written
-    # into the agent workspace and a "[File uploaded by X]: name (size)
-    # saved to path" line is appended to the prompt so the agent can
-    # `Read` them. (Phase 5.2 file-upload parity with Chat.)
-    files: Optional[list] = None
 
 
 # ---------------------------------------------------------------------------

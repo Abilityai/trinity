@@ -143,7 +143,7 @@ class TestVoiceConstants:
         assert config.DEFAULT_VOICE_NAME == "Kore"
         assert config.DEFAULT_VOICE_NAME in config.GEMINI_VOICE_NAMES
         assert config.GEMINI_VOICE_NAMES == (
-            "Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir",
+            "Kore", "Zephyr", "Puck", "Aoede", "Charon", "Fenrir", "Gacrux",
         )
 
     def test_frontend_voice_list_matches_backend(self):

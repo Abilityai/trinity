@@ -24,11 +24,10 @@ from fastapi import (
     Query,
     status,
 )
-from pydantic import BaseModel
 
 from database import db
 from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
-from models import User
+from models import User, VoipBindingResponse, VoipCallRequest, VoipConfigureRequest, VoipEnabledRequest
 from services import idempotency_service
 from services.settings_service import settings_service
 from services.voip_service import voip_service, normalize_e164
@@ -38,35 +37,6 @@ logger = logging.getLogger(__name__)
 
 auth_router = APIRouter(prefix="/api/agents", tags=["voip"])
 public_router = APIRouter(tags=["voip-public"])
-
-
-# ── Request/Response models ──────────────────────────────────────────────────
-
-class VoipConfigureRequest(BaseModel):
-    account_sid: str
-    auth_token: str
-    from_number: str
-    daily_call_cap: Optional[int] = None
-
-
-class VoipBindingResponse(BaseModel):
-    agent_name: str
-    configured: bool
-    account_sid: Optional[str] = None
-    from_number: Optional[str] = None
-    daily_call_cap: Optional[int] = None
-    display_name: Optional[str] = None
-    enabled: Optional[bool] = None
-
-
-class VoipCallRequest(BaseModel):
-    to_number: str
-    context: Optional[str] = None
-    process_transcript: bool = True
-
-
-class VoipEnabledRequest(BaseModel):
-    enabled: bool
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -225,6 +195,16 @@ async def place_voip_call(
             public_url=public_url,
             context=request.context,
             process_transcript=request.process_transcript,
+            execution_id=request.execution_id,
+            dedup_label=request.dedup_label,
+        )
+    except idempotency_service.EffectInProgressError:
+        # Concurrent duplicate dial for the same (execution, number) is mid-flight
+        # (#1084). Release the outer trigger claim and surface a retryable 409.
+        idempotency_service.fail(idem)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A duplicate call for this execution is already in progress.",
         )
     except HTTPException:
         idempotency_service.fail(idem)  # nothing durable dialed → release the claim

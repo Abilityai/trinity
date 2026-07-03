@@ -637,8 +637,15 @@ const agentRows = computed(() => {
       return
     }
 
+    // #1332: a user-cancelled terminal is not a failure. It carries
+    // event.error="Execution terminated by user", which would otherwise make
+    // hasError truthy and render the bar red — so detect it first and exclude
+    // it from hasError, then carry isCancelled onto the bar for a distinct color.
+    const isCancelled = event.status === 'cancelled'
     // Check if event has error status
-    const hasError = event.status === 'error' || event.status === 'failed' || event.error || event.hasError
+    const hasError = !isCancelled && (
+      event.status === 'error' || event.status === 'failed' || event.error || event.hasError
+    )
     // Get duration from event (in milliseconds)
     // If null, use a default of 30 seconds for visibility (typical execution time)
     const durationMs = event.duration_ms || 30000
@@ -658,6 +665,7 @@ const agentRows = computed(() => {
       type: 'execution',
       eventIndex: index,
       hasError,
+      isCancelled,
       durationMs,
       isInProgress,
       isEstimated,
@@ -717,6 +725,10 @@ const agentRows = computed(() => {
         active,
         type: act.type,
         hasError: act.hasError,
+        // #1332: carry the cancelled flag onto the FINAL bar object — getBarColor/
+        // getBarTooltip read this rendered object, not the intermediate `act`, so
+        // dropping it here left the slate color + (Cancelled) tooltip dead.
+        isCancelled: act.isCancelled,
         durationMs: effectiveDuration, // Use effective duration for tooltips
         isInProgress: act.isInProgress,
         isEstimated: act.isEstimated && !act.isInProgress, // Not estimated if we're calculating live
@@ -1024,6 +1036,9 @@ function formatDuration(ms) {
 }
 
 function getBarColor(activity) {
+  // #1332: user-cancelled terminal — neutral slate, distinct from the red of a
+  // genuine failure. Checked before hasError/isInProgress/trigger branches.
+  if (activity.isCancelled) return '#94a3b8'  // Slate for cancelled
   if (activity.hasError) return '#ef4444'  // Red for errors
   if (activity.isInProgress) return '#f59e0b'  // Amber for in-progress
 
@@ -1094,7 +1109,8 @@ function getBarTooltip(activity) {
   }
 
   // Determine status
-  if (activity.hasError) status = '(Error)'
+  if (activity.isCancelled) status = '(Cancelled)'  // #1332
+  else if (activity.hasError) status = '(Error)'
   else if (activity.isInProgress) status = '(In Progress)'
   else status = ''
 

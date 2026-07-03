@@ -199,6 +199,12 @@ chat_activity_id = await activity_service.track_activity(
 )
 ```
 
+> **#1332:** the collaboration close-sites (`routers/chat.py` `_complete_collaboration_activity`
+> and `execute_parallel_task`) no longer hard-code `COMPLETED if SUCCESS else FAILED`.
+> They call the shared `models.activity_state_for_terminal(result.status)` helper, so a
+> user-cancelled collaboration turn closes the activity as `CANCELLED` (not `FAILED`) and
+> reads as a distinct, non-failure terminal in the collaboration timeline / replay.
+
 **Activity Completion** (Lines 330-341):
 ```python
 # Complete collaboration activity if this was agent-to-agent
@@ -427,7 +433,7 @@ CREATE TABLE agent_activities (
     id TEXT PRIMARY KEY,                -- UUID
     agent_name TEXT NOT NULL,           -- Agent the activity belongs to
     activity_type TEXT NOT NULL,        -- 'agent_collaboration', 'chat_start', 'tool_call', etc.
-    activity_state TEXT NOT NULL,       -- 'started', 'completed', 'failed'
+    activity_state TEXT NOT NULL,       -- 'started', 'completed', 'failed', 'cancelled' (#1332)
     parent_activity_id TEXT,            -- Link to parent activity (nullable)
     started_at TEXT NOT NULL,           -- ISO 8601 timestamp
     completed_at TEXT,                  -- When activity finished

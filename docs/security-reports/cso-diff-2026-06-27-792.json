@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "date": "2026-06-27",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "AndriiPasternak31/issue-792",
+  "base": "85546c74 (merge-base, == HEAD; changes uncommitted in working tree)",
+  "issue": "#792 SUB-003 subscription switch+retry",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "changed_files": [
+    "src/backend/services/task_execution_service.py (code)",
+    "tests/unit/test_792_subscription_retry.py (test-only, excluded)",
+    "docs/memory/architecture.md (docs, excluded)",
+    "docs/memory/feature-flows.md (docs, excluded)",
+    "docs/memory/feature-flows/task-execution-service.md (docs, excluded)",
+    "docs/memory/requirements.md (docs, excluded)",
+    "docs/requirements/SUB-003-subscription-auto-switch.md (docs, excluded)"
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_auth_surface": 0,
+    "new_user_input": 0,
+    "untrusted_input_parsed": "agent HTTP response body (response.json / response.text[:500]) — semi-trusted container",
+    "new_external_calls": "1 re-issued POST to same agent /api/task (same execution_id), timeout-capped"
+  },
+  "findings": [],
+  "supply_chain_summary": "No dependency changes in diff.",
+  "filter_stats": {
+    "candidates_considered": 4,
+    "discarded_bounded_cost_amplification": 1,
+    "discarded_preexisting_behavior": 2,
+    "discarded_trusted_cost_reporting": 1,
+    "findings_above_gate": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "trend": "First CSO --diff for issue #792. No findings; nothing to compare.",
+  "verdict": "CLEAN"
+}

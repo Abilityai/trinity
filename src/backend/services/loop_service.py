@@ -25,10 +25,12 @@ Template substitution:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from database import db
@@ -60,6 +62,18 @@ class _LoopHandle:
     task: asyncio.Task
     should_stop: bool = False
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _fingerprint(text: Optional[str]) -> str:
+    """SHA-256 of normalized response text for no-progress detection (#1157).
+
+    Normalizes by collapsing every whitespace run to a single space and
+    stripping (`" ".join(text.split())`). This preserves word boundaries so
+    `"foo bar"` and `"foobar"` do NOT collide, while `"hi"` and `"hi  \\n"`
+    do. Empty / None / whitespace-only all normalize to `""` — a repeated
+    empty response IS a doom loop and counts like any other fingerprint.
+    """
+    return hashlib.sha256(" ".join((text or "").split()).encode()).hexdigest()
 
 
 def _render_template(template: str, run_number: int, previous_response: Optional[str]) -> str:
@@ -97,6 +111,9 @@ class LoopService:
         stop_signal: Optional[str] = None,
         delay_seconds: int = 0,
         timeout_per_run: Optional[int] = None,
+        max_duration_seconds: Optional[int] = None,
+        max_cost_usd: Optional[float] = None,
+        no_progress_threshold: Optional[int] = None,
         model: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         started_by_user_id: Optional[int] = None,
@@ -116,6 +133,9 @@ class LoopService:
             stop_signal=stop_signal,
             delay_seconds=delay_seconds,
             timeout_per_run=timeout_per_run,
+            max_duration_seconds=max_duration_seconds,
+            max_cost_usd=max_cost_usd,
+            no_progress_threshold=no_progress_threshold,
             model=model,
             allowed_tools=allowed_tools,
             started_by_user_id=started_by_user_id,
@@ -186,6 +206,35 @@ class LoopService:
         stop_reason = "max_runs_reached"
         terminal_error: Optional[str] = None
 
+        # #1156: optional wall-clock deadline measured from loop start
+        # (≈ started_at, just stamped by mark_loop_running above). NULL/0
+        # disables. Enforced only at iteration boundaries, so an in-flight
+        # run is never killed mid-turn — overshoot is bounded by one
+        # timeout_per_run.
+        max_duration = loop.get("max_duration_seconds")
+        deadline = (
+            datetime.utcnow() + timedelta(seconds=max_duration)
+            if max_duration else None
+        )
+
+        # #1155: optional per-loop USD cost budget. NULL = no limit. Enforced
+        # only at iteration boundaries — once accumulated cost of completed
+        # runs meets/exceeds the budget, the loop stops before the next run
+        # (stop_reason='budget_exhausted'). The current run always finishes, so
+        # one run (including the first) can overshoot. accumulated_cost grows
+        # only on the success branch (the only path that loops back here);
+        # display stays correct because GET sums the run rows.
+        max_cost = loop.get("max_cost_usd")
+        accumulated_cost = 0.0
+
+        # #1157: no-progress / doom-loop detection. NULL/0 disables (back-compat
+        # for in-flight loops). Fingerprint each successful run's response; stop
+        # once `repeat_count` consecutive identical fingerprints reach the
+        # threshold. Runner-local — no persistence.
+        no_progress_threshold = loop.get("no_progress_threshold")
+        last_fingerprint: Optional[str] = None
+        repeat_count = 0
+
         try:
             for run_number in range(1, loop["max_runs"] + 1):
                 # Cooperative stop check BEFORE starting the next iteration.
@@ -194,6 +243,22 @@ class LoopService:
                 if handle is not None and handle.should_stop:
                     terminal_status = "stopped"
                     stop_reason = "user_stopped"
+                    break
+
+                # #1156: deadline check at the iteration boundary.
+                if deadline is not None and datetime.utcnow() >= deadline:
+                    terminal_status = "stopped"
+                    stop_reason = "deadline_exceeded"
+                    break
+
+                # #1155: cost-budget check at the iteration boundary. Fires only
+                # when a NEXT run would start with the budget already met/
+                # exceeded — boundary-only, so a run that crosses the budget but
+                # is the final run (max_runs) or matches stop_signal yields
+                # those reasons instead.
+                if max_cost is not None and accumulated_cost >= max_cost:
+                    terminal_status = "stopped"
+                    stop_reason = "budget_exhausted"
                     break
 
                 rendered = _render_template(
@@ -254,6 +319,32 @@ class LoopService:
                     )
                     previous_response = result.response
                     runs_completed = run_number
+
+                    # #1155: accumulate spend toward the budget. Only finite,
+                    # positive costs count — a NaN/inf cost is ignored so it
+                    # can't poison the accumulator (NaN >= max_cost is always
+                    # False → budget would never trip). NULL/unknown cost is
+                    # fail-open (counts as 0 per AC). When a budget is active,
+                    # BOTH unusable-cost cases WARN (distinct messages) so the
+                    # "spends while showing $0" blind spot is greppable instead
+                    # of silent — NULL and non-finite are both metering faults.
+                    c = result.cost
+                    if c is not None and math.isfinite(c) and c > 0:
+                        accumulated_cost += c
+                    elif max_cost is not None and c is None:
+                        logger.warning(
+                            "[Loop] %s run %d reported no cost; counts as 0 "
+                            "toward the $%.4f budget",
+                            loop_id, run_number, max_cost,
+                        )
+                    elif max_cost is not None and c is not None and not math.isfinite(c):
+                        logger.warning(
+                            "[Loop] %s run %d reported a non-finite cost (%r); "
+                            "ignored so it can't poison the $%.4f budget "
+                            "accumulator (counts as 0)",
+                            loop_id, run_number, c, max_cost,
+                        )
+
                     db.update_loop_progress(
                         loop_id,
                         runs_completed=runs_completed,
@@ -272,9 +363,36 @@ class LoopService:
                     })
 
                     # Stop-signal check — substring match on the full response.
+                    # Placed BEFORE no-progress so stop_signal wins if both fire.
                     if loop["stop_signal"] and loop["stop_signal"] in (result.response or ""):
                         stop_reason = "stop_signal_matched"
                         break
+
+                    # #1157: no-progress detection. Fingerprint the full
+                    # response and track consecutive identical results.
+                    if no_progress_threshold:
+                        fp = _fingerprint(result.response)
+                        if fp == last_fingerprint:
+                            repeat_count += 1
+                        else:
+                            last_fingerprint = fp
+                            repeat_count = 1
+                        # A pending user-stop or passed deadline outranks
+                        # no_progress — let the next iteration's top-of-loop
+                        # checks finalize user_stopped/deadline_exceeded. An
+                        # explicit Stop must never be relabeled "no progress".
+                        deadline_passed = (
+                            deadline is not None
+                            and datetime.utcnow() >= deadline
+                        )
+                        if (
+                            repeat_count >= no_progress_threshold
+                            and not (handle is not None and handle.should_stop)
+                            and not deadline_passed
+                        ):
+                            terminal_status = "stopped"
+                            stop_reason = "no_progress"
+                            break
                 else:
                     db.finalize_loop_run(
                         run_id,
@@ -300,8 +418,19 @@ class LoopService:
 
                 # Inter-run delay — also a stop point.
                 if loop["delay_seconds"] and run_number < loop["max_runs"]:
+                    sleep_for = loop["delay_seconds"]
+                    # #1156: never sleep past the deadline — cap the delay to
+                    # the remaining budget; the next boundary check then stops
+                    # the loop with deadline_exceeded.
+                    if deadline is not None:
+                        remaining = (deadline - datetime.utcnow()).total_seconds()
+                        if remaining <= 0:
+                            terminal_status = "stopped"
+                            stop_reason = "deadline_exceeded"
+                            break
+                        sleep_for = min(sleep_for, remaining)
                     try:
-                        await asyncio.sleep(loop["delay_seconds"])
+                        await asyncio.sleep(sleep_for)
                     except asyncio.CancelledError:
                         terminal_status = "stopped"
                         stop_reason = "user_stopped"

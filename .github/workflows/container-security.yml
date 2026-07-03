@@ -40,6 +40,7 @@ on:
       - 'docker/**'
       - 'docker-compose*.yml'
       - 'scripts/deploy/start.sh'
+      - 'tests/deploy/**'
       - 'src/mcp-server/Dockerfile'
       - '.github/workflows/container-security.yml'
   pull_request:
@@ -58,7 +59,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # need base history to diff the PR's changed paths
 
@@ -214,3 +215,19 @@ jobs:
           name: container-security-failure
           path: trinity-logs.txt
           retention-days: 14
+
+  # #1131: lock start.sh's DOCKER_GID detection. This is the ONLY guard for the
+  # probe path — verify-non-root above runs on the Linux runner where the socket
+  # IS group-owned by `docker`, so it never exercises the Docker Desktop / Colima
+  # / rootless probe branch that the #1131 fix turns on. The bash test is
+  # hermetic (it shims `docker`/`getent`/`uname` and extracts the real functions
+  # from start.sh), so it needs no daemon and runs in ~1s. Separate job, not
+  # gated on the container-surface self-skip, so the GID invariant is always
+  # checked on every PR.
+  verify-docker-gid-detection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run ensure_docker_gid regression test
+        run: bash tests/deploy/test_docker_gid.sh

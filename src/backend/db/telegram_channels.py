@@ -297,6 +297,44 @@ class TelegramChannelOperations:
         link = self.get_chat_link(binding_id, telegram_user_id)
         return link["verified_email"] if link else None
 
+    def list_clients_for_agent(self, agent_name: str) -> List[dict]:
+        """External Telegram clients who have messaged this agent (#20 roster).
+
+        Joins the agent's binding to its chat links. Returns normalized roster
+        rows; ``identity`` is the @username when known, else the numeric user id.
+        """
+        stmt = (
+            select(
+                telegram_chat_links.c.telegram_user_id,
+                telegram_chat_links.c.telegram_username,
+                telegram_chat_links.c.verified_email,
+                telegram_chat_links.c.message_count,
+                telegram_chat_links.c.last_active,
+            )
+            .select_from(
+                telegram_chat_links.join(
+                    telegram_bindings,
+                    telegram_chat_links.c.binding_id == telegram_bindings.c.id,
+                )
+            )
+            .where(telegram_bindings.c.agent_name == agent_name)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        clients = []
+        for row in rows:
+            username = row["telegram_username"]
+            identity = f"@{username}" if username else str(row["telegram_user_id"])
+            clients.append({
+                "channel": "telegram",
+                "identity": identity,
+                "display_name": username or None,
+                "verified_email": row["verified_email"] or None,
+                "message_count": row["message_count"] or 0,
+                "last_active": row["last_active"],
+            })
+        return clients
+
     def set_verified_email(
         self,
         binding_id: int,

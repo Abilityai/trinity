@@ -2,7 +2,11 @@
   <div :class="isFullscreenTab ? 'h-screen overflow-hidden flex flex-col bg-gray-100 dark:bg-gray-900' : 'min-h-screen bg-gray-100 dark:bg-gray-900'">
     <NavBar />
 
-    <main :class="['max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
+    <!-- #954: w-full keeps <main> at its max width in BOTH layout modes. Without it,
+         the fullscreen (Chat) mode makes the root a flex column, and `mx-auto`'s auto
+         inline margins override align-items:stretch on the flex item — collapsing
+         <main> to content width and shifting/narrowing the whole card on tab switch. -->
+    <main :class="['w-full max-w-[1400px] mx-auto py-2 sm:px-6 lg:px-8', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
       <div :class="['px-4 sm:px-0 py-2', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : 'overflow-visible']">
         <div v-if="loading" class="text-center py-8">
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
@@ -183,6 +187,11 @@
               <SchedulesPanel :agent-name="agent.name" :initial-message="schedulePrefillMessage" />
             </div>
 
+            <!-- Reports Tab Content (#918) -->
+            <div v-if="activeTab === 'reports'">
+              <ReportsPanel :agent-name="agent.name" :can-delete="agent.can_share" />
+            </div>
+
             <!-- Loops Tab Content (#1106 / #740 Phase 2) -->
             <div v-if="activeTab === 'loops'">
               <LoopsPanel :agent-name="agent.name" :agent-status="agent.status" />
@@ -294,6 +303,7 @@ import GitConflictModal from '../components/GitConflictModal.vue'
 import OverviewPanel from '../components/OverviewPanel.vue'
 import SchedulesPanel from '../components/SchedulesPanel.vue'
 import LoopsPanel from '../components/LoopsPanel.vue'
+import ReportsPanel from '../components/ReportsPanel.vue'
 import TasksPanel from '../components/TasksPanel.vue'
 import GitPanel from '../components/GitPanel.vue'
 import InfoPanel from '../components/InfoPanel.vue'
@@ -342,7 +352,7 @@ const error = ref('')
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
-const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'reports', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
 // Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
 // #1112: the Session tab collapsed into Chat, so ?tab=session resolves to chat
 // (the session-mode toggle, not the tab id, selects the surface).
@@ -725,6 +735,7 @@ const visibleTabs = computed(() => {
   }
 
   tabs.push(
+    { id: 'reports', label: 'Reports' },  // #918 agent-published reports
     { id: 'schedules', label: 'Schedules' },
     { id: 'loops', label: 'Loops' },
     { id: 'playbooks', label: 'Playbooks' },

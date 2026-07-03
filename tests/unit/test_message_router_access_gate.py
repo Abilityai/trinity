@@ -38,6 +38,7 @@ def _make_adapter(channel: str = "telegram") -> MagicMock:
     a.channel_type = channel
     # awaited methods
     a.get_agent_name = AsyncMock(return_value="agent1")
+    a.enrich_message = AsyncMock(return_value=None)  # #350 async identity hook
     a.handle_verification = AsyncMock(return_value=True)
     a.resolve_verified_email = AsyncMock(return_value=None)
     a.is_group_verified = AsyncMock(return_value=False)

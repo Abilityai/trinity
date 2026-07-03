@@ -206,6 +206,7 @@ Activity bars are colored by what triggered them, not the activity type:
 
 | Trigger | Color | Active | Inactive | Description |
 |---------|-------|--------|----------|-------------|
+| Cancelled | Slate | `#94a3b8` | - | User-cancelled execution — distinct from a failure (#1332) |
 | Error | Red | `#ef4444` | - | Any failed execution |
 | In Progress | Amber | `#f59e0b` | - | Currently running |
 | `schedule` | Purple | `#8b5cf6` | `#c4b5fd` | Scheduled executions |
@@ -217,6 +218,7 @@ Activity bars are colored by what triggered them, not the activity type:
 ```javascript
 // ReplayTimeline.vue:880-916
 function getBarColor(activity) {
+  if (activity.isCancelled) return '#94a3b8'  // Slate for cancelled (#1332)
   if (activity.hasError) return '#ef4444'  // Red for errors
   if (activity.isInProgress) return '#f59e0b'  // Amber for in-progress
 

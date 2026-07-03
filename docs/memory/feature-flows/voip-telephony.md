@@ -246,3 +246,6 @@ money-spending OSS backend would be cosmetic; gated on the existing
   `whatsapp-integration` (the Twilio binding/encryption pattern this mirrors).
 - **Downstream**: post-call processing reuses `task_execution_service.execute_task`
   (`triggered_by="voip"`).
+- **Guards**: [effect-idempotency.md](effect-idempotency.md) — `place_outbound_call`
+  is wired through `effect_guard` (scope `effect:{execution_id}`, identity = resolved
+  dial target) so a re-delivered turn cannot place a second PSTN call (#1084).

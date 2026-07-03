@@ -18,11 +18,10 @@ after the first success, so the exposure is limited to the pre-setup window only
 """
 import logging
 import re
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, Field
 
+from models import SetAdminPasswordRequest
 from database import db
 from dependencies import hash_password
 from services.operator_intake_service import submit_operator_intake
@@ -40,30 +39,6 @@ _ADMIN_USERNAME = "admin"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s.]+$")
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
-
-
-class SetAdminPasswordRequest(BaseModel):
-    """Request body for creating the admin account at first-time setup.
-
-    `email` is **required** (trinity-enterprise#49): it becomes the admin's
-    sign-in identity (login with email + password instead of the fixed 'admin')
-    and is the contact used for the optional operator intake. The remaining
-    operator-profile fields (company/name/role/use_case) stay optional and are
-    only forwarded to the hosted intake endpoint when `consent_updates` is true.
-    """
-    password: str = Field(..., max_length=128)
-    confirm_password: str = Field(..., max_length=128)
-    # Required admin email — sign-in identity. Shape validated in the handler so
-    # a typo / blank value yields a clean 400 (a missing field yields a 422).
-    email: str = Field(..., max_length=254)
-    # Optional operator profile — all skippable; setup completes without them.
-    company: Optional[str] = Field(None, max_length=200)
-    name: Optional[str] = Field(None, max_length=200)
-    role: Optional[str] = Field(None, max_length=200)
-    use_case: Optional[str] = Field(None, max_length=500)
-    # Affirmative, opt-in consent to occasionally receive security & product
-    # updates. ONLY when true is anything submitted to the hosted intake.
-    consent_updates: bool = False
 
 
 @router.get("/status")

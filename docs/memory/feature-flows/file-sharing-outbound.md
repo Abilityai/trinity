@@ -304,6 +304,7 @@ AGENT=filetest-$(date +%s)
 - **Upstream**: [unified-channel-access-control.md](unified-channel-access-control.md) — `require_email` / `session_token` gate reused here
 - **Adjacent**: [agent-sharing.md](agent-sharing.md) — email allow-list that gates the download endpoint when `require_email=true`
 - **Related**: [audit-trail.md](audit-trail.md) — `file_share_download` events recorded here
+- **Guards**: [effect-idempotency.md](effect-idempotency.md) — `create_share` is wired through `effect_guard` (scope `effect:{execution_id}`, identity = filename + content version) so a re-delivered turn replays the existing signed URL instead of re-minting a share (#1084)
 
 ## Design References
 

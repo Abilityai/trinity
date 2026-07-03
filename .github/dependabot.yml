@@ -1,8 +1,15 @@
 version: 2
 # All version-update PRs target `dev` per the SDLC (feature → dev → main).
 # Note: Dependabot reads this file from the DEFAULT branch (main), so changes
-# here only take effect after a release cut. Security updates ignore
-# target-branch and still go to main by GitHub design.
+# here only take effect after a release cut.
+#
+# SECURITY updates ignore `target-branch` and ALWAYS open against the default
+# branch (main) by GitHub design — `target-branch: dev` cannot redirect them,
+# and closing such a PR just makes Dependabot recreate it against main. So a
+# Dependabot *security* PR against `main` is EXPECTED, not a config misroute
+# (see #1341): let it merge to main as a security fix and it reaches dev on the
+# next release back-merge, or cherry-pick the bump into a dev PR if urgent.
+# Only *version* updates honor the per-entry `target-branch: dev` below.
 updates:
   # GitHub Actions: catch new SHAs for already-pinned third-party actions and
   # flag CVEs in first-party actions. Weekly cadence — security PRs from

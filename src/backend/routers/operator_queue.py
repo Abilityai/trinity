@@ -7,9 +7,9 @@ operator_queue_service background poller.
 """
 
 import json
-from typing import List, Optional, Set
+from typing import Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from models import BulkCancelRequest, ClearResolvedRequest, OperatorResponse
 
 from database import db
 from dependencies import get_current_user
@@ -27,30 +27,6 @@ def set_websocket_manager(manager):
     """Set the WebSocket manager for broadcasting events."""
     global _websocket_manager
     _websocket_manager = manager
-
-
-# ============================================================================
-# Request/Response Models
-# ============================================================================
-
-class OperatorResponse(BaseModel):
-    """Body for responding to a queue item."""
-    response: str
-    response_text: Optional[str] = None
-
-
-class BulkCancelRequest(BaseModel):
-    """Body for bulk-cancelling pending queue items (#1017).
-
-    The client sends the ids it actually rendered, so a sync-loop race can
-    never cancel items the operator never saw.
-    """
-    ids: List[str] = Field(..., min_length=1, max_length=500)
-
-
-class ClearResolvedRequest(BaseModel):
-    """Body for clearing the Resolved tab (#1017)."""
-    agent_name: Optional[str] = None
 
 
 # ============================================================================

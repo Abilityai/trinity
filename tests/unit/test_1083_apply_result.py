@@ -162,8 +162,11 @@ class TestSuccessGolden:
         )
         assert result.status == TaskExecutionStatus.CANCELLED
         assert result.error_code == TaskExecutionErrorCode.RECONCILED
-        # Activity completed as FAILED ("superseded"), NEVER COMPLETED; no breaker.
-        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
+        # #1332: SUCCESS only ever loses the CAS to a CANCELLED row (schedules.py
+        # update_execution_status SUCCESS guard = `status != CANCELLED`), so the
+        # activity closes as CANCELLED ("superseded by cancelled"), NEVER
+        # COMPLETED and no longer collapsed to FAILED; no breaker.
+        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.CANCELLED
         mrec.assert_not_awaited()
 
 

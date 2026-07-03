@@ -187,4 +187,4 @@ Ruled out:   <what this pilot explicitly did NOT test — capacity-physical mode
 ## See also
 - [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md) — the #945 envelope + result-reporting contract this pilot rides
 - [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) §Coordination Model, §Async-First Communication
-- **#946** pilot · **#1081** umbrella · **#1082**/**#1083** bankable wins · **#1084** effect-scoped idempotency (the gate)
+- **#946** pilot · **#1081** umbrella · **#1082**/**#1083** bankable wins · **#1084** effect-scoped idempotency (Direction A; reframed to retry-with-trace + tool-side gates in `TARGET_ARCHITECTURE.md` v2 — #1401/#1402, no longer *the* gate)

@@ -16,7 +16,7 @@ import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from models import WriteUserMemoryRequest
 
 from database import db
 from dependencies import get_current_user
@@ -31,11 +31,6 @@ _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
 
 # Lightweight email sanity check — not RFC-exhaustive, just catches obvious garbage.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-class WriteUserMemoryRequest(BaseModel):
-    execution_id: str = Field(..., min_length=1, max_length=200)
-    memory_text: str = Field(..., max_length=8000)
 
 
 @router.post("/{agent_name}/user-memory")

@@ -42,9 +42,13 @@ if _dot_env_754.exists():
     try:
         from dotenv import dotenv_values as _dotenv_values_754
         _env_vals_754 = _dotenv_values_754(_dot_env_754)
-        # INTERNAL_API_SECRET / SECRET_KEY have no earlier default — setdefault
-        # is fine (the caller's explicit export still wins).
-        for _k754 in ("INTERNAL_API_SECRET", "SECRET_KEY"):
+        # INTERNAL_API_SECRET / SECRET_KEY / AGENT_AUTH_SECRET have no earlier
+        # default — setdefault is fine (the caller's explicit export still wins).
+        # AGENT_AUTH_SECRET (#1159) is auto-generated into .env by start.sh; the
+        # backend's derive_agent_token() raises without it, so tests that mint
+        # per-agent auth tokens (circuit breaker, monitoring, watchdog, PAT
+        # propagation) need it loaded here too.
+        for _k754 in ("INTERNAL_API_SECRET", "SECRET_KEY", "AGENT_AUTH_SECRET"):
             _v754 = _env_vals_754.get(_k754)
             if _v754:
                 _os_589.environ.setdefault(_k754, _v754)

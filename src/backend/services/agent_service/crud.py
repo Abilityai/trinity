@@ -522,6 +522,14 @@ async def create_agent_internal(
         'TMPDIR': AGENT_DEFAULT_TMPDIR,
     }
 
+    # #1369: operator-configurable headless per-tool stall-watchdog ceiling.
+    # Only propagate when the backend env sets it — an unset value leaves the
+    # agent-side default (1800s). Baked at create like AGENT_TMP_SIZE; existing
+    # agents pick up a change on their next recreate (not a plain restart).
+    _stall_limit = (os.getenv('AGENT_TOOL_STALL_LIMIT_S') or '').strip()
+    if _stall_limit:
+        env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
+
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
     # is always applied inside the container).
     _guardrails = db.get_guardrails_config(config.name)

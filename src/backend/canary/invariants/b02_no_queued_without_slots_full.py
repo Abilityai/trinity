@@ -84,11 +84,21 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         if queued == 0:
             continue
 
+        # #506: compare against the EFFECTIVE cap (stored clamped to the fleet
+        # ceiling), not the stored cap. Under a lower ceiling an agent can be
+        # effective-full while stored > slots, and queued is then the correct
+        # state — using the stored cap would false-fire "drain stalled".
+        effective_cap = (
+            agent.effective_max_parallel
+            if agent.effective_max_parallel is not None
+            else agent.max_parallel
+        )
+
         # Filter drain sentinels — they're held briefly while the next
         # backlog item is being claimed and are not real running work.
         real_slots = {s for s in agent.slot_ids if not s.startswith(DRAIN_PREFIX)}
-        if len(real_slots) >= agent.max_parallel:
-            # Slots are at the cap; queued is the correct state.
+        if len(real_slots) >= effective_cap:
+            # Slots are at the (effective) cap; queued is the correct state.
             continue
 
         if tick_age <= DRAIN_TICK_GRACE_SECONDS:
@@ -106,7 +116,8 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                     "queued_count": queued,
                     "slot_count": len(real_slots),
                     "max_parallel_tasks": agent.max_parallel,
-                    "free_slots": agent.max_parallel - len(real_slots),
+                    "effective_max_parallel_tasks": effective_cap,
+                    "free_slots": effective_cap - len(real_slots),
                     "drain_tick_at": snapshot.drain_tick_at,
                     "drain_tick_age_seconds": (
                         None if tick_age == float("inf") else int(tick_age)
@@ -116,8 +127,8 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                 },
                 signal_query=(
                     f"agent {agent.name}: queued={queued}, "
-                    f"slots={len(real_slots)}/{agent.max_parallel} "
-                    f"(free={agent.max_parallel - len(real_slots)}), "
+                    f"slots={len(real_slots)}/{effective_cap} "
+                    f"(free={effective_cap - len(real_slots)}), "
                     f"drain_tick_age="
                     f"{'never' if tick_age == float('inf') else f'{int(tick_age)}s'} "
                     f"> {DRAIN_TICK_GRACE_SECONDS}s"

@@ -74,20 +74,20 @@ function showLabel(i) {
       <div
         v-for="(d, i) in data"
         :key="d.date"
-        class="relative flex-1 flex flex-col-reverse justify-start min-w-0"
+        class="relative flex-1 flex flex-col-reverse justify-start items-center min-w-0"
         @mouseenter="hover = i"
         @mouseleave="hover = null"
       >
         <!-- baseline tick for empty days so the axis reads as continuous -->
         <div
           v-if="!d.total"
-          class="w-full rounded-sm bg-gray-200 dark:bg-gray-700"
+          class="w-full max-w-[56px] rounded-sm bg-gray-200 dark:bg-gray-700"
           style="height: 2px"
         ></div>
         <div
           v-for="b in bucketsForDay(d)"
           :key="b"
-          class="w-full first:rounded-t-sm"
+          class="w-full max-w-[56px] first:rounded-t-md"
           :style="{
             height: segHeight(d, b) + 'px',
             backgroundColor: colorFor(b),

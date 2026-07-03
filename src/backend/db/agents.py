@@ -30,6 +30,8 @@ from .agent_settings import (
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    McpExposureMixin,
+    TtsMixin,
 )
 from utils.helpers import utc_now_iso
 
@@ -47,6 +49,8 @@ class AgentOperations(
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    McpExposureMixin,
+    TtsMixin,
 ):
     """Agent ownership, access control, and settings database operations.
 
@@ -428,5 +432,71 @@ class AgentOperations(
                 update(agent_ownership)
                 .where(agent_ownership.c.agent_name == agent_name)
                 .values(voice_name=voice_name or None)
+            )
+            return result.rowcount > 0
+
+    def get_public_channel_model(self, agent_name: str) -> Optional[str]:
+        """Per-agent model override for public-facing channels (#894).
+
+        Returns the persisted model id, or ``None`` when unset OR when the
+        persisted value is not a currently-valid public-channel model (a model
+        removed after it was saved). ``None`` ⇒ the caller inherits the platform
+        default — same defense-in-depth posture as ``get_voice_name`` (#28).
+        """
+        from services.settings_service import is_valid_public_channel_model
+
+        stmt = select(agent_ownership.c.public_channel_model).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        value = row["public_channel_model"] if row else None
+        return value if (value and is_valid_public_channel_model(value)) else None
+
+    def set_public_channel_model(self, agent_name: str, model: Optional[str]) -> bool:
+        """Set/clear the per-agent public-channel model override (None clears it)."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(public_channel_model=model or None)
+            )
+            return result.rowcount > 0
+
+    # =========================================================================
+    # Public/Channel System Prompt (#1205)
+    # Custom instructions injected into public-facing conversations only
+    # (public links, Slack/Telegram/WhatsApp channels, x402 paid chat).
+    # Text-surface counterpart of voice_system_prompt.
+    # =========================================================================
+
+    def get_public_channel_system_prompt(self, agent_name: str) -> Optional[str]:
+        """Get the public/channel system prompt for an agent (#1205)."""
+        stmt = select(agent_ownership.c.public_channel_system_prompt).where(
+            agent_ownership.c.agent_name == agent_name,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+            return (
+                row["public_channel_system_prompt"]
+                if row and row["public_channel_system_prompt"]
+                else None
+            )
+
+    def set_public_channel_system_prompt(
+        self, agent_name: str, prompt: Optional[str]
+    ) -> bool:
+        """Set the public/channel system prompt for an agent (#1205).
+
+        Empty/whitespace-only clears the value (strict no-op surface).
+        """
+        cleaned = prompt.strip() if prompt else None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(agent_ownership.c.agent_name == agent_name)
+                .values(public_channel_system_prompt=cleaned or None)
             )
             return result.rowcount > 0

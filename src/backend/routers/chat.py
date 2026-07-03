@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import NamedTuple, NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource, activity_state_for_terminal
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.agent_auth import agent_httpx_client
@@ -800,24 +800,32 @@ async def _run_chat_and_finalize(
         # in-flight chat activity + execution row in the FAILED state
         # so the timeline reflects the rejection accurately.
         budget_msg = str(_budget_e)
+        # #1332: read the row's current state BEFORE closing activities. If it
+        # already went terminal (e.g. CANCELLED via an operator terminate that
+        # raced this rejection), mirror that real state onto the chat/collab
+        # activities instead of stamping FAILED over a cancel. A still-RUNNING
+        # or missing row maps to FAILED — the genuine-rejection case.
+        existing = db.get_execution(task_execution_id) if task_execution_id else None
+        budget_close_state = (
+            activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
+        )
+        budget_close_error = budget_msg if budget_close_state == ActivityState.FAILED else None
         await activity_service.complete_activity(
             activity_id=chat_activity_id,
-            status=ActivityState.FAILED,
-            error=budget_msg,
+            status=budget_close_state,
+            error=budget_close_error,
         )
-        if task_execution_id:
-            existing = db.get_execution(task_execution_id)
-            if not existing or existing.status != TaskExecutionStatus.CANCELLED:
-                db.update_execution_status(
-                    execution_id=task_execution_id,
-                    status=TaskExecutionStatus.FAILED,
-                    error=budget_msg,
-                )
+        if task_execution_id and (not existing or existing.status != TaskExecutionStatus.CANCELLED):
+            db.update_execution_status(
+                execution_id=task_execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error=budget_msg,
+            )
         if collaboration_activity_id:
             await activity_service.complete_activity(
                 activity_id=collaboration_activity_id,
-                status=ActivityState.FAILED,
-                error=budget_msg,
+                status=budget_close_state,
+                error=budget_close_error,
             )
         raise HTTPException(status_code=503, detail=budget_msg)
 
@@ -846,11 +854,20 @@ async def _run_chat_and_finalize(
                     error_msg = e.response.text[:500]
         logging.getLogger("trinity.errors").error(f"Failed to communicate with agent {name}: {error_msg}")
 
+        # #1332: read the row state BEFORE closing activities so a row already
+        # CANCELLED (operator terminate raced this HTTP error) closes the
+        # chat/collab activities as CANCELLED, not FAILED. RUNNING/missing → FAILED.
+        existing = db.get_execution(task_execution_id) if task_execution_id else None
+        http_close_state = (
+            activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
+        )
+        http_close_error = error_msg if http_close_state == ActivityState.FAILED else None
+
         # Track chat failure
         await activity_service.complete_activity(
             activity_id=chat_activity_id,
-            status=ActivityState.FAILED,
-            error=error_msg
+            status=http_close_state,
+            error=http_close_error,
         )
 
         # Update task execution record on failure (#96: all chat types now have execution records)
@@ -860,31 +877,29 @@ async def _run_chat_and_finalize(
         # the SQL WHERE clause in update_execution_status already blocks a
         # FAILED write over a CANCELLED row, but the explicit pre-check
         # keeps the two callers consistent and avoids a wasted UPDATE.
-        if task_execution_id:
-            existing = db.get_execution(task_execution_id)
-            if not existing or existing.status != TaskExecutionStatus.CANCELLED:
-                salvage_cost = partial_metadata.get("cost_usd") if partial_metadata else None
-                salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
-                salvage_context_max = (
-                    (partial_metadata.get("context_window") or 200000)
-                    if partial_metadata
-                    else None
-                )
-                db.update_execution_status(
-                    execution_id=task_execution_id,
-                    status=TaskExecutionStatus.FAILED,
-                    error=error_msg,
-                    cost=salvage_cost,
-                    context_used=salvage_context,
-                    context_max=salvage_context_max,
-                )
+        if task_execution_id and (not existing or existing.status != TaskExecutionStatus.CANCELLED):
+            salvage_cost = partial_metadata.get("cost_usd") if partial_metadata else None
+            salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
+            salvage_context_max = (
+                (partial_metadata.get("context_window") or 200000)
+                if partial_metadata
+                else None
+            )
+            db.update_execution_status(
+                execution_id=task_execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error=error_msg,
+                cost=salvage_cost,
+                context_used=salvage_context,
+                context_max=salvage_context_max,
+            )
 
         # Complete collaboration activity on failure (was missing - caused activities to stay in "started" state)
         if collaboration_activity_id:
             await activity_service.complete_activity(
                 activity_id=collaboration_activity_id,
-                status=ActivityState.FAILED,
-                error=error_msg
+                status=http_close_state,
+                error=http_close_error,
             )
 
         # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
@@ -1188,11 +1203,8 @@ async def _complete_collaboration_activity(
     try:
         await activity_service.complete_activity(
             activity_id=collaboration_activity_id,
-            status=(
-                ActivityState.COMPLETED
-                if result.status == TaskExecutionStatus.SUCCESS
-                else ActivityState.FAILED
-            ),
+            # #1332: a cancelled collaboration turn reads as CANCELLED, not FAILED.
+            status=activity_state_for_terminal(result.status),
             details={
                 "response_length": len(result.response or ""),
                 "execution_time_ms": execution_time_ms,
@@ -1214,11 +1226,8 @@ async def _finalize_self_task(
     if not (is_self_task and self_task_activity_id):
         return
 
-    activity_status = (
-        ActivityState.COMPLETED
-        if result.status == TaskExecutionStatus.SUCCESS
-        else ActivityState.FAILED
-    )
+    # #1332: a cancelled self-task turn reads as CANCELLED, not FAILED.
+    activity_status = activity_state_for_terminal(result.status)
 
     # Complete the self-task activity
     try:
@@ -1269,7 +1278,9 @@ async def _finalize_self_task(
                 "type": "agent_activity",
                 "agent_name": agent_name,
                 "activity_type": "self_task",
-                "activity_state": "completed" if result.status == TaskExecutionStatus.SUCCESS else "failed",
+                # #1332: mirror the activity DB state (cancelled stays cancelled)
+                # so the WS event and the persisted row never disagree.
+                "activity_state": activity_status.value,
                 "action": f"Background task completed",
                 "timestamp": utc_now_iso(),
                 "details": {
@@ -1829,7 +1840,8 @@ async def execute_parallel_task(
     if collaboration_activity_id:
         await activity_service.complete_activity(
             activity_id=collaboration_activity_id,
-            status=ActivityState.COMPLETED if result.status == TaskExecutionStatus.SUCCESS else ActivityState.FAILED,
+            # #1332: a cancelled collaboration turn reads as CANCELLED, not FAILED.
+            status=activity_state_for_terminal(result.status),
             details={
                 "response_length": len(result.response),
                 "execution_id": execution_id,
@@ -2421,12 +2433,60 @@ async def terminate_agent_execution(
             # terminal in place (deterministic; "agent self-report is
             # authoritative"). Capacity is still force-released above in both cases.
             if task_execution_id and result.get("status") == "terminated":
-                db.update_execution_status(
+                cancel_won = db.update_execution_status(
                     execution_id=task_execution_id,
                     status=TaskExecutionStatus.CANCELLED,
                     error="Execution terminated by user"
                 )
-                logger.info(f"[Terminate] Updated database execution {task_execution_id} to cancelled")
+                if cancel_won:
+                    logger.info(f"[Terminate] Updated database execution {task_execution_id} to cancelled")
+                else:
+                    logger.info(
+                        f"[Terminate] CANCELLED write for {task_execution_id} lost the CAS — "
+                        f"row already terminal; leaving it and closing the activity in its real state"
+                    )
+
+                # #1332 (Path B): close the still-open dispatch activity as
+                # CANCELLED immediately. The operator-terminate path writes the
+                # CANCELLED row first and never reaches apply_result (the async
+                # callback short-circuits on the authoritative terminal; a sync
+                # apply_result loses the CAS), so without this the dispatch
+                # activity is left `started` until mark_stale_activities_failed
+                # flips it to FAILED ~30 min later. Best-effort like
+                # _close_stale_slot_activity — a close failure never fails the
+                # terminate request.
+                #
+                # Gate the activity state on whether the CANCELLED row-write won
+                # the CAS: if it LOST (the row went terminal via a concurrent
+                # path between the agent's terminate response and this write),
+                # close the activity in the row's ACTUAL terminal state so the
+                # activity never disagrees with the row (e.g. row=SUCCESS would
+                # else read CANCELLED). Won → CANCELLED.
+                try:
+                    dispatch_activity_id = db.get_open_activity_id_for_execution(task_execution_id)
+                    if dispatch_activity_id:
+                        if cancel_won:
+                            close_state = ActivityState.CANCELLED
+                            close_error = "Execution terminated by user"
+                        else:
+                            reconciled = db.get_execution(task_execution_id)
+                            close_state = activity_state_for_terminal(
+                                reconciled.status if reconciled else TaskExecutionStatus.CANCELLED
+                            )
+                            close_error = (
+                                None if close_state == ActivityState.COMPLETED
+                                else "Execution terminated by user"
+                            )
+                        await activity_service.complete_activity(
+                            activity_id=dispatch_activity_id,
+                            status=close_state,
+                            error=close_error,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[Terminate] Failed to close dispatch activity for "
+                        f"{task_execution_id} as cancelled: {e}"
+                    )
 
         # Track termination activity
         await activity_service.track_activity(

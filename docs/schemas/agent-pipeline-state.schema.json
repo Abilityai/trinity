@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trinity.abilityai.dev/schemas/agent-pipeline-state.schema.json",
+  "title": "Trinity Agent Pipeline Instance State",
+  "description": "Runtime state of one instance of an agent-defined pipeline, published by the agent at ~/.trinity/pipeline-state/<pipeline_id>/<instance_id>.json. Trinity reads this file via the get_agent_pipeline_state MCP tool (and the latest instance per pipeline via list_agent_pipelines). The agent is the sole writer; Trinity never mutates it. The fields the MCP tools depend on are listed in `required`.",
+  "type": "object",
+  "properties": {
+    "instance_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "description": "Instance identifier. SHOULD equal the <instance_id> in the filename and SHOULD be time-sortable (e.g. an ISO-like or monotonic id) — list/latest selection orders instances by file mtime and tie-breaks on this id lexically. Must match ^[A-Za-z0-9._-]+$."
+    },
+    "pipeline_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "description": "Id of the pipeline this instance belongs to (matches the parent directory / the definition file's id)."
+    },
+    "current_stage": {
+      "type": "string",
+      "description": "Id of the stage the instance is currently in (matches a stage id in the definition)."
+    },
+    "health": {
+      "type": "string",
+      "description": "Coarse health of the instance.",
+      "examples": ["green", "yellow", "red", "blocked", "complete"]
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of the last state update. The authoritative semantic 'last touched' time. The agent SHOULD write the file whenever it advances state, so the file mtime tracks this value (the MCP tools select the latest instance by mtime + instance_id, and surface updated_at to the consumer)."
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Attempt count for the current stage (drives the agent's retry/escalation policy)."
+    },
+    "blockers": {
+      "type": "array",
+      "description": "Active blockers preventing progress (free-form, agent-defined).",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "escalations": {
+      "type": "array",
+      "description": "Escalations raised for this instance. The MCP layer reports the count of OPEN escalations (an entry is open unless it carries open=false, resolved=true, or status in {resolved, closed, done}; an entry with no recognisable status counts as open). When an escalation is also filed to the operator queue, that queue item's context SHOULD carry { pipeline_id, instance_id, stage }.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "stage": { "type": "string", "description": "Stage the escalation was raised from." },
+          "status": {
+            "type": "string",
+            "description": "Lifecycle status. open|pending|... is treated as open; resolved|closed|done is treated as closed.",
+            "examples": ["open", "resolved", "closed"]
+          },
+          "open": { "type": "boolean", "description": "Explicit open flag (takes precedence over status)." },
+          "resolved": { "type": "boolean", "description": "Explicit resolved flag." },
+          "reason": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "stages": {
+      "type": "object",
+      "description": "Per-stage runtime metrics, keyed by stage id (durations, attempt counts, costs, last error, etc.). Free-form, agent-defined.",
+      "additionalProperties": { "type": "object", "additionalProperties": true }
+    }
+  },
+  "required": ["instance_id", "current_stage", "health", "updated_at", "escalations"],
+  "additionalProperties": true
+}

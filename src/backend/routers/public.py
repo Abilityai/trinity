@@ -11,10 +11,8 @@ import os
 import secrets
 import httpx
 import logging
-from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from database import (
     db,
@@ -27,31 +25,18 @@ from database import (
     PublicChatMessage
 )
 from dependencies import get_current_user
-from models import User
+from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.email_service import email_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_prompt_service import (
+    build_public_channel_caller_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
-
-
-class PublicChatHistoryResponse(BaseModel):
-    """Response model for chat history endpoint."""
-    messages: List[dict]
-    session_id: str
-    message_count: int
-
-
-class ClearSessionResponse(BaseModel):
-    """Response model for clear session endpoint."""
-    cleared: bool
-    new_session_id: Optional[str] = None
-
 
 
 logger = logging.getLogger(__name__)
@@ -618,7 +603,12 @@ async def public_chat(
         triggered_by="public",
         source_user_email=source_email,
         timeout_seconds=900,
-        system_prompt=memory_system_prompt,
+        # #894: per-agent public-channel model override (None → platform default).
+        model=db.get_public_channel_model(agent_name),
+        # #1205: per-agent public/channel custom-instructions fragment.
+        system_prompt=build_public_channel_caller_prompt(
+            agent_name, memory_system_prompt
+        ),
         images=_pub_image_data,
     )
 
@@ -939,7 +929,12 @@ async def _execute_public_chat_background(
             source_user_email=source_email,
             timeout_seconds=900,
             execution_id=execution_id,
-            system_prompt=memory_system_prompt,
+            # #894: per-agent public-channel model override (None → platform default).
+            model=db.get_public_channel_model(agent_name),
+            # #1205: per-agent public/channel custom-instructions fragment.
+            system_prompt=build_public_channel_caller_prompt(
+                agent_name, memory_system_prompt
+            ),
             images=images or [],
         )
 

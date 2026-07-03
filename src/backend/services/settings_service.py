@@ -23,6 +23,25 @@ _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0
 
+# #894: current-gen models an agent owner may select as a per-agent override for
+# public-facing channels. Mirrors the current presets in
+# `frontend/src/components/ModelSelector.vue` (kept in sync by hand — there is no
+# shared model registry across the Python/Vue boundary). A model removed from
+# this set after it was saved is treated as unset (→ platform default) by
+# `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
+PUBLIC_CHANNEL_MODELS = frozenset({
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+})
+
+
+def is_valid_public_channel_model(model: str) -> bool:
+    """True if `model` is a selectable per-agent public-channel override (#894)."""
+    return model in PUBLIC_CHANNEL_MODELS
+
 
 # ============================================================================
 # Ops Settings Configuration - moved from routers/settings.py
@@ -57,6 +76,9 @@ OPS_SETTINGS_DEFAULTS = {
     # often), so default is shorter than the agent window. "0"
     # disables the sweep.
     "schedule_soft_delete_retention_days": "30",
+    # Issue #918: retention for agent_reports. Rows older than this many days
+    # are deleted by the cleanup sweep. "0" disables the sweep.
+    "agent_reports_retention_days": "90",
 }
 
 # Descriptions for each ops setting
@@ -75,6 +97,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
+    "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
 }
 
 
@@ -445,6 +468,82 @@ def get_agent_default_resources() -> dict:
     cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
     memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
     return {"cpu": cpu or AGENT_DEFAULT_CPU, "memory": memory or AGENT_DEFAULT_MEMORY}
+
+
+# ============================================================================
+# Max Parallel Tasks Ceiling (#506 — fleet-wide cap on per-agent concurrency)
+# ============================================================================
+
+MAX_PARALLEL_TASKS_CEILING_KEY = "max_parallel_tasks_ceiling"
+MAX_PARALLEL_TASKS_CEILING_DEFAULT = 10
+MAX_PARALLEL_TASKS_CEILING_MIN = 1
+MAX_PARALLEL_TASKS_CEILING_MAX = 32
+
+
+def get_max_parallel_tasks_ceiling() -> int:
+    """Fleet-wide ceiling on any single agent's ``max_parallel_tasks`` (#506).
+
+    An admin sets it (1–32); owners pick a per-agent value within it. Stored
+    in the generic ``system_settings`` key/value store (no migration), so the
+    value comes back as a string and is parsed to int. A garbage/absent value
+    falls back to the code default, and an out-of-range integer is clamped into
+    ``[MIN, MAX]`` — the defensive backstop for the dedicated range-validated
+    PUT (so a stray store value can neither fail-close the fleet nor defeat the
+    host cap).
+
+    No per-process cache: the backend runs ``--workers 2``; a TTL cache would
+    let a stale worker keep admitting above a just-lowered ceiling. Read-through
+    every call — one cheap SQLite read, negligible next to the Redis ops already
+    on the admit path, and the ceiling applies instantly across workers.
+    """
+    try:
+        raw = settings_service.get_setting(MAX_PARALLEL_TASKS_CEILING_KEY)
+    except Exception:
+        # Fail-open on the admit hot path: a settings read failure (DB down /
+        # unit-test stub) must never crash dispatch. Default ceiling applies.
+        return MAX_PARALLEL_TASKS_CEILING_DEFAULT
+    if raw is None:
+        return MAX_PARALLEL_TASKS_CEILING_DEFAULT
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return MAX_PARALLEL_TASKS_CEILING_DEFAULT
+    # #506 defense-in-depth: the dedicated PUT range-validates and the generic
+    # PUT is blocked for this key, but this getter is the single read-through
+    # feeding BOTH owner validation (agent_config) AND the runtime clamp
+    # (capacity_manager / bypasses). If an out-of-range value ever reaches the
+    # generic key/value store (a direct DB write, a future writer that skips
+    # the validated route), enforce the [MIN, MAX] invariant here. Otherwise a
+    # stray "0" makes every agent's effective cap min(stored, 0) == 0 — a
+    # fleet-wide fail-CLOSED (no agent can ever acquire a slot) — and a "999"
+    # silently defeats the host-protection cap. Clamp (don't default) so a
+    # configured-low or configured-high intent is preserved within bounds.
+    if parsed < MAX_PARALLEL_TASKS_CEILING_MIN:
+        return MAX_PARALLEL_TASKS_CEILING_MIN
+    if parsed > MAX_PARALLEL_TASKS_CEILING_MAX:
+        return MAX_PARALLEL_TASKS_CEILING_MAX
+    return parsed
+
+
+def clamp_to_ceiling(n: int) -> int:
+    """Clamp a per-agent concurrency cap to the fleet ceiling (#506).
+
+    Single source of truth for the runtime clamp used by the
+    ``CapacityManager`` facade. "Clamp on use, never auto-rewrite the stored
+    value" — the agent keeps its chosen ``max_parallel_tasks``; only the
+    *effective* admit limit is capped.
+    """
+    return min(n, get_max_parallel_tasks_ceiling())
+
+
+def get_effective_max_parallel_tasks(agent_name: str) -> int:
+    """Effective per-agent concurrency = stored cap clamped to the ceiling (#506).
+
+    Used by the two genuine ``CapacityManager`` facade-bypasses
+    (``backlog_service``, ``agent_call_limiter``).
+    """
+    from database import db
+    return clamp_to_ceiling(db.get_max_parallel_tasks(agent_name))
 
 
 # ============================================================================

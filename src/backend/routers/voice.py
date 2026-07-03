@@ -13,12 +13,10 @@ import base64
 import json
 import logging
 import types
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from pydantic import BaseModel
 
-from models import User
+from models import User, VoiceStartRequest, VoiceStartResponse, VoiceStopRequest, VoiceStopResponse
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
@@ -30,30 +28,6 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["voice"])
-
-
-# ── Request/Response Models ──────────────────────────────────────────────────
-
-class VoiceStartRequest(BaseModel):
-    session_id: Optional[str] = None  # Existing chat session to continue
-    voice_name: Optional[str] = None  # Gemini voice name (e.g. "Kore", "Puck")
-    workspace_mode: bool = False       # Enable canvas panel tools
-
-
-class VoiceStartResponse(BaseModel):
-    voice_session_id: str
-    websocket_url: str
-    chat_session_id: str
-
-
-class VoiceStopRequest(BaseModel):
-    voice_session_id: str
-
-
-class VoiceStopResponse(BaseModel):
-    transcript: list
-    messages_saved: int
-    duration_seconds: float
 
 
 # ── REST Endpoints ───────────────────────────────────────────────────────────

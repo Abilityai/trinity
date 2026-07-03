@@ -18,6 +18,28 @@
         {{ monitoringStore.enabled ? 'Monitoring Active' : 'Monitoring Disabled' }}
       </span>
 
+      <!--
+        Admin-only enable/disable of the SERVER-SIDE monitoring loop (#1409).
+        Distinct from the client-side auto-refresh toggle below (clock icon):
+        this persists via POST /api/monitoring/{enable,disable} and survives a
+        backend restart (#1121). Non-admins never see it (Health tab is
+        admin-gated; keep parity).
+      -->
+      <button
+        v-if="isAdmin"
+        @click="toggleMonitoring"
+        :disabled="togglingMonitoring"
+        class="px-3 py-1.5 text-sm rounded-lg disabled:opacity-50 transition-colors"
+        :class="monitoringStore.enabled
+          ? 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
+          : 'bg-status-success-600 hover:bg-status-success-700 text-white'"
+        :title="monitoringStore.enabled
+          ? 'Stop the fleet-health monitoring loop (persists across restarts)'
+          : 'Start the fleet-health monitoring loop (persists across restarts)'"
+      >
+        {{ togglingMonitoring ? 'Working…' : (monitoringStore.enabled ? 'Disable monitoring' : 'Enable monitoring') }}
+      </button>
+
       <span v-if="autoRefreshEnabled" class="text-xs text-gray-500 dark:text-gray-400">
         Auto-refresh: {{ refreshCountdown }}s
       </span>
@@ -47,6 +69,17 @@
         class="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50"
       >
         {{ triggeringCheck ? 'Checking...' : 'Check All' }}
+      </button>
+    </div>
+
+    <!-- Monitoring enable/disable error (#1409) -->
+    <div
+      v-if="monitoringError"
+      class="mb-4 px-4 py-2 rounded-lg bg-status-danger-50 dark:bg-status-danger-900/20 text-status-danger-700 dark:text-status-danger-300 text-sm flex items-center justify-between"
+    >
+      <span>{{ monitoringError }}</span>
+      <button @click="monitoringError = ''" class="ml-3 text-status-danger-500 hover:text-status-danger-700" title="Dismiss">
+        <XCircleIcon class="w-4 h-4" />
       </button>
     </div>
 
@@ -246,6 +279,9 @@ const isAdmin = computed(() => authStore.role === 'admin')
 const statusFilter = ref('')
 const triggeringCheck = ref(false)
 const checkingAgent = ref(null)
+// #1409: server-side monitoring-loop enable/disable (admin-only)
+const togglingMonitoring = ref(false)
+const monitoringError = ref('')
 const autoRefreshEnabled = ref(true)
 const refreshCountdown = ref(30)
 let refreshInterval = null
@@ -311,6 +347,28 @@ function toggleAutoRefresh() {
   autoRefreshEnabled.value = !autoRefreshEnabled.value
   if (autoRefreshEnabled.value) {
     refreshCountdown.value = 30
+  }
+}
+
+async function toggleMonitoring() {
+  // Start/stop the persisted server-side monitoring loop (#1409 / #1121).
+  monitoringError.value = ''
+  const turningOn = !monitoringStore.enabled
+  togglingMonitoring.value = true
+  try {
+    if (turningOn) {
+      await monitoringStore.enableMonitoring()
+    } else {
+      await monitoringStore.disableMonitoring()
+    }
+    // Reflect the new loop state in the summary/health data.
+    await refreshAll()
+  } catch (err) {
+    monitoringError.value = turningOn
+      ? 'Failed to enable monitoring. Check your permissions and try again.'
+      : 'Failed to disable monitoring. Please try again.'
+  } finally {
+    togglingMonitoring.value = false
   }
 }
 

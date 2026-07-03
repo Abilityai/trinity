@@ -29,6 +29,7 @@ from ..tables import (
     agent_dashboard_values,
     monitoring_alert_cooldowns,
     agent_shared_files,
+    agent_reports,
 )
 
 
@@ -109,6 +110,8 @@ class MetadataMixin:
         - agent_health_checks
         - agent_dashboard_values
         - monitoring_alert_cooldowns
+        - agent_shared_files
+        - agent_reports
 
         Args:
             old_name: Current agent name
@@ -276,6 +279,27 @@ class MetadataMixin:
                     .values(agent_name=new_name)
                 )
 
+                # Entitled-module agent-scoped tables (ent#46) registered via
+                # db.agent_cleanup.register_agent_owned_table — e.g.
+                # enterprise_connectors. Table/column come from code (not user
+                # input); values are bound. Absent tables are skipped.
+                from db.agent_cleanup import EXTRA_AGENT_REFS, _table_exists
+                for table, column in EXTRA_AGENT_REFS:
+                    if not _table_exists(conn, table):
+                        continue
+                    conn.execute(
+                        text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
+                        {"new": new_name, "old": old_name},
+                    )
+                # Reports (#918) — re-key so the renamed agent keeps its report
+                # history and the old name doesn't leave orphaned rows a reused
+                # name could inherit (cross-tenant disclosure).
+                conn.execute(
+                    update(agent_reports)
+                    .where(agent_reports.c.agent_name == old_name)
+                    .values(agent_name=new_name)
+                )
+
                 return True
 
             except IntegrityError:
@@ -334,6 +358,7 @@ class MetadataMixin:
                 COALESCE(ao.autonomy_enabled, 0) as autonomy_enabled,
                 COALESCE(ao.read_only_mode, 0) as read_only_enabled,
                 COALESCE(ao.use_platform_api_key, 1) as use_platform_api_key,
+                COALESCE(ao.mcp_exposed, 0) as mcp_exposed,
                 ao.memory_limit,
                 ao.cpu_limit,
                 ao.avatar_updated_at,
@@ -364,6 +389,7 @@ class MetadataMixin:
                     "autonomy_enabled": bool(row["autonomy_enabled"]),
                     "read_only_enabled": bool(row["read_only_enabled"]),
                     "use_platform_api_key": bool(row["use_platform_api_key"]),
+                    "mcp_exposed": bool(row["mcp_exposed"]),
                     "memory_limit": row["memory_limit"],
                     "cpu_limit": row["cpu_limit"],
                     "github_repo": row["github_repo"],

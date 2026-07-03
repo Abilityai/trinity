@@ -1570,6 +1570,64 @@ class TestInvariantB02:
         v = b02.check(snap)
         assert len(v) == 1, "sentinel must not satisfy slots-full arm"
 
+    def test_effective_full_under_lowered_ceiling_does_not_fire(self):
+        """#506: stored=5 but ceiling clamps effective=2; with 2 real slots and
+        a queue, the agent is effective-full → no violation despite stale drain.
+
+        Without the effective-cap fix this would false-fire ("free slots =
+        5 - 2 = 3 → drain stalled").
+        """
+        import time
+        from canary.snapshot import Snapshot, AgentSnapshot
+        from datetime import datetime
+        now = time.time()
+        snap = Snapshot(
+            snapshot_time=datetime.utcfromtimestamp(now).isoformat() + "Z",
+            drain_tick_at=now - 600,  # stale
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=5,            # stored, unchanged
+                    effective_max_parallel=2,  # clamped to fleet ceiling
+                    execution_timeout_seconds=900,
+                    slot_ids={"r0", "r1"},     # effective-full
+                    queued_exec_ids={"q0", "q1"},
+                )
+            ],
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        assert b02.check(snap) == []
+
+    def test_effective_cap_still_fires_when_genuinely_free(self):
+        """#506: stored=5, effective=4, only 2 real slots → genuinely free under
+        the effective cap → still a violation when the drain tick is stale.
+        """
+        import time
+        from canary.snapshot import Snapshot, AgentSnapshot
+        from datetime import datetime
+        now = time.time()
+        snap = Snapshot(
+            snapshot_time=datetime.utcfromtimestamp(now).isoformat() + "Z",
+            drain_tick_at=now - 600,
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=5,
+                    effective_max_parallel=4,
+                    execution_timeout_seconds=900,
+                    slot_ids={"r0", "r1"},
+                    queued_exec_ids={"q0"},
+                )
+            ],
+        )
+        from canary.invariants import b02_no_queued_without_slots_full as b02
+        v = b02.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["effective_max_parallel_tasks"] == 4
+        assert v[0].observed_state["free_slots"] == 2  # 4 - 2
+
     def test_skipped_when_redis_unavailable(self):
         from canary.snapshot import Snapshot, AgentSnapshot
         snap = Snapshot(

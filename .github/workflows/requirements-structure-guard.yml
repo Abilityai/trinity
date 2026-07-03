@@ -1,0 +1,83 @@
+# Requirements-structure guard (#1406)
+#
+# The former monolithic docs/memory/requirements.md was split into per-area
+# files under docs/memory/requirements/ with a thin index. This guard keeps the
+# split from silently regressing:
+#   1. The index (requirements.md) stays THIN — fails if it re-grows into a
+#      monolith (line cap).
+#   2. No DANGLING links — every `requirements/<file>.md` referenced by the
+#      index exists on disk, and every area file's back-link to the index
+#      resolves.
+#
+# Least privilege: checkout + grep/test only, no writes.
+name: requirements-structure-guard
+
+on:
+  pull_request:
+    paths:
+      - 'docs/memory/requirements.md'
+      - 'docs/memory/requirements/**'
+      - '.github/workflows/requirements-structure-guard.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'docs/memory/requirements.md'
+      - 'docs/memory/requirements/**'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Index stays thin (no re-formed monolith)
+        run: |
+          set -uo pipefail
+          INDEX=docs/memory/requirements.md
+          CAP=120
+          LINES=$(wc -l < "$INDEX")
+          echo "Index line count: $LINES (cap $CAP)"
+          if [ "$LINES" -gt "$CAP" ]; then
+            echo "::error file=$INDEX::requirements.md is $LINES lines (cap $CAP). It is an INDEX — put requirement text in a docs/memory/requirements/<area>.md file, not here (#1406)."
+            exit 1
+          fi
+
+      - name: No dangling links between the index and area files
+        run: |
+          set -uo pipefail
+          INDEX=docs/memory/requirements.md
+          DIR=docs/memory/requirements
+          status=0
+
+          # (a) Every requirements/<file>.md linked from the index must exist.
+          for f in $(grep -oE 'requirements/[A-Za-z0-9._-]+\.md' "$INDEX" | sort -u); do
+            if [ ! -f "docs/memory/$f" ]; then
+              echo "::error file=$INDEX::index links docs/memory/$f which does not exist."
+              status=1
+            fi
+          done
+
+          # (b) Every area file must back-link to the index and the target must exist.
+          for area in "$DIR"/*.md; do
+            if ! grep -qE '\]\(\.\./requirements\.md\)' "$area"; then
+              echo "::error file=$area::area file is missing the back-link to ../requirements.md."
+              status=1
+            fi
+          done
+
+          # (c) Every area file should be listed in the index (discoverability).
+          for area in "$DIR"/*.md; do
+            base=$(basename "$area")
+            if ! grep -qE "requirements/$base" "$INDEX"; then
+              echo "::error file=$INDEX::area file $base exists but is not listed in the index table."
+              status=1
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK — index is thin and all requirements links resolve."

@@ -127,13 +127,23 @@ sys.modules["services.agent_client"] = agent_client
 _AC_SPEC.loader.exec_module(agent_client)
 
 
-# Stub `database` so monitoring_service.py's `from database import db` works.
+# Stub `database`, `services.docker_service`, and `services.docker_utils` ONLY
+# for the monitoring_service module load below, then restore the real
+# sys.modules entries. These are imported lazily inside health-check functions
+# and are never exercised by the tests, so the stubs are needed only to satisfy
+# imports during exec_module. Leaving them installed permanently leaks a bare
+# `services.docker_utils` (no `container_get_archive`) into later test files
+# such as test_whatsapp_adapter, breaking their imports with
+# "cannot import name 'container_get_archive' ... (unknown location)" (#211).
+# `services.agent_client` (loaded above) is the REAL module and IS used at test
+# runtime by check_network_health's lazy import, so it deliberately stays.
+_CONFINED_KEYS = ("database", "services.docker_service", "services.docker_utils")
+_saved_mods = {k: sys.modules.get(k) for k in _CONFINED_KEYS}
+
 _fake_database = types.ModuleType("database")
 _fake_database.db = MagicMock()
 sys.modules["database"] = _fake_database
 
-# Stub `services.docker_service` and `services.docker_utils` (imported lazily
-# inside health check functions; harmless to stub since we never call them).
 _fake_docker_service = types.ModuleType("services.docker_service")
 _fake_docker_service.docker_client = None
 _fake_docker_service.get_agent_container = MagicMock(return_value=None)
@@ -151,6 +161,15 @@ _MS_SPEC = importlib.util.spec_from_file_location(
 )
 monitoring_service = importlib.util.module_from_spec(_MS_SPEC)
 _MS_SPEC.loader.exec_module(monitoring_service)
+
+# monitoring_service now holds its own bound references (db, lazy importers);
+# restore the real sys.modules entries so the fakes don't leak into later
+# test files. agent_client is intentionally NOT restored (real + needed).
+for _k, _v in _saved_mods.items():
+    if _v is None:
+        sys.modules.pop(_k, None)
+    else:
+        sys.modules[_k] = _v
 
 
 pytestmark = pytest.mark.integration

@@ -16,7 +16,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -32,6 +32,8 @@ _STUBBED_MODULE_NAMES = [
     "services",
     "services.settings_service",
     "services.platform_audit_service",
+    "services.agent_service",
+    "services.agent_service.capabilities",
     "adapters",
     "adapters.transports",
     "adapters.transports.telegram_webhook",
@@ -75,9 +77,6 @@ def _load_settings_module():
 
     from pydantic import BaseModel
 
-    class _User(BaseModel):
-        username: str = "admin"
-
     class _SystemSetting(BaseModel):
         key: str
         value: str = ""
@@ -85,19 +84,12 @@ def _load_settings_module():
     class _SystemSettingUpdate(BaseModel):
         value: str = ""
 
-    class _AgentDefaultResourcesUpdate(BaseModel):
-        max_parallel_tasks: int | None = None
-        execution_timeout_seconds: int | None = None
-
-    class _AgentDefaultAccessPolicyUpdate(BaseModel):
-        require_email: bool | None = None
-
-    _stub(
-        "models",
-        User=_User,
-        AgentDefaultResourcesUpdate=_AgentDefaultResourcesUpdate,
-        AgentDefaultAccessPolicyUpdate=_AgentDefaultAccessPolicyUpdate,
-    )
+    # Use the REAL models module rather than a partial fake: settings.py imports
+    # its request/response models from `models` (#654 centralization), so a
+    # hand-listed stub would need every moved name and break whenever the import
+    # surface grows. `models` is a safe leaf (imports only utils.helpers +
+    # db_models) and is already preloaded by tests/conftest.py.
+    stubs["models"] = importlib.import_module("models")
 
     db_stub = MagicMock()
     db_stub.set_setting = MagicMock(return_value=_SystemSetting(key="public_chat_url"))
@@ -135,8 +127,23 @@ def _load_settings_module():
         AGENT_DEFAULT_REQUIRE_EMAIL_KEY="agent_default_require_email",  # #1129
         AGENT_DEFAULT_REQUIRE_EMAIL=True,
         get_agent_default_require_email=MagicMock(return_value=True),
+        MAX_PARALLEL_TASKS_CEILING_KEY="max_parallel_tasks_ceiling",  # #506
+        MAX_PARALLEL_TASKS_CEILING_DEFAULT=10,
+        MAX_PARALLEL_TASKS_CEILING_MIN=1,
+        MAX_PARALLEL_TASKS_CEILING_MAX=32,
+        get_max_parallel_tasks_ceiling=MagicMock(return_value=10),
     )
-    _stub("services", __path__=[])
+    # settings.py module-level imports VALID_CPU/VALID_MEMORY from the
+    # container-spec module (#1197); stub it so the standalone load completes.
+    services_mod = _stub("services", __path__=[])
+    agent_service_mod = _stub("services.agent_service", __path__=[])
+    capabilities_mod = _stub(
+        "services.agent_service.capabilities",
+        VALID_CPU=["1", "2", "4", "8", "16"],
+        VALID_MEMORY=["1g", "2g", "4g", "8g", "16g", "32g"],
+    )
+    services_mod.agent_service = agent_service_mod
+    agent_service_mod.capabilities = capabilities_mod
 
     # Stub adapters.transports.telegram_webhook before load so the function
     # can import it lazily without hitting the real backend.

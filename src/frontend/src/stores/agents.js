@@ -140,6 +140,25 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
+    // #1205: per-agent custom instructions for public & channel chats
+    async fetchPublicChannelPrompt(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/public-prompt`, {
+        headers: authStore.authHeader
+      })
+      return response.data.public_channel_system_prompt
+    },
+
+    async savePublicChannelPrompt(name, prompt) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/public-prompt`,
+        { public_channel_system_prompt: prompt },
+        { headers: authStore.authHeader }
+      )
+      return response.data.public_channel_system_prompt
+    },
+
     async createAgent(config) {
       this.loading = true
       this.error = null
@@ -736,6 +755,23 @@ export const useAgentsStore = defineStore('agents', {
       })
     },
 
+    // MCP Exposure (#846) — expose the agent as a dedicated chat_with_<slug> tool
+    async getMcpExposedStatus(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/mcp-exposed`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setMcpExposed(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/mcp-exposed`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // Shared Folders Actions (Phase 9.11: Agent Shared Folders)
     async getAgentFolders(name) {
       const authStore = useAuthStore()
@@ -820,6 +856,25 @@ export const useAgentsStore = defineStore('agents', {
     async setGuardrails(name, guardrails) {
       const authStore = useAuthStore()
       const response = await axios.put(`/api/agents/${name}/guardrails`, guardrails, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Capacity (CAPACITY-001 / #506 — per-agent max_parallel_tasks within the fleet ceiling)
+    async getAgentCapacity(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/capacity`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setAgentCapacity(name, maxParallelTasks) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/capacity`, {
+        max_parallel_tasks: maxParallelTasks
+      }, {
         headers: authStore.authHeader
       })
       return response.data

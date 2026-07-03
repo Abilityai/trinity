@@ -12,12 +12,21 @@ import asyncio
 import os
 import hmac
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
-from pydantic import BaseModel
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 import logging
 
 from database import db
-from models import ActivityState, ActivityType, ShareFileRequest, ShareFileResponse, TaskExecutionStatus
+from models import (
+    ActivityCompleteRequest,
+    ActivityTrackRequest,
+    ActivityType,
+    InternalAuditRequest,
+    InternalTaskExecutionRequest,
+    ShareFileRequest,
+    ShareFileResponse,
+    TaskExecutionStatus,
+    ValidateExecutionRequest,
+)
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -109,22 +118,6 @@ async def internal_agent_sync_health(agent_name: str):
 # =============================================================================
 # Activity Tracking Endpoints (for dedicated scheduler)
 # =============================================================================
-
-class ActivityTrackRequest(BaseModel):
-    """Request model for tracking activity start."""
-    agent_name: str
-    activity_type: str  # e.g., "schedule_start"
-    user_id: Optional[int] = None
-    triggered_by: str = "schedule"  # schedule, manual, user, agent, system
-    related_execution_id: Optional[str] = None
-    details: Optional[Dict] = None
-
-
-class ActivityCompleteRequest(BaseModel):
-    """Request model for completing an activity."""
-    status: str = ActivityState.COMPLETED  # ActivityState: completed, failed
-    details: Optional[Dict] = None
-    error: Optional[str] = None
 
 
 @router.post("/activities/track")
@@ -219,22 +212,6 @@ async def complete_activity(activity_id: str, request: ActivityCompleteRequest):
 # =============================================================================
 # Task Execution Endpoint (for dedicated scheduler)
 # =============================================================================
-
-class InternalTaskExecutionRequest(BaseModel):
-    """Request model for internal task execution via TaskExecutionService."""
-    agent_name: str
-    message: str
-    triggered_by: str = "schedule"
-    model: Optional[str] = None
-    timeout_seconds: Optional[int] = None  # TIMEOUT-001: None = use agent's config (default 15 min)
-    allowed_tools: Optional[List[str]] = None
-    execution_id: Optional[str] = None
-    async_mode: bool = False
-    # #171: optional schedule metadata surfaced in the agent's execution context block.
-    schedule_name: Optional[str] = None
-    schedule_cron: Optional[str] = None
-    schedule_next_run: Optional[str] = None
-    attempt: Optional[int] = None
 
 
 def _schedule_context_from(request: "InternalTaskExecutionRequest") -> Optional[Dict]:
@@ -455,16 +432,6 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
 # Validation Endpoints (VALIDATE-001)
 # =============================================================================
 
-class ValidateExecutionRequest(BaseModel):
-    """Request model for triggering execution validation."""
-    execution_id: str
-    agent_name: str
-    schedule_id: str
-    original_message: str
-    execution_response: str
-    custom_prompt: Optional[str] = None
-    timeout_seconds: int = 120
-
 
 @router.post("/validate-execution")
 async def validate_execution(request: ValidateExecutionRequest):
@@ -542,22 +509,6 @@ async def _run_validation_background(
 # Audit Logging Endpoint (SEC-001 Phase 3 — MCP server integration)
 # =============================================================================
 
-class InternalAuditRequest(BaseModel):
-    """Request model for audit log entries from MCP server."""
-    event_type: str          # AuditEventType value
-    event_action: str        # e.g. "tool_call"
-    source: str = "mcp"      # Always "mcp" for MCP server calls
-    # MCP auth context
-    mcp_key_id: Optional[str] = None
-    mcp_key_name: Optional[str] = None
-    mcp_scope: Optional[str] = None
-    actor_agent_name: Optional[str] = None
-    # Target
-    target_type: Optional[str] = None
-    target_id: Optional[str] = None
-    # Details
-    details: Optional[Dict] = None
-
 
 @router.post("/audit")
 async def log_audit_entry(request: InternalAuditRequest):
@@ -587,6 +538,7 @@ async def log_audit_entry(request: InternalAuditRequest):
             actor_agent_name=request.actor_agent_name,
             target_type=request.target_type,
             target_id=request.target_id,
+            request_id=request.request_id,
             details=request.details,
         )
 
@@ -623,3 +575,44 @@ async def agent_files_share(payload: ShareFileRequest):
         created_by=payload.agent_name,
     )
     return ShareFileResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# MCP-exposed agents poll endpoint (#846)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp-exposed-agents")
+async def mcp_exposed_agents():
+    """Authoritative list of agents to expose as dedicated MCP tools (#846).
+
+    Polled by the Trinity MCP server (over the existing X-Internal-Secret path)
+    every ~20s. The backend is the single source of truth for the deterministic,
+    collision-free ``tool_name`` per exposed agent (computed over the full set),
+    so restarts/replicas of the MCP server agree and there is no client-side
+    slug split-brain.
+
+    ``description`` is intentionally **name-only** (see ``build_tool_description``):
+    the dedicated tool's description is advertised globally to every non-connector
+    MCP session, so it must not carry per-agent metadata (the agent's
+    ``trinity.template`` label was a cross-tenant leak + injection surface, #846).
+    """
+    from services.agent_service.mcp_tool_names import (
+        compute_tool_names,
+        build_tool_description,
+    )
+
+    exposed = db.get_mcp_exposed_agents()
+    names = [a["agent_name"] for a in exposed]
+    tool_names = compute_tool_names(names)
+
+    return {
+        "agents": [
+            {
+                "agent_name": name,
+                "tool_name": tool_names[name],
+                "description": build_tool_description(name),
+            }
+            for name in names
+        ]
+    }

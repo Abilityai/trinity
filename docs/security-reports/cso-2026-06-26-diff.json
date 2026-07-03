@@ -1,0 +1,107 @@
+{
+  "version": "1.0",
+  "date": "2026-06-26",
+  "mode": "daily",
+  "scope": "diff",
+  "base": "origin/dev (85546c74)",
+  "branch": "AndriiPasternak31/issue-919",
+  "subject": "#919 — agent-defined pipeline introspection MCP tools (list_agent_pipelines, get_agent_pipeline_state)",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "changed_surface": {
+    "new_mcp_tools": ["list_agent_pipelines", "get_agent_pipeline_state"],
+    "new_files": [
+      "src/mcp-server/src/tools/pipelines.ts",
+      "src/mcp-server/src/pipelines.test.ts",
+      "docs/schemas/agent-pipeline.schema.json",
+      "docs/schemas/agent-pipeline-state.schema.json"
+    ],
+    "modified_files": [
+      "src/mcp-server/src/client.ts",
+      "src/mcp-server/src/server.ts",
+      "src/mcp-server/src/types.ts",
+      "src/mcp-server/package.json",
+      "src/mcp-server/package-lock.json",
+      "docs/memory/architecture.md",
+      "docs/memory/requirements.md",
+      "docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md"
+    ],
+    "new_backend_endpoints": 0,
+    "new_db_tables": 0,
+    "ci_changes": 0,
+    "dockerfile_changes": 0,
+    "env_changes": 0
+  },
+  "findings": [],
+  "verified_safe": [
+    {
+      "surface": "Path traversal via pipeline_id / instance_id",
+      "sink": "client.downloadAgentFile/listAgentFiles -> GET /api/agents/{name}/files[/download]?path=",
+      "guards": [
+        "MCP idSchema: regex ^[A-Za-z0-9._-]+$ rejects '/', '%', '\\\\'; .refine rejects '..' substring",
+        "Only pipeline_id/instance_id are user-controlled path segments (get_agent_pipeline_state); list_agent_pipelines interpolates no user input (paths come from backend file tree)",
+        "agent-server confines reads via Path(path).resolve() + startswith('/home/developer') — collapses any '..' and cannot escape container home",
+        "backend can_user_access_agent() gates every /files call — user reads only their own accessible agent's files (no cross-tenant reach)"
+      ],
+      "conclusion": "Two independent traversal guards; no cross-tenant exposure. Worst case is reading one's own accessible agent's home files."
+    },
+    {
+      "surface": "YAML parsing of attacker-influenced pipeline definitions",
+      "guard": "parseYamlHardened: 256 KiB size-cap BEFORE parse; uniqueKeys (dup-key reject); maxAliasCount 100 (billion-laughs guard). JS 'yaml' lib instantiates no arbitrary classes (no PyYAML-style RCE surface).",
+      "conclusion": "Hardened; no parse-bomb or code-exec surface."
+    },
+    {
+      "surface": "JSON state parsing",
+      "guard": "readInstanceState size-caps to 256 KiB then JSON.parse; parsed object is read-only (countOpenEscalations) and re-serialized — no Object.assign/merge sink, so no prototype pollution.",
+      "conclusion": "Safe."
+    },
+    {
+      "surface": "Authentication / authorization",
+      "guard": "getClient(context.session) uses the caller's own MCP API key (mirrors files.ts); backend enforces agent ownership/sharing. No new auth surface, no internal-secret endpoint.",
+      "conclusion": "Consistent with existing pattern; access correctly delegated."
+    },
+    {
+      "surface": "client._fetch refactor (extracted from request)",
+      "guard": "auth header + single 401-reauth-retry + error mapping preserved; request() decodes JSON, downloadAgentFile() decodes text. No behavioral/security regression.",
+      "conclusion": "Safe refactor."
+    },
+    {
+      "surface": "Supply chain — new dep 'yaml' ^2.6.1 (resolved 2.9.0)",
+      "guard": "Widely-used pure-JS parser (eemeli/yaml); lockfile updated and tracked; no install/preinstall/postinstall scripts; no known high/critical CVE with a reachable path.",
+      "conclusion": "Low risk."
+    },
+    {
+      "surface": "DoS / fan-out",
+      "guard": "MAX_PIPELINES=50 cap with explicit log on truncation (no silent cap); one download per pipeline via mtime-based latest-instance selection.",
+      "conclusion": "Bounded (DoS is a hard-exclusion category regardless)."
+    },
+    {
+      "surface": "ReDoS",
+      "guard": "ID_PATTERN and httpStatusFromError regexes are linear character-classes — no catastrophic backtracking.",
+      "conclusion": "Safe."
+    }
+  ],
+  "secrets_archaeology": "No secret patterns (sk-, ghp_, xox-, AKIA) introduced in diff. No .env tracked. No hardcoded credentials in new TS.",
+  "filter_stats": {
+    "candidates_considered": 3,
+    "below_gate_demoted": 3,
+    "demoted_notes": [
+      "agent-server prefix check startswith('/home/developer') admits sibling-prefix dirs (e.g. /home/developer-x) — PRE-EXISTING, out of --diff scope, not exploitable (no sibling dir, cannot be created).",
+      "agent_name param is z.string().min(1), not pattern-validated — matches every existing tool; encodeURIComponent + Starlette non-decoding of %2F + backend agent-existence check make it non-exploitable.",
+      "Backend error text echoed in fail() messages — own agent only, negligible info disclosure."
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "trend": {
+    "prior_report": "docs/security-reports/cso-2026-06-25-1131-diff.json",
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "direction": "clean — no findings at the 8/10 daily gate"
+  }
+}

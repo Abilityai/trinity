@@ -132,8 +132,16 @@ async def _get_agent_sem(agent_name: str) -> tuple[asyncio.Semaphore, int]:
     try:
         # Local import so the limiter is unit-testable without the heavy
         # `database` module init.
-        from database import db as _db  # noqa: WPS433 — local on purpose
-        actual = _db.get_max_parallel_tasks(agent_name)
+        # #506: facade bypass — read the effective cap (stored clamped to the
+        # fleet ceiling). NOTE (documented limitation): the cap is frozen in
+        # `_AGENT_SEMAPHORE_CAPS` at first access and never re-read, so a live
+        # agent's semaphore does not shrink when the ceiling (or its own
+        # max_parallel_tasks) drops until process restart. New agents get the
+        # clamped cap immediately. Semaphore-resize machinery is out of scope.
+        from services.settings_service import (  # noqa: WPS433 — local on purpose
+            get_effective_max_parallel_tasks,
+        )
+        actual = get_effective_max_parallel_tasks(agent_name)
         if isinstance(actual, int) and actual > 0:
             cap = actual
     except Exception:  # pragma: no cover — defensive, unit tests stub `database`

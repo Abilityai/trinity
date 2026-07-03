@@ -1,6 +1,13 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1332_cancelled_activity_state.py",
+      "feature": "#1332",
+      "added": "2026-06-26",
+      "categories": ["backend", "unit", "activities", "observability"],
+      "description": "A user-cancelled execution's dispatch activity is recorded as ActivityState.CANCELLED, not FAILED. Covers the enum value + activity_state_for_terminal mapping helper, the operator-terminate handler (Path B) closing the open dispatch activity as CANCELLED (terminated→close, already_finished→no-op, no-activity→no-op, close-raises→swallowed), and the collaboration/self-task close helpers mapping a cancelled result to CANCELLED (#1332)."
+    },
+    {
       "file": "unit/test_voip_audio.py",
       "feature": "VOIP-001",
       "added": "2026-06-04",

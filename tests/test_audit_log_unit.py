@@ -1098,3 +1098,139 @@ def test_verify_chain_valid_with_details(audit_service, audit_ops):
         assert result["first_invalid_id"] is None
     finally:
         service.enable_hash_chain(False)
+
+
+# ---------------------------------------------------------------------------
+# #905 — request_id correlation (MCP `mcp_operation` ⨝ backend `git_operation`)
+# ---------------------------------------------------------------------------
+#
+# An MCP git tool stamps a per-call request id on its own `mcp_operation` audit
+# row AND forwards it as X-Request-ID; the backend git handler adopts it and
+# tags the `git_operation` row with the same id. Both rows are then retrievable
+# together via the new `request_id` query filter. These tests pin that the two
+# code paths (both funnel through `service.log`) produce joinable rows.
+
+
+def test_905_request_id_correlation_returns_both_rows(audit_service, audit_ops):
+    """The MCP row and the backend git row share one request_id and join."""
+    service, ETYPE, _ = audit_service
+    rid = "req-905-join"
+    user = types.SimpleNamespace(id=7, email="owner@example.com")
+
+    # 1) The MCP-side row (what routers/internal.py:log_audit_entry writes from
+    #    an InternalAuditRequest forwarded by the MCP audit wrapper).
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.MCP_OPERATION,
+            event_action="tool_call",
+            source="mcp",
+            mcp_key_id="key-1",
+            mcp_scope="agent",
+            actor_agent_name="alpha",
+            target_type="agent",
+            target_id="alpha",
+            request_id=rid,
+            details={"tool": "git_sync"},
+        )
+    )
+    # 2) The backend-side row (what routers/git.py:_audit_git writes, adopting
+    #    the X-Request-ID the MCP tool forwarded).
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.GIT_OPERATION,
+            event_action="sync",
+            source="api",
+            actor_user=user,
+            target_type="agent",
+            target_id="alpha",
+            request_id=rid,
+            details={"success": True, "branch": "work"},
+        )
+    )
+
+    joined = audit_ops.get_audit_entries(request_id=rid, limit=100)
+    assert len(joined) == 2
+    sources = {e["source"] for e in joined}
+    assert sources == {"mcp", "api"}
+    event_types = {e["event_type"] for e in joined}
+    assert event_types == {"mcp_operation", "git_operation"}
+    assert all(e["request_id"] == rid for e in joined)
+
+
+def test_905_request_id_filter_isolates(audit_service, audit_ops):
+    """The request_id filter returns only matching rows (no cross-talk)."""
+    service, ETYPE, _ = audit_service
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.GIT_OPERATION,
+            event_action="pull",
+            source="api",
+            actor_agent_name="alpha",
+            request_id="req-A",
+        )
+    )
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.GIT_OPERATION,
+            event_action="pull",
+            source="api",
+            actor_agent_name="alpha",
+            request_id="req-B",
+        )
+    )
+    only_a = audit_ops.get_audit_entries(request_id="req-A", limit=100)
+    assert len(only_a) == 1
+    assert only_a[0]["request_id"] == "req-A"
+    assert audit_ops.count_audit_entries(request_id="req-A") == 1
+    assert audit_ops.get_audit_entries(request_id="req-missing") == []
+
+
+def test_905_request_id_failure_path_is_audited(audit_service, audit_ops):
+    """A conflict (409) on a mutating git op still emits a joinable row (#905).
+
+    Mirrors routers/git.py:_audit_git on the failure exit path — previously the
+    conflict path emitted no row at all.
+    """
+    service, ETYPE, _ = audit_service
+    rid = "req-905-conflict"
+    asyncio.run(
+        service.log(
+            event_type=ETYPE.GIT_OPERATION,
+            event_action="sync",
+            source="api",
+            actor_agent_name="alpha",
+            target_type="agent",
+            target_id="alpha",
+            request_id=rid,
+            details={"success": False, "status_code": 409, "conflict_type": "diverged_history"},
+        )
+    )
+    rows = audit_ops.get_audit_entries(request_id=rid, limit=100)
+    assert len(rows) == 1
+    # The read layer deserializes the JSON `details` blob back to a dict.
+    details = rows[0]["details"]
+    if isinstance(details, str):
+        details = json.loads(details)
+    assert details["success"] is False
+    assert details["conflict_type"] == "diverged_history"
+
+
+def test_905_internal_audit_request_model_carries_request_id():
+    """InternalAuditRequest exposes request_id so the MCP server can forward it (T2)."""
+    import importlib
+
+    models = importlib.import_module("models")
+    req = models.InternalAuditRequest(
+        event_type="mcp_operation",
+        event_action="tool_call",
+        source="mcp",
+        request_id="req-xyz",
+    )
+    assert req.request_id == "req-xyz"
+    # Default stays None so non-git tools (no requestId) are unaffected.
+    assert (
+        models.InternalAuditRequest(
+            event_type="mcp_operation", event_action="tool_call"
+        ).request_id
+        is None
+    )

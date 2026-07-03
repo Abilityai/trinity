@@ -15,14 +15,13 @@ Authenticated Endpoints:
 """
 
 import logging
-from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
 
 from database import db
 from dependencies import get_current_user
-from models import User
+from models import SlackChannelMessageRequest, SlackEventResponse, User
+from services import rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
 from services.settings_service import get_slack_signing_secret
@@ -49,12 +48,6 @@ def set_webhook_transport(transport):
 # =========================================================================
 
 public_router = APIRouter(prefix="/api/public/slack", tags=["slack-public"])
-
-
-class SlackEventResponse(BaseModel):
-    """Response to Slack events (always return 200)."""
-    ok: bool = True
-    challenge: Optional[str] = None
 
 
 @public_router.post("/events", response_model=SlackEventResponse)
@@ -612,4 +605,113 @@ async def set_agent_as_slack_dm_default(
         "workspace_name": workspace.get("team_name"),
         "previous": previous,
         "new_default": name,
+    }
+
+
+# =============================================================================
+# Proactive channel messaging (#350 Phase 3) — parallels Telegram #349
+# =============================================================================
+
+# Mirror the Telegram proactive caps (10/hr/channel, 100/hr/agent) via the
+# shared sliding-window limiter (#1023) rather than a bespoke bucket.
+_SLACK_PROACTIVE_PER_CHANNEL = 10
+_SLACK_PROACTIVE_PER_AGENT = 100
+_SLACK_PROACTIVE_WINDOW = 3600
+_SLACK_MESSAGE_MAX = 4000
+
+
+@auth_router.get("/api/agents/{name}/slack/channels")
+async def list_agent_slack_channels(
+    name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """List the Slack channels an agent is bound to (#350).
+
+    Backs the MCP ``list_channel_groups`` discovery tool. Any user with access
+    to the agent may list; proactive send is owner-gated separately.
+    """
+    if not db.can_user_access_agent(current_user.username, name):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # team_id → workspace name, resolved once for labelling.
+    ws_names = {ws["team_id"]: ws.get("team_name") for ws in db.get_all_slack_workspaces()}
+    channels = [
+        {
+            "channel_type": "slack",
+            "channel_id": c["slack_channel_id"],
+            "channel_name": c.get("slack_channel_name"),
+            "team_id": c["team_id"],
+            "workspace_name": ws_names.get(c["team_id"]),
+            "is_dm_default": c.get("is_dm_default", False),
+        }
+        for c in db.get_slack_channels_for_agent(name)
+    ]
+    return {"channels": channels, "count": len(channels)}
+
+
+@auth_router.post("/api/agents/{name}/slack/channels/{channel_id}/messages")
+async def send_agent_slack_channel_message(
+    name: str,
+    channel_id: str,
+    request: SlackChannelMessageRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Send a proactive message to a Slack channel the agent is bound to (#350).
+
+    Owner-gated. Rate limited (10/hr/channel, 100/hr/agent) to prevent spam.
+    Posts via ``chat.postMessage`` with the agent's identity, optionally in a
+    thread.
+    """
+    if not db.can_user_share_agent(current_user.username, name):
+        raise HTTPException(status_code=403, detail="Only owners can send channel messages")
+
+    text = (request.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if len(text) > _SLACK_MESSAGE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message exceeds {_SLACK_MESSAGE_MAX} character limit",
+        )
+
+    # Validate the channel is actually bound to this agent (also yields team_id).
+    target = next(
+        (c for c in db.get_slack_channels_for_agent(name) if c["slack_channel_id"] == channel_id),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
+
+    # Rate limit: per-channel then per-agent (fail-open inside the limiter).
+    rate_limiter.enforce(
+        f"slack_proactive:{name}:{channel_id}",
+        _SLACK_PROACTIVE_PER_CHANNEL, _SLACK_PROACTIVE_WINDOW,
+        detail="Too many messages to this channel.",
+    )
+    rate_limiter.enforce(
+        f"slack_proactive:{name}",
+        _SLACK_PROACTIVE_PER_AGENT, _SLACK_PROACTIVE_WINDOW,
+        detail="Too many proactive messages from this agent.",
+    )
+
+    bot_token = db.get_slack_workspace_bot_token(target["team_id"])
+    if not bot_token:
+        raise HTTPException(status_code=500, detail="Failed to retrieve Slack bot token")
+
+    ok, error = await slack_service.send_message(
+        bot_token=bot_token,
+        channel=channel_id,
+        text=text,
+        username=name,  # per-message agent identity (chat:write.customize)
+        thread_ts=request.thread_ts,
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"Slack send failed: {error}")
+
+    return {
+        "sent": True,
+        "channel_type": "slack",
+        "channel_id": channel_id,
+        "channel_name": target.get("slack_channel_name"),
+        "thread_ts": request.thread_ts,
     }

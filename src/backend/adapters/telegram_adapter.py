@@ -225,6 +225,14 @@ class TelegramAdapter(ChannelAdapter):
         if not text:
             return
 
+        # Voice-out (epic #24 / #25): if the agent has spoken replies enabled with
+        # a voice id, try to deliver the reply as a Telegram voice note. Strictly
+        # additive — any failure (no TTS key, over the cost cap, provider or
+        # transcode error) returns None and we fall through to the text path below.
+        agent_name = response.metadata.get("agent_name")
+        if agent_name and await self._maybe_send_voice(bot_token, channel_id, text, agent_name, thread_id, response):
+            return
+
         # Convert markdown to Telegram HTML
         html_text = self._markdown_to_html(text)
 
@@ -705,6 +713,78 @@ class TelegramAdapter(ChannelAdapter):
                 return resp.json().get("result")
         except Exception as e:
             logger.error(f"Telegram sendMessage error: {e}", exc_info=True)
+            return None
+
+    async def _maybe_send_voice(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        agent_name: str,
+        thread_id: Optional[str],
+        response: ChannelResponse,
+    ) -> bool:
+        """Try to deliver ``text`` as a Telegram voice note (epic #24 / #25).
+
+        Returns True only when a voice note was actually sent. Any miss — feature
+        off, no voice id, TTS unavailable, over the cost cap, provider/transcode
+        error, or a failed ``sendVoice`` — returns False so the caller falls back
+        to text. Never raises.
+        """
+        try:
+            cfg = db.get_tts_config(agent_name)
+        except Exception as e:
+            logger.warning(f"voice-out: config lookup failed for {agent_name}: {e}")
+            return False
+        if not cfg.get("enabled") or not cfg.get("voice_id"):
+            return False
+
+        import services.tts_service as tts_service
+
+        # Speak plain text, not markup (strip the markdown→HTML rendering).
+        spoken = self._strip_html(self._markdown_to_html(text))
+        ogg = await tts_service.synthesize_voice_note(spoken, cfg["voice_id"])
+        if not ogg:
+            return False
+
+        reply_to = thread_id if response.metadata.get("is_group") else None
+        result = await self._send_voice(bot_token, chat_id, ogg, reply_to_message_id=reply_to)
+        return result is not None
+
+    async def _send_voice(
+        self,
+        bot_token: str,
+        chat_id: str,
+        ogg_bytes: bytes,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Send an OGG/Opus voice note via Telegram ``sendVoice``. Retries once on
+        429; returns the message result, or None on failure (caller uses text)."""
+        url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendVoice"
+        data = {"chat_id": str(chat_id)}
+        if reply_to_message_id:
+            # sendVoice takes reply_parameters as a JSON string in multipart form.
+            import json as _json
+            data["reply_parameters"] = _json.dumps({
+                "message_id": int(reply_to_message_id),
+                "allow_sending_without_reply": True,
+            })
+        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, data=data, files=files)
+                if resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"Telegram sendVoice rate limited, retry_after={retry_after}s")
+                    import asyncio
+                    await asyncio.sleep(min(retry_after, 30))
+                    resp = await client.post(url, data=data, files=files)
+                if resp.status_code != 200:
+                    logger.error(f"Telegram sendVoice failed ({resp.status_code}): {resp.text[:300]}")
+                    return None
+                return resp.json().get("result")
+        except Exception as e:
+            logger.error(f"Telegram sendVoice error: {e}", exc_info=True)
             return None
 
     async def _send_chat_action(self, bot_token: str, chat_id: str, action: str) -> None:

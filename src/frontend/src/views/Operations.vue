@@ -79,6 +79,15 @@
           Executions
         </button>
         <button
+          @click="switchTab('reports')"
+          class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
+          :class="activeTab === 'reports'
+            ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+            : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'"
+        >
+          Reports
+        </button>
+        <button
           @click="switchTab('resolved')"
           class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px whitespace-nowrap"
           :class="activeTab === 'resolved'
@@ -161,6 +170,11 @@
         <ExecutionsPanel />
       </div>
 
+      <!-- Reports Tab (#918) -->
+      <div v-if="activeTab === 'reports'">
+        <ReportsPanelFleet />
+      </div>
+
       <!-- Resolved Items Tab (narrow card feed) -->
       <div v-if="activeTab === 'resolved'" class="max-w-3xl mx-auto">
         <div v-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
@@ -201,6 +215,7 @@ import ResolvedCard from '../components/operator/ResolvedCard.vue'
 import NotificationsPanel from '../components/operator/NotificationsPanel.vue'
 import MonitoringPanel from '../components/MonitoringPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
+import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
@@ -216,7 +231,7 @@ const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.role === 'admin')
 
 // Health is admin-only; non-admins must not reach it even via deep link.
-const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'resolved']
+const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'reports', 'resolved']
 const OPERATOR_TABS = ['needs-response', 'notifications', 'resolved']
 
 function resolveTab(q) {
