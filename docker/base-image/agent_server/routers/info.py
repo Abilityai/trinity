@@ -47,6 +47,35 @@ def _diagnostics() -> Dict[str, Any]:
     }
 
 
+def _clone_status() -> str:
+    """#1439: coarse, server-computed identity-clone status for /health.
+
+    Reads the agent-writable /home/developer/.git-clone-status defensively —
+    it is UNTRUSTED input (the workspace runs as the same UID as the agent):
+    size-capped, JSON-parsed inside a guard, whitelisted to a fixed enum.
+    Absent / malformed / oversized ⇒ "ok" (never flip a healthy agent unhealthy
+    on a corrupt or missing marker). Only an explicit, well-formed
+    {"status": "failed"} maps to "failed".
+
+    NEVER returns the file's repo/branch/error strings: /health is intentionally
+    unauthenticated and reachable by every peer on the agent network (#1159), so
+    agent-controlled strings must not reach it (cross-tenant disclosure /
+    operator-UI injection). startup.sh writes this marker on a failed GitHub
+    clone and clears it on success.
+    """
+    path = "/home/developer/.git-clone-status"
+    try:
+        if os.path.getsize(path) > 4096:
+            return "ok"
+        with open(path, "r") as f:
+            data = json.loads(f.read(4096))
+    except (OSError, ValueError):
+        return "ok"
+    if isinstance(data, dict) and data.get("status") == "failed":
+        return "failed"
+    return "ok"
+
+
 @router.get("/")
 async def root():
     """Root endpoint - no UI, just API info"""
@@ -119,6 +148,11 @@ async def health_check():
         "active_tasks": agent_state.active_task_count,
         "last_task_at": agent_state.last_task_at,
         "consecutive_failures": agent_state.consecutive_failures,
+        # #1439: coarse identity-clone status ("ok"|"failed") so the backend can
+        # surface a silently-failed GitHub-template clone as unhealthy instead of
+        # reporting a running-but-empty agent as healthy. Enum only — no
+        # agent-controlled strings on this unauthenticated endpoint.
+        "clone_status": _clone_status(),
         "diagnostics": _diagnostics(),
     }
 

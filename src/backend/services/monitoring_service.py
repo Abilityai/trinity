@@ -408,6 +408,7 @@ async def check_business_health(
     recent_error_rate = 0.0
     consecutive_failures = None  # #1020: None when agent image predates the field
     last_task_at = None
+    clone_status = None  # #1439: None when agent image predates the field
 
     # Check /health endpoint for runtime status
     try:
@@ -422,6 +423,9 @@ async def check_business_health(
                 # circuit breaker (#526).
                 consecutive_failures = health_data.get("consecutive_failures")
                 last_task_at = health_data.get("last_task_at")
+                # #1439: coarse identity-clone status ("ok"|"failed"); absent on
+                # older images → None → treated as healthy by aggregation.
+                clone_status = health_data.get("clone_status")
     except Exception:
         pass  # Will be marked as degraded/unhealthy by aggregation
 
@@ -469,6 +473,9 @@ async def check_business_health(
     issues = []
     if runtime_available is False or claude_available is False:
         status = "unhealthy"
+    elif clone_status == "failed":
+        # #1439: identity clone failed — running but no workspace identity.
+        status = "unhealthy"
     elif context_percent and context_percent > 95:
         status = "degraded"
     elif stuck_execution_count > 0:
@@ -484,6 +491,7 @@ async def check_business_health(
         stuck_execution_count=stuck_execution_count,
         recent_error_rate=recent_error_rate,
         credential_status=None,
+        clone_status=clone_status,  # #1439
         consecutive_failures=consecutive_failures,  # #1020
         last_task_at=last_task_at,  # #1020
         checked_at=now
@@ -534,6 +542,15 @@ def aggregate_health(
 
     if business.runtime_available is False:
         issues.append("Runtime not available")
+        return AgentHealthStatus.UNHEALTHY, issues
+
+    # #1439: identity clone failed — the agent is running but has no workspace
+    # identity (no repo, no CLAUDE.md / skills). Surface it instead of reporting
+    # a healthy-but-empty agent. The issue string is a fixed, server-controlled
+    # constant (never the agent-supplied repo/branch/error), so it can't forge
+    # extra '; '-joined rows or inject into the operator UI.
+    if business.clone_status == "failed":
+        issues.append("Agent identity clone failed")
         return AgentHealthStatus.UNHEALTHY, issues
 
     # Degraded: Performance issues
