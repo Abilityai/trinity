@@ -97,6 +97,11 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
+      - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
+      - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
       - GITHUB_PAT=${GITHUB_PAT}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
