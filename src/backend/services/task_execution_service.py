@@ -19,6 +19,7 @@ Lifecycle:
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,6 +42,7 @@ from services.dispatch_breaker import DispatchBreaker
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
+from utils.helpers import utc_now_iso
 from services.platform_prompt_service import (
     ExecutionContext,
     compose_system_prompt,
@@ -88,6 +90,7 @@ class TaskExecutionErrorCode(str, Enum):
     CIRCUIT_OPEN = "circuit_open"   # Circuit breaker open — agent known unhealthy (#767)
     RECONCILED = "reconciled"       # Terminal write lost the CAS; row reflects another writer's terminal (#671/H4)
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
+    SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
 
 
 @dataclass
@@ -233,6 +236,126 @@ def _is_reader_race_signature(detail) -> bool:
         return False
     msg = (detail.get("message") or "").lower()
     return "result message" in msg
+
+
+# ---------------------------------------------------------------------------
+# Unresolved slash-command detection (#1410)
+# ---------------------------------------------------------------------------
+
+# Triggers with no human watching the reply — an unresolved-command run here is
+# invisible without an explicit signal, so it earns an Operating Room alert. An
+# interactive-ish trigger (a user's /task, mcp, or public turn) still classifies
+# as FAILED but the caller already sees the "Unknown command" reply, so no alert.
+_AUTONOMOUS_TRIGGERS = frozenset(
+    {"schedule", "webhook", "loop", "event", "fan_out", "agent"}
+)
+
+# The agent runtime (Claude Code) answers a slash-command that doesn't resolve
+# to an installed skill with a normal, successful assistant turn — e.g.
+# "Unknown command: /generate". Anchored at the start of the (stripped)
+# response so an agent that merely mentions the phrase mid-prose is never
+# matched.
+_UNRESOLVED_COMMAND_RE = re.compile(
+    r"^\s*unknown (?:slash )?command:\s*(/\S+)", re.IGNORECASE
+)
+
+
+def detect_unresolved_slash_command(
+    message: Optional[str], response: Optional[str]
+) -> Optional[str]:
+    """Return the offending command when *message* was a slash-command
+    invocation and *response* is the runtime's unresolved-command reply (#1410).
+
+    A scheduled/triggered ``/foo`` whose skill is absent from the container
+    comes back as a successful $0 turn ("Unknown command: /foo"), so the
+    execution would otherwise record as SUCCESS and blend into legitimate
+    skipped/$0 runs — masking a dead agent function indefinitely. Detection is
+    gated on the SENT message being a slash-command so a normal turn that
+    happens to echo the phrase is never misclassified. Returns ``None`` when it
+    is not this specific shape.
+    """
+    if not message or not response:
+        return None
+    if not message.lstrip().startswith("/"):
+        return None
+    match = _UNRESOLVED_COMMAND_RE.match(response)
+    return match.group(1) if match else None
+
+
+async def _alert_skill_not_found(
+    agent_name: str,
+    command: str,
+    execution_id: Optional[str],
+    triggered_by: str,
+) -> None:
+    """Raise an Operating Room item + notification when a scheduled/triggered
+    slash-command no-ops because its skill is missing (#1410).
+
+    Best-effort and idempotent-per-series: skips creation when a pending
+    ``skill_not_found`` item already exists for this agent+command, so a
+    recurring schedule doesn't flood the queue between operator responses.
+    Never raises — a failed alert must not turn the (already-FAILED) terminal
+    write into an exception.
+    """
+    try:
+        existing = db.list_operator_queue_items(
+            status="pending", type="skill_not_found", agent_name=agent_name
+        )
+        already = any(
+            (it.get("context") or {}).get("command") == command for it in existing
+        )
+        if already:
+            return
+
+        now = utc_now_iso()
+        title = "Scheduled command references a missing skill"
+        question = (
+            f"{agent_name}'s scheduled command '{command}' did not resolve to an "
+            f"installed skill — the run no-opped ('Unknown command'). The agent's "
+            f"scheduled function is not executing. Install the skill "
+            f"(.claude/skills/{command.lstrip('/').split()[0]}/SKILL.md) or fix the "
+            f"schedule's command."
+        )
+        item = {
+            "id": f"skill-not-found-{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "skill_not_found",
+            "status": "pending",
+            "priority": "high",
+            "title": title,
+            "question": question,
+            "context": {
+                "command": command,
+                "triggered_by": triggered_by,
+                "execution_id": execution_id or "",
+            },
+            "created_at": now,
+        }
+        db.create_operator_queue_item(agent_name, item)
+
+        try:
+            from db_models import NotificationCreate
+
+            db.create_notification(
+                agent_name,
+                NotificationCreate(
+                    notification_type="alert",
+                    title=title,
+                    message=question,
+                    priority="high",
+                    category="error",
+                    metadata={"command": command, "execution_id": execution_id or ""},
+                ),
+            )
+        except Exception:  # noqa: BLE001 — notification is a secondary surface
+            logger.debug("[#1410] skill_not_found notification skipped", exc_info=True)
+
+        logger.warning(
+            "[#1410] skill_not_found alert raised for %s: command=%s execution=%s",
+            agent_name, command, execution_id,
+        )
+    except Exception:  # noqa: BLE001 — alerting must never break the terminal write
+        logger.exception("[#1410] failed to raise skill_not_found alert for %s", agent_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1361,55 @@ class TaskExecutionService:
                 return await self.apply_result(
                     agent_name,
                     cancelled_envelope,
+                    activity_id=activity_id,
+                    breaker_enabled=breaker_enabled,
+                    release_slot=False,
+                )
+
+            # ---- #1410: unresolved slash-command guard --------------------
+            # A scheduled/triggered `/foo` whose skill is missing from the
+            # container comes back as a successful $0 turn ("Unknown command:
+            # /foo"). Left as SUCCESS it blends into legitimate skipped/$0 runs
+            # and a dead agent function stays invisible. Finalize it as FAILED
+            # (SKILL_NOT_FOUND) so it flows through the standard failure
+            # observability (executions list, success-rate analytics, health)
+            # and raise a best-effort operator alert. Not counted as AUTH, so
+            # the dispatch breaker is untouched. (The #1083 fire-and-forget path
+            # finalizes agent-side via the result callback and bypasses this
+            # sync branch; it's default-OFF, so scheduled runs today are sync —
+            # async coverage is a follow-up that needs the sent message threaded
+            # into the terminal envelope.)
+            unresolved_command = detect_unresolved_slash_command(
+                message, response_data.get("response")
+            )
+            if unresolved_command:
+                logger.warning(
+                    "[#1410] %s: command '%s' did not resolve to an installed "
+                    "skill (execution %s, triggered_by=%s) — recording FAILED",
+                    agent_name, unresolved_command, execution_id, triggered_by,
+                )
+                if triggered_by in _AUTONOMOUS_TRIGGERS:
+                    _spawn_bg(
+                        _alert_skill_not_found(
+                            agent_name, unresolved_command, execution_id, triggered_by
+                        )
+                    )
+                skill_not_found_envelope = TerminalEnvelope(
+                    execution_id=execution_id,
+                    status=TaskExecutionStatus.FAILED,
+                    error=(
+                        f"Command '{unresolved_command}' did not resolve to an "
+                        f"installed skill (agent runtime replied 'Unknown command')"
+                    ),
+                    error_code=TaskExecutionErrorCode.SKILL_NOT_FOUND,
+                    metadata=metadata,
+                    retry_count=retry_count,
+                    previous_attempt_cost=previous_attempt_cost,
+                    execution_time_ms=execution_time_ms,
+                )
+                return await self.apply_result(
+                    agent_name,
+                    skill_not_found_envelope,
                     activity_id=activity_id,
                     breaker_enabled=breaker_enabled,
                     release_slot=False,

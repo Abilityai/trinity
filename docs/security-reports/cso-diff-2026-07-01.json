@@ -1,0 +1,35 @@
+{
+  "version": "1.1",
+  "date": "2026-07-01",
+  "mode": "diff-final",
+  "scope": "brain-orb Phase 4 arc (full branch): KB writes (#61), transcript + post-session claude -p (#66), refresh loop (#67/#68), camera+navigate (#70), link validation (#71), selection (#72), Brain-tab postprocess config (#73)",
+  "branch": "feature/61-brain-orb-actions",
+  "base": "feature/60-brain-orb-voice",
+  "merge_base": "e90a4fab",
+  "issues": ["#61", "#66", "#67", "#68", "#70", "#71", "#72", "#73"],
+  "attack_surface": {
+    "new_endpoints": [
+      "GET/POST /api/agents/{name}/brain-orb/actions|action (OwnedAgentByName, write-flag-gated)",
+      "POST /api/agents/{name}/brain-orb/refresh (OwnedAgentByName, write-flag-gated)",
+      "GET/PUT /api/agents/{name}/brain-orb/postprocess (OwnedAgentByName, write-flag-gated)",
+      "agent-server GET/POST /api/brain-orb/action[s], POST /refresh, GET/PUT /postprocess (AgentAuthMiddleware #1159)"
+    ],
+    "new_flags": ["BRAIN_ORB_WRITE_ENABLED (default OFF)"],
+    "exec_surface": "post-session `claude -p` over the transcript, forked inside the agent action hook (stdin-fed, detached), gated by enabled-config + write flag",
+    "new_voice_tools": ["capture_note", "link_notes (owner-only locked manifest)"]
+  },
+  "findings": [
+    {"id": "F1", "sev": "medium", "title": "/refresh not write-flag-gated (drives the action hook)", "status": "fixed"},
+    {"id": "F2", "sev": "medium", "title": "prior 4a-only CSO report stale vs merged exec surface", "status": "fixed"},
+    {"id": "F3", "sev": "low-medium", "title": "action backend/agent timeout parity -> 504 double-write window", "status": "fixed"},
+    {"id": "F4", "sev": "low", "title": "postprocess body-cap mismatch backend(1MiB)/agent(64KiB)", "status": "fixed"},
+    {"id": "F5", "sev": "low", "title": "audit awaited after complete() unguarded", "status": "fixed"},
+    {"id": "ORB", "sev": "medium", "title": "orb-tool postMessage handler lacked origin check (owner-write tools)", "status": "fixed"},
+    {"id": "F6", "sev": "info", "title": "broker validates verb only; ids/paths delegated to agent (Inv #8)", "status": "accepted"},
+    {"id": "F7", "sev": "info", "title": "outbound postMessage uses '*' (pre-existing Phase-3, out of diff)", "status": "noted"}
+  ],
+  "verified_clean": ["auth boundaries (all mutating routes OwnedAgentByName)", "can_write split airtight", "no shell injection (stdin-exec)", "enum gate fires pre-forward", "idempotency ordering + verb-folded key", "no XSS in new surface", "inbound postMessage origin-pinned"],
+  "totals": {"critical": 0, "high": 0, "medium": 3, "low": 3, "info": 2, "all_medium_low_fixed": true},
+  "verdict": "SHIP — no critical/high; all medium/low fixed on-branch, info accepted/noted.",
+  "deferred": "run_skill (arbitrary exec) + a tool-constrained sub-invocation for the post-process claude -p."
+}

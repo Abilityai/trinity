@@ -345,6 +345,69 @@ class SlackService:
             logger.error(f"Failed to get Slack user email: {e}")
             return None
 
+    async def get_user_info(
+        self,
+        bot_token: str,
+        user_id: str
+    ) -> Optional[dict]:
+        """
+        Fetch a user's display identity (#350).
+
+        Returns ``{"real_name", "display_name", "name"}`` (any may be empty),
+        or None on error. Requires ``users:read`` scope. Best-effort — the
+        caller degrades to the bare user ID when this returns None.
+        """
+        try:
+            response = await self.client.get(
+                f"{self.SLACK_API_BASE}/users.info",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"user": user_id}
+            )
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning(f"Failed to get Slack user info: {data.get('error')}")
+                return None
+            user = data.get("user", {})
+            profile = user.get("profile", {})
+            return {
+                "real_name": profile.get("real_name") or user.get("real_name"),
+                "display_name": profile.get("display_name"),
+                "name": user.get("name"),
+            }
+        except Exception as e:
+            logger.error(f"Failed to get Slack user info: {e}")
+            return None
+
+    async def get_channel_info(
+        self,
+        bot_token: str,
+        channel_id: str
+    ) -> Optional[dict]:
+        """
+        Fetch a channel's name (#350).
+
+        Returns ``{"name", "is_private"}`` or None on error. Requires
+        ``channels:read`` / ``groups:read`` scope. Best-effort.
+        """
+        try:
+            response = await self.client.get(
+                f"{self.SLACK_API_BASE}/conversations.info",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                params={"channel": channel_id}
+            )
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning(f"Failed to get Slack channel info: {data.get('error')}")
+                return None
+            channel = data.get("channel", {})
+            return {
+                "name": channel.get("name"),
+                "is_private": channel.get("is_private", False),
+            }
+        except Exception as e:
+            logger.error(f"Failed to get Slack channel info: {e}")
+            return None
+
     async def open_dm_channel(
         self,
         bot_token: str,

@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
 
@@ -7,31 +8,31 @@ const routes = [
     path: '/setup',
     name: 'Setup',
     component: () => import('../views/SetupPassword.vue'),
-    meta: { requiresAuth: false, isSetup: true }
+    meta: { requiresAuth: false, isSetup: true, title: 'Setup' }
   },
   {
     path: '/login',
     name: 'Login',
     component: () => import('../views/Login.vue'),
-    meta: { requiresAuth: false }
+    meta: { requiresAuth: false, title: 'Login' }
   },
   {
     path: '/chat/:token',
     name: 'PublicChat',
     component: () => import('../views/PublicChat.vue'),
-    meta: { requiresAuth: false }
+    meta: { requiresAuth: false, title: 'Chat' }
   },
   {
     path: '/',
     name: 'Dashboard',
     component: () => import('../views/Dashboard.vue'),
-    meta: { requiresAuth: true }
+    meta: { requiresAuth: true, title: 'Dashboard' }
   },
   {
     path: '/agents',
     name: 'Agents',
     component: () => import('../views/Agents.vue'),
-    meta: { requiresAuth: true }
+    meta: { requiresAuth: true, title: 'Agents' }
   },
   // #1109 — Health consolidated into the Operations "Health" tab.
   // Redirect preserves bookmarks; the tab is admin-gated inside Operations.vue.
@@ -43,13 +44,14 @@ const routes = [
     path: '/agents/:name',
     name: 'AgentDetail',
     component: () => import('../views/AgentDetail.vue'),
-    meta: { requiresAuth: true }
+    // #1418 — the :name param IS the canonical agent identifier in Trinity.
+    meta: { requiresAuth: true, title: (to) => to.params.name }
   },
   {
     path: '/agents/:name/workspace',
     name: 'AgentWorkspace',
     component: () => import('../views/AgentWorkspace.vue'),
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, title: (to) => `${to.params.name} · Workspace` },
     beforeEnter: async (to, from, next) => {
       const sessionsStore = useSessionsStore()
       await sessionsStore.loadFeatureFlags()
@@ -61,10 +63,35 @@ const routes = [
     },
   },
   {
+    // #58/#60 (trinity-enterprise) — Brain Orb: capability-gated per-agent page.
+    // The guard enforces BOTH gates so the orb is NEVER launchable on a
+    // non-Cornelius agent (not even via a raw URL): the platform flag AND the
+    // per-agent `brain-orb` capability from template.yaml. A non-capable agent
+    // (or a stopped agent whose /info can't be read) redirects to AgentDetail.
+    path: '/agents/:name/brain',
+    name: 'AgentBrainOrb',
+    component: () => import('../views/AgentBrainOrb.vue'),
+    meta: { requiresAuth: true },
+    beforeEnter: async (to, from, next) => {
+      const sessionsStore = useSessionsStore()
+      const authStore = useAuthStore()
+      await sessionsStore.loadFeatureFlags()
+      const bail = () => next({ name: 'AgentDetail', params: { name: to.params.name } })
+      if (!sessionsStore.brainOrbAvailable) return bail()
+      try {
+        const r = await axios.get(`/api/agents/${to.params.name}/info`, { headers: authStore.authHeader })
+        const caps = Array.isArray(r.data?.capabilities) ? r.data.capabilities : []
+        return caps.includes('brain-orb') ? next() : bail()
+      } catch (_) {
+        return bail()
+      }
+    },
+  },
+  {
     path: '/agents/:name/executions/:executionId',
     name: 'ExecutionDetail',
     component: () => import('../views/ExecutionDetail.vue'),
-    meta: { requiresAuth: true }
+    meta: { requiresAuth: true, title: (to) => `${to.params.name} · Execution` }
   },
   // REMOVED: /files route - file management is now per-agent via Files tab in AgentDetail
   // REMOVED: /credentials route - credentials are now managed per-agent only
@@ -73,7 +100,7 @@ const routes = [
     path: '/templates',
     name: 'Templates',
     component: () => import('../views/Templates.vue'),
-    meta: { requiresAuth: true }
+    meta: { requiresAuth: true, title: 'Templates' }
   },
   // Legacy redirect: Events consolidated into the Operations Notifications tab (#1109)
   {
@@ -88,7 +115,7 @@ const routes = [
     path: '/operations',
     name: 'Operations',
     component: () => import('../views/Operations.vue'),
-    meta: { requiresAuth: true }
+    meta: { requiresAuth: true, title: 'Operations' }
   },
   // Legacy redirects — function form so existing ?tab= deep links survive
   // the hop (a string/object redirect would drop the incoming query).
@@ -110,7 +137,7 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: () => import('../views/Settings.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true }
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'Settings' }
   },
   // Legacy redirect for /system-agent -> agents page (consolidated)
   {
@@ -139,20 +166,20 @@ const routes = [
     path: '/enterprise',
     name: 'EnterpriseLanding',
     component: () => import('../views/enterprise/Index.vue'),
-    meta: { requiresAuth: true, requiresAnyEntitlement: true }
+    meta: { requiresAuth: true, requiresAnyEntitlement: true, title: 'Enterprise' }
   },
   {
     path: '/enterprise/audit',
     name: 'EnterpriseAudit',
     component: () => import('../views/enterprise/Audit.vue'),
-    meta: { requiresAuth: true, requiresEntitlement: 'audit' }
+    meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {
     path: '/m',
     name: 'MobileAdmin',
     component: () => import('../views/MobileAdmin.vue'),
-    meta: { requiresAuth: false }  // handles its own inline auth
+    meta: { requiresAuth: false, title: 'Mobile' }  // handles its own inline auth
   },
   // Catch-all redirect to dashboard
   {
@@ -264,6 +291,19 @@ router.beforeEach(async (to, from, next) => {
     // Public route, allow access
     next()
   }
+})
+
+// Per-route browser-tab titles (#1418). `meta.title` is a string, or a function
+// of the resolved route for dynamic agent-scoped pages (the :name param is the
+// canonical agent identifier). afterEach fires once per completed navigation —
+// including the final destination of a redirect — so SPA nav updates the tab
+// title with no reload. Routes without a title (redirects, catch-all) fall back
+// to the branded default that index.html ships as the pre-hydration title.
+const BASE_TITLE = 'Trinity'
+router.afterEach((to) => {
+  const raw = to.meta?.title
+  const label = typeof raw === 'function' ? raw(to) : raw
+  document.title = label ? `${BASE_TITLE} — ${label}` : `${BASE_TITLE} — Agent Orchestration`
 })
 
 // Clear setup cache on successful setup

@@ -66,30 +66,11 @@
           </div>
         </div>
 
-        <!-- Exposed playbooks allow-list -->
-        <div>
-          <div class="flex items-center justify-between mb-2">
-            <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">Exposed playbooks</h4>
-            <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
-              <input type="checkbox" v-model="exposeAll" @change="saveAllowList" :disabled="busy" />
-              Expose all
-            </label>
-          </div>
-          <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-            Choose which playbooks the connector advertises as tools. Non-user-invocable playbooks are never exposed.
-          </p>
-          <div v-if="playbooksError" class="text-xs text-gray-500 dark:text-gray-400">{{ playbooksError }}</div>
-          <div v-else-if="availablePlaybooks.length === 0" class="text-xs text-gray-500 dark:text-gray-400">
-            No user-invocable playbooks found for this agent.
-          </div>
-          <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-            <li v-for="pb in availablePlaybooks" :key="pb.name" class="px-3 py-2 flex items-center gap-2">
-              <input type="checkbox" :value="pb.name" v-model="selected" :disabled="exposeAll || busy" @change="debouncedSaveAllowList" />
-              <span class="text-sm text-gray-900 dark:text-gray-100">{{ pb.name }}</span>
-              <span v-if="pb.description" class="text-xs text-gray-500 dark:text-gray-400 truncate">— {{ pb.description }}</span>
-            </li>
-          </ul>
-        </div>
+        <!-- Exposed-playbooks picker — extracted to a standalone, decoupled
+             component (trinity-enterprise#55) so it can be reused across
+             client-sharing channels and this key block can be swapped for the
+             SSO/OAuth variant without reworking the picker. -->
+        <ExposedToolsPanel :agent-name="agentName" />
       </div>
 
       <!-- One-time secret + per-client snippets (after generate/regenerate) -->
@@ -118,8 +99,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import api from '../api'
+import ExposedToolsPanel from './ExposedToolsPanel.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -128,11 +110,7 @@ const props = defineProps({
 const loading = ref(true)
 const busy = ref(false)
 const accessDenied = ref(false)
-const status = ref({ has_key: false, enabled: false, key_prefix: null, exposed_playbooks: null, mcp_url: null })
-const availablePlaybooks = ref([])
-const playbooksError = ref('')
-const selected = ref([])
-const exposeAll = ref(true)
+const status = ref({ has_key: false, enabled: false, key_prefix: null, mcp_url: null })
 const freshSnippets = ref([])
 const message = ref('')
 const messageError = ref(false)
@@ -142,45 +120,17 @@ const notify = (text, isError = false) => {
   messageError.value = isError
 }
 
-const syncAllowListState = () => {
-  // exposed_playbooks === null ⇒ all exposed; else the explicit set.
-  const list = status.value.exposed_playbooks
-  exposeAll.value = list == null
-  selected.value = Array.isArray(list) ? [...list] : []
-}
-
 const loadStatus = async () => {
   loading.value = true
   accessDenied.value = false
   try {
     const { data } = await api.get(`/api/agents/${props.agentName}/connector`)
     status.value = data
-    syncAllowListState()
   } catch (e) {
     if (e.response?.status === 403) accessDenied.value = true
     else notify(e.response?.data?.detail || 'Failed to load connector', true)
   } finally {
     loading.value = false
-  }
-  loadPlaybooks()
-}
-
-const loadPlaybooks = async () => {
-  playbooksError.value = ''
-  try {
-    const { data } = await api.get(`/api/agents/${props.agentName}/playbooks`)
-    availablePlaybooks.value = (data?.skills || []).filter((s) => s.user_invocable !== false)
-    // Prune stale names: an allow-list entry that's no longer a live
-    // user_invocable playbook would otherwise linger and be re-sent forever.
-    if (!exposeAll.value) {
-      const names = new Set(availablePlaybooks.value.map((p) => p.name))
-      selected.value = selected.value.filter((n) => names.has(n))
-    }
-  } catch (e) {
-    availablePlaybooks.value = []
-    playbooksError.value = e.response?.status === 503
-      ? 'Start the agent to choose which playbooks to expose.'
-      : 'Could not load this agent’s playbooks.'
   }
 }
 
@@ -217,36 +167,11 @@ const toggleEnabled = async () => {
   try {
     const { data } = await api.put(`/api/agents/${props.agentName}/connector`, { enabled: !status.value.enabled })
     status.value = data
-    syncAllowListState()
   } catch (e) {
     notify(e.response?.data?.detail || 'Failed to update connector', true)
   } finally {
     busy.value = false
   }
-}
-
-const saveAllowList = async () => {
-  busy.value = true
-  try {
-    const body = exposeAll.value
-      ? { expose_all_playbooks: true }
-      : { exposed_playbooks: selected.value }
-    const { data } = await api.put(`/api/agents/${props.agentName}/connector`, body)
-    status.value = data
-    notify('Exposed playbooks updated.')
-  } catch (e) {
-    notify(e.response?.data?.detail || 'Failed to update playbooks', true)
-  } finally {
-    busy.value = false
-  }
-}
-
-// Coalesce a burst of checkbox toggles into one PUT (each send is the full set,
-// so last-write-wins is safe). The "expose all" toggle saves immediately.
-let saveTimer = null
-const debouncedSaveAllowList = () => {
-  clearTimeout(saveTimer)
-  saveTimer = setTimeout(saveAllowList, 400)
 }
 
 const copy = async (text) => {

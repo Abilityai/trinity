@@ -37,6 +37,8 @@ jobs:
           language: ${{ matrix.language }}
           # Interpreted languages — no compilation step needed.
           build-mode: none
+          # Excludes vendored third-party code (see the config file).
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4

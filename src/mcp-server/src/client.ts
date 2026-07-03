@@ -1956,6 +1956,48 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * List the Slack channels an agent is bound to (#350)
+   */
+  async listSlackChannels(agentName: string): Promise<{
+    channels: Array<{
+      channel_type: string;
+      channel_id: string;
+      channel_name: string | null;
+      team_id: string;
+      workspace_name: string | null;
+      is_dm_default: boolean;
+    }>;
+    count: number;
+  }> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/slack/channels`
+    );
+  }
+
+  /**
+   * Send a proactive message to a Slack channel (#350)
+   */
+  async sendSlackChannelMessage(
+    agentName: string,
+    channelId: string,
+    message: string,
+    threadTs?: string
+  ): Promise<{
+    sent: boolean;
+    channel_type: string;
+    channel_id: string;
+    channel_name?: string | null;
+    thread_ts?: string | null;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/slack/channels/${encodeURIComponent(channelId)}/messages`,
+      threadTs ? { message, thread_ts: threadTs } : { message }
+    );
+  }
+
   // ============================================================================
   // Sequential Agent Loops (#740)
   // ============================================================================

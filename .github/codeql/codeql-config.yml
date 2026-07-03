@@ -1,0 +1,15 @@
+# CodeQL analysis config (referenced by .github/workflows/codeql.yml).
+#
+# paths-ignore excludes vendored third-party code we don't author and can't
+# meaningfully fix — CodeQL alerts there are noise (e.g. three.js' internal
+# Math.random(), minified marked/DOMPurify bundles). First-party code stays
+# in scope; only clearly-vendored directories are skipped.
+name: "Trinity CodeQL config"
+
+paths-ignore:
+  # Locally vendored browser libraries for the Brain Orb static page
+  # (CSP-clean first-party hosting of three.js / marked / DOMPurify).
+  - "src/frontend/public/**/vendor/**"
+  # Any other explicitly-vendored third-party bundles.
+  - "**/vendor/**"
+  - "**/*.min.js"

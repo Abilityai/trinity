@@ -35,6 +35,13 @@ services:
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - WORKSPACE_ENABLED=${WORKSPACE_ENABLED:-false}  # Voice Workspace canvas — opt-in BETA (#860)
+      # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
+      # Both default OFF; must reach the container or the flags stay false (config.py).
+      - BRAIN_ORB_ENABLED=${BRAIN_ORB_ENABLED:-false}
+      - BRAIN_ORB_VOICE_ENABLED=${BRAIN_ORB_VOICE_ENABLED:-false}
+      # KB-write surface (#61 Phase 4a) — owner-gated capture/link. Distinct kill-switch
+      # so writes disable without downing read/voice. Default OFF (config.py).
+      - BRAIN_ORB_WRITE_ENABLED=${BRAIN_ORB_WRITE_ENABLED:-false}
       # VoIP telephony (VOIP-001, #1056) — opt-in, default OFF. Master switch must
       # reach the container or voip_available stays false (read by config.py).
       - VOIP_ENABLED=${VOIP_ENABLED:-false}
@@ -44,6 +51,12 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
+      # gates the feature (empty ⇒ adapters deliver text). Must reach the
+      # container or the .env lever is inert (the #1056/#1039 packaging class).
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
@@ -90,6 +103,7 @@ services:
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Credential Encryption
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}
       # Agent auth master (#1159) - backend derives each agent's in-container

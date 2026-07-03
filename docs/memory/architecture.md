@@ -71,6 +71,7 @@
 - `agent_config.py` - Per-agent settings: autonomy, read-only, resources, capabilities, capacity, timeout, api-key
 - `agent_files.py` - Files, info, playbooks, permissions, metrics, shared folders, file-sharing toggle + list/revoke (FILES-001)
 - `agent_data.py` - Runtime-data export/import (`data_paths`) over the durable home volume (#1169)
+- `agent_brain_orb.py` - Brain Orb proxy: `/brain-orb/data` + `/scopes` + `/tool` (read) + `/scope` (owner mutation) + `/voice-token` (Phase 3 ephemeral Gemini mint) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58, #60)
 - `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
@@ -176,7 +177,7 @@
 - `compatibility/` - Agent compatibility validation package (spec/collector/static_checks/ai_checks/fixes) — see [Agent Compatibility Validation](#agent-compatibility-validation-668)
 
 *Auth & Credentials:*
-- `credential_encryption.py` - AES-256-GCM encryption for `.credentials.enc` and DB-persisted tokens (CRED-002, Invariant #12)
+- `credential_encryption.py` - AES-256-GCM encryption for `.credentials.enc` and DB-persisted tokens (CRED-002, Invariant #12). Supports **online key rotation** (#267): an optional decrypt-only `CREDENTIAL_ENCRYPTION_KEY_SECONDARY` (the previous key) keeps old-key ciphertext readable while new writes use the primary; `rewrap()` + `scripts/deploy/rotate-credential-key.py` re-encrypt persisted DB secrets onto the new key (runbook `docs/migrations/CREDENTIAL_KEY_ROTATION.md`)
 - `subscription_service.py` - Subscription management (SUB-002)
 - `ssh_service.py` - Ephemeral SSH credential generation
 - `email_service.py` - Email sending for verification codes
@@ -192,6 +193,7 @@
 - `tts_service.py` - Shared outbound-voice TTS layer (epic #24): ElevenLabs synth → ffmpeg OGG/Opus transcode; shared char cost-cap; fail-soft (any error → text fallback). Consumed by channel adapters (Telegram #25 first; Slack #26 / WhatsApp trinity-enterprise#56 reuse it)
 - `agent_shared_files_service.py` - Outbound file sharing — see [Outbound File Sharing](#outbound-file-sharing-files-001)
 - `loop_service.py` - Sequential agent loop runner — see [Sequential Agent Loops](#sequential-agent-loops-740-ui-1106)
+- `client_roster_service.py` - Aggregates external channel clients (Telegram + WhatsApp) into the Sharing-tab roster; cross-channel sort + per-channel failure degradation (#20)
 - `voip_service.py` - VoIP outbound-call orchestration — see [VoIP](#voip-telephony-voip-001-1056)
 
 *Content & Media:*
@@ -208,8 +210,8 @@
 **Channel Adapters (`adapters/`)** — pluggable external messaging (SLACK-002, Invariant #9):
 
 - `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
-- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895)
-- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`; outbound voice replies as an inline MP3 clip via the Slack Files upload flow (`slack_service.upload_file`) when TTS enabled (epic #24/#26, shared `tts_service`; MP3 needs no transcode)
+- `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895); calls the adapter's async `enrich_message` hook then prepends a `[Channel: #x]\n[From: …]` identity prefix for enriched channel (non-DM) messages (#350); passes the agent's public avatar URL as `agent_avatar_url` so channels with a per-message bot icon render it (Slack `icon_url`, best-effort — #292)
+- `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`; `enrich_message` resolves sender display name + channel name via `users.info`/`conversations.info` so the agent sees who/where (best-effort, #350); outbound voice replies as an inline MP3 clip via the Slack Files upload flow (`slack_service.upload_file`) when TTS enabled (epic #24/#26, shared `tts_service`; MP3 needs no transcode)
 - `transports/slack_socket.py` - Socket Mode: N concurrent WebSockets per `SLACK_SOCKET_CONNECTION_COUNT` (default 2, range 1–10), per-client watchdog, envelope-ID dedup ring (#244)
 - `transports/slack_webhook.py` - HTTP webhook transport (production fallback)
 - `telegram_adapter.py` - DMs, group chats (@mention/observe modes), voice transcription, /login flow; outbound voice replies via `sendVoice` when TTS enabled (epic #24/#25, shared `tts_service`)
@@ -263,7 +265,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `notifications.ts` (1) | `send_notification` | Agent-to-platform notifications |
 | `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001) |
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
-| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging (#349) |
+| `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging — Telegram (#349) and Slack channels (#350); `channel_type: telegram\|slack`, Slack send accepts optional `thread_ts` |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
 | `files.ts` (1) | `share_file` | Publish file from `/home/developer/public/`, return download URL (FILES-001) |
 | `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |
@@ -289,6 +291,7 @@ Vector 0.43.1 (`timberio/vector:0.43.1-alpine`). Captures all container stdout/s
 - `/api/credentials/reload-token` - Surgical subscription-token hot-reload (#1089): mutates the agent-server process `os.environ["CLAUDE_CODE_OAUTH_TOKEN"]` so the NEXT claude subprocess uses the rotated token while in-flight subprocesses keep theirs; persists to the writable-layer override `/var/lib/trinity/oauth-token` (0600). Does NOT touch `.env`/`.mcp.json`. See [Subscription Token Rotation](#subscription-token-rotation-via-hot-reload-1089)
 - `/api/chat/session` - Context window stats
 - `/api/files`, `/api/files/download` (100MB limit), `/api/files/mkdir` (workspace-confined, #37)
+- `/api/brain-orb/data` - Streams the agent's `resources/agent-visualization/data.json` (Brain Orb read surface, #58); 404 when absent. `/api/brain-orb/scopes` + `/api/brain-orb/scope` run the agent's `~/.trinity/brain-orb/{scopes,scope}` convention hooks for live scope control (#58 Phase 2); `/api/brain-orb/tool` runs the read-only `~/.trinity/brain-orb/search` hook (#60 Phase 3)
 
 The agent server also runs two loops: the 15-min git `auto_sync` heartbeat (see [Git Sync Health](#git-sync-health-389390)) and the 5s liveness heartbeat (see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307)).
 
@@ -423,7 +426,7 @@ agent:heartbeat:misses:{name} → STRING(int), ~60s TTL. Consecutive-miss counte
 
 Trigger-boundary dedup — policy in Architectural Invariant #18, table DDL under `idempotency_keys`, details in [idempotency-keys.md](feature-flows/idempotency-keys.md). `services/idempotency_service.py` (`begin`/`complete`/`fail`) over `db/idempotency.py`. The `(scope, key)` PRIMARY KEY is the atomic claim: `claim()` INSERTs an `in_flight` row; a concurrent loser catches `IntegrityError` and reads the surviving row (cross-process safe over the shared SQLite file). Lifecycle: `claim` → (`attach_execution`) → `complete` (stores `response_snapshot` for replay) or `release` (deletes the in_flight row so retry is possible; never deletes a `completed` row). Rows >24h expire and re-claim (cleanup purges via `idempotency_purge_expired`). Duplicates within 24h short-circuit with the original result + `X-Idempotent-Replay: true`; an in-flight duplicate returns 409. Fail-open.
 
-**Effect-scoped extension (#1084):** trigger-boundary dedup stops a re-POSTed `/chat`/webhook from creating a *second execution*; it does NOT reach an agent's individual outbound tool calls. So a re-delivered turn (the at-least-once semantics pull-mode / work-stealing will introduce, Epic #1045/#1081) re-emits the same side effect (re-sends a message, re-charges a payment). The same `idempotency_service` adds a per-sink guard — `effect_guard(effect_type, identifying_args, *, execution_id, agent_name, dedup_label, payment_request_id)` — enforced at the SINK, per resolved action identity. Scopes: `effect:{execution_id}` for messages/voip/share_file (after `resolve_and_validate_execution` confirms the execution belongs to the agent — generalizing MEM-001), `payment:{agent_request_id}` for Nevermined settles (its native exactly-once token). Key = `{effect_type}:sha256(execution_id ∥ effect_type ∥ resolved_identifying_args ∥ dedup_label)` on **resolved, immutable** identity only (recipient/channel/account) — **never the LLM-generated body** (non-deterministic across a re-run → would defeat dedup); `dedup_label` lets an agent intentionally repeat an effect to the same target in one turn. `in_flight ≠ completed`: a completed replay returns the stored sanitized snapshot (no re-emit); an in-flight replay raises `EffectInProgressError` (router → 409, never a silent skip-and-succeed). Reuses the 24h default TTL (already exceeds the lease window, so a completed row outlives a late re-delivery — no new TTL plumbing). Wired sinks: `proactive_message_service.send_message`, `voip_service.place_outbound_call`, `agent_shared_files_service.create_share`, `nevermined_payment_service.settle_payment_once`; agents pass `execution_id`+`dedup_label` as MCP tool args (`messages.ts`/`voip.ts`/`files.ts`), **fail-open when absent** (safe today — pull-mode re-delivery is OFF). Trusted runtime injection of `execution_id` + fail-closed-when-absent is a **BLOCKING prerequisite** on Epic #1045/#1081 before pull-mode default-ON for side-effect agents (git push is idempotent-by-construction and needs no key). See [effect-idempotency.md](feature-flows/effect-idempotency.md).
+**Effect-scoped extension (#1084):** trigger-boundary dedup stops a re-POSTed `/chat`/webhook from creating a *second execution*; it does NOT reach an agent's individual outbound tool calls. So a re-delivered turn (the at-least-once semantics pull-mode / work-stealing will introduce, Epic #1045/#1081) re-emits the same side effect (re-sends a message, re-charges a payment). The same `idempotency_service` adds a per-sink guard — `effect_guard(effect_type, identifying_args, *, execution_id, agent_name, dedup_label, payment_request_id)` — enforced at the SINK, per resolved action identity. Scopes: `effect:{execution_id}` for messages/voip/share_file (after `resolve_and_validate_execution` confirms the execution belongs to the agent — generalizing MEM-001), `payment:{agent_request_id}` for Nevermined settles (its native exactly-once token). Key = `{effect_type}:sha256(execution_id ∥ effect_type ∥ resolved_identifying_args ∥ dedup_label)` on **resolved, immutable** identity only (recipient/channel/account) — **never the LLM-generated body** (non-deterministic across a re-run → would defeat dedup); `dedup_label` lets an agent intentionally repeat an effect to the same target in one turn. `in_flight ≠ completed`: a completed replay returns the stored sanitized snapshot (no re-emit); an in-flight replay raises `EffectInProgressError` (router → 409, never a silent skip-and-succeed). Reuses the 24h default TTL (already exceeds the lease window, so a completed row outlives a late re-delivery — no new TTL plumbing). Wired sinks: `proactive_message_service.send_message`, `voip_service.place_outbound_call`, `agent_shared_files_service.create_share`, `nevermined_payment_service.settle_payment_once`; agents pass `execution_id`+`dedup_label` as MCP tool args (`messages.ts`/`voip.ts`/`files.ts`), **fail-open when absent** (safe today — pull-mode re-delivery is OFF). Trusted runtime injection of `execution_id` + fail-closed-when-absent is a **BLOCKING prerequisite** on Epic #1045/#1081 before pull-mode default-ON for side-effect agents (git push is idempotent-by-construction and needs no key). **Target-direction note:** `TARGET_ARCHITECTURE.md` v2 reframes this from a **per-agent** gate to **per-effect** — read/analysis-only + reversible + capability-confined-irreversible effects default on, only irreversible-**un-confineable** effects gate via the async operator queue (#1402); `effect_guard` (this section) is the reversible/backend-sink slice and retry-with-prior-trace (#1401) is the general recovery. See [effect-idempotency.md](feature-flows/effect-idempotency.md).
 
 ### Subscription Token Rotation via Hot-Reload (#1089)
 
@@ -611,6 +614,79 @@ never bypassed.
   migration (SQLite `agent_ownership_mcp_exposed` + Alembic
   `0009_agent_ownership_mcp_exposed`).
 
+### Brain Orb — Self-Rendering Mind page (#58, trinity-enterprise)
+
+Capability-gated per-agent 3D knowledge-graph page for Cornelius-class agents.
+**Shipped: static render (Phase 1) + live scope control (Phase 2) + client-held
+Gemini Live voice tile + read-only KB search (Phase 3, #60).** The orb renders the
+agent-produced graph, supports button-driven **scope mount/unmount → agent
+re-export → live rebuild**, and a **client-held voice tile** (browser connects
+directly to Gemini Live via a short-lived, config-locked ephemeral token minted by
+Trinity — no audio proxying). Still deferred to later epic children: KB-write
+actions, transcript capture, and headless-skill injection. Mirrors the workspace
+page (gated per-agent route) and the agent-owned read-surface pattern (pipelines
+#919, reports #918): the agent owns generation + scope state (Invariant #8),
+Trinity reads/renders + brokers control. Default OFF — no impact on other agents.
+
+- **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
+  page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
+  `DOMPurify`/JetBrains-Mono vendored locally — so it runs CSP-clean under prod
+  `script-src 'self'` / `font-src 'self'` with **no nginx change** (the #979 trap
+  was *agent-origin* + *inline* scripts; this is first-party + external). Only
+  mechanical edits: externalize the module, vendor CDN deps, repoint the data +
+  scope fetches at the per-agent proxy base (carrying the platform JWT), hide the
+  still-deferred voice/action panels. Markdown note bodies are DOMPurify-sanitized
+  (H-005).
+- **Frontend host** (`views/AgentBrainOrb.vue`, route `/agents/:name/brain`,
+  lazy + `beforeEnter` flag guard): a thin chrome + **same-origin iframe** of the
+  static page. JWT reaches the iframe's data fetch via origin-pinned `postMessage`
+  (orb posts `brain-orb:ready` → host replies `brain-orb:init {agentName, apiBase,
+  authToken}`; never in a URL) — no new ticket primitive. A `brain-orb:error`
+  message shows the "hasn't rendered its mind yet" empty state. Gating:
+  `brainOrbAvailable` (platform flag, `stores/sessions.js`) **AND** the per-agent
+  `brain-orb` token in `template.yaml capabilities` (read from `/info`). BOTH the
+  route guard (`beforeEnter` fetches `/info`, #60) and the `visibleTabs` Brain tab
+  enforce the capability, so the orb is never launchable on a non-Cornelius agent —
+  even via a raw URL (redirect, not empty state). Selecting the tab route-pushes to
+  the page. The voice tile also ships a **vendored p5** audio-reactive orb that
+  pulses with the spoken audio (CDN load was removed then re-vendored, #60).
+- **Backend proxy** (`routers/agent_brain_orb.py`, prefix `/api/agents/{name}/brain-orb/*`):
+  one shared gate/proxy helper (flag → running → `agent_httpx_client` #1159, **byte
+  pass-through**, 404/503/504/502 mapping). `GET /data` + `GET /scopes` + `POST /tool`
+  (read-only KB search) are read (`AuthorizedAgentByName`); **`POST /scope` is the only
+  mutating route and is `OwnedAgentByName`** (owner/admin) — body-capped 64 KB, 200s
+  timeout above the agent hook's 180s. `POST /voice-token` (Phase 3, `AuthorizedAgentByName`,
+  per-(user,agent) rate-limited) mints the ephemeral Gemini Live credential (does NOT
+  contact the agent — a Google call, not an agent call).
+- **Voice-token mint** (`services/brain_orb_voice_service.py`, Phase 3, #60): the client-held
+  voice tile connects the browser DIRECTLY to Gemini Live. `mint_voice_token()` builds its
+  **own v1alpha `genai.Client`** (NOT the cached `gemini_voice` singleton, which lacks
+  v1alpha and would reject the ephemeral mint) and calls `auth_tokens.create` with
+  `live_connect_constraints` locking the model + the whole `LiveConnectConfig` (system
+  prompt + voice + the **read/visual/scope-only tool manifest** — no write tools), `uses=1`,
+  a ~60s new-session window, and `expire_time = VOICE_MAX_DURATION`. The token's constraints
+  ARE the security envelope (no Redis ticket needed — the browser talks to Google, not
+  Trinity). Response field is `ephemeral_token` (never `token`, which would flip orb.js's
+  deferred write surface on). The orb page (which holds the JWT) mints and relays only the
+  Google token to the nested voice iframe over `postMessage`. Writes stay off by
+  construction: locked manifest + no `/session` route.
+- **Agent-server mirror** (`agent_server/routers/brain_orb.py`): `GET /api/brain-orb/data`
+  streams the fixed-path `~/resources/agent-visualization/data.json` via `FileResponse`.
+  Scope + search run **agent convention hooks** (mirrors `~/.trinity/pre-check`, #454):
+  `GET /api/brain-orb/scopes` runs `~/.trinity/brain-orb/scopes`; `POST /api/brain-orb/scope`
+  pipes the body to `~/.trinity/brain-orb/scope` (mutate active set, re-export → rewrite
+  `data.json`, print new state); `POST /api/brain-orb/tool` pipes a query to the read-only
+  `~/.trinity/brain-orb/search` hook (scope-aware, no writes). All via hardened async
+  subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards); **404 when the
+  hook is absent**. Trinity never runs `export_data.py` itself — the agent owns generation +
+  scope state (Invariant #8).
+- Platform flags: `brain_orb_available = BRAIN_ORB_ENABLED` (env, default OFF — static
+  render, no Gemini dependency); **`brain_orb_voice_available = BRAIN_ORB_VOICE_ENABLED &&
+  GEMINI_API_KEY`** (default OFF — Phase 3 voice tile, distinct because voice needs a Gemini
+  key). Voice frontend assets are CSP-clean (hand-rolled Gemini client, externalized
+  `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src` already allows `wss:`).
+  No DB change, no migration, no new secret.
+
 ---
 
 ## API Endpoints
@@ -664,6 +740,11 @@ never bypassed.
 | GET | `/api/agents/{name}/circuit-breaker` | Unified breaker state: `{dispatch:{state,failure_count,retry_after_seconds}, transport:{...}, open:bool, config:{enabled,global_enabled}}` (#526) |
 | PUT | `/api/agents/{name}/circuit-breaker` | Enable/disable per-agent dispatch breaker (owner-only); engages only with global `DISPATCH_BREAKER_ENABLED` (#526) |
 | POST | `/api/agents/{name}/circuit-breaker/reset` | Admin-only; resets BOTH transport and dispatch breakers to closed (#921, #526) |
+| GET | `/api/agents/{name}/brain-orb/data` | Read-only proxy of the agent's Brain Orb `data.json` (`AuthorizedAgentByName`; byte pass-through; 404 when flag off / no export, 503/504 unreachable, 502 agent error). See [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58) |
+| GET | `/api/agents/{name}/brain-orb/scopes` | List the agent's selectable + active vault scopes for the orb scope panel (`AuthorizedAgentByName`; 404 when unsupported). (#58 Phase 2) |
+| POST | `/api/agents/{name}/brain-orb/scope` | Mutate the active scope set → agent re-export (**`OwnedAgentByName`** — owner/admin; body-capped; 404 when unsupported). (#58 Phase 2) |
+| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when `BRAIN_ORB_VOICE_ENABLED` off, 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
+| POST | `/api/agents/{name}/brain-orb/tool` | Read-only KB search — proxies to the agent's `~/.trinity/brain-orb/search` hook (`AuthorizedAgentByName`; 404 when unsupported). (#60 Phase 3) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
 | GET | `/api/agents/{name}/mcp-exposed` | MCP-exposure flag + the deterministic `tool_name` the MCP server would register. See [MCP Exposure](#mcp-exposure--dedicated-dynamic-tools-846) (#846) |
@@ -730,6 +811,8 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
 | GET | `/api/agents/{name}/shares` | List shares |
 | GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
+| GET | `/api/agents/{name}/clients` | External-client roster: channel users who've messaged the agent, aggregated across Telegram + WhatsApp, sorted by `last_active` desc (never-active last). Owner-only, read-only, DB-sourced (renders when agent stopped). Slack/VoIP additive (#20) |
+| GET/PUT | `/api/agents/{name}/public-prompt` | Owner-only per-agent custom instructions (`public_channel_system_prompt`, 4000-char cap) folded into the system prompt for **public-facing surfaces only** — public links, channel router (Slack/Telegram/WhatsApp), x402 paid chat — via `platform_prompt_service.build_public_channel_caller_prompt` (composes with the MEM-001 memory block). NOT applied to authenticated chat, schedules, loops, or a2a. Text counterpart of `voice_system_prompt` (#1205) |
 | GET/PUT | `/api/agents/{name}/access-policy` | Cross-channel access policy: `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | Pending access requests |
 | POST | `/api/agents/{name}/access-requests/{id}/decide` | Approve (auto-shares + fire-and-forget approval notification on the requester's originating channel for telegram/slack/whatsapp, #951) or reject |
@@ -861,7 +944,7 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
-| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
+| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (`BRAIN_ORB_ENABLED`, default OFF; gates the Brain Orb page — #58), `brain_orb_voice_available` (`BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY`, default OFF; gates the client-held voice tile — #60), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
 | GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |
@@ -890,7 +973,7 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 2. **DB Layer: Class-per-domain with Mixin Composition** — Each `db/` file defines an `XOperations` class. Agent-specific settings use mixins (`db/agent_settings/`) composed into `AgentOperations`. New agent settings → new mixin, not a bigger class.
 
-3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All OSS table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py` (tracked in the `schema_migrations` table). Never create tables ad-hoc in service code. **Runner safety (#1160):** `init_database()` wraps both migration passes + `init_schema` in a cross-process `flock` (`db/migration_lock.py`) so workers + scheduler can't race; table-rebuild migrations use `_atomic_rebuild` (rename-swap inside `BEGIN`/`COMMIT`) so a crash mid-rebuild rolls back; a failed migration is named via `add_note` and surfaced as `first_pending` in the `/health` 503. **Backend split (#1183):** the `db/migrations.py` runner (PRAGMA + `INSERT OR IGNORE`) is **SQLite-only**; PostgreSQL is owned by **Alembic** — `init_database()`'s non-SQLite branch calls `db/alembic_runner.upgrade_to_head()` (`src/backend/migrations/` + `alembic.ini`; `env.py` targets `db/tables.py` MetaData). Fresh PG built by the `0001_baseline` revision (reuses `init_schema_postgres` DDL); pre-Alembic PG stamped at baseline. Both coexist during transition, so a schema change lands in **both** `migrations.py` (SQLite) and a new Alembic revision (Postgres) — both tracks CI-guarded by the `schema-parity` job (SQLite parity pytest + the `scripts/ci/check_alembic_parity.py` cross-track guard that fails a DDL change missing its Alembic revision, #1342) — until SQLite **end-of-support September 1, 2026** (#1278; guide `docs/migrations/SQLITE_TO_POSTGRES.md`) — after which the goal (#746) is `tables.py` MetaData as single source with autogenerated revisions. **Two-track (open-core):** enterprise owns only `enterprise_*` tables via a **separate** runner (`enterprise/backend/_migrations.py`, tracked in `enterprise_schema_migrations`, never OSS `schema_migrations`); one file per migration (`NNNN_slug.py` with `NAME` + `upgrade(cursor, conn)`, filename order). Enterprise migrations may FK-into OSS tables but must **never ALTER** one — OSS enforcement goes through an OSS migration as an edition-agnostic primitive (e.g. `users.suspended_at`, #995). The enterprise runner runs from `register_enterprise` *after* OSS `init_database`.
+3. **Schema in `db/schema.py`, Migrations in `db/migrations.py`** — All OSS table DDL lives in `schema.py`. Schema changes require a versioned migration in `migrations.py` (tracked in the `schema_migrations` table). Never create tables ad-hoc in service code. **Runner safety (#1160):** `init_database()` wraps both migration passes + `init_schema` in a cross-process `flock` (`db/migration_lock.py`) so workers + scheduler can't race; table-rebuild migrations use `_atomic_rebuild` (rename-swap inside `BEGIN`/`COMMIT`) so a crash mid-rebuild rolls back; a failed migration is named via `add_note` and surfaced as `first_pending` in the `/health` 503. **Backend split (#1183):** the `db/migrations.py` runner (PRAGMA + `INSERT OR IGNORE`) is **SQLite-only**; PostgreSQL is owned by **Alembic** — `init_database()`'s non-SQLite branch calls `db/alembic_runner.upgrade_to_head()` (`src/backend/migrations/` + `alembic.ini`; `env.py` targets `db/tables.py` MetaData). Fresh PG built by the `0001_baseline` revision (reuses `init_schema_postgres` DDL); pre-Alembic PG stamped at baseline. **Revision-id width (#1420):** `alembic_version.version_num` is `VARCHAR(255)` (env.py `version_table_column_type` + `0001_baseline` DDL; the `0008a_widen_alembic_version` migration widens existing 32-wide DBs) because Trinity's descriptive `NNNN_<table>_<change>` ids exceed Alembic's 32-char default and PostgreSQL enforces the width (SQLite doesn't — so the truncation only breaks PG boot). Keep revision ids ≤255; the `pg-migrations` CI job runs a real `alembic upgrade head` and `tests/unit/test_alembic_revision_id_length.py` lints the ids. Both coexist during transition, so a schema change lands in **both** `migrations.py` (SQLite) and a new Alembic revision (Postgres) — both tracks CI-guarded by the `schema-parity` job (SQLite parity pytest + the `scripts/ci/check_alembic_parity.py` cross-track guard that fails a DDL change missing its Alembic revision, #1342) — until SQLite **end-of-support September 1, 2026** (#1278; guide `docs/migrations/SQLITE_TO_POSTGRES.md`) — after which the goal (#746) is `tables.py` MetaData as single source with autogenerated revisions. **Two-track (open-core):** enterprise owns only `enterprise_*` tables via a **separate** runner (`enterprise/backend/_migrations.py`, tracked in `enterprise_schema_migrations`, never OSS `schema_migrations`); one file per migration (`NNNN_slug.py` with `NAME` + `upgrade(cursor, conn)`, filename order). Enterprise migrations may FK-into OSS tables but must **never ALTER** one — OSS enforcement goes through an OSS migration as an edition-agnostic primitive (e.g. `users.suspended_at`, #995). The enterprise runner runs from `register_enterprise` *after* OSS `init_database`.
 
 4. **Router Registration Order Matters** — In `main.py`, static routes like `/api/agents/context-stats` must come before `/{name}` catch-all. New collection-level agent endpoints must be registered before parameterized routes.
 
@@ -976,6 +1059,7 @@ CREATE TABLE agent_ownership (
     voice_system_prompt TEXT,
     voice_name TEXT,                               -- #28: persisted Gemini voice (NULL → 'Kore')
     public_channel_model TEXT,                     -- #894: per-agent model for public channels (NULL → platform default)
+    public_channel_system_prompt TEXT,             -- #1205: public/channel-only custom-instructions fragment
     guardrails_config TEXT,
     file_sharing_enabled INTEGER DEFAULT 0,        -- FILES-001
     circuit_breaker_enabled INTEGER DEFAULT 0,     -- RELIABILITY-007 (#526): dispatch-breaker opt-in

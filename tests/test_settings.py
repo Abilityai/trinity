@@ -1296,3 +1296,45 @@ class TestMaxParallelTasksCeiling:
             "/api/settings/max_parallel_tasks_ceiling", json={"value": "999"}
         )
         assert_status(response, 422)
+
+
+class TestFeatureFlagsBrainOrb:
+    """GET /api/settings/feature-flags — Brain Orb gating keys (#58/#60/#61).
+
+    The three brain_orb_* flags gate the orb page, the client-held voice tile, and
+    the KB-write surface in the frontend; no prior test asserted they exist, so a
+    renamed/dropped key would silently hide the feature. Values are env-dependent
+    (all default OFF), so assert presence/type and the compound-gate invariant,
+    never specific values.
+    """
+
+    pytestmark = pytest.mark.smoke
+
+    ENDPOINT = "/api/settings/feature-flags"
+
+    def test_feature_flags_requires_auth(self, unauthenticated_client: TrinityApiClient):
+        """feature-flags is any-auth-user, not public — unauthenticated gets 401."""
+        response = unauthenticated_client.get(self.ENDPOINT, auth=False)
+        assert_status(response, 401)
+
+    def test_brain_orb_flags_present_and_boolean(self, api_client: TrinityApiClient):
+        """All three brain_orb_* keys exist and are booleans."""
+        response = api_client.get(self.ENDPOINT)
+        assert_status(response, 200)
+        flags = response.json()
+        for key in (
+            "brain_orb_available",
+            "brain_orb_voice_available",
+            "brain_orb_write_available",
+        ):
+            assert key in flags, f"missing feature flag: {key}"
+            assert isinstance(flags[key], bool), f"{key} must be boolean, got {flags[key]!r}"
+
+    def test_brain_orb_write_implies_available(self, api_client: TrinityApiClient):
+        """Kill-switch layering (#61): brain_orb_write_available = WRITE && ENABLED,
+        so it can never be true while the master brain_orb_available flag is false —
+        holds under any env configuration."""
+        flags = api_client.get(self.ENDPOINT).json()
+        assert not (flags["brain_orb_write_available"] and not flags["brain_orb_available"]), (
+            "brain_orb_write_available must be gated on brain_orb_available"
+        )

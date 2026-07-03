@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page. Phase 1 (static render: first-party CSP-clean assets + same-origin iframe host + read-only `data.json` proxy) + Phase 2 (live scope mount/unmount → owner-gated agent re-export via `~/.trinity/brain-orb/` convention hooks → in-place rebuild). Voice/KB-actions/transcript deferred | [brain-orb.md](feature-flows/brain-orb.md) |
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |
 | 2026-06-29 | #894 | feat(channels): per-agent **public-channel model override** — owners pick the Claude model for public-facing chats (public link, Slack/Telegram/WhatsApp, x402) via the Sharing tab; additive NULL `agent_ownership.public_channel_model` (NULL→platform default), owner-only `GET`/`PUT /api/agents/{name}/public-channel-model`. Epic #1079. | [public-channel-model.md](feature-flows/public-channel-model.md) |
@@ -63,7 +64,7 @@
 | Capacity Management | [capacity-management.md](feature-flows/capacity-management.md) | Unified facade for per-agent execution capacity (#428) |
 | Task Execution Service | [task-execution-service.md](feature-flows/task-execution-service.md) | Unified execution lifecycle for all task callers (EXEC-024) |
 | Idempotency Keys | [idempotency-keys.md](feature-flows/idempotency-keys.md) | `Idempotency-Key` dedup at every execution trigger boundary — one execution per `(scope,key)` in 24h, fail-open (RELIABILITY-006, #525, Invariant #18) |
-| Effect Idempotency | [effect-idempotency.md](feature-flows/effect-idempotency.md) | Per-sink exactly-once-style guard for outbound side effects (messages/voip/share_file/Nevermined settle) — `effect_guard` keyed on resolved identity, scoped by execution_id; the gate on pull-mode default-ON (#1084) |
+| Effect Idempotency | [effect-idempotency.md](feature-flows/effect-idempotency.md) | Per-sink exactly-once-style guard for outbound side effects (messages/voip/share_file/Nevermined settle) — `effect_guard` keyed on resolved identity, scoped by execution_id (#1084, Direction A — the pull-mode side-effect approach was reframed to retry-with-trace (#1401) + tool-side gates + async operator human-gate (#1402) in `TARGET_ARCHITECTURE.md` v2; gates per-effect, not *the* per-agent gate) |
 | Redelivery Governor | [redelivery-governor.md](feature-flows/redelivery-governor.md) | Correlated-failure / thundering-herd controls for the #1083 re-delivery callback path — agent-side jitter (unflagged) + backend rate caps + distinct-agent shared-cause pause; fail-open, Redis-only, default-OFF behind `REDELIVERY_GOVERNOR_ENABLED` (#1085) |
 | Business Validation | [business-validation.md](feature-flows/business-validation.md) | Post-execution auditor verifies task completion (VALIDATE-001) |
 | Fan-Out | [fan-out.md](feature-flows/fan-out.md) | Parallel task dispatch and result collection via semaphore (FANOUT-001) |

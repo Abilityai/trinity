@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Brain Orb — Voice</title>
+<!-- Trinity-hardened voice tile (#58 Phase 3). Adapted from the standalone
+     Cornelius voice page: the hardcoded API key, the p5 CDN visualiser, and the
+     localhost tool proxy are all removed. The browser holds its own Gemini Live
+     socket authenticated by a short-lived EPHEMERAL token minted by the Trinity
+     backend (the config — model, voice, tools, prompt — is locked into the token
+     server-side; the browser only sends {setup:{model}}). Inline styles are
+     allowed by prod CSP (style-src 'unsafe-inline'); the LOGIC is externalized to
+     voice.js because script-src is 'self' (no inline scripts). -->
+<style>
+  body {
+    margin: 0; background: transparent; overflow: hidden;
+    font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+  }
+  #top-bar {
+    position: absolute; top: 11px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; align-items: center; z-index: 200;
+    max-width: calc(100% - 14px); flex-wrap: wrap; justify-content: center;
+  }
+  button {
+    padding: 5px 11px; font-size: 11px; background: rgba(49,64,98,0.34);
+    color: #cad5e2; border: 1px solid rgba(229,231,235,0.14); border-radius: 9999px;
+    cursor: pointer; font-family: 'JetBrains Mono', monospace; transition: background 0.2s;
+  }
+  button:hover:not(:disabled) { background: rgba(99,179,237,0.18); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #start-btn { background: rgba(0,188,125,0.18); border-color: rgba(0,188,125,0.45); color: #7fe7c4; }
+  #start-btn:hover:not(:disabled) { background: rgba(0,188,125,0.3); }
+  #end-btn { background: rgba(255,32,86,0.16); border-color: rgba(255,32,86,0.42); color: #ff8aa3; display: none; }
+  #end-btn:hover { background: rgba(255,32,86,0.28); }
+  #mute-btn { background: rgba(99,179,237,0.16); border-color: rgba(99,179,237,0.4); color: #9fcdf2; display: none; }
+  #mute-btn.active { background: rgba(99,179,237,0.5); border-color: rgba(120,190,250,0.85); color: #ebf8ff; }
+  #status {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px;
+    color: rgba(202,213,226,0.6); font-size: 11px; letter-spacing: 0.06em;
+    max-width: calc(100% - 20px); text-align: center;
+  }
+  #state-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: rgba(99,179,237,0.35); transition: background 0.4s;
+  }
+  #state-dot.connecting { background: rgba(240,177,0,0.75); animation: pulse 1s ease-in-out infinite; }
+  #state-dot.ready      { background: rgba(0,188,125,0.8); }
+  #state-dot.speaking   { background: rgba(99,179,237,0.95); animation: pulse 0.6s ease-in-out infinite; }
+  #state-dot.error      { background: rgba(255,32,86,0.85); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  /* p5 audio-reactive orb canvas — sits behind the controls, blends over the graph. */
+  canvas { position: fixed !important; top: 0 !important; left: 0 !important; z-index: 1 !important; display: block !important; mix-blend-mode: screen; }
+</style>
+</head>
+<body>
+  <div id="top-bar">
+    <button id="start-btn">Start Conversation</button>
+    <button id="mute-btn" title="Keep listening but don't play replies">Don't Interrupt</button>
+    <button id="end-btn">End</button>
+  </div>
+  <div id="status">
+    <div id="state-dot"></div>
+    <span id="status-text">press start to speak</span>
+  </div>
+  <!-- Vendored p5.js (local → CSP script-src 'self'; the CDN load was the reason
+       the audio-reactive voice orb was stripped). Loads before voice.js. -->
+  <script src="./vendor/p5.min.js"></script>
+  <!-- Logic externalized for prod CSP script-src 'self'. -->
+  <script src="./voice.js"></script>
+</body>
+</html>

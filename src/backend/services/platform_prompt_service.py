@@ -602,6 +602,36 @@ def compose_system_prompt(
     return "\n\n".join(parts)
 
 
+def build_public_channel_caller_prompt(
+    agent_name: str, memory_system_prompt: Optional[str] = None
+) -> Optional[str]:
+    """Caller-prompt fragment for public/channel surfaces (#1205).
+
+    Folds the per-agent public/channel custom instructions
+    (``public_channel_system_prompt``) together with the MEM-001 per-user memory
+    block into the single string public/channel callers pass as
+    ``execute_task(system_prompt=...)`` → ``compose_system_prompt(caller_prompt=...)``.
+    Public instructions come first (persona / guardrails / scope), then the
+    per-user memory block.
+
+    Strict no-op when the agent has no public prompt set: returns the memory
+    block unchanged (or ``None``). Never raises — a lookup failure degrades to
+    just the memory block so a chat is never blocked on this. Only the
+    public-facing surfaces (channel router, public chat, paid chat) call this;
+    authenticated chat, schedules, loops, and agent-to-agent calls do not, which
+    is what keeps the fragment scoped to outside audiences.
+    """
+    try:
+        public_prompt = db.get_public_channel_system_prompt(agent_name)
+    except Exception as e:  # noqa: BLE001 - never block a chat on this lookup
+        logger.warning(
+            "public_channel_system_prompt fetch failed for %s: %s", agent_name, e
+        )
+        public_prompt = None
+    parts = [p for p in (public_prompt, memory_system_prompt) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
+
+
 def is_execution_context_enabled() -> bool:
     """Operator kill-switch for the execution context block. Default: enabled."""
     try:

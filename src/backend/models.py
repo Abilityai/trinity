@@ -615,6 +615,23 @@ class SharedFilesList(BaseModel):
     quota_bytes: int
 
 
+class ClientRosterEntry(BaseModel):
+    """One external channel client in the Sharing-tab roster (#20).
+
+    An outside person (no Trinity account) who has messaged the agent through a
+    channel. `identity` is the channel-native handle (Telegram @username or
+    numeric id, WhatsApp phone). `display_name`/`verified_email` are null when
+    unknown; `last_active` is null for a row that has never recorded activity.
+    Channel-extensible: Slack/VoIP slot in without a contract change.
+    """
+    channel: str
+    identity: str
+    display_name: Optional[str] = None
+    verified_email: Optional[str] = None
+    message_count: int = 0
+    last_active: Optional[str] = None
+
+
 class AgentDataImportResponse(BaseModel):
     """Response for POST /api/agents/{name}/data/import (#1169).
 
@@ -651,6 +668,26 @@ class MaxParallelTasksCeilingUpdate(BaseModel):
 class AgentCapacityUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
     max_parallel_tasks: int
+
+
+# Max length for the public/channel custom-instructions fragment (#1205).
+PUBLIC_CHANNEL_PROMPT_MAX_LEN = 4000
+
+
+class PublicChannelPrompt(BaseModel):
+    """Per-agent custom instructions for public & channel chats (#1205).
+
+    Response for GET, and the stored value echoed back by PUT. `null`/empty
+    means unset — a strict no-op for the agent's behavior.
+    """
+    public_channel_system_prompt: Optional[str] = None
+
+
+class PublicChannelPromptUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/public-prompt (#1205)."""
+    public_channel_system_prompt: Optional[str] = Field(
+        default=None, max_length=PUBLIC_CHANNEL_PROMPT_MAX_LEN
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2154,6 +2191,12 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class SlackChannelMessageRequest(BaseModel):
+    """Request model for proactive Slack channel messaging (#350)."""
+    message: str
+    thread_ts: Optional[str] = None  # optionally reply in an existing thread
 
 
 # =============================================================================

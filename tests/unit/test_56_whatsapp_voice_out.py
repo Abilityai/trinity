@@ -28,6 +28,26 @@ if "database" not in sys.modules:
     _fake_db.db = MagicMock()
     sys.modules["database"] = _fake_db
 
+# Import-time stubs monkeypatch can't reach (precedent:
+# tests/unit/test_telegram_webhook_backfill.py) — snapshot & restore per test.
+_STUBBED_MODULE_NAMES = [
+    "utils.helpers",
+    "database",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
 
 @pytest.fixture
 def adapter():

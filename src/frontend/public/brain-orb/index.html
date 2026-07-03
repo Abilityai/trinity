@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cornelius — The Self-Rendering Mind</title>
+<link rel="stylesheet" href="./styles.css" />
+<link rel="stylesheet" href="./orb-trinity.css" />
+</head>
+<body>
+<canvas id="scene" tabindex="0"></canvas>
+<div id="labels"></div>
+
+<div id="loading">priming the mind…</div>
+
+<header id="title" class="panel">
+  <h1><span class="amber">◇</span> CORNELIUS</h1>
+  <p>The Self-Rendering Mind — woven from its own notes, edges and activation.</p>
+  <div class="stat" id="statline"></div>
+</header>
+
+<aside id="brief1" class="panel bcard"></aside>
+<aside id="brief2" class="panel bcard"></aside>
+<aside id="brief3" class="panel bcard"></aside>
+
+<aside id="stateBox" class="panel">
+  <div class="label">state</div>
+  <div id="stateName"><span class="dot"></span>Idle</div>
+  <div id="stateDesc">slow rotation · gentle breathing · low ambient heat</div>
+</aside>
+
+<div id="search" class="panel">
+  <input id="searchInput" type="text" autocomplete="off" spellcheck="false"
+    placeholder="find a note…   press  /  to search" />
+  <div id="searchResults"></div>
+</div>
+
+<div id="voiceTile" class="panel">
+  <div class="vhead"><span class="vh-dot"></span>voice · Cornelius<span class="vclose" id="voiceClose">✕</span></div>
+  <iframe id="voiceFrame" title="Cornelius voice" allow="microphone"></iframe>
+</div>
+
+<aside id="legend" class="panel">
+  <div id="modeChips">
+    <span class="chip on" data-mode="provenance">provenance</span>
+    <span class="chip" data-mode="recency">recency</span>
+    <span class="chip" data-mode="domains">domains</span>
+    <span class="legtitle">colour by</span>
+  </div>
+  <div id="legendProv" class="legrow">
+    <span><i class="sw" style="background:#aee9ff;box-shadow:0 0 7px #aee9ff"></i>originated</span>
+    <span><i class="sw" style="background:#63b3ed;box-shadow:0 0 7px #63b3ed"></i>endorsed</span>
+    <span><i class="sw" style="background:#5a6b86"></i>encountered</span>
+    <span><i class="sw" style="background:#f0b100;box-shadow:0 0 7px #f0b100"></i>ai-inferred</span>
+    <span><i class="sw" style="background:#a78bfa;box-shadow:0 0 7px #a78bfa"></i>reference</span>
+    <span><i class="sw" style="background:#ff2056;box-shadow:0 0 7px #ff2056"></i>tension</span>
+  </div>
+  <div id="legendRec" class="legrow" style="display:none">
+    <span><i class="sw" style="background:#dffaff;box-shadow:0 0 7px #dffaff"></i>≤2d</span>
+    <span><i class="sw" style="background:#3cf0b0;box-shadow:0 0 7px #3cf0b0"></i>week</span>
+    <span><i class="sw" style="background:#63b3ed"></i>month</span>
+    <span><i class="sw" style="background:#3f5170"></i>quarter</span>
+    <span><i class="sw" style="background:#243049"></i>older</span>
+  </div>
+  <div id="legendDom" class="legrow" style="display:none"><!-- built from DOMAINS; click to isolate --></div>
+</aside>
+
+<aside id="controls" class="panel">
+  <div>find<span class="k">/</span></div>
+  <div>voice<span class="k">V</span></div>
+  <div>states<span class="k">1</span>–<span class="k">7</span></div>
+  <div>staleness<span class="k">W</span></div>
+  <div>endorse<span class="k">E</span></div>
+  <div>colour<span class="k">R</span></div>
+  <div>lens<span class="k">L</span></div>
+  <div>scope<span class="k">S</span></div>
+  <div>briefing<span class="k">B</span></div>
+  <div>demo<span class="k">P</span></div>
+  <div>actions<span class="k">A</span></div>
+</aside>
+
+<!-- lens: runtime visual controls (press L) — modes + brightness/focus/size/edge knobs -->
+<aside id="lensPanel" class="panel">
+  <h3>lens</h3>
+  <div class="modes">
+    <span class="chip on" data-lmode="default">default</span>
+    <span class="chip" data-lmode="foundations">foundations</span>
+    <span class="chip" data-lmode="recent">recent</span>
+    <span class="chip" data-lmode="provenance">provenance</span>
+    <span class="chip" data-lmode="tensions">tensions</span>
+  </div>
+  <select id="lensSource" class="lsrc" title="what brightness means">
+    <option value="heat">brightness · heat (blend)</option>
+    <option value="in-degree">brightness · in-degree (authority)</option>
+    <option value="recency">brightness · recency</option>
+    <option value="lifecycle">brightness · lifecycle</option>
+    <option value="provenance">brightness · provenance</option>
+    <option value="tension">brightness · tensions</option>
+  </select>
+  <div class="knob"><label>brightness floor <b id="lensFloorV">0.42</b></label><input id="lensFloor" type="range" min="0" max="0.8" step="0.01"></div>
+  <div class="knob"><label>brightness gain <b id="lensGainV">0.95</b></label><input id="lensGain" type="range" min="0.2" max="2" step="0.01"></div>
+  <div class="knob"><label>focus threshold <b id="lensFocusV">0.00</b></label><input id="lensFocus" type="range" min="0" max="0.95" step="0.01"></div>
+  <div class="knob"><label>hub size <b id="lensHubV">0.85</b></label><input id="lensHub" type="range" min="0" max="2" step="0.01"></div>
+  <div class="knob"><label>edge density <b id="lensEdgesV">100%</b></label><input id="lensEdges" type="range" min="0" max="1" step="0.02"></div>
+</aside>
+
+<!-- scope: mount/unmount vault scopes live (press S) — drives BOTH the orb render and voice search -->
+<aside id="scopePanel" class="panel">
+  <h3>scope · mount / unmount</h3>
+  <div id="scopeList" class="scoperows"><div class="scopehint">connecting to the orb backend…</div></div>
+  <div class="scopefoot">mounted scopes render on the orb <b>and</b> are searchable by voice</div>
+</aside>
+
+<!-- dock: re-open closed tiles (always visible, never closeable) -->
+<div id="dock" class="panel"></div>
+
+<!-- actions: capture a thought, connect notes, run a skill (needs the brain-orb backend) -->
+<div id="actions" class="panel">
+  <div class="ahead">actions<span class="aclose" id="actClose">✕</span></div>
+  <textarea id="capInput" placeholder="capture a thought…  (⌘/Ctrl+Enter saves to 00-Inbox)"></textarea>
+  <span class="abtn" id="capSave">capture → inbox</span>
+  <div class="asec">graph</div>
+  <span class="abtn" id="refreshGraphBtn" title="Reindex &amp; re-export so new notes/links appear on the orb">↻ integrate &amp; refresh</span>
+  <div id="skillBtns" class="skillrow"></div>
+  <div id="actStatus" class="astatus"></div>
+</div>
+
+<aside id="inspector" class="panel">
+  <span class="close" id="inspClose">✕</span>
+  <h2 id="inspTitle"></h2>
+  <div class="meta">
+    <div><span class="k">layer</span> <span id="inspLayer"></span></div>
+    <div><span class="k">lifecycle</span> <span id="inspPhase"></span></div>
+    <div><span class="k">provenance</span> <span class="pill" id="inspProv"></span></div>
+    <div><span class="k">heat</span> <span id="inspHeat"></span></div>
+    <div><span class="k">connections</span> <span id="inspDeg"></span></div>
+    <div><span class="k">inbound</span> <span id="inspInDeg"></span></div>
+  </div>
+  <div class="conns" id="inspActions" style="display:none">
+    <h4>actions</h4>
+    <div class="iactrow"><span class="iabtn" id="iaConnect">＋ connect to…</span></div>
+  </div>
+  <div class="conns">
+    <h4>full content</h4>
+    <div id="inspContent"></div>
+  </div>
+  <div class="conns">
+    <h4>top connections</h4>
+    <div id="inspConns"></div>
+  </div>
+</aside>
+
+<section id="reading" class="panel">
+  <span class="close" id="readClose">✕</span>
+  <div class="rkicker">⬡ ai-inferred · converged conclusion <span id="readRuns"></span></div>
+  <h2 id="readTopic"></h2>
+  <div id="readQ" class="rq"></div>
+  <div id="readBody" class="rbody"></div>
+  <div class="rfoot">This is the agent's own synthesis. It stays quarantined as <b>ai-inferred</b> until you endorse it across the membrane.</div>
+</section>
+
+<section id="tensionBox" class="panel">
+  <span class="close" id="tenClose">✕</span>
+  <div class="tkicker">⚡ tension · productive contradiction</div>
+  <div id="tenPair" class="tpair"></div>
+  <div id="tenBody" class="tbody"></div>
+  <div class="tfoot">Tension edges are <b>immune to staleness</b> — they're surfaced as synthesis opportunities, never auto-resolved.</div>
+</section>
+
+<div id="toast"></div>
+
+<!-- markdown render (global `marked`) + sanitizer (Trinity H-005); first-party for prod CSP script-src 'self' -->
+<script src="./vendor/marked.min.js"></script>
+<script src="./vendor/purify.min.js"></script>
+<!-- orb renderer — externalized from the inline module so prod CSP (script-src 'self') serves it -->
+<script type="module" src="./orb.js"></script>
+</body>
+</html>
