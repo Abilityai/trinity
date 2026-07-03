@@ -265,16 +265,37 @@ class SchedulerDatabase:
     def list_all_schedules(self) -> List[Schedule]:
         """List all schedules (enabled and disabled) for sync detection.
 
-        Excludes soft-deleted (#834 Phase 1b).
+        Excludes schedules that are themselves soft-deleted (#834 Phase 1b).
+
+        A schedule whose *parent agent* is soft-deleted (`agent_ownership.
+        deleted_at`) is reported as **disabled** here (#1427): soft-deleting an
+        agent leaves the child schedule row untouched (enabled=1, deleted_at
+        NULL, same updated_at), so the sync's transition diff saw no change and
+        never removed the already-registered APScheduler job — it kept firing
+        into a nonexistent container (ConnectError every cron tick). Folding the
+        agent's soft-delete into the reported `enabled` makes the existing
+        enabled→disabled transition remove the job, and — because agent recovery
+        clears `agent_ownership.deleted_at` — the disabled→enabled transition
+        re-adds it. Symmetric with #834 recovery; no schedule-row mutation.
+        `list_all_enabled_schedules` already applies this join at startup; this
+        closes the same gap on the live-sync path.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM agent_schedules
-                WHERE deleted_at IS NULL
-                ORDER BY agent_name, name
+                SELECT s.*, ao.deleted_at AS _agent_deleted_at
+                FROM agent_schedules s
+                LEFT JOIN agent_ownership ao ON ao.agent_name = s.agent_name
+                WHERE s.deleted_at IS NULL
+                ORDER BY s.agent_name, s.name
             """)
-            return [self._row_to_schedule(row) for row in cursor.fetchall()]
+            schedules = []
+            for row in cursor.fetchall():
+                schedule = self._row_to_schedule(row)
+                if row["_agent_deleted_at"] is not None:
+                    schedule.enabled = False
+                schedules.append(schedule)
+            return schedules
 
     def list_agent_schedules(self, agent_name: str) -> List[Schedule]:
         """List all schedules for a specific agent.
