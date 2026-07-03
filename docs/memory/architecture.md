@@ -280,6 +280,8 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 
 Vector 0.43.1 (`timberio/vector:0.43.1-alpine`). Captures all container stdout/stderr via Docker socket; routes platform logs to `/data/logs/platform.json` and agent logs to `/data/logs/agents.json`; enriches with container metadata; parses JSON logs. Health: `http://localhost:8686/health`. Query: `docker exec trinity-vector sh -c "tail -50 /data/logs/platform.json" | jq .` (same for `agents.json`).
 
+**Docker Desktop local override (#1432):** the `docker_logs` source busy-loops on Docker Desktop / VM-based runtimes (the virtualized log relay closes each `follow` stream after backlog flush; `docker_logs` reconnects with no backoff → a storm that pegs the Docker VM). Native Linux dockerd is unaffected, so **prod is unchanged**. For local dev, `config/vector.local.yaml` swaps to a `file` source tailing `/var/lib/docker/containers/*/*-json.log` (immune to the follow-close bug), applied via a gitignored `docker-compose.override.yml` (template `docker-compose.override.example.yml`) that `start.sh` auto-creates when it detects Docker Desktop (`TRINITY_LOCAL_LOG_SOURCE=docker|file` overrides). The file source keys by container ID → a single `/data/logs/local-*.json` instead of the name-split files. See [docs/QUERYING_LOGS.md](../QUERYING_LOGS.md).
+
 ### Agent Containers
 
 **Base image** `trinity-agent-base:latest`: Python 3.11, Node.js 20, Go 1.21, Claude Code (latest), common Python packages.

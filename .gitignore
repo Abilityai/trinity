@@ -163,6 +163,9 @@ session-files/
 # Local-only working artifacts (never push)
 saved-conversations/
 tests/manual/
+# Machine-local compose override (#1432 Docker Desktop Vector fix, and any local
+# tweaks). Committed template: docker-compose.override.example.yml
+docker-compose.override.yml
 # gstack tooling state (skill-local artifacts; project-tracked CSO reports
 # live under docs/security-reports/ instead)
 .gstack/
