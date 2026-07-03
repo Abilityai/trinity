@@ -88,18 +88,26 @@ class OperatorQueueOperations:
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
 
+        # Agents author operator-queue.json free-form, so the sync boundary must
+        # be defensive (#1426): a required field missing from one item used to
+        # raise KeyError here, and because the item stayed `pending` in the agent
+        # file the 5s sync loop retried and error-logged it forever — the request
+        # never reached the Operating Room. Default the hard-indexed fields
+        # (mirrors how type/status/priority are already defaulted) so the item is
+        # created once and the loop stops (the next cycle sees it via exists()).
+        # `created_at` defaults to now (ingest time) per the issue's preferred fix.
         stmt = make_insert(operator_queue).values(
             id=item_id,
             agent_name=agent_name,
             type=item.get("type", "question"),
             status=item.get("status", "pending"),
             priority=item.get("priority", "medium"),
-            title=item["title"],
-            question=item["question"],
+            title=item.get("title") or "Agent request",
+            question=item.get("question") or item.get("title") or "(no details provided)",
             options=options_json,
             context=context_json,
             execution_id=item.get("context", {}).get("execution_id") if item.get("context") else None,
-            created_at=item["created_at"],
+            created_at=item.get("created_at") or utc_now_iso(),
             expires_at=item.get("expires_at"),
         ).on_conflict_do_nothing(index_elements=["id"])
 
