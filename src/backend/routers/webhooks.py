@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from models import CONTEXT_MAX_CHARS, WebhookTriggerRequest
 
 from database import db
+from routers.public import _get_client_ip
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import idempotency_service
 from services import rate_limiter
@@ -38,6 +39,21 @@ SCHEDULER_URL = os.getenv("SCHEDULER_URL", "http://scheduler:8001")
 # used to live here.
 WEBHOOK_RATE_LIMIT = int(os.getenv("WEBHOOK_RATE_LIMIT", "10"))
 WEBHOOK_RATE_WINDOW = 60  # seconds
+
+# Pre-auth per-IP rate limit (#1424). Applied BEFORE the token regex/DB lookup so
+# a flood of well-formed-but-unknown tokens on this unauthenticated, world-reachable
+# route is throttled — the per-token limit above only engages once a token resolves.
+# Uses the trusted-proxy-aware client IP (routers.public._get_client_ip) so callers
+# can't spoof X-Forwarded-For to dodge it, and legit callers behind our nginx don't
+# all collapse into one bucket. Generous vs the per-token limit so normal valid-token
+# traffic is never falsely blocked. Fail-open (shared limiter).
+WEBHOOK_IP_RATE_LIMIT = int(os.getenv("WEBHOOK_IP_RATE_LIMIT", "60"))
+WEBHOOK_IP_RATE_WINDOW = 60  # seconds
+
+# Max accepted request-body size (#1424). The optional `context` is already ≤4000
+# chars; 16 KiB comfortably covers that (UTF-8 worst case) plus JSON framing and the
+# small `metadata` dict, while capping the unauthenticated read amplification surface.
+WEBHOOK_MAX_BODY_BYTES = int(os.getenv("WEBHOOK_MAX_BODY_BYTES", str(16 * 1024)))
 
 # Webhook tokens are secrets.token_urlsafe(32) — exactly 43 chars (CSO OBS-2).
 # Tightened from {20,60}: prior regex was a defense-in-depth early-reject;
@@ -55,7 +71,6 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 async def trigger_webhook(
     webhook_token: str,
     request: Request,
-    body: Optional[WebhookTriggerRequest] = None,
     idempotency_key: Optional[str] = Header(None),
 ):
     """
@@ -67,6 +82,18 @@ async def trigger_webhook(
     Returns 202 Accepted immediately; execution runs asynchronously.
     Poll GET /api/agents/{name}/executions to track the result.
     """
+    # Pre-auth per-IP rate limit (#1424) — enforced FIRST, before the regex/DB
+    # steps, so a flood of well-formed-but-unknown tokens is throttled even
+    # though the per-token limiter below never engages for them. Trusted-proxy
+    # aware so X-Forwarded-For can't be spoofed to bypass it. Fail-open.
+    caller_ip = _get_client_ip(request)
+    rate_limiter.enforce(
+        f"webhook_ip:{caller_ip}",
+        WEBHOOK_IP_RATE_LIMIT,
+        WEBHOOK_IP_RATE_WINDOW,
+        detail="Too many webhook requests from this address.",
+    )
+
     # Reject obviously malformed tokens before hitting the DB
     if not _TOKEN_RE.match(webhook_token):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -92,6 +119,49 @@ async def trigger_webhook(
         detail="Webhook rate limit exceeded.",
     )
 
+    # Read + size-cap the body BEFORE parsing (#1424). Fast-reject on the
+    # Content-Length hint, then read the stream with a hard byte ceiling so a
+    # missing/lying header (or chunked encoding) can't force us to buffer an
+    # arbitrarily large body — we bail at cap+one chunk. The body is no longer a
+    # typed FastAPI param, so no full parse happens before this gate, and the
+    # same bytes feed the idempotency key below (single read).
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Request body too large",
+            )
+    chunks: list[bytes] = []
+    received = 0
+    try:
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > WEBHOOK_MAX_BODY_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Request body too large",
+                )
+            chunks.append(chunk)
+    except HTTPException:
+        raise
+    except Exception:
+        chunks = []
+    raw_body = b"".join(chunks)
+    body: Optional[WebhookTriggerRequest] = None
+    if raw_body.strip():
+        try:
+            body = WebhookTriggerRequest.model_validate_json(raw_body)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid webhook request body",
+            )
+
     # Build the message: base schedule message + optional caller context.
     # Framed as data (not instructions) to reduce prompt injection surface.
     message = schedule.message
@@ -106,16 +176,10 @@ async def trigger_webhook(
                 f"---"
             )
 
-    # Trigger execution via the scheduler service
-    caller_ip = request.client.host if request.client else "unknown"
-
     # RELIABILITY-006 (#525): idempotency gate. External senders retry on 5xx
     # and perceived timeouts; without a key we auto-derive one from
     # (token, body_hash) so naive re-deliveries don't fire the schedule twice.
-    try:
-        raw_body = await request.body()
-    except Exception:
-        raw_body = b""
+    # `raw_body` was read + size-capped above (single read).
     idem_key = idempotency_key or idempotency_service.derive_webhook_key(
         webhook_token, raw_body
     )

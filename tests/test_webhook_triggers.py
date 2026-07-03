@@ -255,6 +255,62 @@ class TestWebhookTrigger:
         finally:
             _delete_schedule(api_client, test_agent_name, sid)
 
+    def test_oversized_body_returns_413(
+        self, api_client: TrinityApiClient, test_agent_name: str
+    ):
+        """A body over the size cap is rejected (413) before it is parsed (#1424)."""
+        import httpx
+        schedule = _create_test_schedule(api_client, test_agent_name)
+        sid = schedule["id"]
+        try:
+            gen_resp = api_client.post(
+                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+            )
+            webhook_url = gen_resp.json()["webhook_url"]
+            token = webhook_url.split("/api/webhooks/")[1]
+
+            # ~20 KB raw body — over the 16 KiB cap; rejected on Content-Length
+            # before any JSON parse (so 413, not 422).
+            resp = httpx.post(
+                f"http://localhost:8000/api/webhooks/{token}",
+                content=b'{"metadata": {"blob": "' + b"y" * 20000 + b'"}}',
+                headers={"Content-Type": "application/json"},
+                timeout=15.0,
+            )
+            assert resp.status_code == 413, (
+                f"Expected 413 for oversized body, got {resp.status_code}"
+            )
+        finally:
+            _delete_schedule(api_client, test_agent_name, sid)
+
+    def test_invalid_token_flood_is_rate_limited(self):
+        """A flood of well-formed-but-unknown tokens is throttled per-IP (#1424).
+
+        The per-token limiter never engages for unknown tokens; the pre-auth
+        per-IP limit must (429 + Retry-After). Isolated to its own bucket via
+        X-Real-IP (127.0.0.1 is a trusted proxy, so _get_client_ip honors it).
+        """
+        import httpx
+        # WEBHOOK_IP_RATE_LIMIT default is 60/60s; send enough to cross it.
+        headers = {"X-Real-IP": "203.0.113.77"}
+        saw_429 = False
+        retry_after_ok = True
+        for _ in range(70):
+            resp = httpx.post(
+                "http://localhost:8000/api/webhooks/" + "Z" * 43,
+                headers=headers,
+                timeout=15.0,
+            )
+            if resp.status_code == 429:
+                saw_429 = True
+                retry_after_ok = "Retry-After" in resp.headers
+                break
+            assert resp.status_code == 404, (
+                f"Pre-429 requests should 404 (unknown token), got {resp.status_code}"
+            )
+        assert saw_429, "Per-IP rate limit did not trigger 429 within 70 requests"
+        assert retry_after_ok, "429 response is missing the Retry-After header"
+
     def test_old_token_invalid_after_regenerate(
         self, api_client: TrinityApiClient, test_agent_name: str
     ):
