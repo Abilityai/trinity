@@ -8,10 +8,14 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from models import AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision
+from models import (
+    AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision,
+    User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
+)
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import get_current_user, OwnedAgentByName, CurrentUser
 from services.docker_service import get_agent_container
+from services.client_roster_service import get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
 
@@ -200,6 +204,53 @@ async def get_agent_access_endpoint(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     return db.get_agent_operator_access(agent_name)
+@router.get("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
+async def get_public_channel_prompt_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: CurrentUser,
+):
+    """Get the agent's public/channel custom instructions (#1205).
+
+    Owner-only. Applies to public links, channel chats (Slack/Telegram/
+    WhatsApp), and x402 paid chat — not the owner's authenticated chats,
+    schedules, loops, or agent-to-agent calls.
+    """
+    return PublicChannelPrompt(
+        public_channel_system_prompt=db.get_public_channel_system_prompt(agent_name)
+    )
+
+
+@router.put("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
+async def set_public_channel_prompt_endpoint(
+    agent_name: OwnedAgentByName,
+    body: PublicChannelPromptUpdate,
+    current_user: CurrentUser,
+):
+    """Set/clear the agent's public/channel custom instructions (#1205).
+
+    Owner-only. Empty/whitespace clears the value (strict no-op surface).
+    """
+    db.set_public_channel_system_prompt(agent_name, body.public_channel_system_prompt)
+    return PublicChannelPrompt(
+        public_channel_system_prompt=db.get_public_channel_system_prompt(agent_name)
+    )
+
+
+@router.get("/{agent_name}/clients", response_model=List[ClientRosterEntry])
+async def get_client_roster_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: CurrentUser,
+):
+    """External-client roster for the Sharing tab (#20).
+
+    Lists outside users (no Trinity account) who have messaged the agent through
+    a channel, aggregated across channels and ordered by most-recent activity.
+    DB-sourced — renders even when the agent container is stopped — so there is
+    deliberately no container existence check here (`OwnedAgentByName` already
+    enforces the agent exists and the caller owns it). Read-only; per-client
+    block/revoke/approve controls are a separate follow-up (#21).
+    """
+    return get_client_roster(agent_name)
 
 
 # ---------------------------------------------------------------------------

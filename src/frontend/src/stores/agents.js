@@ -140,6 +140,25 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
+    // #1205: per-agent custom instructions for public & channel chats
+    async fetchPublicChannelPrompt(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/public-prompt`, {
+        headers: authStore.authHeader
+      })
+      return response.data.public_channel_system_prompt
+    },
+
+    async savePublicChannelPrompt(name, prompt) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/public-prompt`,
+        { public_channel_system_prompt: prompt },
+        { headers: authStore.authHeader }
+      )
+      return response.data.public_channel_system_prompt
+    },
+
     async createAgent(config) {
       this.loading = true
       this.error = null

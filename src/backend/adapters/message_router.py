@@ -24,6 +24,7 @@ from collections import defaultdict
 from database import db
 from services.docker_service import get_agent_container
 from services.platform_prompt_service import (
+    build_public_channel_caller_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
@@ -126,6 +127,66 @@ def _format_group_sender(message: NormalizedMessage) -> str:
         parts.append(f"[From: User #{message.sender_id}]")
 
     return "\n".join(parts)
+
+
+def _format_channel_identity(message: NormalizedMessage) -> str:
+    """Format channel + sender identity for a non-group channel message (#350).
+
+    Driven by metadata an adapter's ``enrich_message`` populated
+    (``channel_name`` / ``sender_display_name`` / ``sender_username``). Returns
+    a prefix like::
+
+        [Channel: #engineering]
+        [From: John Smith (@johndoe)]
+
+    Gated on ``channel_name`` presence, so this fires only for channel messages
+    (Slack #channel), never DMs or channels without enrichment (empty string ⇒
+    context unchanged).
+    """
+    channel_name = message.metadata.get("channel_name")
+    if not channel_name:
+        return ""
+
+    parts = [f"[Channel: #{channel_name}]"]
+    display = message.metadata.get("sender_display_name")
+    username = message.metadata.get("sender_username")
+    if display and username:
+        parts.append(f"[From: {display} (@{username})]")
+    elif display:
+        parts.append(f"[From: {display}]")
+    elif username:
+        parts.append(f"[From: @{username}]")
+    else:
+        parts.append(f"[From: User {message.sender_id}]")
+    return "\n".join(parts)
+
+
+def _agent_avatar_url(agent_name: str) -> Optional[str]:
+    """Best-effort public URL to an agent's avatar for a channel bot icon (#292).
+
+    Slack (and any channel supporting a per-message icon) needs a publicly
+    fetchable URL. Returns None when no public base URL is configured; a
+    private/unreachable base is harmless — the channel simply falls back to its
+    default icon. Cache-busts with ``avatar_updated_at`` when available so the
+    channel refetches after an avatar change. The avatar endpoint 404s cleanly
+    for avatar-less agents, so we don't gate on existence.
+    """
+    try:
+        base = settings_service.get_public_chat_url()
+        if not base:
+            return None
+        url = f"{base.rstrip('/')}/api/agents/{agent_name}/avatar"
+        identity = db.get_avatar_identity(agent_name)
+        updated_at = identity.get("updated_at") if identity else None
+        if updated_at:
+            # digits-only cache-bust token from the ISO timestamp
+            ver = "".join(ch for ch in str(updated_at) if ch.isdigit())
+            if ver:
+                url = f"{url}?v={ver}"
+        return url
+    except Exception:  # noqa: BLE001 — icon is best-effort, never blocks a reply
+        logger.debug("[#292] avatar URL build failed for %s", agent_name, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +323,11 @@ class ChannelMessageRouter:
             return
         agent_name, bot_token = resolved
 
+        # 2a. Enrich with async-fetched sender/channel identity (#350). No-op on
+        # channels whose event already carries identity (Telegram); Slack fills
+        # in display name + channel name here. Best-effort — never raises.
+        await adapter.enrich_message(message)
+
         # 2b. Transcribe Telegram voice notes in place (no-op elsewhere).
         message = await self._maybe_transcribe_voice(adapter, message, bot_token, channel)
 
@@ -313,6 +379,12 @@ class ChannelMessageRouter:
             context_prompt = f"{sender_context}\n\n{message.text}"
         else:
             context_prompt = db.build_public_chat_context(session_id, message.text)
+            # #350: prepend channel + sender identity for channel (non-DM)
+            # messages so the agent knows who is speaking. Empty for DMs and
+            # un-enriched channels → context unchanged.
+            identity_prefix = _format_channel_identity(message)
+            if identity_prefix:
+                context_prompt = f"{identity_prefix}\n\n{context_prompt}"
         logger.debug(f"[ROUTER:{channel}] Step 7 - context built ({len(context_prompt)} chars, group={is_group})")
 
         # 7b. Handle file uploads — download via adapter, copy into agent container.
@@ -434,7 +506,10 @@ class ChannelMessageRouter:
                 allowed_tools=public_allowed_tools,
                 # #894: per-agent public-channel model override (None → platform default).
                 model=db.get_public_channel_model(agent_name),
-                system_prompt=memory_system_prompt,
+                # #1205: public/channel custom instructions + MEM-001 memory.
+                system_prompt=build_public_channel_caller_prompt(
+                    agent_name, memory_system_prompt
+                ),
                 images=image_data or None,
             )
 
@@ -550,6 +625,12 @@ class ChannelMessageRouter:
 
         logger.debug(f"[ROUTER:{channel}] Step 12 - sending response")
         response_metadata = {"bot_token": bot_token, "agent_name": agent_name}
+        # #292: hand the agent's avatar to channels that render a per-message bot
+        # icon (Slack `icon_url`). Best-effort — None when the agent has no
+        # avatar or no public base URL is set; adapters ignore it otherwise.
+        avatar_url = _agent_avatar_url(agent_name)
+        if avatar_url:
+            response_metadata["agent_avatar_url"] = avatar_url
         if is_group:
             response_metadata["is_group"] = True
         await adapter.send_response(

@@ -1004,6 +1004,22 @@ def _migrate_agent_ownership_public_channel_model(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_public_channel_prompt(cursor, conn):
+    """Add public_channel_system_prompt column to agent_ownership (#1205).
+
+    Per-agent custom instructions appended to the system prompt for
+    public-facing conversations only (public links, Slack/Telegram/WhatsApp
+    channels, x402 paid chat). Text-surface counterpart of voice_system_prompt.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "public_channel_system_prompt",
+        "ALTER TABLE agent_ownership ADD COLUMN public_channel_system_prompt TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -2746,4 +2762,5 @@ MIGRATIONS = [
     ("agent_ownership_public_channel_model", _migrate_agent_ownership_public_channel_model),
     ("agent_ownership_mcp_exposed", _migrate_agent_ownership_mcp_exposed),
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
+    ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
 ]

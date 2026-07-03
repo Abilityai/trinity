@@ -45,6 +45,7 @@ services:
       # prod (the #1039 packaging-gap class).
       - SLACK_SOCKET_CONNECTION_COUNT=${SLACK_SOCKET_CONNECTION_COUNT:-2}
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY:-}
+      - CREDENTIAL_ENCRYPTION_KEY_SECONDARY=${CREDENTIAL_ENCRYPTION_KEY_SECONDARY:-}  # #267 rotation fallback
       # Agent auth master (#1159) - backend derives each agent's in-container
       # :8000 auth token from this; .env alone is inert in prod, so forward it
       # explicitly. Backend hard-fails on first agent call if unset.
@@ -87,6 +88,12 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
+      # gates the feature (empty ⇒ adapters deliver text). Prod compose launches
+      # standalone (no base merge / env_file), so wire it here too (#1056 class).
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s

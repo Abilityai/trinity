@@ -392,7 +392,7 @@ Reuses `build_snapshot`/`restore_from_tar` **only if** greenlit, and **only afte
 Git-worktree-per-execution. Blocked on the **runtime-config-sharing** problem: a fresh worktree does not carry the gitignored `.claude/`, `.env`, `.mcp.json`, `content/` the turn needs. **This is where #27 (CLOSED) lives** — #1095 supersedes it as the worktree implementation track, to be opened only when the concurrent quadrant is greenlit.
 
 ### 10.3 External side-effect rollback — #1084
-A workspace transaction is **not** global atomicity. Email/Slack/git-push/payment already sent are not un-sent by a filesystem rollback. `TARGET_ARCHITECTURE.md:482` makes effect-scoped idempotency (#1084) the gate for defaulting side-effect-bearing agents into re-delivery; **the workspace transaction must state this limit explicitly so it does not masquerade as global atomicity.**
+A workspace transaction is **not** global atomicity. Email/Slack/git-push/payment already sent are not un-sent by a filesystem rollback. `TARGET_ARCHITECTURE.md` (§Re-Delivery and Side-Effect Recovery, v2) makes side-effect **recovery** (#1084 / #1401 / #1402) the discipline for defaulting side-effect-bearing agents into re-delivery — reframed from the earlier "effect-scoped idempotency is the gate" to retry-with-prior-trace + deterministic tool-side gates; **the workspace transaction must state this limit explicitly so it does not masquerade as global atomicity.**
 
 ### 10.4 Implementation & tests
 A follow-up issue, **gated on this doc's review + a GO** (§0.5). The §11 matrix is the test plan that issue inherits.

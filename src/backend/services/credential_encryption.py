@@ -32,8 +32,15 @@ from services.agent_auth import agent_httpx_client
 
 logger = logging.getLogger(__name__)
 
-# Encryption key environment variable
+# Encryption key environment variable (primary — used for ALL new writes)
 ENCRYPTION_KEY_ENV = "CREDENTIAL_ENCRYPTION_KEY"
+
+# Optional secondary key (#267) — DECRYPT-ONLY fallback used during key rotation.
+# Set it to the *previous* key while CREDENTIAL_ENCRYPTION_KEY holds the new one:
+# existing ciphertext still decrypts (via the secondary), new writes use the
+# primary, and `scripts/deploy/rotate-credential-key.py` re-encrypts persisted
+# secrets onto the primary. Once the sweep completes the secondary can be removed.
+SECONDARY_ENCRYPTION_KEY_ENV = "CREDENTIAL_ENCRYPTION_KEY_SECONDARY"
 
 # Default credential files to look for
 DEFAULT_CREDENTIAL_FILES = [".env", ".mcp.json"]
@@ -100,6 +107,7 @@ class CredentialEncryptionService:
         """
         self._key = key
         self._aesgcm: Optional[AESGCM] = None
+        self._aesgcm_secondary: Optional[AESGCM] = None  # #267 rotation fallback
 
     @property
     def key(self) -> bytes:
@@ -134,6 +142,31 @@ class CredentialEncryptionService:
         if self._aesgcm is None:
             self._aesgcm = AESGCM(self.key)
         return self._aesgcm
+
+    @property
+    def aesgcm_secondary(self) -> Optional[AESGCM]:
+        """Decrypt-only cipher for the previous key during rotation (#267).
+
+        Returns None when ``CREDENTIAL_ENCRYPTION_KEY_SECONDARY`` is unset, so a
+        single-key deployment behaves exactly as before. An invalid secondary is
+        logged and ignored (it must never break the primary decrypt path)."""
+        if self._aesgcm_secondary is not None:
+            return self._aesgcm_secondary
+        key_hex = os.getenv(SECONDARY_ENCRYPTION_KEY_ENV)
+        if not key_hex:
+            return None
+        try:
+            key_bytes = bytes.fromhex(key_hex)
+            if len(key_bytes) != 32:
+                raise ValueError(f"must be 32 bytes (64 hex chars), got {len(key_bytes)}")
+        except ValueError as e:
+            logger.warning(
+                "Ignoring invalid %s (rotation decrypt-fallback disabled): %s",
+                SECONDARY_ENCRYPTION_KEY_ENV, e,
+            )
+            return None
+        self._aesgcm_secondary = AESGCM(key_bytes)
+        return self._aesgcm_secondary
 
     def encrypt(self, files: Dict[str, str]) -> str:
         """
@@ -196,11 +229,19 @@ class CredentialEncryptionService:
         except (KeyError, ValueError) as e:
             raise ValueError(f"Invalid encrypted data structure: {e}")
 
-        # Decrypt
+        # Decrypt with the primary key; during rotation (#267) fall back to the
+        # decrypt-only secondary key so ciphertext written under the previous key
+        # still opens. GCM's auth tag makes a wrong key a clean failure.
         try:
             plaintext = self.aesgcm.decrypt(nonce, ciphertext, None)
-        except Exception as e:
-            raise ValueError(f"Decryption failed - wrong key or corrupted data: {e}")
+        except Exception as primary_err:
+            secondary = self.aesgcm_secondary
+            if secondary is None:
+                raise ValueError(f"Decryption failed - wrong key or corrupted data: {primary_err}")
+            try:
+                plaintext = secondary.decrypt(nonce, ciphertext, None)
+            except Exception:
+                raise ValueError(f"Decryption failed - wrong key or corrupted data: {primary_err}")
 
         # Parse decrypted JSON
         try:
@@ -229,6 +270,18 @@ class CredentialEncryptionService:
         if isinstance(data, dict) and data.get(_ARCHIVE_V2_MARKER):
             return data.get("files", {}), data.get("files_b64", {})
         return data, {}
+
+    def rewrap(self, encrypted: str) -> str:
+        """Re-encrypt an existing envelope under the PRIMARY key (#267).
+
+        Decrypts with whichever key works (primary or rotation secondary) and
+        re-encrypts with the primary. Works uniformly for single-secret DB
+        tokens and v2 `.credentials.enc` archives — both ride the same envelope
+        through ``encrypt``/``decrypt``. Idempotent: an envelope already on the
+        primary key round-trips to an equivalent envelope (fresh nonce). The
+        re-encryption sweep (`scripts/deploy/rotate-credential-key.py`) calls
+        this per persisted secret to migrate the fleet onto a rotated key."""
+        return self.encrypt(self.decrypt(encrypted))
 
     async def read_agent_credential_files(
         self,

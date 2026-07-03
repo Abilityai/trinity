@@ -19,6 +19,7 @@ from services.nevermined_payment_service import (
     NEVERMINED_AVAILABLE,
 )
 from services.task_execution_service import get_task_execution_service
+from services.platform_prompt_service import build_public_channel_caller_prompt
 
 router = APIRouter(prefix="/api/paid", tags=["paid"])
 logger = logging.getLogger(__name__)
@@ -172,6 +173,7 @@ async def paid_chat(agent_name: str, request_body: PaidChatRequest, request: Req
             agent_name=agent_name,
             message=request_body.message,
             triggered_by="paid",
+            system_prompt=build_public_channel_caller_prompt(agent_name),  # #1205
             resume_session_id=request_body.session_id,
             # #894: per-agent public-channel model override (None → platform default).
             model=db.get_public_channel_model(agent_name),

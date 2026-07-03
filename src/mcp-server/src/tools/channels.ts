@@ -66,8 +66,8 @@ export function createChannelTools(
         "Returns group IDs, names, and configuration for each group. " +
         "Use this to discover which groups you can send proactive messages to.",
       parameters: z.object({
-        channel_type: z.enum(["telegram"])
-          .describe("Channel type to list groups for. Currently only 'telegram' is supported."),
+        channel_type: z.enum(["telegram", "slack"])
+          .describe("Channel type to list groups for: 'telegram' groups or 'slack' channels."),
         agent_name: z.string().optional()
           .describe(
             "Agent name to list groups for. Required for user-scoped API keys. " +
@@ -76,7 +76,7 @@ export function createChannelTools(
       }),
       execute: async (
         params: {
-          channel_type: "telegram";
+          channel_type: "telegram" | "slack";
           agent_name?: string;
         },
         context?: { session?: McpAuthContext }
@@ -112,6 +112,25 @@ export function createChannelTools(
             }, null, 2);
           }
 
+          if (params.channel_type === "slack") {
+            const result = await apiClient.listSlackChannels(agentName);
+            const groups = result.channels.map(c => ({
+              channel_type: "slack",
+              chat_id: c.channel_id,
+              chat_title: c.channel_name || "Unnamed Channel",
+              workspace_name: c.workspace_name,
+              is_dm_default: c.is_dm_default,
+            }));
+
+            return JSON.stringify({
+              success: true,
+              agent_name: agentName,
+              channel_type: params.channel_type,
+              groups,
+              count: groups.length,
+            }, null, 2);
+          }
+
           return JSON.stringify({
             success: false,
             error: `Unsupported channel type: ${params.channel_type}`,
@@ -137,12 +156,14 @@ export function createChannelTools(
         "Use this to broadcast updates, alerts, or information to groups you're connected to. " +
         "Rate limited to prevent spam: 10 messages/hour/group, 100 messages/hour/agent.",
       parameters: z.object({
-        channel_type: z.enum(["telegram"])
-          .describe("Channel type. Currently only 'telegram' is supported."),
+        channel_type: z.enum(["telegram", "slack"])
+          .describe("Channel type: 'telegram' group or 'slack' channel."),
         chat_id: z.string()
           .describe("The group/channel ID to send the message to. Get this from list_channel_groups."),
         message: z.string().max(4096)
-          .describe("Message text to send (max 4096 characters). Telegram HTML formatting is supported."),
+          .describe("Message text to send (max 4096 characters). Telegram supports HTML; Slack supports mrkdwn."),
+        thread_ts: z.string().optional()
+          .describe("Slack only: post in an existing thread (the parent message's ts). Ignored for Telegram."),
         agent_name: z.string().optional()
           .describe(
             "Agent name to send as. Required for user-scoped API keys. " +
@@ -151,9 +172,10 @@ export function createChannelTools(
       }),
       execute: async (
         params: {
-          channel_type: "telegram";
+          channel_type: "telegram" | "slack";
           chat_id: string;
           message: string;
+          thread_ts?: string;
           agent_name?: string;
         },
         context?: { session?: McpAuthContext }
@@ -198,6 +220,24 @@ export function createChannelTools(
               chat_id: result.chat_id,
               group_title: result.group_title,
               message_id: result.message_id,
+            }, null, 2);
+          }
+
+          if (params.channel_type === "slack") {
+            const result = await apiClient.sendSlackChannelMessage(
+              agentName,
+              params.chat_id,
+              params.message.trim(),
+              params.thread_ts
+            );
+
+            return JSON.stringify({
+              success: result.sent,
+              agent_name: agentName,
+              channel_type: params.channel_type,
+              chat_id: result.channel_id,
+              group_title: result.channel_name,
+              thread_ts: result.thread_ts,
             }, null, 2);
           }
 

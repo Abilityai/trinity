@@ -32,6 +32,28 @@ import config  # noqa: E402
 import services.tts_service as tts_service  # noqa: E402
 
 
+# #762: this file stubs modules into sys.modules — an import-time `utils.helpers`
+# preload (above, before importing config/tts_service, which monkeypatch can't
+# reach) and a lazy `database` stub in the `adapter` fixture. Declaring the
+# `_STUBBED_MODULE_NAMES` + `_restore_sys_modules` pair snapshots and restores
+# them per test so the stubs never leak across files, and satisfies
+# tests/lint_sys_modules.py (precedent: test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = ["utils.helpers", "database"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # --------------------------------------------------------------------------- #
 # tts_service.synthesize_mp3
 # --------------------------------------------------------------------------- #
