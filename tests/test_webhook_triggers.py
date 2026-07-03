@@ -273,3 +273,52 @@ class TestWebhookTrigger:
             assert resp.status_code == 404
         finally:
             _delete_schedule(api_client, test_agent_name, sid)
+
+    def test_soft_deleted_agent_webhook_returns_404_then_recovers(
+        self, api_client: TrinityApiClient
+    ):
+        """#1423: a webhook must not fire a schedule whose *agent* is soft-deleted.
+
+        Soft-deleting the agent → the token lookup joins agent_ownership and
+        excludes it → 404 (so no scheduler dispatch, no execution row). Admin
+        recovery clears agent_ownership.deleted_at → the same token fires again.
+        Uses a throwaway agent so the shared fixture agent is untouched; the
+        webhook 404 gate needs only the ownership row, not a running container.
+        """
+        import httpx
+        agent = f"test-1423-{uuid.uuid4().hex[:6]}"
+        created = api_client.post("/api/agents", json={"name": agent})
+        if created.status_code not in (200, 201):
+            pytest.skip(f"could not create throwaway agent: {created.text}")
+
+        sid = None
+        try:
+            sid = _create_test_schedule(api_client, agent)["id"]
+            token = api_client.post(
+                f"/api/agents/{agent}/schedules/{sid}/webhook"
+            ).json()["webhook_url"].split("/api/webhooks/")[1]
+
+            # Sanity: token fires while the agent is live (202 dispatched, or 503
+            # if the scheduler is down — never 404).
+            live = httpx.post(f"http://localhost:8000/api/webhooks/{token}", timeout=15.0)
+            assert live.status_code in (202, 503), live.text
+
+            # Soft-delete the agent (child schedule row keeps deleted_at NULL).
+            assert api_client.delete(f"/api/agents/{agent}").status_code in (200, 204)
+
+            # The token must now 404 — the agent-ownership guard (#1423).
+            gone = httpx.post(f"http://localhost:8000/api/webhooks/{token}", timeout=15.0)
+            assert gone.status_code == 404, (
+                f"soft-deleted agent's webhook should 404, got {gone.status_code}"
+            )
+
+            # Admin recovery clears deleted_at → the token resolves again.
+            rec = api_client.post(f"/api/admin/soft-deleted/agents/{agent}/recover")
+            assert rec.status_code == 200, rec.text
+            back = httpx.post(f"http://localhost:8000/api/webhooks/{token}", timeout=15.0)
+            assert back.status_code != 404, "recovered agent's webhook should fire again"
+            assert back.status_code in (202, 503), back.text
+        finally:
+            if sid:
+                _delete_schedule(api_client, agent, sid)
+            api_client.delete(f"/api/agents/{agent}")

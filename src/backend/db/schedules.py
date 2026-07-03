@@ -831,11 +831,29 @@ class ScheduleOperations:
         return token
 
     def get_schedule_by_webhook_token(self, token: str) -> Optional[Schedule]:
-        """Look up a schedule by its webhook token (O(1) via index)."""
-        stmt = select(agent_schedules).where(
-            and_(
-                agent_schedules.c.webhook_token == token,
-                agent_schedules.c.deleted_at.is_(None),
+        """Look up a schedule by its webhook token (O(1) via index).
+
+        Applies the same two soft-delete filters as `list_all_enabled_schedules`
+        (#834, #1423): skip a soft-deleted *schedule* (`agent_schedules.deleted_at`)
+        AND a schedule whose *agent* is soft-deleted (`agent_ownership.deleted_at`).
+        Without the agent join, a webhook could still fire a schedule of a
+        soft-deleted (recoverable) agent during the retention window — the exact
+        hole the cron path guards against.
+        """
+        stmt = (
+            select(agent_schedules)
+            .select_from(
+                agent_schedules.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_schedules.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_schedules.c.webhook_token == token,
+                    agent_schedules.c.deleted_at.is_(None),
+                    agent_ownership.c.deleted_at.is_(None),
+                )
             )
         )
         with get_engine().connect() as conn:
