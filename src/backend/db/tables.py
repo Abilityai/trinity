@@ -518,6 +518,9 @@ public_chat_messages = Table(
     Column("content", Text),
     Column("timestamp", Text),
     Column("cost", Float),
+    # #903: per-message speaker attribution for thread-scoped channel sessions.
+    Column("sender_email", Text),
+    Column("sender_label", Text),
 )
 
 public_user_memory = Table(

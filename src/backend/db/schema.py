@@ -592,6 +592,8 @@ TABLES = {
             content TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             cost REAL,
+            sender_email TEXT,
+            sender_label TEXT,
             FOREIGN KEY (session_id) REFERENCES public_chat_sessions(id) ON DELETE CASCADE
         )
     """,

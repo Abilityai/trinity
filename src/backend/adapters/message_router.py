@@ -161,6 +161,27 @@ def _format_channel_identity(message: NormalizedMessage) -> str:
     return "\n".join(parts)
 
 
+def _sender_label(message: NormalizedMessage) -> Optional[str]:
+    """Per-message speaker label persisted with a channel user's turn (#903).
+
+    Thread-scoped channel sessions can hold turns from several users, so each
+    stored message carries who spoke it — replayed as an attributed history line
+    (``Alice: …``) instead of a flat ``User:``. Reuses the same
+    ``enrich_message`` metadata as ``_format_channel_identity`` (display name /
+    username). Returns ``None`` for DMs and un-enriched messages, so the history
+    renderer falls back to the role label.
+    """
+    display = message.metadata.get("sender_display_name")
+    username = message.metadata.get("sender_username")
+    if display and username:
+        return f"{display} (@{username})"
+    if display:
+        return display
+    if username:
+        return f"@{username}"
+    return None
+
+
 def _agent_avatar_url(agent_name: str) -> Optional[str]:
     """Best-effort public URL to an agent's avatar for a channel bot icon (#292).
 
@@ -574,10 +595,20 @@ class ChannelMessageRouter:
         # 10. Done processing — show completion indicator
         await adapter.indicate_done(message)
 
-        # 11. Persist messages in session
+        # 11. Persist messages in session, with per-speaker attribution (#903).
+        # The user turn carries verified_email (drives sender-filtered MEM-001
+        # summarization) + a display label (attributed history replay for
+        # multi-participant threads); the assistant turn is labelled by agent.
         logger.debug(f"[ROUTER:{channel}] Step 11 - persisting messages")
-        db.add_public_chat_message(session_id, "user", message.text)
-        db.add_public_chat_message(session_id, "assistant", response_text, cost=result.cost)
+        db.add_public_chat_message(
+            session_id, "user", message.text,
+            sender_email=verified_email,
+            sender_label=_sender_label(message),
+        )
+        db.add_public_chat_message(
+            session_id, "assistant", response_text, cost=result.cost,
+            sender_label=agent_name,
+        )
 
         # 11a. MEM-001 (#895): mirror the web path — increment per-user count
         # and fire-and-forget the conversation summarizer every 5 messages.

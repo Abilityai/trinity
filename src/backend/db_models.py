@@ -579,6 +579,9 @@ class PublicChatMessage(BaseModel):
     content: str
     timestamp: datetime
     cost: Optional[float] = None
+    # #903: per-message speaker attribution (thread-scoped channel sessions).
+    sender_email: Optional[str] = None
+    sender_label: Optional[str] = None
 
 
 # =========================================================================

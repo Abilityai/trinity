@@ -1,27 +1,29 @@
 """Unit tests for #903 — Slack: scope chat session to thread, not channel.
 
-`SlackAdapter.get_session_identifier` is the entire conversation boundary for
-Slack channel chats: it feeds `get_or_create_public_chat_session` +
-`build_public_chat_context`'s last-10-turn replay (there is no persistent Claude
-session on this path). Before #903 the key was `team_id:sender_id:channel_id`, so
-every thread and @mention from one user in one channel shared a single
-channel-wide transcript and cross-contaminated.
+``SlackAdapter.get_session_identifier`` is the entire conversation boundary for
+Slack channel chats: it feeds ``get_or_create_public_chat_session`` +
+``build_public_chat_context``'s last-10-turn replay (there is no persistent
+Claude session on this path). Before #903 the key was
+``team_id:sender_id:channel_id``, so every thread and @mention from one user in
+one channel shared a single channel-wide transcript and cross-contaminated.
 
 After #903:
-- DMs (no threads): keep `team_id:sender_id:channel_id` — one continuous convo.
-- Channel messages: `team_id:channel_id:thread_id` — sender_id dropped so
-  multi-participant threads share context; per-speaker attribution comes from the
-  #350 identity prefix, not the key.
+- DMs (no threads): keep ``team_id:sender_id:channel_id`` — one continuous convo.
+- Channel messages: ``team_id:channel_id:thread_id`` — ``sender_id`` dropped so
+  multi-participant threads share context; per-speaker attribution moves to the
+  stored ``sender_label`` on each message row (see
+  ``test_903_public_chat_sender.py``), not the key.
 
-These tests exercise the real parsers (`_parse_dm`, `_parse_mention`,
-`_parse_thread_reply`) so the `is_dm` / `thread_id` metadata the key relies on is
-populated exactly as production would populate it.
+These tests exercise the real parsers (``_parse_dm``, ``_parse_mention``,
+``_parse_thread_reply``) so the ``is_dm`` / ``thread_id`` metadata the key relies
+on is populated exactly as production would populate it (F-TESTS — the pure
+direct cases alone would bypass the parser contract the fix depends on).
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -104,6 +106,7 @@ def test_dm_key_ignores_thread_ts(adapter):
 
 
 def test_missing_team_id_falls_back_to_unknown(adapter):
+    """F-TEAMID: `or "unknown"` handles a malformed event with no team_id."""
     msg = NormalizedMessage(
         sender_id="U1", text="hi", channel_id=CHANNEL, thread_id="1700.0001",
         timestamp="", metadata={"is_dm": False},
@@ -114,6 +117,17 @@ def test_missing_team_id_falls_back_to_unknown(adapter):
 # ---------------------------------------------------------------------------
 # End-to-end via parsers — the AC scenarios
 # ---------------------------------------------------------------------------
+
+def test_parsers_always_set_is_dm_and_thread_id(adapter):
+    """The key relies on `is_dm` and (on the channel path) a non-None
+    `thread_id`; pin the contract each parser upholds."""
+    mention = adapter._parse_mention(_mention_event("1700.1000"), TEAM)
+    assert mention.metadata["is_dm"] is False
+    assert mention.thread_id == "1700.1000"  # thread_ts or ts → never None
+
+    dm = adapter._parse_dm(_dm_event("1700.2000"), TEAM)
+    assert dm.metadata["is_dm"] is True
+
 
 def test_two_concurrent_threads_get_distinct_sessions(adapter):
     """Two top-level @mentions in one channel → two distinct sessions."""

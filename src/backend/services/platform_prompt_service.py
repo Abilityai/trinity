@@ -255,7 +255,14 @@ async def summarize_user_memory_background(
         memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
         existing_summary = memory_record.get("conversation_summary", "") or ""
 
-        messages = db.get_recent_public_chat_messages(session_id, limit=20)
+        # #903 (F-MEM): a thread-scoped channel session can hold turns from
+        # several users. Filter to the current user's own turns so Alice's
+        # conversation never persists into Bob's durable, re-injected memory.
+        # Web/DM sessions store the user's turns with their verified email too,
+        # so the filter is a no-op there.
+        messages = db.get_recent_public_chat_messages(
+            session_id, limit=20, sender_email=user_email
+        )
         if not messages:
             return
 

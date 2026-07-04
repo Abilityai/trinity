@@ -42,14 +42,17 @@ class SlackAdapter(ChannelAdapter):
         return f"slack:{message.metadata.get('team_id')}:{message.sender_id}"
 
     def get_session_identifier(self, message: NormalizedMessage) -> str:
-        # Issue #903: scope channel sessions to the thread, not the whole channel.
-        # DMs have no threads (one continuous per-user conversation) → keep the
-        # sender+channel key. Channel messages key on the thread so two concurrent
-        # threads get distinct transcripts and a fresh top-level @mention (which
-        # _parse_mention mints as thread_ts or ts) starts clean. sender_id is dropped
-        # for channels so multi-participant threads share one context — per-speaker
-        # attribution comes from the #350 identity prefix, not the session key.
-        team_id = message.metadata.get("team_id", "unknown")
+        """Conversation-scope key for the public-chat session (#903).
+
+        DMs stay per-user (``team:sender:channel``) — one continuous per-user
+        conversation, no threads. Channel messages are **thread-scoped**
+        (``team:channel:thread``) with ``sender_id`` deliberately dropped so a
+        multi-participant thread shares one context and a fresh top-level
+        @mention (which mints a new ``thread_id = ts``) starts clean. Per-speaker
+        attribution moves to the stored ``sender_label`` on each message row, so
+        dropping ``sender_id`` here no longer loses who-said-what.
+        """
+        team_id = message.metadata.get("team_id") or "unknown"
         if message.metadata.get("is_dm", False):
             return f"{team_id}:{message.sender_id}:{message.channel_id}"
         return f"{team_id}:{message.channel_id}:{message.thread_id}"

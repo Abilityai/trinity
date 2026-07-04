@@ -534,11 +534,16 @@ async def public_chat(
     if _pub_file_descs:
         context_prompt = f"{context_prompt}\n\n" + "\n".join(_pub_file_descs)
 
-    # Store user message (after context is built so it doesn't appear twice)
+    # Store user message (after context is built so it doesn't appear twice).
+    # #903: stamp the verified email as the message sender so the shared
+    # sender-filtered MEM-001 summarizer (which keys on the user's own turns)
+    # works on the web path identically to channels. None for anonymous
+    # sessions, which never summarize.
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="user",
-        content=chat_request.message
+        content=chat_request.message,
+        sender_email=verified_email,
     )
 
     # Record usage
