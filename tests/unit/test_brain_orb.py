@@ -515,9 +515,12 @@ _ACTION_URL = f"/api/agents/{_AGENT}/brain-orb/action"
 
 
 def _deny_owner(client):
-    """Flip the OwnedAgentByName gate to 403 for one test (function-scoped app)."""
+    """Flip the OwnedAgentByName gate to a denial for one test (function-scoped app).
+
+    #186: the owner dependency now denies with a uniform 404 (was 403).
+    """
     def _raise():
-        raise HTTPException(status_code=403, detail="Owner access required")
+        raise HTTPException(status_code=404, detail="Agent not found")
     client.app.dependency_overrides[get_owned_agent_by_name] = _raise
 
 
@@ -551,10 +554,10 @@ def test_actions_no_hook_maps_to_404(client):
     assert r.status_code == 404
 
 
-def test_actions_owner_gate_403(client):
+def test_actions_owner_gate_404(client):
     _deny_owner(client)
     r = client.get(_ACTIONS_URL)
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 # --- backend /action (capture + link) --------------------------------------
@@ -625,12 +628,12 @@ def test_refresh_success_and_audited(client):
     assert audit.await_args.kwargs["event_action"] == "brain_orb_refresh"
 
 
-def test_refresh_owner_gate_403(client):
+def test_refresh_owner_gate_404(client):
     _deny_owner(client)
     agent_req = AsyncMock()
     with patch.object(bo, "_agent_request", agent_req):
         r = client.post(_REFRESH_URL)
-    assert r.status_code == 403
+    assert r.status_code == 404
     agent_req.assert_not_called()
 
 
@@ -698,12 +701,12 @@ def test_postprocess_put_success_and_audited(client):
     assert audit.await_args.kwargs["event_action"] == "brain_orb_postprocess_config"
 
 
-def test_postprocess_owner_gate_403(client):
+def test_postprocess_owner_gate_404(client):
     _deny_owner(client)
     agent_req = AsyncMock()
     with patch.object(bo, "_agent_request", agent_req):
-        assert client.get(_POSTPROC_URL).status_code == 403
-        assert client.put(_POSTPROC_URL, json={"enabled": False, "prompt": ""}).status_code == 403
+        assert client.get(_POSTPROC_URL).status_code == 404
+        assert client.put(_POSTPROC_URL, json={"enabled": False, "prompt": ""}).status_code == 404
     agent_req.assert_not_called()
 
 
@@ -759,12 +762,12 @@ def test_action_invalid_json_400(client):
     assert r.status_code == 400
 
 
-def test_action_owner_gate_403(client):
+def test_action_owner_gate_404(client):
     _deny_owner(client)
     agent_req = AsyncMock()
     with patch.object(bo, "_agent_request", agent_req):
         r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"})
-    assert r.status_code == 403
+    assert r.status_code == 404
     agent_req.assert_not_called()   # owner gate fires before any forward
 
 
@@ -944,14 +947,14 @@ def test_agent_server_action_body_too_large_413(agent_env):
 # --- backend: the Phase-2 mutating route gets the same owner-gate proof its
 # --- Phase-4 siblings have (incomplete-fix-chain escape class) ---------------
 
-def test_scope_post_owner_gate_403(client):
+def test_scope_post_owner_gate_404(client):
     """POST /scope is OwnedAgentByName like every other mutating brain-orb route —
-    a non-owner gets 403 before any agent call (only the Phase-4 routes had this)."""
+    a non-owner gets 404 before any agent call (only the Phase-4 routes had this)."""
     _deny_owner(client)
     agent_req = AsyncMock()
     with patch.object(bo, "_agent_request", agent_req):
         r = client.post(_SCOPE_URL, json={"tokens": ["core"]})
-    assert r.status_code == 403
+    assert r.status_code == 404
     agent_req.assert_not_called()
 
 
