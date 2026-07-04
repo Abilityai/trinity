@@ -349,3 +349,57 @@ def test_cancelled_execution_keeps_body_and_no_settle():
     assert body["status"] == "cancelled"
     assert body["response"] == "the answer"             # cancelled keeps its body
     m["settle"].assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 6. /retry-settlement is honest — 501, not a misleading 200 "queued" stub
+# ---------------------------------------------------------------------------
+
+def _admin():
+    return SimpleNamespace(role="admin", username="admin")
+
+
+def _drive_retry(*, role="admin", log_entry="settle_failed"):
+    """Invoke nevermined.retry_settlement with mocked db + user. Returns the raised
+    HTTPException (all outcomes are exceptions)."""
+    import routers.nevermined as nvm
+    from fastapi import HTTPException
+
+    entry = None
+    if log_entry is not None:
+        entry = SimpleNamespace(action=log_entry, agent_name="agent-a")
+    mock_db = MagicMock()
+    mock_db.get_nevermined_payment_log_entry.return_value = entry
+    user = SimpleNamespace(role=role, username="u")
+
+    with (
+        patch.object(nvm, "NEVERMINED_AVAILABLE", True),
+        patch.object(nvm, "db", mock_db),
+    ):
+        try:
+            _await(nvm.retry_settlement("log-1", current_user=user))
+        except HTTPException as e:
+            return e
+    raise AssertionError("expected HTTPException")
+
+
+def test_retry_settlement_settle_failed_is_honest_501():
+    exc = _drive_retry(log_entry="settle_failed")
+    assert exc.status_code == 501                        # was a lying 200 "queued" stub
+    assert "not stored" in exc.detail
+    assert "payment-signature" in exc.detail             # points the caller to the real path
+
+
+def test_retry_settlement_non_admin_403():
+    exc = _drive_retry(role="user")
+    assert exc.status_code == 403
+
+
+def test_retry_settlement_missing_log_404():
+    exc = _drive_retry(log_entry=None)
+    assert exc.status_code == 404
+
+
+def test_retry_settlement_non_failed_action_400():
+    exc = _drive_retry(log_entry="settle")
+    assert exc.status_code == 400
