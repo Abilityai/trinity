@@ -91,8 +91,8 @@ No dedicated UI as of WEBHOOK-001. The webhook URL is returned in the `POST /api
 POST /api/webhooks/{webhook_token}
 ```
 
-1. Reject tokens that don't match regex `^[A-Za-z0-9_\-]{20,60}$` with 404 (avoids DB lookup on garbage input)
-2. `db.get_schedule_by_webhook_token(token)` — O(1) via partial unique index
+1. Reject tokens that don't match regex `^[A-Za-z0-9_\-]{20,60}$` with 404 (avoids DB lookup on garbage input). Logs a static `webhook 404: malformed token` line (#1445) — the raw token is NEVER interpolated here (this branch fires on un-validated bytes → log-injection risk)
+2. `db.get_schedule_by_webhook_token(token)` — O(1) via partial unique index. Miss → 404 + static `webhook 404: token lookup miss` (neutral: covers unknown/revoked/rotated tokens, soft-deleted schedules, soft-deleted agents — #1445)
 3. Check `schedule.webhook_enabled` — 403 if disabled
 4. `_check_webhook_rate_limit(token)` — Redis key `webhook_calls:{token}`, 10 calls / 60s window, fail-open on Redis unavailability
 5. Build message: append `body.context` (if present) with injection-resistant framing
@@ -178,7 +178,8 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 | Method | SQL | Notes |
 |--------|-----|-------|
 | `generate_webhook_token(schedule_id)` | `UPDATE SET webhook_token=?, webhook_enabled=1` | `secrets.token_urlsafe(32)` — 43 chars |
-| `get_schedule_by_webhook_token(token)` | `SELECT WHERE webhook_token=?` | O(1) via partial index |
+| `get_schedule_by_webhook_token(token)` | `SELECT … JOIN agent_ownership WHERE webhook_token=? AND schedule.deleted_at IS NULL AND agent.deleted_at IS NULL` | O(1) via partial index. **INNER JOIN** on `agent_ownership` (#1423) skips a soft-deleted schedule AND a schedule whose *agent* is soft-deleted — so a schedule with no live owning agent resolves to `None` → 404. Unchanged by #1445 (the creation gate keeps this from ever seeing an orphan schedule) |
+| `is_agent_live(name)` *(db/agents.py)* | `SELECT 1 FROM agent_ownership WHERE agent_name=? AND deleted_at IS NULL` | #1445 creation-gate predicate. No `users` join — matches the token-lookup JOIN exactly so the gate never false-negatives a live agent whose owner-user row is missing (FKs off platform-wide). Used by `create_schedule` + `generate_webhook` (routers) and the `create_schedule` db chokepoint |
 | `set_webhook_enabled(schedule_id, enabled)` | `UPDATE SET webhook_enabled=?` | enable/disable without revoking token |
 | `revoke_webhook_token(schedule_id)` | `UPDATE SET webhook_token=NULL, webhook_enabled=0` | nulling token drops it from the partial index |
 | `get_webhook_status(schedule_id)` | `SELECT webhook_token, webhook_enabled` | returns `{webhook_token, webhook_enabled, has_token}` |
