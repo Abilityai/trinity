@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-04 | #1446 | fix(canary): stop B-01 queue-status coherence false-firing under full-suite load — canary tests own the `database` dep (temp-DB stub via `get_engine`) + first end-to-end B-01 coverage (test-only) | [architecture.md](architecture.md) |
 | 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page. Phase 1 (static render: first-party CSP-clean assets + same-origin iframe host + read-only `data.json` proxy) + Phase 2 (live scope mount/unmount → owner-gated agent re-export via `~/.trinity/brain-orb/` convention hooks → in-place rebuild). Voice/KB-actions/transcript deferred | [brain-orb.md](feature-flows/brain-orb.md) |
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |
@@ -39,7 +40,6 @@
 | 2026-06-19 | #1231 | fix(agent): agent `/tmp` tmpfs size configurable via `AGENT_TMP_SIZE` | [container-capabilities.md](feature-flows/container-capabilities.md) |
 | 2026-06-19 | #1115 | feat(ui): per-schedule performance scorecards on Agent Detail | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md), [scheduling.md](feature-flows/scheduling.md) |
 | 2026-06-19 | #1083 | feat(exec): fire-and-forget dispatch (202 ACK + result callback) | [task-execution-service.md](feature-flows/task-execution-service.md), [capacity-management.md](feature-flows/capacity-management.md), [cleanup-service.md](feature-flows/cleanup-service.md) |
-| 2026-06-19 | #1082 | refactor(reliability): status-as-projection for `schedule_executions.status` | [status-as-projection.md](feature-flows/status-as-projection.md) |
 
 ---
 
