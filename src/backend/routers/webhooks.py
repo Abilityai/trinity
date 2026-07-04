@@ -94,13 +94,21 @@ async def trigger_webhook(
         detail="Too many webhook requests from this address.",
     )
 
-    # Reject obviously malformed tokens before hitting the DB
+    # Reject obviously malformed tokens before hitting the DB.
+    # Distinct static log line per 404 branch (#1445) so the next occurrence is
+    # attributable from Vector in one grep. NEVER interpolate the raw token —
+    # this branch fires on un-regex-validated bytes (CR/LF → log-injection /
+    # partial-secret leak). Response body stays opaque ("Not found").
     if not _TOKEN_RE.match(webhook_token):
+        logger.info("webhook 404: malformed token")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     # Resolve token → schedule
     schedule = db.get_schedule_by_webhook_token(webhook_token)
     if not schedule:
+        # Neutral wording: this covers revoked/rotated tokens, soft-deleted
+        # schedules, soft-deleted agents, and unknown tokens — not just orphans.
+        logger.info("webhook 404: token lookup miss")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     if not schedule.webhook_enabled:

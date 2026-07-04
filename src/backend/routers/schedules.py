@@ -140,6 +140,17 @@ async def create_schedule(
             detail=f"Invalid cron expression: {str(e)}"
         )
 
+    # #1445: fail-loud no-orphan gate. Access-check FIRST so a low-priv caller
+    # gets a uniform 403 whether or not the agent exists (no 404-vs-403
+    # name-enumeration oracle); only an admin/owner — not a tenant boundary —
+    # ever reaches the 404 that actually blocks orphan-schedule creation.
+    # Ordered BEFORE the #929 timeout check (which reads the agent cap) so the
+    # gate can't be probed via the timeout-validation path.
+    if not db.can_user_access_agent(current_user.username, name):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not db.is_agent_live(name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
     # #929: schedule timeout cannot exceed the agent cap. Validated here so
     # the operator gets the 400 at config time instead of a SIGKILL at run time.
     # After #913 the field is Optional — only enforce when the caller set it.
@@ -150,7 +161,7 @@ async def create_schedule(
     if not schedule:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot create schedule - access denied or agent not found"
+            detail="Cannot create schedule - access denied"
         )
 
     # Dedicated scheduler syncs from database automatically
@@ -482,6 +493,14 @@ async def generate_webhook(
 
     if not db.can_user_access_agent(current_user.username, name):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    # #1445: defense-in-depth — never mint a token for a schedule whose agent
+    # has no live ownership row (that token would 404 at trigger time). Placed
+    # AFTER the access check so it's not a pre-auth existence probe. In practice
+    # the schedule can't exist without a live agent post-gate, but this holds
+    # for any pre-existing orphan schedules and future creation paths.
+    if not db.is_agent_live(name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
     token = db.generate_webhook_token(schedule_id)
     if not token:
