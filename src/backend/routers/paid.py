@@ -262,10 +262,16 @@ async def paid_chat(
                 headers={"X-Idempotent-Replay": "true"},
             )
 
-        # Completed but UNSETTLED — re-drive settle deterministically (idempotent via
-        # the payment:{agent_request_id} effect guard, #1084) WITHOUT re-running the
-        # LLM, then converge the snapshot. This is why the unsettled branch stores the
-        # claim with complete() (not fail()): fail() would re-execute here.
+        # Completed but UNSETTLED — re-drive settle WITHOUT re-running the LLM (the
+        # trigger key already deduped the execution), then converge the snapshot. This
+        # is why the unsettled branch stores the claim with complete() (not fail()):
+        # fail() would re-execute here. NOTE: the re-settle is NOT provider-idempotent —
+        # Nevermined's agent_request_id is an observability id (fresh per verify) and the
+        # facilitator burns on every successful settle_permissions call. Re-driving is
+        # safe here only because the prior settle genuinely did NOT complete; a settle
+        # that burned on-chain but reported failure would re-burn (at-least-once residual,
+        # tracked by #1408). The payment:{agent_request_id} effect guard only dedups a
+        # concurrent settle that reuses the SAME id.
         resettle = await payment_service.settle_payment_once(
             config=config,
             nvm_api_key=nvm_api_key,
@@ -355,10 +361,11 @@ async def paid_chat(
     idempotency_service.attach_execution(idem, exec_result.execution_id)
 
     # Step 4: Settle payment (on success only). Effect-scoped guard (#1084) so a
-    # retried paid chat reusing the same Nevermined agent_request_id settles
-    # exactly once. The terminal-turn guard above (failed execution → no settle)
-    # is the outer layer and is preserved; the agent_request_id native token
-    # remains the real on-chain exactly-once guarantee.
+    # concurrent settle reusing the SAME agent_request_id is deduped locally. The
+    # terminal-turn guard above (failed execution → no settle) is the outer layer
+    # and is preserved. NOTE: agent_request_id is a Nevermined observability id, not
+    # a provider exactly-once token — this local guard is the only settle dedup, and
+    # a fresh-id retry's double-settle residual is tracked by #1408.
     settle_result = await payment_service.settle_payment_once(
         config=config,
         nvm_api_key=nvm_api_key,

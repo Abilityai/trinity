@@ -47,10 +47,13 @@ External Caller
 > **#1018 (settlement ordering).** The settle-failed branch used to lie with top-level
 > `status:"success"` — releasing the paid resource without a confirmed transfer. It now returns
 > honest `success_unsettled` while still delivering the completed work (deliver-then-reconcile).
-> Because `verify_payment` doesn't burn credits and the native `agent_request_id` token settles
-> exactly once, a client that re-presents the same `payment-signature` replays the completed work
-> (via the `(token+body)` trigger key) and re-attempts settle deterministically — no double LLM run,
-> no double charge. Durable server-side (stored-credential) retry is a Tier 2 follow-up.
+> Because `verify_payment` doesn't burn credits, a client that re-presents the same
+> `payment-signature` replays the completed work (via the `(token+body)` trigger key, so **no double
+> LLM run**) and re-attempts settle. The re-settle is **not** provider-idempotent — Nevermined's
+> `agent_request_id` is an observability id and the facilitator burns on every successful settle — so
+> a re-drive is safe only because the prior settle did not complete; a false-negative burn (settled
+> on-chain but reported failed) can still double-charge (at-least-once residual, tracked by #1408).
+> Durable server-side (stored-credential) retry is a Tier 2 follow-up.
 
 ## Flow: Admin Configuration
 
@@ -166,7 +169,7 @@ Shared User (view-only)
 
 ## Related Flows
 
-- **Guards**: [effect-idempotency.md](effect-idempotency.md) — `settle_payment_once` is wired through `effect_guard` on the `payment:{agent_request_id}` scope (the Nevermined native exactly-once token) so a re-delivered turn cannot double-charge a settlement; preserves the existing terminal-turn no-settle guard (#1084).
+- **Guards**: [effect-idempotency.md](effect-idempotency.md) — `settle_payment_once` is wired through `effect_guard` on the `payment:{agent_request_id}` scope so a *concurrent same-id* settle cannot double-charge (`agent_request_id` is a Nevermined observability id, not a provider exactly-once token — a fresh-id retry's residual is tracked by #1408); preserves the existing terminal-turn no-settle guard (#1084).
 - **Trigger idempotency**: [idempotency-keys.md](idempotency-keys.md) — the paid boundary is a wired `Idempotency-Key` boundary (Invariant #18, #1018). Trigger dedup (`derive_payment_key`, `(token+body)` scope `agent:{name}`) composes with the `payment:{agent_request_id}` effect guard above.
 
 ## Change History

@@ -39,7 +39,9 @@ side-effect-bearing agents.
 
 1. **Content-derived key on STABLE identity, scoped by execution_id.**
    - Scope: `effect:{execution_id}` (messages / voip / share_file);
-     `payment:{agent_request_id}` (Nevermined — its natural unit + native token).
+     `payment:{agent_request_id}` (Nevermined — an observability id, **not** a
+     provider exactly-once token; this local guard enforces at-most-once per id,
+     residual at-least-once retry tracked by #1408).
    - Key: `{effect_type}:sha256(execution_id ∥ effect_type ∥
      resolved_identifying_args ∥ dedup_label)`. `resolved_identifying_args` is the
      **resolved, immutable** identity only — recipient + channel (+ provider
@@ -186,7 +188,9 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 - [nevermined-payments.md](nevermined-payments.md) — the paid x402 boundary now
   carries the #525 trigger-idempotency layer too (`derive_payment_key`, `(token+body)`,
   #1018), composing with the `payment:{agent_request_id}` settle effect guard here:
-  trigger-dedup stops the LLM re-run, the effect guard stops the double-settle.
+  trigger-dedup stops the LLM re-run; the effect guard stops a *concurrent same-id*
+  double-settle (Nevermined's `agent_request_id` is an observability id, not a provider
+  exactly-once token, so a fresh-id retry's double-settle residual is tracked by #1408).
 - [idempotency-keys.md](idempotency-keys.md) — the #525 trigger-boundary layer
   this extends (shared `idempotency_keys` table + `begin`/`complete`/`fail`).
 - #1083 fire-and-forget dispatch (architecture.md → Fire-and-Forget Dispatch);

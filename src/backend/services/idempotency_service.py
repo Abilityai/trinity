@@ -135,7 +135,8 @@ def derive_payment_key(
 # channel + provider account) — NEVER the LLM-generated message body, which is
 # non-deterministic across a re-run and would defeat dedup. Effects scope by
 # `effect:{execution_id}`; Nevermined settles scope by `payment:{agent_request_id}`
-# (its native exactly-once token). Long TTL is inherited from the shared 24h
+# (a Nevermined observability id — the local guard, not the provider, enforces
+# at-most-once per id; fresh-id retry residual is #1408). Long TTL is inherited from the shared 24h
 # default, which already exceeds the lease window (agent_timeout + buffer ≤ ~2h),
 # so a completed row outlives a late re-delivery. See the contract doc at
 # docs/memory/feature-flows/effect-idempotency.md.
@@ -151,10 +152,16 @@ def make_effect_scope(execution_id: str) -> str:
 
 
 def make_payment_scope(agent_request_id: str) -> str:
-    """Scope a settlement to its Nevermined `agent_request_id` (native token).
+    """Scope a settlement to its Nevermined `agent_request_id`.
 
-    The agent_request_id is the payment's natural exactly-once unit — one
-    settle per request — so it is the dedup scope as well as the on-chain key.
+    Per the Nevermined x402 docs the agent_request_id is an OBSERVABILITY/tracking
+    id (returned fresh by each `verify_permissions`), NOT a provider-enforced
+    exactly-once token — the facilitator burns credits on *every* successful
+    `settle_permissions` call until the token's limit. So this local effect-guard
+    row is the actual dedup, and it only stops a double-burn when the SAME
+    agent_request_id is re-presented (a concurrent duplicate settle). A retry that
+    re-verifies gets a fresh id and is not deduped here — the residual at-least-once
+    double-settle is tracked by #1408.
     """
     return f"payment:{agent_request_id}"
 

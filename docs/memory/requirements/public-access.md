@@ -387,15 +387,18 @@
   `response` (deliver-then-reconcile) but the top-level `status` is **`"success_unsettled"`** (NOT the
   old lying `"success"`), with `payment:{settled:false, settle_retry_needed:true, error}`. A concurrent
   settle held by the #1084 effect guard returns `status:"success_unsettled"` +
-  `payment:{settled:false, settle_in_progress:true}` — the native `agent_request_id` token guarantees the
-  in-flight settle completes exactly once. A `failed` execution no longer echoes the response body
+  `payment:{settled:false, settle_in_progress:true}` — the concurrently-running settle (holding the same
+  local `agent_request_id` guard claim) completes it once; the guard, not a provider token, is what
+  prevents a double-burn (`agent_request_id` is a Nevermined observability id, not an exactly-once token —
+  residual at-least-once retry tracked by #1408). A `failed` execution no longer echoes the response body
   (a `cancelled` turn still does, #679).
 - **Idempotency (Invariant #18, #1018)**: the boundary accepts an optional `Idempotency-Key` header
   but always keys on `sha256(payment-signature ∥ message)` (the native client-retry unit) — a client
   re-POST replays the completed work and re-attempts settle rather than re-running the LLM (double cost).
   In-flight duplicate → 409; a completed **settled** snapshot replays verbatim (`X-Idempotent-Replay: true`);
-  a completed **unsettled** snapshot re-drives `settle_payment_once` (idempotent via the
-  `payment:{agent_request_id}` effect guard) and converges the stored snapshot to settled. A divergent
+  a completed **unsettled** snapshot re-drives `settle_payment_once` (deduped only against a *concurrent*
+  same-id settle via the `payment:{agent_request_id}` guard — not provider-idempotent; #1408) and
+  converges the stored snapshot to settled. A divergent
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
 
