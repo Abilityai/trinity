@@ -71,7 +71,7 @@
 - **Flow**: `docs/memory/feature-flows/slack-integration.md`
 
 ### 15.1b-ii Channel Adapters + Multi-Agent Slack (SLACK-002)
-- **Status**: ✅ Implemented (2026-03-23, updated 2026-03-26)
+- **Status**: ✅ Implemented (2026-03-23, updated 2026-07-04)
 - **Requirement ID**: SLACK-002
 - **Priority**: P1
 - **Description**: Pluggable channel adapter abstraction for external messaging platforms. Extends SLACK-001 with multi-agent routing (multiple agents per workspace), @mention support in channels, thread continuity (reply-without-mention), and configurable operational limits.
@@ -81,6 +81,7 @@
   - Multi-agent workspace: bind different agents to different Slack channels
   - @mention routing in channels + DM default agent
   - Thread tracking: bot auto-responds to thread replies without requiring @mention
+  - **Thread-scoped session context + per-speaker attribution + sender-filtered memory (#903)**: channel chat sessions key on `team:channel:thread` (not `team:sender:channel`), so two concurrent threads in a channel stay isolated, a fresh top-level @mention starts with clean history, and a multi-participant thread shares one context. `sender_id` is dropped from the key; per-speaker attribution and per-user memory move onto each message row via two nullable `public_chat_messages` columns — `sender_label` (history replays as `Alice:`/`Bob:`, role fallback when null) and `sender_email` (the MEM-001 summarizer filters on the current user's own turns so a shared thread never feeds one user's turns into another user's durable memory). DMs keep `team:sender:channel` (one continuous per-user convo). Concurrent `get_or_create_session` on a brand-new thread key is race-guarded (savepoint + `IntegrityError` re-SELECT). No migration of pre-existing channel-keyed rows (one-time "forget", expected).
   - Configurable rate limits, execution timeout, and allowed tools via `settings_service`
   - Periodic pruning of rate-limit buckets to prevent memory leaks
   - **Settings UI**: Socket Mode connect/disconnect, app token management, connection status badge
@@ -90,6 +91,7 @@
   - `slack_workspaces` — Workspace connections (team_id, bot_token encrypted)
   - `slack_channel_agents` — Channel-to-agent bindings (multi-agent routing)
   - `slack_active_threads` — Active thread tracking (reply-without-mention)
+  - `public_chat_messages.sender_email` / `sender_label` — per-message speaker attribution (#903), both nullable, dual-track migration (SQLite `public_chat_messages_sender` + Alembic `0013_public_chat_messages_sender`)
 - **Configurable Settings** (via Settings UI or DB):
   - `channel_rate_limit_max` — Messages per window (default: 30)
   - `channel_rate_limit_window` — Window in seconds (default: 60)
