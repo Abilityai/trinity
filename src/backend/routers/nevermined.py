@@ -36,7 +36,13 @@ def _require_read_access(agent_name: str, current_user: User):
     Uniform 404 for both non-existent and inaccessible agents so config
     presence can't be used as an existence oracle (#186).
     """
-    if not (_agent_exists(agent_name) and db.can_user_access_agent(current_user.username, agent_name)):
+    # Evaluate existence AND access unconditionally (no short-circuit) so the
+    # query count — hence timing — is identical for the non-existent and the
+    # existing-but-inaccessible case, mirroring _require_write_access and the
+    # dependencies.py helpers (#186 equal-query-count discipline).
+    exists = _agent_exists(agent_name)
+    allowed = db.can_user_access_agent(current_user.username, agent_name)
+    if not (exists and allowed):
         raise HTTPException(status_code=404, detail="Agent not found")
 
 

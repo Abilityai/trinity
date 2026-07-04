@@ -42,7 +42,7 @@ _TESTS = str(Path(__file__).resolve().parents[1])
 if _TESTS not in sys.path:
     sys.path.insert(0, _TESTS)
 
-from db_harness import db_backend, seed_agent, seed_user  # noqa: E402,F401
+from db_harness import db_backend, run, seed_agent, seed_user  # noqa: E402,F401
 
 
 # =============================================================================
@@ -248,3 +248,101 @@ def test_tier4_config_gets_are_access_gated():
         assert get_authorized_agent_by_name in deps, (
             f"{fn.__name__} is not bound to get_authorized_agent_by_name"
         )
+
+
+# =============================================================================
+# 4. nevermined.py router-level access helpers — uniform 404 (Tier 3)
+# =============================================================================
+#
+# nevermined.py keeps its OWN module-level _require_read_access /
+# _require_write_access — they predate the dependency helpers and gate the
+# payment-config endpoints directly. #186 converted their historic
+# 404-then-403 split into a single uniform 404, and the follow-up removed the
+# read-path short-circuit so the query count (hence timing) is identical for
+# the non-existent and the existing-but-inaccessible case. These guard the
+# SIBLING codepath the dependency-helper tests above don't reach (incomplete-fix
+# escape class): both helpers must stay enumeration-safe, and the write helper
+# must still enforce owner-only.
+#
+# _agent_exists() calls services.docker_service.get_agent_by_name (Docker) then
+# falls back to the real db.get_agent_owner. Only the Docker probe is stubbed
+# (to "no container") — every access-check db call under test stays real.
+
+
+@pytest.fixture
+def _no_docker(monkeypatch):
+    """Stub only the Docker existence probe so _agent_exists resolves purely
+    from the real db.get_agent_owner. Keeps the db access-check calls real."""
+    monkeypatch.setattr(
+        "services.docker_service.get_agent_by_name", lambda name: None, raising=True
+    )
+
+
+def _seed_shared_reader(email: str = "stranger@example.com") -> None:
+    """Give the stranger an email and a share row on _AGENT so
+    can_user_access_agent is True (shared) while can_user_share_agent is False."""
+    run("UPDATE users SET email = :e WHERE id = :id", e=email, id=_STRANGER_ID)
+    run(
+        "INSERT INTO agent_sharing "
+        "(agent_name, shared_with_email, shared_by_id, created_at) "
+        "VALUES (:a, :e, :o, :n)",
+        a=_AGENT, e=email.lower(), o=_OWNER_ID, n="2026-01-01T00:00:00Z",
+    )
+
+
+def _nvm_denial(fn, name, user):
+    """Invoke a nevermined helper and return the raised HTTPException."""
+    import routers.nevermined as nvm
+
+    with pytest.raises(HTTPException) as exc:
+        getattr(nvm, fn)(name, user)
+    return exc.value
+
+
+@pytest.mark.parametrize("helper", ["_require_read_access", "_require_write_access"])
+def test_nvm_nonexistent_and_inaccessible_are_byte_identical(seeded, _no_docker, helper):
+    """Both nevermined access helpers must raise an IDENTICAL 404 for a
+    non-existent agent and an existing-but-inaccessible one — no 404-vs-403
+    existence oracle on the payment-config surface (#186 Tier 3)."""
+    stranger = _user(_STRANGER)
+    missing = _nvm_denial(helper, _MISSING, stranger)
+    inaccessible = _nvm_denial(helper, _AGENT, stranger)
+
+    assert missing.status_code == inaccessible.status_code == 404
+    assert missing.detail == inaccessible.detail == "Agent not found"
+
+
+@pytest.mark.parametrize("helper", ["_require_read_access", "_require_write_access"])
+def test_nvm_admin_on_nonexistent_still_404s(seeded, _no_docker, helper):
+    """An admin passes can_user_access/share for ANY name, so the existence
+    check must still 404 an admin against a non-existent agent (no 200-vs-404
+    oracle for admins)."""
+    admin = _user(_ADMIN, role="admin")
+    err = _nvm_denial(helper, _MISSING, admin)
+    assert err.status_code == 404
+    assert err.detail == "Agent not found"
+
+
+@pytest.mark.parametrize("helper", ["_require_read_access", "_require_write_access"])
+def test_nvm_owner_passes(seeded, _no_docker, helper):
+    """Positive control — the owner clears both read and write helpers."""
+    import routers.nevermined as nvm
+
+    getattr(nvm, helper)(_AGENT, _user(_OWNER))  # no raise
+
+
+def test_nvm_shared_reader_reads_but_cannot_write(seeded, _no_docker):
+    """A shared (non-owner) reader clears _require_read_access but _require_write_access
+    still 404s — the write path keeps owner-only enforcement while the denial stays
+    a uniform 404 (never a distinguishing 403). Sibling-path completeness for the
+    read-vs-write asymmetry."""
+    import routers.nevermined as nvm
+
+    _seed_shared_reader()
+    stranger = _user(_STRANGER)
+
+    nvm._require_read_access(_AGENT, stranger)  # shared → allowed, no raise
+
+    err = _nvm_denial("_require_write_access", _AGENT, stranger)
+    assert err.status_code == 404
+    assert err.detail == "Agent not found"
