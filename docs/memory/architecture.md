@@ -837,6 +837,8 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 
 Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_token` (partial unique index, O(1) lookup); re-POST rotates (old URL instantly invalid); DELETE nulls (subsequent triggers 404). Optional `{"context": "..."}` body (max 4000 chars) appended to the schedule message wrapped in a framing header to reduce prompt-injection surface. All triggers audit-logged with `triggered_by="webhook"`; auto-derives idempotency key `(token, body_hash)` (Invariant #18).
 
+**Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
+
 ### Auth, Users & MCP (15 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|

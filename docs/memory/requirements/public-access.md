@@ -216,6 +216,7 @@
   - Optional `context` field (max 4000 chars) appended to schedule message with framing wrapper to reduce prompt injection surface
   - All trigger events audit-logged with `triggered_by="webhook"` in execution records
   - O(1) token lookup via partial unique index on `agent_schedules.webhook_token`
+  - **Creation gated on a live owning agent (#1445)**: schedule creation and webhook generation are rejected (fail-loud **404**) when the agent has no live `agent_ownership` row (`deleted_at IS NULL`); non-owners get a uniform **403** regardless of existence (no enumeration oracle). Guarantees a webhook token always resolves to a schedule of a live agent — no orphan schedules whose tokens 404 at trigger time under the #1423 soft-delete-aware token lookup
 - **Database Changes**:
   - `agent_schedules.webhook_token TEXT` — nullable 43-char urlsafe token
   - `agent_schedules.webhook_enabled INTEGER DEFAULT 0`

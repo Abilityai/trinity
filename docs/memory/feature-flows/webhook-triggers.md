@@ -113,9 +113,11 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{20,60}$")
 
 | Method | Path | Auth | Handler |
 |--------|------|------|---------|
-| POST | `/{name}/schedules/{id}/webhook` | `get_current_user` + `can_user_access_agent` | `generate_webhook` |
+| POST | `/{name}/schedules/{id}/webhook` | `get_current_user` + `can_user_access_agent` + `is_agent_live` | `generate_webhook` |
 | GET | `/{name}/schedules/{id}/webhook` | `AuthorizedAgent` | `get_webhook_status` |
 | DELETE | `/{name}/schedules/{id}/webhook` | `get_current_user` + `can_user_access_agent` | `revoke_webhook` |
+
+**Creation gate (#1445):** both `create_schedule` (`POST /{name}/schedules`) and `generate_webhook` reject an agent with no live `agent_ownership` row. The order is access-check → **404** on `not db.is_agent_live(name)` (never before the access check, so a low-priv caller can't distinguish "agent missing" from "access denied" — uniform 403). The db layer re-enforces it at the `db/schedules.py:create_schedule` chokepoint (`is_agent_live` → `None` → router 403), so every caller (router, MCP, system-manifest deploy) holds the no-orphan invariant. `is_agent_live` checks `agent_ownership.deleted_at IS NULL` **without joining `users`**, matching the token-lookup predicate exactly (`get_agent_owner` joins `users`, so it would false-negative a live agent whose owner-user row is missing — FKs are off platform-wide).
 
 `generate_webhook` calls `db.generate_webhook_token(schedule_id)` and builds the full URL from `request.base_url`:
 ```python
@@ -210,8 +212,8 @@ CREATE UNIQUE INDEX idx_schedules_webhook_token
 
 | Error Case | HTTP Status | Condition |
 |------------|-------------|-----------|
-| Token format invalid | 404 | Regex mismatch before DB lookup |
-| Token not found | 404 | No row with that `webhook_token` |
+| Token format invalid | 404 | Regex mismatch before DB lookup (logs `webhook 404: malformed token`, #1445) |
+| Token not found | 404 | No live row with that `webhook_token` — covers unknown/revoked/rotated tokens, soft-deleted schedules, and soft-deleted agents (#1423 INNER JOIN). Orphan schedules on never-created agents can no longer be created (#1445 creation gate), so this branch no longer fires for them. Logs `webhook 404: token lookup miss` |
 | Webhook disabled | 403 | `webhook_enabled = 0` |
 | Rate limit exceeded | 429 | Redis counter >= 10 in 60s window; `Retry-After` header set |
 | Scheduler unreachable | 503 | `httpx.ConnectError` or `TimeoutException` |

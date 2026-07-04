@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-04 | #1445 | fix(webhooks): gate schedule/webhook **creation** on a live owning agent (`is_agent_live` → 404; access-check-first so non-owners see a uniform 403) so a webhook token always resolves to a schedule of a live agent — closes the orphan-schedule class that made valid tokens 404 after #1433's soft-delete-aware token-lookup INNER JOIN | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
 | 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page. Phase 1 (static render: first-party CSP-clean assets + same-origin iframe host + read-only `data.json` proxy) + Phase 2 (live scope mount/unmount → owner-gated agent re-export via `~/.trinity/brain-orb/` convention hooks → in-place rebuild). Voice/KB-actions/transcript deferred | [brain-orb.md](feature-flows/brain-orb.md) |
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |
