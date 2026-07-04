@@ -160,8 +160,15 @@ async def retry_settlement(
 ):
     """Retry a failed settlement (admin only).
 
-    Looks up the original payment log entry, retrieves agent credentials,
-    and attempts settlement again.
+    Honest not-implemented (#1018): server-side retry is not supported because the
+    payer's x402 access token is never stored (it is a whole-plan-budget bearer
+    credential — storing it durably is the Tier 2 follow-up to #1018, pending a
+    security review). This used to return HTTP 200 "Settlement retry queued" while
+    doing nothing — a misleading stub. The workable path today is client-driven:
+    the caller re-presents the same ``payment-signature`` to
+    ``POST /api/paid/{agent}/chat``, which replays the completed work
+    (Idempotency-Key, #1018) and re-attempts settlement deterministically via the
+    ``payment:{agent_request_id}`` effect guard (#1084) — no re-charge, no re-run.
     """
     _check_sdk()
     if current_user.role != "admin":
@@ -174,17 +181,18 @@ async def retry_settlement(
     if log_entry.action != "settle_failed":
         raise HTTPException(status_code=400, detail="Only failed settlements can be retried")
 
-    # Get agent config with decrypted key
-    config_data = db.get_nevermined_config_with_key(log_entry.agent_name)
-    if not config_data:
-        raise HTTPException(status_code=404, detail="Agent Nevermined config not found")
+    logger.info(
+        f"retry-settlement requested for {log_id} (agent '{log_entry.agent_name}') "
+        f"by {current_user.username} — returning 501 (server-side retry not supported)"
+    )
 
-    logger.info(f"Retrying settlement {log_id} for agent '{log_entry.agent_name}' by {current_user.username}")
-
-    return {
-        "detail": "Settlement retry queued",
-        "log_id": log_id,
-        "agent_name": log_entry.agent_name,
-        "note": "Manual settlement retry requires the original access token, which is not stored. "
-                "Use the Nevermined dashboard to reconcile unsettled transactions.",
-    }
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Server-side settlement retry is not supported: the payer access token "
+            "is not stored. Ask the caller to re-present the same payment-signature to "
+            "POST /api/paid/{agent}/chat — it replays the completed work and re-attempts "
+            "settlement without re-charging. Durable server-side retry is tracked as a "
+            "follow-up to #1018."
+        ),
+    )
