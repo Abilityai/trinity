@@ -258,6 +258,16 @@ def test_create_schedule_path_skips_enforcement_when_timeout_none(monkeypatch):
     def fake_enforce(agent_name, requested_seconds):
         enforcer_calls.append((agent_name, requested_seconds))
 
+    # #1445: create_schedule now gates on the caller's access AND a live agent
+    # ownership row before the timeout enforcer runs. Stub both truthy so this
+    # direct route-handler call reaches the enforcement path under test.
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: True, raising=False
+    )
+    monkeypatch.setattr(
+        sched_router.db, "is_agent_live", lambda *_a, **_k: True, raising=False
+    )
+
     monkeypatch.setattr(
         sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
     )
@@ -334,6 +344,16 @@ def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
 
     def fake_enforce(agent_name, requested_seconds):
         enforcer_calls.append((agent_name, requested_seconds))
+
+    # #1445: create_schedule now gates on the caller's access AND a live agent
+    # ownership row before the timeout enforcer runs. Stub both truthy so this
+    # direct route-handler call reaches the enforcement path under test.
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: True, raising=False
+    )
+    monkeypatch.setattr(
+        sched_router.db, "is_agent_live", lambda *_a, **_k: True, raising=False
+    )
 
     monkeypatch.setattr(
         sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
