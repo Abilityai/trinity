@@ -1184,9 +1184,10 @@ async def _persist_and_broadcast_chat_session(
     broadcast chat_response_ready. Returns the chat_session_id (or None when
     persistence isn't applicable) — the caller threads it to signal_sync_waiter.
 
-    The persist call is intentionally un-wrapped (a persistence failure
-    propagates, after the caller's finally signals the waiter); only the
-    best-effort broadcast is isolated — preserving the pre-refactor behavior.
+    The persist body is fail-loud but non-fatal (#1444): `_persist_chat_session`
+    logs a DB error at ERROR (stack trace, no user content) and returns None
+    rather than propagating — so a dropped write never breaks the caller's
+    finally / waiter signal. The broadcast is separately best-effort.
     """
     if not (request.save_to_session and user_id and user_email):
         return None

@@ -239,6 +239,54 @@ def test_persist_failure_is_loud_safe_and_non_fatal(chat_mod, monkeypatch, caplo
     assert _SENSITIVE_RESP not in joined
 
 
+def test_dbapi_error_params_not_leaked_by_fail_loud_log(chat_mod, monkeypatch, caplog):
+    """A REAL SQLAlchemy statement error that binds user content must NOT leak
+    that content through the fail-loud `exc_info=True` log.
+
+    The sibling test above uses a param-less RuntimeError, which cannot exercise
+    SQLAlchemy's `[parameters: [...]]` tail — the realistic failure is a DBAPIError
+    from the `add_chat_message` INSERT (which binds the message body as a
+    parameter). Without `hide_parameters=True` on the engine (db/engine.py), that
+    tail is appended to the exception str and `exc_info=True` writes it verbatim
+    to the ERROR log (proven leak). This guards that engine config end-to-end."""
+    from db.engine import get_engine
+    from sqlalchemy import text
+
+    def _boom(**kwargs):
+        # A genuine engine statement error that binds the sensitive body as a
+        # parameter (unknown table → OperationalError, params still attached).
+        with get_engine().connect() as conn:
+            conn.execute(
+                text("SELECT * FROM __no_such_table__ WHERE body = :b"),
+                {"b": _SENSITIVE_MSG},
+            )
+
+    monkeypatch.setattr(chat_mod.db, "add_chat_message", _boom, raising=False)
+
+    with caplog.at_level(logging.ERROR, logger="routers.chat"):
+        sid = asyncio.run(chat_mod._persist_chat_session(
+            agent_name="agent-a",
+            request=_make_request(chat_mod, user_message=_SENSITIVE_MSG),
+            result=_SuccessResult(response=_SENSITIVE_RESP),
+            user_id=7,
+            user_email=_SENSITIVE_EMAIL,
+        ))
+
+    assert sid is None  # non-fatal
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "a persistence failure must log at ERROR (fail-loud)"
+
+    # The full emitted record — message AND the exc_info traceback (which is
+    # where the DBAPIError's parameter tail would surface) — carries no content.
+    joined = "\n".join(
+        r.getMessage() + "\n" + (logging.Formatter().formatException(r.exc_info) if r.exc_info else "")
+        for r in errors
+    )
+    assert _SENSITIVE_MSG not in joined
+    assert _SENSITIVE_RESP not in joined
+    assert _SENSITIVE_EMAIL not in joined
+
+
 # ---------------------------------------------------------------------------
 # Security F2 — a foreign chat_session_id must not be written into (IDOR).
 # ---------------------------------------------------------------------------
