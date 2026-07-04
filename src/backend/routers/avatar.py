@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from database import db
-from dependencies import get_current_user
+from dependencies import OwnedAgentByName, get_current_user
 from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
@@ -386,21 +386,14 @@ async def get_avatar_emotion(agent_name: str, emotion: str):
 
 @router.post("/{agent_name}/avatar/generate")
 async def generate_avatar(
-    agent_name: str,
+    agent_name: OwnedAgentByName,
     request: AvatarGenerateRequest,
-    current_user: User = Depends(get_current_user),
 ):
-    """Generate an avatar from an identity prompt using the image generation service."""
-    # Only owner/admin can generate
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Generate an avatar from an identity prompt using the image generation service.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can generate avatars")
-
+    Owner/admin only via the OwnedAgentByName dependency — a uniform 404 for both
+    non-existent and unowned agents (no existence oracle, #186).
+    """
     identity_prompt = request.identity_prompt.strip()
     if not identity_prompt:
         raise HTTPException(status_code=400, detail="identity_prompt cannot be empty")
@@ -465,19 +458,12 @@ async def generate_avatar(
 
 @router.post("/{agent_name}/avatar/regenerate")
 async def regenerate_avatar(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: OwnedAgentByName,
 ):
-    """Regenerate avatar as a variation of the reference image."""
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Regenerate avatar as a variation of the reference image.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can regenerate avatars")
-
+    Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
+    """
     # Need a reference image and stored prompt
     ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
     if not ref_path.exists():
@@ -522,19 +508,12 @@ async def regenerate_avatar(
 
 @router.delete("/{agent_name}/avatar")
 async def delete_avatar(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: OwnedAgentByName,
 ):
-    """Remove avatar file and clear DB fields."""
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Remove avatar file and clear DB fields.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can remove avatars")
-
+    Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
+    """
     # Delete files (display + reference + emotion variants, both formats)
     for ext in (".webp", ".png"):
         p = AVATAR_DIR / f"{agent_name}{ext}"
