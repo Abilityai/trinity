@@ -258,8 +258,12 @@ async def summarize_user_memory_background(
         # #903 (F-MEM): a thread-scoped channel session can hold turns from
         # several users. Filter to the current user's own turns so Alice's
         # conversation never persists into Bob's durable, re-injected memory.
-        # Web/DM sessions store the user's turns with their verified email too,
-        # so the filter is a no-op there.
+        # Single-participant paths (web + any channel DM: Slack/Telegram/
+        # WhatsApp) stamp BOTH the user turn and the assistant reply with the
+        # recipient's email, so the filter is a no-op there (full user+assistant
+        # conversation, as before #903). Only a multi-participant session (Slack
+        # channel thread or group chat) leaves the assistant turn null, so the
+        # shared reply is excluded from any one participant's memory.
         messages = db.get_recent_public_chat_messages(
             session_id, limit=20, sender_email=user_email
         )

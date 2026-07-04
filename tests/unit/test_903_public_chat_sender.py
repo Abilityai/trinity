@@ -182,6 +182,23 @@ def test_get_recent_messages_filters_by_sender_email(ops):
     assert all(m.sender_email == "bob@x.com" for m in bob_only)
 
 
+def test_sender_filter_includes_assistant_stamped_with_that_email(ops):
+    """Single-participant parity (#903): web/DM stamp the assistant reply with the
+    recipient's email, so the sender-filtered summarizer feed keeps assistant
+    context (the pre-#903 behavior) instead of dropping it as null."""
+    sid = _session(ops)
+    ops.add_message(sid, "user", "my question", sender_email="bob@x.com", sender_label="Bob")
+    ops.add_message(sid, "assistant", "my answer", sender_email="bob@x.com", sender_label="bot")
+
+    bob_feed = ops.get_recent_messages(sid, limit=20, sender_email="bob@x.com")
+
+    contents = [m.content for m in bob_feed]
+    assert contents == ["my question", "my answer"], (
+        "a single-participant assistant turn stamped with the user's email must "
+        "stay in that user's filtered memory feed"
+    )
+
+
 def test_get_recent_messages_unfiltered_returns_all(ops):
     """No sender_email → unchanged behavior (all turns), so history replay and
     web/DM paths are unaffected."""

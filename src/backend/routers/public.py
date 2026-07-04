@@ -641,12 +641,19 @@ async def public_chat(
 
     assistant_response = result.response
 
-    # Store assistant response in public chat messages
+    # Store assistant response in public chat messages.
+    # #903: a public-link session is always single-participant, so stamp the
+    # assistant turn with the same verified email as the user turn. The
+    # sender-filtered MEM-001 summarizer then keeps the assistant's replies in
+    # this user's summary (they were included pre-#903) while the shared
+    # multi-participant Slack thread — where the assistant turn stays null —
+    # is the only place the filter drops assistant context.
     db.add_public_chat_message(
         session_id=chat_session.id,
         role="assistant",
         content=assistant_response,
-        cost=result.cost
+        cost=result.cost,
+        sender_email=verified_email,
     )
 
     # MEM-001: Increment message count and trigger background summarization every 5 messages
@@ -944,11 +951,16 @@ async def _execute_public_chat_background(
         )
 
         if result.status == "success" and result.response:
+            # #903: single-participant web session — stamp the assistant turn
+            # with the verified email (mirror the sync path) so the
+            # sender-filtered summarizer keeps assistant replies in this user's
+            # memory.
             db.add_public_chat_message(
                 session_id=chat_session_id,
                 role="assistant",
                 content=result.response,
-                cost=result.cost
+                cost=result.cost,
+                sender_email=verified_email,
             )
 
             # MEM-001: Increment message count and trigger background summarization every 5 messages

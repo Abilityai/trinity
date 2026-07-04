@@ -170,9 +170,15 @@ def _sender_label(message: NormalizedMessage) -> Optional[str]:
     ``enrich_message`` metadata as ``_format_channel_identity`` (display name /
     username). Returns ``None`` for DMs and un-enriched messages, so the history
     renderer falls back to the role label.
+
+    The label is a channel-controlled display name rendered in the structural
+    ``{speaker}:`` position of the replayed transcript, so newlines/control
+    chars are stripped before it can forge an ``Assistant:`` line (defence in
+    depth: Slack names are single-line today, but the label is persisted and
+    replayed, and future adapters may source multi-line names).
     """
-    display = message.metadata.get("sender_display_name")
-    username = message.metadata.get("sender_username")
+    display = _sanitize_label(message.metadata.get("sender_display_name"))
+    username = _sanitize_label(message.metadata.get("sender_username"))
     if display and username:
         return f"{display} (@{username})"
     if display:
@@ -180,6 +186,45 @@ def _sender_label(message: NormalizedMessage) -> Optional[str]:
     if username:
         return f"@{username}"
     return None
+
+
+def _sanitize_label(value: Optional[str]) -> Optional[str]:
+    """Collapse newlines/control chars in an untrusted speaker label (#903).
+
+    Keeps the label on one line so it can't inject a forged role turn into the
+    replayed transcript. A no-op for legitimate names. Returns ``None`` when the
+    result is empty after stripping.
+    """
+    if not value:
+        return None
+    cleaned = " ".join(value.split())
+    return cleaned or None
+
+
+def _assistant_sender_email(
+    message: NormalizedMessage, verified_email: Optional[str]
+) -> Optional[str]:
+    """Email to stamp on the assistant turn for sender-filtered MEM-001 (#903).
+
+    A single-participant session (any DM — Slack/Telegram/WhatsApp — plus web)
+    returns ``verified_email`` so the sender-filtered summarizer keeps the
+    assistant's replies in that user's memory (parity with the web path,
+    pre-#903 behavior). A shared, multi-participant session returns ``None`` so a
+    reply addressed to the whole thread is never folded into one participant's
+    durable memory.
+
+    Two multi-participant shapes exist, each flagged by its own adapter's signal:
+    a Slack *channel* thread (Slack sets ``is_dm`` explicitly ``False`` and never
+    sets ``is_group``) and a group chat (Telegram sets ``is_group``). Keying on
+    ``is_dm`` alone would wrongly null Telegram/WhatsApp DMs (they never set
+    ``is_dm``); keying on ``not is_group`` alone would wrongly stamp Slack channel
+    threads (Slack never sets ``is_group``). So combine both signals.
+    """
+    is_shared_thread = (
+        message.metadata.get("is_dm") is False
+        or message.metadata.get("is_group", False)
+    )
+    return None if is_shared_thread else verified_email
 
 
 def _agent_avatar_url(agent_name: str) -> Optional[str]:
@@ -605,8 +650,14 @@ class ChannelMessageRouter:
             sender_email=verified_email,
             sender_label=_sender_label(message),
         )
+        # #903: stamp the assistant turn only for single-participant sessions so
+        # the sender-filtered MEM-001 summarizer keeps assistant replies in that
+        # user's memory (DMs + web) but never folds a shared-thread reply into
+        # one participant's memory. See _assistant_sender_email for the per-
+        # channel signal handling.
         db.add_public_chat_message(
             session_id, "assistant", response_text, cost=result.cost,
+            sender_email=_assistant_sender_email(message, verified_email),
             sender_label=agent_name,
         )
 
