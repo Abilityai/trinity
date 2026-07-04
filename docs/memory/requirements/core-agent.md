@@ -99,6 +99,7 @@
 - **Description**: Real-time status labels in Chat tab and Public Chat reflecting agent activity (replaces static "Thinking...")
 - **Key Features**: SSE stream subscription, tool-name-to-label mapping, 500ms anti-flicker, 10s heartbeat timeout, async_mode task execution with session persistence
 - **Scope**: Authenticated Chat tab + Public Chat links (both use async_mode + SSE streaming)
+- **Persistence hardening (#1444)**: `async_mode` + `save_to_session` chat-session persistence is **fail-loud** (a write error logs at ERROR with a stack trace and a `chat_persist_failed` marker on the sync response; never silently swallowed, never 500s a billed turn) and **owner-checks** a caller-supplied `chat_session_id` (IDOR fix). Guarded on a SUCCESS terminal only (FAILED/CANCELLED turns write no session). Covered by a **fast unit regression guard** (`tests/unit/test_1444_chat_session_persistence.py`) — the slow `requires_agent` integration tests (`test_dynamic_thinking_status.py::TestAsyncModeSessionPersistence`) now also assert the execution reached `success` before demanding a session, disambiguating an execution failure from a persistence failure.
 - **Spec**: `docs/requirements/DYNAMIC_THINKING_STATUS.md`
 - **Flow**: `docs/memory/feature-flows/authenticated-chat-tab.md`
 
