@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-04 | #1018 | fix(nevermined): settlement-ordering — honest `success_unsettled` on settle-fail (was lying `"success"`); `Idempotency-Key` on the paid boundary keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-replay / unsettled-re-drive-converge; `/retry-settlement` stub → honest 501. Tier 2 durable retry split to a follow-up | [nevermined-payments.md](feature-flows/nevermined-payments.md), [effect-idempotency.md](feature-flows/effect-idempotency.md) |
 | 2026-06-30 | trinity-enterprise#58 | feat(ui): Brain Orb — capability-gated per-agent 3D knowledge-graph page. Phase 1 (static render: first-party CSP-clean assets + same-origin iframe host + read-only `data.json` proxy) + Phase 2 (live scope mount/unmount → owner-gated agent re-export via `~/.trinity/brain-orb/` convention hooks → in-place rebuild). Voice/KB-actions/transcript deferred | [brain-orb.md](feature-flows/brain-orb.md) |
 | 2026-06-29 | #1376 | fix(session): reconcile against server state on a severed turn so long Session turns never show a false "Failed to send" | [session-tab.md](feature-flows/session-tab.md) |
 | 2026-06-29 | #506 | feat(capacity): admin fleet-wide `max_parallel_tasks` ceiling + runtime clamp + owner/admin UI | [capacity-management.md](feature-flows/capacity-management.md) |

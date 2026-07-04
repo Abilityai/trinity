@@ -183,6 +183,10 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 
 ## Related Flows
 
+- [nevermined-payments.md](nevermined-payments.md) — the paid x402 boundary now
+  carries the #525 trigger-idempotency layer too (`derive_payment_key`, `(token+body)`,
+  #1018), composing with the `payment:{agent_request_id}` settle effect guard here:
+  trigger-dedup stops the LLM re-run, the effect guard stops the double-settle.
 - [idempotency-keys.md](idempotency-keys.md) — the #525 trigger-boundary layer
   this extends (shared `idempotency_keys` table + `begin`/`complete`/`fail`).
 - #1083 fire-and-forget dispatch (architecture.md → Fire-and-Forget Dispatch);
@@ -191,6 +195,9 @@ effect, not fail-open). Both are tracked as a **blocking dependency on Epic
 
 ## Change History
 
+- 2026-07-04 — #1018: the paid x402 boundary (`routers/paid.py`) gained the #525
+  trigger-idempotency layer (`derive_payment_key`, `upgrade_snapshot`), composing
+  with the `payment:{agent_request_id}` settle effect guard. No schema change.
 - 2026-06-22 — #1084: effect-scoped idempotency for outbound side effects
   (messages, voip, share_file, Nevermined settle); `effect_guard` primitive +
   MCP `execution_id`/`dedup_label` params. No schema change.
