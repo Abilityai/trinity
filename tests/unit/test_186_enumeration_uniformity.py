@@ -44,6 +44,19 @@ if _TESTS not in sys.path:
 
 from db_harness import db_backend, run, seed_agent, seed_user  # noqa: E402,F401
 
+# Capture the REAL services package + docker_service module at collection time,
+# while sys.modules is still clean. A sibling unit test stubs these into
+# sys.modules as Mocks during its own run; under some pytest-randomly orderings
+# that state leaks past its teardown, and `_agent_exists`'s function-local
+# `from services.docker_service import get_agent_by_name` then resolves a truthy
+# Mock — reporting a non-existent agent as existing. The `_no_docker` fixture
+# pins these back (monkeypatch.setitem, auto-restored) before stubbing the probe
+# so resolution is deterministic regardless of inbound pollution (#186).
+import services  # noqa: E402
+import services.docker_service  # noqa: E402
+_REAL_SERVICES_PKG = sys.modules["services"]
+_REAL_DOCKER_SERVICE = sys.modules["services.docker_service"]
+
 
 # =============================================================================
 # 1. Agent-access dependency uniformity (real DB, real db calls)
@@ -272,9 +285,20 @@ def test_tier4_config_gets_are_access_gated():
 @pytest.fixture
 def _no_docker(monkeypatch):
     """Stub only the Docker existence probe so _agent_exists resolves purely
-    from the real db.get_agent_owner. Keeps the db access-check calls real."""
+    from the real db.get_agent_owner. Keeps the db access-check calls real.
+
+    First pin the real ``services`` / ``services.docker_service`` modules back
+    into ``sys.modules`` (a sibling unit test can leave them as Mocks under some
+    pytest-randomly orderings — see the module-level capture above), so
+    ``_agent_exists``'s function-local ``from services.docker_service import
+    get_agent_by_name`` deterministically resolves the real module. Then stub the
+    probe to report "no container" — with a leaked Mock in place the probe would
+    otherwise return a truthy Mock and a non-existent agent would read as
+    existing, defeating the enumeration-uniformity 404 (#186)."""
+    monkeypatch.setitem(sys.modules, "services", _REAL_SERVICES_PKG)
+    monkeypatch.setitem(sys.modules, "services.docker_service", _REAL_DOCKER_SERVICE)
     monkeypatch.setattr(
-        "services.docker_service.get_agent_by_name", lambda name: None, raising=True
+        _REAL_DOCKER_SERVICE, "get_agent_by_name", lambda name: None, raising=False
     )
 
 
@@ -346,3 +370,32 @@ def test_nvm_shared_reader_reads_but_cannot_write(seeded, _no_docker):
     err = _nvm_denial("_require_write_access", _AGENT, stranger)
     assert err.status_code == 404
     assert err.detail == "Agent not found"
+
+
+# =============================================================================
+# 4. avatar.py path-component barrier — agent_name (a URL path param) used to
+# build filesystem paths under AVATAR_DIR. The mutating handlers authorize via
+# OwnedAgentByName (#186), which hides the existence/ownership constraint from
+# CodeQL's py/path-injection tracking; _safe_avatar_component restores an explicit
+# basename barrier (defense-in-depth + static-analysis). Uniform 404 keeps the
+# no-existence-oracle contract.
+# =============================================================================
+
+
+def test_avatar_safe_component_allows_valid_name():
+    from routers.avatar import _safe_avatar_component
+
+    assert _safe_avatar_component("my-agent_1.2") == "my-agent_1.2"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["../etc/passwd", "a/b", "..", ".", "", "a\\b", "x\x00y", "/abs", "foo/"],
+)
+def test_avatar_safe_component_rejects_traversal_with_404(bad):
+    from routers.avatar import _safe_avatar_component
+
+    with pytest.raises(HTTPException) as exc:
+        _safe_avatar_component(bad)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Agent not found"

@@ -6,6 +6,7 @@ REST endpoints for AI-generated agent avatars and emotion variants.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,31 @@ router = APIRouter(prefix="/api/agents", tags=["avatars"])
 logger = logging.getLogger(__name__)
 
 AVATAR_DIR = Path("/data/avatars")
+
+
+def _safe_avatar_component(agent_name: str) -> str:
+    """Return ``agent_name`` iff it is a single safe path component, else 404.
+
+    Defense-in-depth barrier before ``agent_name`` (a URL path param) is used to
+    build filesystem paths under ``AVATAR_DIR``. The mutating handlers now
+    authorize via the ``OwnedAgentByName`` dependency (#186) instead of an inline
+    ``db.get_agent_owner`` check; that dependency guarantees the agent exists and
+    is owned (and agent names are charset-restricted at creation), so traversal is
+    not reachable in practice — but the ownership check lives in a separate callee,
+    which hides the constraint from CodeQL's ``py/path-injection`` taint tracking.
+    This explicit basename guard restores the barrier for both static analysis and
+    belt-and-suspenders runtime safety. Uniform 404 preserves #186's
+    no-existence-oracle contract."""
+    if (
+        not agent_name
+        or agent_name in (".", "..")
+        or "/" in agent_name
+        or "\\" in agent_name
+        or "\x00" in agent_name
+        or os.path.basename(agent_name) != agent_name
+    ):
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent_name
 
 
 # #957: Map image-generation error_kind → (HTTP status, user-facing detail).
@@ -394,6 +420,7 @@ async def generate_avatar(
     Owner/admin only via the OwnedAgentByName dependency — a uniform 404 for both
     non-existent and unowned agents (no existence oracle, #186).
     """
+    agent_name = _safe_avatar_component(agent_name)
     identity_prompt = request.identity_prompt.strip()
     if not identity_prompt:
         raise HTTPException(status_code=400, detail="identity_prompt cannot be empty")
@@ -464,6 +491,7 @@ async def regenerate_avatar(
 
     Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
     """
+    agent_name = _safe_avatar_component(agent_name)
     # Need a reference image and stored prompt
     ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
     if not ref_path.exists():
@@ -514,6 +542,7 @@ async def delete_avatar(
 
     Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
     """
+    agent_name = _safe_avatar_component(agent_name)
     # Delete files (display + reference + emotion variants, both formats)
     for ext in (".webp", ".png"):
         p = AVATAR_DIR / f"{agent_name}{ext}"
