@@ -42,10 +42,10 @@ def _avatar_path(agent_name: str, suffix: str) -> Path:
     (CodeQL SafeAccessCheck). Defense-in-depth at runtime; a uniform 404 on escape
     preserves #186's no-existence-oracle contract."""
     base = str(AVATAR_DIR)
-    full = os.path.normpath(os.path.join(base, f"{agent_name}{suffix}"))
-    if full != base and not full.startswith(base + os.sep):
+    fullpath = os.path.normpath(os.path.join(base, f"{agent_name}{suffix}"))
+    if not fullpath.startswith(base):
         raise HTTPException(status_code=404, detail="Agent not found")
-    return Path(full)
+    return Path(fullpath)
 
 
 # #957: Map image-generation error_kind → (HTTP status, user-facing detail).
