@@ -373,29 +373,31 @@ def test_nvm_shared_reader_reads_but_cannot_write(seeded, _no_docker):
 
 
 # =============================================================================
-# 4. avatar.py path-component barrier — agent_name (a URL path param) used to
-# build filesystem paths under AVATAR_DIR. The mutating handlers authorize via
+# 4. avatar.py path containment — agent_name (a URL path param) used to build
+# filesystem paths under AVATAR_DIR. The mutating handlers authorize via
 # OwnedAgentByName (#186), which hides the existence/ownership constraint from
-# CodeQL's py/path-injection tracking; _safe_avatar_component restores an explicit
-# basename barrier (defense-in-depth + static-analysis). Uniform 404 keeps the
-# no-existence-oracle contract.
+# CodeQL's py/path-injection tracking; _avatar_path restores an explicit
+# normpath + within-root barrier (defense-in-depth + static-analysis). Uniform
+# 404 on escape keeps the no-existence-oracle contract.
 # =============================================================================
 
 
-def test_avatar_safe_component_allows_valid_name():
-    from routers.avatar import _safe_avatar_component
+def test_avatar_path_builds_within_root_for_valid_name():
+    from routers.avatar import AVATAR_DIR, _avatar_path
 
-    assert _safe_avatar_component("my-agent_1.2") == "my-agent_1.2"
+    p = _avatar_path("my-agent_1.2", "_ref.png")
+    assert p == AVATAR_DIR / "my-agent_1.2_ref.png"
 
 
 @pytest.mark.parametrize(
     "bad",
-    ["../etc/passwd", "a/b", "..", ".", "", "a\\b", "x\x00y", "/abs", "foo/"],
+    ["../etc/passwd", "/abs/evil", "../../root", "../..", "a/../../b"],
 )
-def test_avatar_safe_component_rejects_traversal_with_404(bad):
-    from routers.avatar import _safe_avatar_component
+def test_avatar_path_rejects_escape_with_404(bad):
+    """Any agent_name whose normalized path leaves AVATAR_DIR is a uniform 404."""
+    from routers.avatar import _avatar_path
 
     with pytest.raises(HTTPException) as exc:
-        _safe_avatar_component(bad)
+        _avatar_path(bad, "_ref.png")
     assert exc.value.status_code == 404
     assert exc.value.detail == "Agent not found"
