@@ -955,19 +955,24 @@ app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 # at `src/backend/enterprise/`, repo `Abilityai/trinity-enterprise`).
 # The submodule is OPTIONAL: customers running the public repo without
 # enterprise access clone without it, and the ImportError below silently
-# no-ops. When mounted, `register_enterprise(app)` installs the SSO /
-# SCIM / SIEM routers under `/api/enterprise/*`. The function is
+# no-ops. When mounted, `register_enterprise(app)` installs the private
+# enterprise routers under `/api/enterprise/*`. The function is
 # idempotent (guards on `app.state.enterprise_registered`). Entitlement
 # gating happens per-endpoint via `requires_entitlement(feature_id)`
 # from `dependencies.py` — endpoints are mounted unconditionally and
 # the gate decides whether to serve them. This keeps the wiring
 # deterministic regardless of license state.
 #
+# The specific paid modules the submodule installs are intentionally NOT
+# enumerated here — this is a PUBLIC repo, and the paid-feature catalog
+# lives only in the private enterprise repo (trinity-enterprise#45). This
+# comment (and entitlement_service.py) are grepped by the enterprise-docs
+# guard, so keep it to the generic seam. See `docs/ENTERPRISE.md`.
+#
 # Import path is `enterprise.backend.register_enterprise`: the private
 # repo is restructured into `backend/` and `frontend/` subdirs so the
 # same repo can be dual-mounted (`src/backend/enterprise/` for Python,
-# `src/frontend/src/enterprise/` for Vite). See
-# `docs/planning/ENTERPRISE_ARCHITECTURE.md` for rationale.
+# `src/frontend/src/enterprise/` for Vite).
 try:
     from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
     register_enterprise(app)
