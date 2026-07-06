@@ -310,16 +310,26 @@ _CANARY_SCHEMA_SQL = """
             status TEXT NOT NULL,
             started_at TEXT NOT NULL,
             completed_at TEXT,
+            duration_ms INTEGER,          -- #1077 E-03: terminal-row timing
+            queued_at TEXT,               -- #1077 E-04: backlog enqueue time
+            backlog_metadata TEXT,        -- #1077 E-04/G-04: JSON drain-replay identity
             message TEXT NOT NULL DEFAULT '',
             triggered_by TEXT NOT NULL DEFAULT 'test'
         );
+        -- Mirrors the production agent_schedules columns the canary reads
+        -- (E-06 reads next_run_at/enabled/deleted_at; L-03 reads agent_name).
+        -- NOTE: a single definition — a stray second `CREATE TABLE
+        -- agent_schedules` here (from a #1472 merge) made executescript raise
+        -- `table already exists`, reddening the whole file (#1077 baseline fix).
         CREATE TABLE agent_schedules (
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
-            name TEXT DEFAULT '',
-            cron_expression TEXT DEFAULT '0 4 * * *',
+            name TEXT NOT NULL DEFAULT '',
+            cron_expression TEXT NOT NULL DEFAULT '0 4 * * *',
+            message TEXT NOT NULL DEFAULT '',
             enabled INTEGER DEFAULT 1,
             next_run_at TEXT,
+            owner_id INTEGER NOT NULL DEFAULT 0,
             deleted_at TEXT
         );
         CREATE TABLE agent_sharing (
@@ -723,11 +733,32 @@ def _add_agent(path, name, max_parallel=3, timeout=900, is_system=0):
     c.close()
 
 
-def _add_execution(path, eid, agent_name, status, started_at=None, completed_at=None):
+def _add_execution(
+    path,
+    eid,
+    agent_name,
+    status,
+    started_at=None,
+    completed_at=None,
+    duration_ms=None,
+    queued_at=None,
+    backlog_metadata=None,
+):
     c = _conn(path)
     c.execute(
-        "INSERT INTO schedule_executions (id, agent_name, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?)",
-        (eid, agent_name, status, started_at or "2026-04-30T00:00:00Z", completed_at),
+        "INSERT INTO schedule_executions "
+        "(id, agent_name, status, started_at, completed_at, duration_ms, "
+        "queued_at, backlog_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            eid,
+            agent_name,
+            status,
+            started_at or "2026-04-30T00:00:00Z",
+            completed_at,
+            duration_ms,
+            queued_at,
+            backlog_metadata,
+        ),
     )
     c.commit()
     c.close()
@@ -1278,6 +1309,7 @@ class TestRunner:
         assert results["E-01"] == []
         assert results["E-02"] == []
         assert results["E-05"] == []
+        assert results["E-06"] == []
         assert len(results["L-03"]) == 1
         # B-01 now reads the SAME temp DB on both sides via reload_canary's
         # controlled `database` stub (get_queued_count over the temp
