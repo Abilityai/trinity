@@ -24,7 +24,9 @@ Add the following path rule in your Cloudflare Tunnel dashboard so Twilio webhoo
 
 | Route | Backend |
 |-------|---------|
-| `/api/whatsapp/webhook/*` | `http://frontend:80` (or `http://backend:8000` if routing directly) |
+| `/api/whatsapp/webhook/*` | `http://backend:8000` |
+
+The webhook is a backend FastAPI route (Twilio-signature verified). Routing it to the frontend service silently drops inbound messages — point it at the backend.
 
 Without this rule, Twilio webhooks return 404 at the Cloudflare edge and never reach Trinity. The UI shows a yellow notice as a reminder.
 
@@ -58,8 +60,8 @@ You need three values from Twilio: **Account SID**, **Auth Token**, and a **What
 ### Connect WhatsApp to an Agent
 
 1. Open the agent detail page
-2. Select the **Sharing** tab
-3. Scroll to the **WhatsApp (Twilio)** section
+2. Select the **Sharing** tab and find the **WhatsApp** row under **Channels**
+3. Click **Configure** — the WhatsApp (Twilio) configuration opens in a dialog
 4. Enter:
    - **Twilio Account SID** — starts with `AC`, 34 characters long
    - **Auth Token** — from the Twilio Console (stored encrypted)
@@ -96,6 +98,25 @@ On the connected state, click **Verify** to confirm the stored credentials are s
 ### Disconnect
 
 Click **Disconnect** to remove the binding. The Twilio sender is not affected — only the Trinity configuration is removed.
+
+### Outbound Media & Files
+
+Agents can deliver files and images in their WhatsApp replies, not just text. Each file is hosted transiently by Trinity (~1 hour) and sent as a Twilio media attachment — one message per file, since WhatsApp allows a single media item per message. The text reply always goes out first, so it survives even if a media send fails.
+
+| File type | Delivered as | Size cap |
+|-----------|--------------|----------|
+| Images, audio, video | Native media | 5 MB |
+| Text and structured documents (txt, JSON, XML, PDF, YAML, SQL, …) | Document | 16 MB |
+| Unknown binary types | Not deliverable as media | — |
+
+Rules:
+
+- Outbound media requires the agent's **file-sharing** toggle to be on (Sharing tab → Distribution → File sharing) and a configured **Public Chat URL** (media links must be HTTPS).
+- A file that is oversized, of an unsupported type, or otherwise undeliverable degrades to a `📎 name: url` download link appended to the text reply — it never blocks the reply or other files.
+
+### Voice Replies (Outbound)
+
+The agent can speak its replies as WhatsApp voice notes (OGG, delivered via Twilio media). Enable the shared **Voice replies** toggle inside the WhatsApp dialog — see [Voice Replies](../advanced/voice-replies.md). Voice notes work even when the file-sharing toggle is off; they are gated only by their own setting.
 
 ## User Commands
 
@@ -182,7 +203,7 @@ Go to **Settings → Public Chat URL** and enter your Trinity instance's public 
 
 ### Twilio webhook returns 404
 
-The Cloudflare Tunnel ingress rule for `/api/whatsapp/webhook/*` is missing or misconfigured. Add it in the Cloudflare dashboard pointing to the frontend or backend service.
+The Cloudflare Tunnel ingress rule for `/api/whatsapp/webhook/*` is missing or misconfigured. Add it in the Cloudflare dashboard pointing to the **backend** service (`http://backend:8000`).
 
 ### HMAC signature validation fails
 
@@ -205,5 +226,6 @@ Twilio returns 401 if the AccountSid/AuthToken combination is invalid. Re-copy t
 
 - [Telegram Integration](telegram-integration.md)
 - [Slack Integration](slack-integration.md)
+- [Voice Replies](../advanced/voice-replies.md)
 - [Access Control](../sharing-and-access/access-control.md)
-- [Agent Sharing](../sharing-and-access/agent-sharing.md)
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md)

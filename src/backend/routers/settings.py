@@ -20,6 +20,7 @@ from models import (
     AgentQuotaUpdate,
     ApiKeyTest,
     ApiKeyUpdate,
+    BrainOrbSettingsUpdate,
     GitHubTemplatesUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
@@ -135,14 +136,15 @@ async def get_public_feature_flags(
         GEMINI_API_KEY,
         VOICE_ENABLED,
         VOIP_ENABLED,
-        BRAIN_ORB_ENABLED,
-        BRAIN_ORB_VOICE_ENABLED,
-        BRAIN_ORB_WRITE_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
+    # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
+    # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
+    # is reflected here without a backend restart.
+    brain_orb_enabled = settings_service.is_brain_orb_enabled()
     return {
         "session_tab_enabled": settings_service.is_session_tab_enabled(),
         "voice_available": voice_available,
@@ -151,22 +153,25 @@ async def get_public_feature_flags(
         # Also requires a per-agent voip_bindings row to actually function.
         "voip_available": VOIP_ENABLED and bool(GEMINI_API_KEY),
         # Brain Orb (#58, trinity-enterprise) — gates the per-agent /agents/:name/brain
-        # route + tab. Just the env flag (static render needs no Gemini); the per-agent
-        # capability gate is the template.yaml `brain-orb` token, checked frontend-side.
-        "brain_orb_available": BRAIN_ORB_ENABLED,
+        # route + tab. Static render needs no Gemini; the per-agent capability gate is
+        # the template.yaml `brain-orb` token, checked frontend-side.
+        "brain_orb_available": brain_orb_enabled,
         # Brain Orb voice tile (#58 Phase 3, trinity-enterprise#60) — client-held
-        # Gemini Live. DISTINCT from brain_orb_available: the voice tile also needs a
-        # Gemini key, so gate on BRAIN_ORB_VOICE_ENABLED AND a key (mirrors
-        # voice_available). The frontend un-hides the voice tile only when this is on
-        # AND the agent carries the `brain-orb` capability. Default OFF.
-        "brain_orb_voice_available": BRAIN_ORB_VOICE_ENABLED and bool(GEMINI_API_KEY),
+        # Gemini Live. Composes base AND voice AND a Gemini key (#85 — with base OFF
+        # the orb is down, so voice must read unavailable too; mirrors the write
+        # composition below). The frontend un-hides the voice tile only when this is
+        # on AND the agent carries the `brain-orb` capability. Default OFF.
+        "brain_orb_voice_available": brain_orb_enabled
+        and settings_service.is_brain_orb_voice_enabled()
+        and bool(GEMINI_API_KEY),
         # Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
         # capture/link. DISTINCT kill-switch from brain_orb_available so writes can be
         # disabled without downing read/voice. UI-only hint (the write routes independently
         # enforce the flag + owner gate); the orb only attempts initActions when on. The
         # per-agent gate is still owner + the agent shipping a `brain-orb/action` hook.
         # run_skill + the transcript pipeline are Phase 4b (#66). Default OFF.
-        "brain_orb_write_available": BRAIN_ORB_WRITE_ENABLED and BRAIN_ORB_ENABLED,
+        "brain_orb_write_available": settings_service.is_brain_orb_write_enabled()
+        and brain_orb_enabled,
         # Pull-pilot routing for agent→agent MCP chat (#946) — default OFF.
         # Observability-only here: the routing gate is the MCP server's own read
         # of the same env var. Lets an operator confirm, via the API, whether the
@@ -1513,6 +1518,140 @@ async def update_max_parallel_tasks_ceiling_setting(
         "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
         "min": MAX_PARALLEL_TASKS_CEILING_MIN,
         "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
+# ============================================================================
+# Brain Orb Feature Flags (trinity-enterprise#85 — admin-configurable)
+# ============================================================================
+
+def _brain_orb_flag_state() -> Dict[str, Any]:
+    """Per-flag effective value + source for the admin panel.
+
+    `source` tells the UI whether a DB override is active — critical because a
+    stored row makes the BRAIN_ORB_* env var silently dead until cleared:
+    - "override": a system_settings row exists (env ignored)
+    - "env":      no row; the env var opts the flag in
+    - "default":  neither; the code default (OFF) applies
+    """
+    from services.settings_service import BRAIN_ORB_FLAGS
+
+    state: Dict[str, Any] = {}
+    for field, (setting_key, env_var) in BRAIN_ORB_FLAGS.items():
+        stored = db.get_setting_value(setting_key, None)
+        env_on = os.getenv(env_var, "").strip().lower() in ("true", "1", "yes")
+        if stored is not None:
+            value = str(stored).lower() in ("true", "1", "yes")
+            source = "override"
+        else:
+            value = env_on
+            source = "env" if env_on else "default"
+        state[field] = {"value": value, "source": source}
+    return state
+
+
+@router.get("/brain-orb")
+async def get_brain_orb_settings(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the Brain Orb platform flags with per-flag source (trinity-enterprise#85).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
+    `gemini_key_configured` reflects the env-only GEMINI_API_KEY secret the
+    voice tile additionally requires (boolean only — never the key).
+    """
+    require_admin(current_user)
+
+    from config import GEMINI_API_KEY
+
+    return {
+        "flags": _brain_orb_flag_state(),
+        "gemini_key_configured": bool(GEMINI_API_KEY),
+    }
+
+
+@router.put("/brain-orb")
+async def update_brain_orb_settings(
+    body: BrainOrbSettingsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the Brain Orb platform flags (trinity-enterprise#85).
+
+    Admin-only, audit-logged with per-flag old→new values. Partial update:
+    only provided booleans are written. `clear: [flag,...]` deletes a flag's
+    stored override, reverting it to its env/default value. Takes effect on
+    the next request — route gates resolve at request time, no restart.
+    """
+    require_admin(current_user)
+
+    from config import GEMINI_API_KEY
+    from services.settings_service import BRAIN_ORB_FLAGS
+
+    clear = body.clear or []
+    unknown = [f for f in clear if f not in BRAIN_ORB_FLAGS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown flag(s) in clear: {', '.join(sorted(unknown))}. "
+                   f"Valid: {', '.join(BRAIN_ORB_FLAGS)}",
+        )
+    conflict = [f for f in clear if getattr(body, f, None) is not None]
+    if conflict:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Flag(s) both set and cleared: {', '.join(sorted(conflict))}",
+        )
+
+    before = _brain_orb_flag_state()
+    updated = []
+    cleared = []
+    # getattr default: a registry flag missing from the model must read as
+    # "not provided", never AttributeError→500 (drift-guarded by test too).
+    for field, (setting_key, _env_var) in BRAIN_ORB_FLAGS.items():
+        value = getattr(body, field, None)
+        if value is not None:
+            db.set_setting(setting_key, "true" if value else "false")
+            updated.append(field)
+        elif field in clear:
+            db.delete_setting(setting_key)
+            cleared.append(field)
+    after = _brain_orb_flag_state()
+
+    if updated or cleared:
+        # SEC-001: the write flag gates an exec-adjacent surface (the agent's
+        # action hook), so every change must leave a per-flag old→new trace.
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "setting": "brain_orb_flags",
+                "action": "update",
+                "changes": {
+                    field: {
+                        "old": before[field]["value"],
+                        "new": after[field]["value"],
+                    }
+                    for field in updated + cleared
+                },
+                "cleared": cleared,
+            },
+        )
+
+    return {
+        "success": True,
+        "updated": updated,
+        "cleared": cleared,
+        "flags": after,
+        "gemini_key_configured": bool(GEMINI_API_KEY),
     }
 
 

@@ -309,6 +309,37 @@
   private schema, the licensing/entitlement enforcement design, and the
   commercial rationale are documented privately in `trinity-enterprise`.
 
+### 35.2 Seam DX — Optional Submodules, Public Install Doc, Edition Surface (#1443)
+- **Status**: ✅ Implemented (2026-07-04)
+- **GitHub Issue**: #1443 (epic #1258)
+- **Description**: Make the open-core seam discoverable and friction-free.
+  Both private submodules (`.claude`, `src/backend/enterprise`) are marked
+  `update = none` in `.gitmodules`, so a fresh public clone +
+  `git submodule update --init --recursive` completes **without credentials**
+  (git skips them, exit 0). Mounting is an explicit per-clone opt-in.
+- **Opt-in mechanics** (empirically verified): under `update = none`, a plain
+  `--init <path>` is *also* skipped, and a one-shot `--init --checkout` copies
+  `none` into local config (future plain updates skip again). The durable
+  opt-in is config-first: `git config submodule.<path>.update checkout`, then
+  `git submodule update --init <path>`. Existing clones initialized while
+  `.gitmodules` had `update = checkout` (i.e. `.claude` post-init) carry a
+  protective local override; enterprise clones do NOT and need the one-time
+  config line (documented in `docs/ENTERPRISE.md`; `deploy-dev.yml` sets it
+  and judges init success by the populated marker file, since skip == exit 0).
+- **Public install doc**: `docs/ENTERPRISE.md` — generic seam only (mount
+  commands, HTTPS-PAT URL override, rebuild, verification via boot line /
+  feature-flags / `edition`); guard-compliant per
+  `.github/workflows/enterprise-docs-guard.yml`.
+- **Edition surface**: `GET /api/version` returns
+  `edition: "oss" | "enterprise"` + `enterprise_features: list[str]`, both
+  derived from `entitlement_service.list_entitled_features()` (the same
+  source as feature-flags — surfaces can't diverge). Semantics: *effective*
+  runtime entitlement, not submodule-on-disk; `TRINITY_OSS_ONLY=1` or a
+  fully-failed registration → `"oss"`; partial registration → `"enterprise"`
+  with the surviving modules listed. Handler imports the service
+  function-locally (test-stub compatibility); `_build_version_payload` stays
+  stdlib-pure with `edition`/`enterprise_features` threaded as parameters.
+
 ---
 
 ## 36. Build Info Surface (#926)
@@ -328,8 +359,10 @@
   {
     "version": "0.9.0",
     "platform": "trinity",
+    "edition": "oss",
+    "enterprise_features": [],
     "components": { … },
-    "runtimes": ["claude-code", "gemini-cli"],
+    "runtimes": ["claude-code", "gemini-cli", "codex"],
     "build_date": "2026-05-25T14:00:00Z",
     "git_commit": "f1ba610fab…full sha…",
     "git_commit_short": "f1ba610f",

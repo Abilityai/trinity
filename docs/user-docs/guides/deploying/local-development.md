@@ -170,6 +170,19 @@ All platform state is stored in Docker named volumes. These survive `docker comp
 
 The volume name prefix `trinity_` comes from the Compose project name (the directory name, `trinity`).
 
+### Optional: PostgreSQL Backend
+
+SQLite is the zero-config default for local development, but the dev compose ships a bundled PostgreSQL container behind a profile (note: **SQLite support ends September 1, 2026** — production instances should run PostgreSQL; see [single-server.md](single-server.md#database-backend)):
+
+```bash
+# In .env:
+#   POSTGRES_PASSWORD=your-postgres-password
+#   DATABASE_URL=postgresql://trinity:your-postgres-password@postgres:5432/trinity
+docker compose --profile postgres up -d
+```
+
+The host in the URL is the compose service name `postgres` (Docker DNS). The switch is non-destructive — comment `DATABASE_URL` out and the next restart is back on SQLite (each backend keeps its own data).
+
 ## Troubleshooting
 
 **`ModuleNotFoundError` on backend startup** — A Python dependency was added since your last build. Rebuild:

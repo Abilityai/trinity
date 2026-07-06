@@ -57,7 +57,7 @@ def test_version_payload_includes_git_provenance_fields(monkeypatch):
     monkeypatch.setenv("BUILD_DATE", "2026-05-25T15:05:00Z")
 
     build = _load_builder()
-    payload = build(voice_enabled=False)
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
 
     assert payload["git_commit"].startswith("abc123de")
     # Short SHA is the first 8 chars.
@@ -82,7 +82,7 @@ def test_version_payload_falls_back_to_unknown_when_env_missing(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     build = _load_builder()
-    payload = build(voice_enabled=False)
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
 
     assert payload["git_commit"] == "unknown"
     assert payload["git_commit_short"] == "unknown"
@@ -99,7 +99,7 @@ def test_version_payload_prefers_version_env(monkeypatch):
     monkeypatch.setenv("VERSION", "0.9.0+gdeadbeef")
 
     build = _load_builder()
-    payload = build(voice_enabled=False)
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
 
     assert payload["version"] == "0.9.0+gdeadbeef"
     # Version flows into the component descriptors too.
@@ -113,7 +113,7 @@ def test_version_payload_empty_version_env_falls_back_to_file(monkeypatch):
     monkeypatch.setenv("VERSION", "")
 
     build = _load_builder()
-    payload = build(voice_enabled=False)
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
 
     # Repo VERSION file is read via the injected __file__ path.
     assert payload["version"] != ""
@@ -124,7 +124,7 @@ def test_version_payload_preserves_existing_fields(monkeypatch):
     """Pre-#926 keys (version, platform, components, runtimes, voice_enabled)
     must still be present so existing callers don't break."""
     build = _load_builder()
-    payload = build(voice_enabled=True)
+    payload = build(voice_enabled=True, edition="oss", enterprise_features=[])
 
     for key in ("version", "platform", "components", "runtimes", "voice_enabled"):
         assert key in payload, f"pre-#926 field missing: {key!r}"
@@ -134,3 +134,69 @@ def test_version_payload_preserves_existing_fields(monkeypatch):
     assert "agent_server" in payload["components"]
     assert "base_image" in payload["components"]
 
+
+
+# -----------------------------------------------------------------------------
+# #1443 — edition + enterprise_features surface
+# -----------------------------------------------------------------------------
+
+
+def test_version_payload_passes_edition_and_features_through():
+    """#1443: `edition` and `enterprise_features` are pure passthrough —
+    the builder must not recompute or normalize them (derivation lives in
+    the handler, from entitlement_service)."""
+    build = _load_builder()
+
+    oss = build(voice_enabled=False, edition="oss", enterprise_features=[])
+    assert oss["edition"] == "oss"
+    assert oss["enterprise_features"] == []
+
+    ent = build(
+        voice_enabled=False,
+        edition="enterprise",
+        enterprise_features=["module-a", "module-b"],
+    )
+    assert ent["edition"] == "enterprise"
+    assert ent["enterprise_features"] == ["module-a", "module-b"]
+
+    # Deliberately MISMATCHED pair: if the builder re-derived edition from
+    # the features list (instead of passing it through), this would flip to
+    # "enterprise" and fail — pinning the pure-passthrough property the
+    # docstring claims (review F5).
+    mismatched = build(
+        voice_enabled=False, edition="oss", enterprise_features=["module-a"]
+    )
+    assert mismatched["edition"] == "oss"
+
+
+def test_version_payload_runtimes_lists_all_shipped_runtimes():
+    """#1187/#1443 drive-by: the hardcoded runtimes list had gone stale
+    (missing codex). Keep it matching the shipped runtime set."""
+    build = _load_builder()
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
+    assert payload["runtimes"] == ["claude-code", "gemini-cli", "codex"]
+
+
+def test_version_handler_imports_entitlement_service_function_locally():
+    """#1443 static guard: `_set_for_testing` rebinds the MODULE GLOBAL in
+    services/entitlement_service.py. A top-level
+    `from services.entitlement_service import entitlement_service` in
+    main.py would freeze the boot-time instance and silently bypass test
+    stubs (and any future runtime rebinding). The import must live inside
+    the get_version handler body — same pattern as routers/settings.py."""
+    src = (_BACKEND / "main.py").read_text(encoding="utf-8")
+
+    # No module-top-level (column-0) import of the singleton.
+    for line in src.splitlines():
+        assert not line.startswith(
+            "from services.entitlement_service import"
+        ), "entitlement_service must not be imported at main.py top level"
+
+    # The handler itself must import it function-locally.
+    idx = src.find("async def get_version")
+    assert idx != -1, "get_version handler not found in main.py"
+    handler_window = src[idx : idx + 2000]
+    assert (
+        "from services.entitlement_service import entitlement_service"
+        in handler_window
+    ), "get_version must import entitlement_service function-locally"
