@@ -303,15 +303,6 @@ def canary_db(monkeypatch):
             shared_by_id TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE TABLE agent_schedules (
-            id TEXT PRIMARY KEY,
-            agent_name TEXT NOT NULL,
-            name TEXT NOT NULL DEFAULT '',
-            cron_expression TEXT NOT NULL DEFAULT '',
-            message TEXT NOT NULL DEFAULT '',
-            enabled INTEGER DEFAULT 1,
-            owner_id INTEGER NOT NULL DEFAULT 0
-        );
         CREATE TABLE chat_sessions (
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
@@ -1159,7 +1150,7 @@ class TestRunner:
 
         assert set(results.keys()) == {
             "S-01", "S-02", "S-03",
-            "E-01", "E-02", "E-05",
+            "E-01", "E-02", "E-05", "E-06",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1177,6 +1168,8 @@ class TestRunner:
         # snapshot id-list count == 0, so the check is genuinely green — not
         # skipped, and immune to a leaked foreign `database` stub (#1446).
         assert results["B-01"] == []
+        # E-06 (stale next_run_at) is green with no schedules present.
+        assert results["E-06"] == []
         # B-02 / R-01 are green on a clean platform.
         assert results["B-02"] == []
         assert results["R-01"] == []
