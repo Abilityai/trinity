@@ -1,10 +1,15 @@
 # Enterprise-docs disclosure guard (trinity-enterprise#45)
 #
-# Fails the build if a public doc reintroduces enterprise/paid-feature
-# specifics: named paid features (SIEM/SCIM/...), private `enterprise_*`
-# table/schema identifiers, or per-module internals. Public docs may describe
-# the GENERIC open-core seam only (entitlement registry + conditional module
-# registration) — never the catalog of which capabilities are paid.
+# Fails the build if a public doc — OR a public open-core SEAM FILE — reintroduces
+# enterprise/paid-feature specifics: named paid features (SIEM/SCIM/...), private
+# `enterprise_*` table/schema identifiers, or per-module internals. Public docs and
+# seam-file comments may describe the GENERIC open-core seam only (entitlement
+# registry + conditional module registration) — never the catalog of which
+# capabilities are paid.
+#
+# Seam files are grepped because a comment there is unguarded prose that can name
+# the paid catalog just as a doc can (#1461 — the register_enterprise loader comment
+# was the one public enumeration of the module catalog for months).
 #
 # Out of scope by design: point-in-time historical records
 # (docs/archive/**, docs/releases/**, docs/security-reports/**) — those are
@@ -16,12 +21,16 @@ on:
     paths:
       - 'docs/**'
       - 'CLAUDE.md'
+      - 'src/backend/main.py'
+      - 'src/backend/services/entitlement_service.py'
       - '.github/workflows/enterprise-docs-guard.yml'
   push:
     branches: [dev, main]
     paths:
       - 'docs/**'
       - 'CLAUDE.md'
+      - 'src/backend/main.py'
+      - 'src/backend/services/entitlement_service.py'
 
 # Least privilege: the guard only checks out and greps — no writes.
 permissions:
@@ -32,23 +41,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Scan live public docs for enterprise disclosure
+      - name: Scan live public docs + open-core seam files for enterprise disclosure
         run: |
           set -uo pipefail
           # Genuinely-private identifiers: named paid features + private schema +
           # per-module paths. Word-boundaried where the token is also a common word.
           PATTERN='\bSIEM\b|\bSCIM\b|enterprise_siem|enterprise_user_2fa|enterprise_2fa|enterprise_sso|two_factor|2fa_recovery_codes'
+          # The open-core seam files: public code whose comments must stay generic
+          # (the entitlement mechanism), never naming the paid catalog (#1461).
+          SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py'
           # Live docs only — exclude historical/point-in-time trees and this guard.
-          HITS=$(grep -rniE "$PATTERN" docs/ CLAUDE.md \
+          HITS=$(grep -rniE "$PATTERN" docs/ CLAUDE.md $SEAM_FILES \
                    --exclude-dir=archive \
                    --exclude-dir=releases \
                    --exclude-dir=security-reports \
                    2>/dev/null || true)
           if [ -n "$HITS" ]; then
-            echo "::error::Enterprise/paid-feature detail found in public docs (trinity-enterprise#45)."
-            echo "Public docs describe the generic open-core seam only. Move specifics to trinity-enterprise/docs/."
+            echo "::error::Enterprise/paid-feature detail found in a public doc or seam file (trinity-enterprise#45)."
+            echo "Public docs and seam-file comments describe the generic open-core seam only. Move specifics to trinity-enterprise/docs/."
             echo "--------------------------------------------------------------------"
             echo "$HITS"
             exit 1
           fi
-          echo "OK — no enterprise/paid-feature disclosure in live public docs."
+          echo "OK — no enterprise/paid-feature disclosure in live public docs or seam files."

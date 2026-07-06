@@ -53,7 +53,7 @@ Enterprise **feature designs, paid-module schema, and the open-core gating/monet
 
 - New enterprise design → write it in `trinity-enterprise/docs/`, not here.
 - Touching the seam in public docs → describe the mechanism, never enumerate the modules behind it.
-- `.github/workflows/enterprise-docs-guard.yml` greps live public docs for paid-feature/private-schema tokens and fails the build on a hit; keep historical point-in-time docs (`docs/archive/`, `docs/releases/`, `docs/security-reports/`) out of scope (covered by the separate git-history-scrub follow-up).
+- `.github/workflows/enterprise-docs-guard.yml` greps live public docs **and the open-core seam files** (`src/backend/main.py`, `src/backend/services/entitlement_service.py` — a code comment can name the catalog just as a doc can, #1461) for paid-feature/private-schema tokens and fails the build on a hit; keep historical point-in-time docs (`docs/archive/`, `docs/releases/`, `docs/security-reports/`) out of scope (covered by the separate git-history-scrub follow-up).
 
 ---
 
