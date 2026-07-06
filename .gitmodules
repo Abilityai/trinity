@@ -1,8 +1,14 @@
 [submodule ".claude"]
 	path = .claude
 	url = https://github.com/Abilityai/trinity-dev.git
-	update = checkout
+	# Private (core-team dev tooling). `update = none` makes recursive init
+	# skip it so a fresh OSS clone needs no credentials (#1443). Maintainers
+	# opt in — see CLAUDE.md → "Development Skills".
+	update = none
 	fetchRecurseSubmodules = true
 [submodule "src/backend/enterprise"]
 	path = src/backend/enterprise
 	url = git@github.com:Abilityai/trinity-enterprise.git
+	# Private (optional enterprise modules). Skipped by default so OSS
+	# clones init cleanly; entitled customers opt in — see docs/ENTERPRISE.md.
+	update = none

@@ -9,6 +9,7 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 - **Subscription** -- A Claude Max or Pro subscription token registered with Trinity. Stored encrypted (AES-256-GCM). Injected as an environment variable to assigned agents.
 - **Round-Robin Assignment** -- New agents automatically get a subscription assigned. The subscription with the fewest agents is selected first, with alphabetical tie-break.
 - **Auto-Switch (SUB-003)** -- When an agent hits a rate-limit (429) or auth-class failure, Trinity automatically switches it to a different subscription. The new token is applied via a **hot-reload** of the running container -- no container recreate -- so in-flight executions keep running. Default ON; toggle it off in the Subscriptions section of Settings.
+- **Hot-Reload Rotation** -- Manual token changes hot-reload the same way: re-registering a subscription with a fresh token pushes the new token to every running agent on that subscription, and reassigning an agent from one subscription to another swaps the token in place. In-flight turns finish on the old token; the next turn uses the new one. Container recreation is only needed for image, template, or auth-*mode* changes (e.g. switching between subscription and API key).
 
 ## How It Works
 
@@ -63,4 +64,4 @@ Share Claude Max/Pro subscription tokens across multiple agents, with automatic 
 ## See Also
 
 - [Credential Management](credential-management.md)
-- [Settings Page](../settings.md)
+- [First-Time Setup](../getting-started/setup.md) — the Settings page overview

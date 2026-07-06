@@ -6,7 +6,7 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
 ## Concepts
 
-- **Admin Account** -- The primary account with full platform access, authenticated by username and password. Created automatically from `ADMIN_PASSWORD` in `.env`.
+- **Admin Account** -- The primary account with full platform access. Created either from `ADMIN_PASSWORD` in `.env` at first boot, or through the first-run setup form in the browser. The admin signs in with the username `admin` **or** their registered email address, plus the password.
 - **Email Login** -- A passwordless authentication method where users receive a one-time code via email. Requires an email service to be configured.
 
 ## How It Works
@@ -26,14 +26,17 @@ Install Trinity, create your admin account, and start managing agents in minutes
    cd trinity
    ```
 
-2. Set `ADMIN_PASSWORD` in `.env` before first boot:
+2. Optionally set `ADMIN_PASSWORD` in `.env` before first boot:
 
    ```bash
    cp .env.example .env
-   # Edit .env and set ADMIN_PASSWORD to a strong password (min 12 chars)
+   # Optionally set ADMIN_PASSWORD to a strong password (min 12 chars)
    ```
 
-   The `admin` account is created automatically from this value on first start. If you leave it blank, a one-time setup token is printed to the backend logs (`docker compose logs backend | grep "Setup token"`) — paste it into the setup wizard that appears on first visit. The token is shared across backend workers, so the single value printed in the logs always works regardless of how many workers are running. If the setup wizard shows a "waiting for Redis" state, the token store is temporarily unreachable; setup resumes automatically once Redis recovers, with no restart needed.
+   - **If set**, the `admin` account is created automatically from this value on first start and no setup screen appears.
+   - **If left blank**, the first visit to the web UI shows a one-page **"Create your admin account"** form: enter your **admin email** (required — this becomes your sign-in identity), a password (12+ characters with uppercase, lowercase, number, and special character; a live strength meter guides you), confirm it, and optionally your company name. An optional checkbox opts you in to occasional security and product update emails from the Trinity team; it sends only your email and company name, nothing else, and can be disabled entirely on air-gapped installs via `OPERATOR_INTAKE_ENABLED=false` or `DO_NOT_TRACK=1`. The form works exactly once — it disables itself permanently after the admin account is created.
+
+   > **Security note:** until setup completes, the setup form is reachable without authentication. On an internet-facing server, keep the instance behind a tunnel, VPN, or firewall until you have completed first-time setup.
 
 3. Start all services:
 
@@ -47,7 +50,7 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
 ### Logging In
 
-**Admin login:** Enter username `admin` and the `ADMIN_PASSWORD` you set in `.env`.
+**Admin login:** Enter username `admin` **or the admin email you registered at setup**, plus the password. (Admins created via `ADMIN_PASSWORD` in `.env` have no registered email at first; bind one later with `PUT /api/users/me/email` to enable email + password sign-in.)
 
 **Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. The admin manages allowed email addresses under Settings > Email Whitelist.
 
@@ -140,5 +143,5 @@ The following endpoints do not require authentication:
 - [Quick Start](quick-start.md) -- After setup, a **guided onboarding wizard** opens on
   your first Dashboard visit to launch your first agent (relaunch any time at
   `http://localhost/?onboarding=1`).
-- [Overview](../overview.md) -- Platform overview and core concepts.
+- [Overview](overview.md) -- Platform overview and core concepts.
 - [Creating Agents](../agents/creating-agents.md) -- Deploy your first agent.

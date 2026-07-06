@@ -216,8 +216,9 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
   change. Only mechanical orb edits (externalize, vendor, repoint data fetch, neutralize the
   deferred voice proxy, hide deferred panels). Note bodies are DOMPurify-sanitized (H-005).
 - **FR-2 — Capability gating**: a `/agents/:name/brain` route (lazy + `beforeEnter` platform-flag
-  guard) and a Brain tab shown only when `brain_orb_available` (platform flag `BRAIN_ORB_ENABLED`,
-  default OFF) **AND** the agent's `template.yaml capabilities` list contains the generalizable
+  guard) and a Brain tab shown only when `brain_orb_available` (runtime-resolved platform flag —
+  admin setting → `BRAIN_ORB_ENABLED` env fallback, default OFF; FR-11) **AND** the agent's
+  `template.yaml capabilities` list contains the generalizable
   `brain-orb` token (surfaced by `/api/agents/{name}/info`) — never a hardcoded agent name.
 - **FR-3 — Same-origin iframe host**: `views/AgentBrainOrb.vue` embeds the first-party page in a
   same-origin iframe (not agent-origin → avoids the #979 CSP trap, no Vue rewrite of the renderer).
@@ -308,6 +309,23 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
   control, an "integrating…" state, and a "graph updated · +N notes, +M links" confirmation toast (#68). No DB
   change. **Confirmed on localhost**: capture → refresh folds the note in as a real graph node (`1072 → 1079`),
   and the UI control rebuilds with the confirmation toast.
+- **FR-11 — Admin-configurable platform flags (trinity-enterprise#85)**: the three platform flags
+  (`brain_orb_enabled`, `brain_orb_voice_enabled`, `brain_orb_write_enabled`) are **runtime-resolved**,
+  not import-time env constants: `system_settings` row ("true"/"false", wins in both directions) →
+  `BRAIN_ORB_*` env var honored as **opt-in** fallback → default OFF (the `workspace_enabled` idiom via
+  one shared `_resolve_bool_flag` helper). Resolvers are fail-open (a settings-read failure falls back
+  to the env/default leg — a raise would 500 `feature-flags` and zero every flag in the frontend store)
+  and deliberately uncached (`--workers 2` cross-worker consistency, #506 rationale). All route gates in
+  `routers/agent_brain_orb.py` and the three `feature-flags` values read the resolvers, so an admin flip
+  applies without restart; the voice-token mint additionally composes with the base flag
+  (`base ∧ voice`, closing the base-OFF mint gap) and `brain_orb_voice_available = base ∧ voice ∧
+  GEMINI_API_KEY`. **Admin surface**: `GET/PUT /api/settings/brain-orb` (admin-only, registered before
+  the `/{key}` catch-all) — GET returns per-flag `{value, source: override|env|default}` +
+  `gemini_key_configured`; PUT takes partial booleans and/or `clear: [flag,…]` to **revert a flag to its
+  env/default** (the env var is otherwise dead once a DB override exists), audit-logged with per-flag
+  old→new values. Settings → General hosts the panel (per-flag source display, write-surface warning,
+  post-save `loadFeatureFlags(force)`; other open sessions pick the change up on next page load).
+  GEMINI_API_KEY stays env-only (secret). No migration (`system_settings` KV).
 
 **Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
 with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh

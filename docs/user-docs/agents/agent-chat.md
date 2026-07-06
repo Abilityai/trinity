@@ -2,6 +2,13 @@
 
 The Chat tab in Agent Detail provides a bubble UI for conversing with agents, with persistent history and real-time status updates.
 
+The tab carries a **Session mode** toggle (top-right of the chat surface, default **on**):
+
+- **Session mode on** — each turn resumes the same Claude session, preserving working memory across turns. This surface is documented in [Agent Session](agent-session.md).
+- **Session mode off** — the classic stateless chat documented on this page: each turn replays the visible transcript as text.
+
+Your choice persists per user (in the browser, across all agents). The toggle is hidden — and the tab always uses classic chat — when the Session surface is unavailable: the platform `session_tab_enabled` flag is off, or the agent runs a runtime without resume support (Codex).
+
 > 📺 **Watch:** [I Gave My AI Three Years of My Notes — Then Interviewed It (voice chat)](https://youtu.be/xflQTzarEBQ) *(May 2026)* · [all videos](../videos.md)
 
 ## Concepts
@@ -13,7 +20,7 @@ The Chat tab in Agent Detail provides a bubble UI for conversing with agents, wi
 
 ## How It Works
 
-1. Open an agent's detail page and click the **Chat** tab.
+1. Open an agent's detail page and click the **Chat** tab. (For the classic surface described below, switch **Session mode** off.)
 2. Select an existing session from the dropdown or click **New Chat**.
 3. Type a message and press Enter.
 4. The agent processes the message -- the status label updates in real-time (e.g., "Reading files...", "Running tests...").
@@ -51,7 +58,7 @@ Voice chat is available directly from the Chat tab.
 ### Continue as Chat
 
 - From the Execution Detail page, click **Continue as Chat**.
-- This opens the Chat tab with a resume banner showing execution context.
+- This opens the Chat tab (temporarily in classic mode, without changing your saved Session-mode preference) with a resume banner showing execution context.
 - Uses `--resume {session_id}` for native session continuity.
 
 ### Session Management
@@ -81,6 +88,7 @@ Voice chat is available directly from the Chat tab.
 
 ## See Also
 
+- [Agent Session](agent-session.md) — the Session-mode surface of this tab
 - Backend API Docs: http://localhost:8000/docs (full request/response schemas)
 - [Creating Agents](creating-agents.md)
 - [Managing Agents](managing-agents.md)

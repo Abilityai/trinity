@@ -79,10 +79,13 @@ def client(monkeypatch):
     app.dependency_overrides[get_authorized_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(id=7, username="u", email="u@example.com")
-    # Flags ON by default; individual tests flip them off. container_reload is async.
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", True)
-    monkeypatch.setattr(bo, "BRAIN_ORB_VOICE_ENABLED", True)   # #60 Phase 3
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", True)   # #61 Phase 4a
+    # Flags ON by default; individual tests flip them off. Since #85 the gates
+    # are runtime resolvers imported into the router's namespace — patch the
+    # module-level names (the DB-backed resolution itself is covered by
+    # test_85_brain_orb_settings.py). container_reload is async.
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: True)
+    monkeypatch.setattr(bo, "is_brain_orb_voice_enabled", lambda: True)   # #60 Phase 3
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: True)   # #61 Phase 4a
     monkeypatch.setattr(bo, "GEMINI_API_KEY", "test-key")      # #60 Phase 3
     monkeypatch.setattr(bo, "container_reload", AsyncMock())
     # #61 Phase 4a: the voice-token route resolves owner-ness for can_write. Default
@@ -98,7 +101,7 @@ _URL = f"/api/agents/{_AGENT}/brain-orb/data"
 
 def test_flag_off_returns_404(client, monkeypatch):
     """Platform flag is the single source of truth — off ⇒ 404, never a 5xx."""
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.get(_URL)
     assert r.status_code == 404
@@ -184,7 +187,7 @@ def test_scopes_success_passes_through(client):
 
 
 def test_scopes_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.get(_SCOPES_URL)
     assert r.status_code == 404
@@ -210,7 +213,7 @@ def test_scope_post_success_passes_through(client):
 
 
 def test_scope_post_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.post(_SCOPE_URL, json={"tokens": []})
     assert r.status_code == 404
@@ -261,8 +264,16 @@ def test_voice_token_success(client):
 
 
 def test_voice_token_flag_off_404(client, monkeypatch):
-    """Gated on the VOICE flag specifically — distinct from BRAIN_ORB_ENABLED."""
-    monkeypatch.setattr(bo, "BRAIN_ORB_VOICE_ENABLED", False)
+    """Voice flag off ⇒ 404 even with the base flag on."""
+    monkeypatch.setattr(bo, "is_brain_orb_voice_enabled", lambda: False)
+    r = client.post(_VOICE_TOKEN_URL)
+    assert r.status_code == 404
+
+
+def test_voice_token_base_flag_off_404(client, monkeypatch):
+    """#85: base OFF ⇒ mint 404 even with voice ON — a disabled orb must not
+    let direct API calls spin up Gemini Live sessions on the platform key."""
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     r = client.post(_VOICE_TOKEN_URL)
     assert r.status_code == 404
 
@@ -332,7 +343,7 @@ def test_tool_unsupported_maps_to_404(client):
 
 
 def test_tool_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.post(_TOOL_URL, json={"query": "x"})
     assert r.status_code == 404
@@ -536,7 +547,7 @@ def test_actions_get_success_passes_through(client):
 def test_actions_write_flag_off_404(client, monkeypatch):
     """Distinct kill-switch: BRAIN_ORB_WRITE_ENABLED off ⇒ 404 even though the base
     render flag is on (writes disabled without downing read/voice)."""
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.get(_ACTIONS_URL)
     assert r.status_code == 404
@@ -635,7 +646,7 @@ def test_refresh_owner_gate_403(client):
 
 
 def test_refresh_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_enabled", lambda: False)
     with patch.object(bo, "get_agent_container", return_value=_running()):
         r = client.post(_REFRESH_URL)
     assert r.status_code == 404
@@ -644,7 +655,7 @@ def test_refresh_flag_off_404(client, monkeypatch):
 def test_refresh_write_flag_off_404(client, monkeypatch):
     """refresh drives the agent action hook, so the write kill-switch must gate it too
     (review F1) — not just BRAIN_ORB_ENABLED."""
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: False)
     agent_req = AsyncMock()
     with patch.object(bo, "_agent_request", agent_req):
         r = client.post(_REFRESH_URL)
@@ -708,7 +719,7 @@ def test_postprocess_owner_gate_403(client):
 
 
 def test_postprocess_write_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: False)
     assert client.get(_POSTPROC_URL).status_code == 404
     assert client.put(_POSTPROC_URL, json={"enabled": False, "prompt": ""}).status_code == 404
 
@@ -741,7 +752,7 @@ def test_action_transcript_large_body_allowed(client):
 
 
 def test_action_write_flag_off_404(client, monkeypatch):
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: False)
     r = client.post(_ACTION_URL, json={"action": "capture", "body": "x"})
     assert r.status_code == 404
 
@@ -887,7 +898,7 @@ def test_voice_token_owner_gets_write_manifest(client):
 
 def test_voice_token_write_flag_off_forces_readonly(client, monkeypatch):
     """Even an owner gets can_write=False when the write flag is off."""
-    monkeypatch.setattr(bo, "BRAIN_ORB_WRITE_ENABLED", False)
+    monkeypatch.setattr(bo, "is_brain_orb_write_enabled", lambda: False)
     mint = AsyncMock(return_value={"ephemeral_token": "auth_tokens/x", "tools": []})
     with patch.object(bo.db, "get_voice_name", return_value="Kore"), patch.object(
         bo.db, "get_voice_system_prompt", return_value=None

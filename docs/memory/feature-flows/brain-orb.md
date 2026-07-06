@@ -75,7 +75,7 @@ Gemini toolCall → voice iframe → postMessage 'orb-tool' → orb.js ORB_TOOLS
 
 **Voice orb animation:** the voice tile renders its own audio-reactive orb (a p5 smoke/core sketch) that breathes when idle and pulses with the spoken audio (`enqueueAudio` connects each output buffer through `outAnalyser`). It was briefly cut with the CDN p5 removal and then restored by vendoring p5 locally — a separate visualization from the main three.js knowledge orb.
 
-**Voice gating:** a new platform flag `brain_orb_voice_available` = `BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY` (default OFF) — **distinct** from the static `brain_orb_available` (which has no Gemini dependency). The orb un-hides the voice tile only when the host passes `voiceAvailable:true` in the init handshake (platform flag) AND the agent is brain-orb-capable. The mint route is independently flag-gated (404 when off, 503 when no key), so the flag is UI-only and can't be bypassed.
+**Voice gating:** the platform flag `brain_orb_voice_available` = `base && voice && GEMINI_API_KEY` (default OFF; flags runtime-resolved since #85, see Gating) — **distinct** from the static `brain_orb_available` (which has no Gemini dependency). The orb un-hides the voice tile only when the host passes `voiceAvailable:true` in the init handshake (platform flag) AND the agent is brain-orb-capable. The mint route is independently gated on `base && voice` (404 when either is off, 503 when no key), so the flag is UI-only and can't be bypassed.
 
 **SDK bump (required — the pinned SDK lacked ephemeral tokens):** `google-genai==1.12.1` has **no `auth_tokens` attribute**, so the mint 502'd on the shipped backend; the pin is bumped to **`1.63.0`** (`docker/backend/Dockerfile`). Verified in the local stack: `POST /voice-token` returns a real `auth_tokens/…` token with the model+voice locked and the 11 read/visual/scope tools (zero write tools, no bare `token` field), and `services/gemini_voice.py` (the existing backend-proxied VOICE-001 path) still imports cleanly under 1.63. **Pre-merge:** a live VOICE-001 smoke test (an actual browser voice session) confirming the bump didn't regress `aio.live.connect`.
 
@@ -106,13 +106,13 @@ orb panel open → initActions()
   200 ⇒ body.brain-orb-write added → panel revealed; 403 (non-owner) / 404 (flag off / no hook) ⇒ stays hidden
 ```
 
-**Auth boundary (airtight):** every write route is `OwnedAgentByName` (owner/admin) — a shared user gets 403 and the orb hides the panel. The voice-token mint stays `AuthorizedAgentByName` (shared users may voice-chat), but the mint route computes `can_write = BRAIN_ORB_WRITE_ENABLED and db.can_user_share_agent(user, agent)` and only then folds the `capture_note`/`link_notes` write tools into the **locked** manifest — so a shared-user session gets the read-only Phase-3 manifest, and even a crafted call hits the owner-gated `/action` route. The manifest is a UX affordance; the backend gate is the security boundary.
+**Auth boundary (airtight):** every write route is `OwnedAgentByName` (owner/admin) — a shared user gets 403 and the orb hides the panel. The voice-token mint stays `AuthorizedAgentByName` (shared users may voice-chat), but the mint route computes `can_write = is_brain_orb_write_enabled() and db.can_user_share_agent(user, agent)` and only then folds the `capture_note`/`link_notes` write tools into the **locked** manifest — so a shared-user session gets the read-only Phase-3 manifest, and even a crafted call hits the owner-gated `/action` route. The manifest is a UX affordance; the backend gate is the security boundary.
 
 **Idempotency (Invariant #18, not #1084):** these are user→backend producer POSTs with no `execution_id`, so the effect_guard (`effect:{execution_id}`-scoped) doesn't fit; the trigger-boundary `Idempotency-Key` path is used instead, with the key folded per action verb (`brain_orb_action:{action}:{key}`) so a reused client key can't replay a different verb's snapshot. Dedups the HTTP POST (double-click / retry) — exactly-once at the KB sink remains the agent hook's responsibility.
 
 **Agent convention (Invariant #8):** the agent ships one executable `~/.trinity/brain-orb/action` hook (a fourth sibling next to `scopes`/`scope`/`search`) that dispatches on the request's `action` field (`list` → allow-list, `capture`, `link`) and owns the write semantics; Trinity runs it via the same hardened `_run_hook` and 404s when absent. The backend enum-restricts the verb before forwarding.
 
-**Kill-switch:** `BRAIN_ORB_WRITE_ENABLED` (env, default OFF) — distinct from `BRAIN_ORB_ENABLED` so writes can be disabled without downing the read path or voice tile. Surfaced as `brain_orb_write_available` in `GET /api/settings/feature-flags`; the host relays it to the orb (`writeAvailable`), which only attempts `initActions` when on.
+**Kill-switch:** the write flag (runtime-resolved since #85: `brain_orb_write_enabled` setting → `BRAIN_ORB_WRITE_ENABLED` env opt-in → OFF — flippable from Settings → General without a restart) — distinct from the base flag so writes can be disabled without downing the read path or voice tile. Surfaced as `brain_orb_write_available` (`base && write`) in `GET /api/settings/feature-flags`; the host relays it to the orb (`writeAvailable`), which only attempts `initActions` when on.
 
 ## Phase 4b — voice-transcript capture + post-session processing (#66)
 
@@ -181,8 +181,19 @@ FileResponse(~/resources/agent-visualization/data.json)   (agent owns generation
 
 `brainOrbAvailable = brain_orb_available (platform flag) && template.yaml.capabilities ⊇ 'brain-orb' (per-agent)`.
 
-- Platform flag: `BRAIN_ORB_ENABLED` (env, default OFF) → `brain_orb_available` in `GET /api/settings/feature-flags`. The static render has **no** Gemini dependency, so unlike voice/workspace/voip it is the bare env flag.
-- Voice flag (Phase 3): `BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY` → `brain_orb_voice_available` (default OFF) — **distinct** from `brain_orb_available` because the voice tile needs a Gemini key. Un-hides the voice tile only when on AND the agent is brain-orb-capable; the `voice-token` mint route is independently flag-gated.
+- **All three platform flags are runtime-resolved and admin-configurable (trinity-enterprise#85):**
+  `system_settings` row (`brain_orb_enabled` / `brain_orb_voice_enabled` / `brain_orb_write_enabled`,
+  wins in both directions) → `BRAIN_ORB_*` env var as **opt-in** fallback → default OFF. Resolution
+  lives in `settings_service.is_brain_orb_*_enabled()` (one shared `_resolve_bool_flag` helper;
+  fail-open on a settings-read failure so `feature-flags` never 500s; uncached — `--workers 2`,
+  #506 rationale). Admin surface: `GET/PUT /api/settings/brain-orb` (per-flag `{value, source:
+  override|env|default}`; `clear: [flag,…]` reverts a flag to env/default — once a stored row
+  exists the env var is ignored until cleared) + a Settings → General panel. Route gates and
+  `feature-flags` read the resolvers, so an admin flip needs **no restart**; open user sessions
+  pick it up on the next page load (`feature-flags` is fetched at load, not WS-pushed; the
+  admin's own session force-refetches after a save).
+- Base flag → `brain_orb_available` in `GET /api/settings/feature-flags`. The static render has **no** Gemini dependency.
+- Voice flag (Phase 3): `brain_orb_voice_available = base && voice && GEMINI_API_KEY` (the key stays env-only — secret; #85 added the base term so a downed orb never advertises its voice tile). Un-hides the voice tile only when on AND the agent is brain-orb-capable; the `voice-token` mint route gates on `base && voice` itself, so the flag is UI-only and can't be bypassed.
 - Per-agent capability: a **generalizable** `brain-orb` token in the agent's `template.yaml capabilities` list (surfaced by `GET /api/agents/{name}/info`, read frontend-side) — never a hardcoded agent/template name. Mirrors the `sessionAvailable` + `hasDashboard` idioms.
 - The **route guard AND the tab both enforce the per-agent capability** (#60): the guard (`router/index.js beforeEnter`) fetches `GET /api/agents/{name}/info` and redirects to AgentDetail unless the agent declares `brain-orb` (and the platform flag is on) — so the orb is **never launchable on a non-Cornelius agent, even via a raw URL** (a stopped/uncapable agent redirects, not an empty orb). Because the route is capability-gated, the voice tile inside it only needs the platform voice flag.
 
@@ -202,10 +213,11 @@ The data route uses standard `AuthorizedAgentByName` Bearer auth like every othe
 | Tab + capability | `src/frontend/src/views/AgentDetail.vue` (`visibleTabs`, `checkBrainOrbCapability`) |
 | Backend proxy | `src/backend/routers/agent_brain_orb.py` (data/scopes/scope + voice-token/tool + **actions/action** — Phase 4a) |
 | Mint service (Phase 3/4a) | `src/backend/services/brain_orb_voice_service.py` (v1alpha ephemeral token + locked tool manifest; **`can_write` → owner-only capture/link tools**) |
-| Flag (BE) | `src/backend/config.py` (`BRAIN_ORB_ENABLED`, `BRAIN_ORB_VOICE_ENABLED`, **`BRAIN_ORB_WRITE_ENABLED`**), `src/backend/routers/settings.py`, **`docker-compose.yml`** (each flag must be in the backend `environment:` block to reach the container) |
+| Flag (BE) | `src/backend/services/settings_service.py` (`_resolve_bool_flag` + `is_brain_orb_*_enabled` + `BRAIN_ORB_FLAGS` registry — #85; `config.py` holds no constants anymore), `src/backend/routers/settings.py` (feature-flags + `GET/PUT /api/settings/brain-orb`), `src/backend/models.py` (`BrainOrbSettingsUpdate`), **`docker-compose.yml`** (each `BRAIN_ORB_*` env var must be in the backend `environment:` block for the env-fallback leg to reach the container) |
 | Agent-server | `docker/base-image/agent_server/routers/brain_orb.py` (data/scopes/scope + search + **action** hook — Phase 4a) |
 | Flag (FE) | `src/frontend/src/stores/sessions.js` (`brainOrbAvailable`, `brainOrbVoiceAvailable`, **`brainOrbWriteAvailable`**) |
-| Tests | `tests/unit/test_brain_orb.py` |
+| Admin panel (#85) | `src/frontend/src/views/Settings.vue` (General → Brain Orb panel), `src/frontend/src/stores/settings.js` (`get/setBrainOrbSettings`) |
+| Tests | `tests/unit/test_brain_orb.py`, `tests/unit/test_85_brain_orb_settings.py` |
 
 ## Invariants honored
 
