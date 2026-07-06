@@ -314,7 +314,13 @@
                 </svg>
                 {{ schedule.max_retries }}x retry
               </span>
-              <span v-if="schedule.next_run_at" class="flex items-center text-action-primary-600 dark:text-action-primary-400">
+              <span v-if="schedule.next_run_at && isOverdue(schedule)" class="flex items-center text-amber-600 dark:text-amber-400" :title="`Scheduled for ${formatDateTime(schedule.next_run_at)} but hasn't fired yet`">
+                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
+                </svg>
+                Overdue by {{ formatOverdue(schedule.next_run_at) }}
+              </span>
+              <span v-else-if="schedule.next_run_at" class="flex items-center text-action-primary-600 dark:text-action-primary-400">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
                 </svg>
@@ -1045,6 +1051,23 @@ function formatRelativeTime(dateStr) {
     if (absDiff < 86400) return `${Math.round(absDiff / 3600)}h ago`
     return `${Math.round(absDiff / 86400)}d ago`
   }
+}
+
+// #1472: an ENABLED schedule whose next_run_at is in the past is "overdue" —
+// the scheduler hasn't advanced its projection. Renders an explicit warning
+// instead of the nonsensical "Next: Nd ago". A 60s grace avoids flashing
+// "Overdue" during the brief fire→advance window.
+function isOverdue(schedule) {
+  if (!schedule.enabled || !schedule.next_run_at) return false
+  return new Date(schedule.next_run_at).getTime() < Date.now() - 60_000
+}
+
+function formatOverdue(dateStr) {
+  const diff = Math.max(0, (Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (diff < 60) return `${Math.round(diff)}s`
+  if (diff < 3600) return `${Math.round(diff / 60)}m`
+  if (diff < 86400) return `${Math.round(diff / 3600)}h`
+  return `${Math.round(diff / 86400)}d`
 }
 
 function formatDateTime(dateStr) {

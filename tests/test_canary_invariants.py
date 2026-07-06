@@ -287,6 +287,15 @@ def canary_db(monkeypatch):
             message TEXT NOT NULL DEFAULT '',
             triggered_by TEXT NOT NULL DEFAULT 'test'
         );
+        CREATE TABLE agent_schedules (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            cron_expression TEXT DEFAULT '0 4 * * *',
+            enabled INTEGER DEFAULT 1,
+            next_run_at TEXT,
+            deleted_at TEXT
+        );
         CREATE TABLE agent_sharing (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL,
@@ -611,6 +620,17 @@ def _add_execution(path, eid, agent_name, status, started_at=None, completed_at=
     c.execute(
         "INSERT INTO schedule_executions (id, agent_name, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?)",
         (eid, agent_name, status, started_at or "2026-04-30T00:00:00Z", completed_at),
+    )
+    c.commit()
+    c.close()
+
+
+def _add_schedule(path, sid, agent_name, next_run_at, enabled=1, deleted_at=None):
+    c = _conn(path)
+    c.execute(
+        "INSERT INTO agent_schedules (id, agent_name, enabled, next_run_at, deleted_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (sid, agent_name, enabled, next_run_at, deleted_at),
     )
     c.commit()
     c.close()
@@ -2374,3 +2394,53 @@ class TestCanarySlackEmit:
         assert "last red" in second_ctx, (
             "second transition must carry the prior snapshot_time"
         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant: E-06 no overdue next_run_at (#1472)
+# ---------------------------------------------------------------------------
+
+def _iso_z(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+class TestE06OverdueNextRun:
+    """Enabled, non-deleted schedule whose next_run_at is >misfire-grace in the
+    past — the "Next: Nd ago" projection the scheduler never advanced (#1472)."""
+
+    def test_synthetic_overdue_fires_future_null_and_grace_hold(self):
+        from datetime import timezone
+        from canary.snapshot import Snapshot
+        from canary.invariants import e06_no_overdue_next_run as e06
+
+        now = datetime.utcnow()
+        kiev_past = (
+            now.replace(tzinfo=timezone.utc) - _td(hours=2)
+        ).astimezone(timezone(_td(hours=3)))  # non-UTC render of a 2h-past instant
+        rows = [
+            {"schedule_id": "s-overdue-utc", "agent_name": "a", "next_run_at": _iso_z(now - _td(hours=2))},
+            {"schedule_id": "s-future", "agent_name": "a", "next_run_at": _iso_z(now + _td(hours=1))},
+            {"schedule_id": "s-within-grace", "agent_name": "a", "next_run_at": _iso_z(now - _td(minutes=30))},
+            {"schedule_id": "s-null", "agent_name": "a", "next_run_at": None},
+            {"schedule_id": "s-overdue-kiev", "agent_name": "a", "next_run_at": kiev_past.isoformat()},
+        ]
+        snap = Snapshot(snapshot_time=_iso_z(now), enabled_schedules=rows)
+        fired = sorted(v.observed_state["schedule_id"] for v in e06.check(snap))
+        assert fired == ["s-overdue-kiev", "s-overdue-utc"]
+
+    def test_collector_predicate_and_end_to_end(self, canary_db, reload_canary):
+        now = datetime.utcnow()
+        _add_agent(canary_db, "a1")
+        _add_schedule(canary_db, "sch-stale", "a1", _iso_z(now - _td(hours=2)))
+        _add_schedule(canary_db, "sch-future", "a1", _iso_z(now + _td(hours=1)))
+        _add_schedule(canary_db, "sch-disabled", "a1", _iso_z(now - _td(hours=2)), enabled=0)
+        _add_schedule(canary_db, "sch-deleted", "a1", _iso_z(now - _td(hours=2)), deleted_at=_iso_z(now))
+
+        snap = reload_canary["canary"].collect_snapshot()
+        # collector predicate mirrors the scheduler: enabled = 1 AND deleted_at IS NULL
+        collected = {s["schedule_id"] for s in snap.enabled_schedules}
+        assert collected == {"sch-stale", "sch-future"}
+
+        from canary.invariants import e06_no_overdue_next_run as e06
+        fired = [v.observed_state["schedule_id"] for v in e06.check(snap)]
+        assert fired == ["sch-stale"]

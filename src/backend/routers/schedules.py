@@ -29,6 +29,11 @@ from models import (
 from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.schedule_validation import (
+    ScheduleValidationError,
+    validate_cron_expression,
+    validate_timezone,
+)
 
 _ANALYTICS_VALID_WINDOWS = frozenset({24, 168, 720})  # #868
 # #1115: Overview/Schedules-tab scorecard windows → hours (matches the #1107
@@ -130,14 +135,20 @@ async def create_schedule(
     current_user: User = Depends(get_current_user)
 ):
     """Create a new schedule for an agent."""
-    # Validate cron expression
+    # #1472: validate cron + timezone with the SAME parser the dedicated
+    # scheduler uses to register the job (5-field + CronTrigger + pytz), not a
+    # looser bare croniter() — else an expression that clears croniter but fails
+    # _add_job (@daily, a 6-field seconds-cron, quartz L/#, or a bad timezone)
+    # would be silently orphaned and its next_run_at would freeze.
     try:
-        from croniter import croniter
-        croniter(schedule_data.cron_expression)
-    except Exception as e:
+        validate_cron_expression(
+            schedule_data.cron_expression,
+            getattr(schedule_data, "timezone", None) or "UTC",
+        )
+    except ScheduleValidationError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid cron expression: {str(e)}"
+            detail=str(e),
         )
 
     # #1445: fail-loud no-orphan gate. Access-check FIRST so a low-priv caller
@@ -280,15 +291,24 @@ async def update_schedule(
             detail="Schedule not found"
         )
 
-    # Validate cron expression if being updated
-    if updates.cron_expression:
+    # #1472: validate cron + timezone with the scheduler's parser (see
+    # create_schedule). Cron-field validity is timezone-independent, so a cron
+    # update is checked under UTC; a timezone update is checked on its own.
+    if updates.cron_expression is not None:
         try:
-            from croniter import croniter
-            croniter(updates.cron_expression)
-        except Exception as e:
+            validate_cron_expression(updates.cron_expression, "UTC")
+        except ScheduleValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid cron expression: {str(e)}"
+                detail=str(e),
+            )
+    if updates.timezone is not None:
+        try:
+            validate_timezone(updates.timezone)
+        except ScheduleValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
             )
 
     # #929: validate timeout against agent cap only when this PUT actually

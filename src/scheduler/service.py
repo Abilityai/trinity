@@ -92,6 +92,11 @@ class SchedulerService:
         self._schedule_snapshot: Dict[str, tuple] = {}
         self._process_schedule_snapshot: Dict[str, tuple] = {}
 
+        # #1472: schedule ids whose _add_job failed PERMANENTLY (bad cron/timezone).
+        # Snapshotted-as-known so the sync loop doesn't retry them every tick; the
+        # flag is cleared on config change / disable / delete so a fix re-attempts.
+        self._permanent_add_failures: set = set()
+
         # Issue #132: Track active background polling tasks for graceful shutdown
         self._active_poll_tasks: set = set()
 
@@ -130,12 +135,15 @@ class SchedulerService:
         self._missed_schedules = self._get_missed_schedules(schedules)
 
         for schedule in schedules:
-            self._add_job(schedule)
-            # Capture snapshot for sync detection
-            self._schedule_snapshot[schedule.id] = (
-                schedule.enabled,
-                schedule.updated_at.isoformat() if schedule.updated_at else None
-            )
+            added = self._add_job(schedule)
+            # #1472: snapshot only when registered OR permanently unregisterable;
+            # a transient boot-time add failure stays un-snapshotted so the sync
+            # loop retries it instead of orphaning it until the next restart.
+            if added or schedule.id in self._permanent_add_failures:
+                self._schedule_snapshot[schedule.id] = (
+                    schedule.enabled,
+                    schedule.updated_at.isoformat() if schedule.updated_at else None
+                )
 
         # Load all enabled process schedules from database
         process_schedules = self.db.list_all_enabled_process_schedules()
@@ -179,7 +187,7 @@ class SchedulerService:
         This covers the case where the scheduler container was down during
         a trigger window and APScheduler's in-memory job store lost the job.
         """
-        now = datetime.utcnow()
+        now = datetime.now(pytz.utc)
         grace = config.misfire_grace_time
         missed = []
 
@@ -187,10 +195,15 @@ class SchedulerService:
             if not schedule.next_run_at:
                 continue
 
-            # Normalize next_run_at to naive UTC for comparison
+            # #1472: compare in aware UTC. A non-UTC schedule stores an aware
+            # next_run_at; the old code stripped tzinfo WITHOUT converting, so a
+            # Europe/Kiev (+03) schedule was mis-compared by the offset (a real
+            # missed window looked future, or vice-versa). Convert to UTC instead.
             expected = schedule.next_run_at
             if expected.tzinfo is not None:
-                expected = expected.replace(tzinfo=None)
+                expected = expected.astimezone(pytz.utc)
+            else:
+                expected = expected.replace(tzinfo=pytz.utc)
 
             # Skip if the next run is in the future — not missed
             if expected > now:
@@ -209,7 +222,9 @@ class SchedulerService:
             if schedule.last_run_at:
                 last = schedule.last_run_at
                 if last.tzinfo is not None:
-                    last = last.replace(tzinfo=None)
+                    last = last.astimezone(pytz.utc)
+                else:
+                    last = last.replace(tzinfo=pytz.utc)
                 if last >= expected:
                     continue  # Already ran
 
@@ -354,10 +369,17 @@ class SchedulerService:
             return f'{_token(lo)}-{_token(hi)}'
         return _token(dow)
 
-    def _add_job(self, schedule: Schedule):
-        """Add a schedule as an APScheduler job."""
+    def _add_job(self, schedule: Schedule) -> bool:
+        """Add a schedule as an APScheduler job. Returns True iff registered.
+
+        #1472: on failure, classify **permanent** (bad cron/timezone — this
+        config can never register) vs **transient**. A permanent failure is
+        recorded in ``self._permanent_add_failures`` and logged ONCE so callers
+        can snapshot it (bounded — no 60s retry-storm); a transient failure
+        returns False without recording, so the sync loop retries next tick.
+        """
         if not self.scheduler:
-            return
+            return False
 
         job_id = self._get_job_id(schedule.id)
 
@@ -395,9 +417,28 @@ class SchedulerService:
             if next_run:
                 self.db.update_schedule_run_times(schedule.id, next_run_at=next_run)
 
+            # Recovered from any prior failure — clear the permanent flag.
+            self._permanent_add_failures.discard(schedule.id)
             logger.info(f"Added schedule job: {job_id} ({schedule.name}) for agent {schedule.agent_name}")
+            return True
+        except (pytz.exceptions.UnknownTimeZoneError, ValueError) as e:
+            # #1472: permanent — a bad timezone or cron that clears the backend's
+            # looser croniter check but fails _parse_cron/CronTrigger. Log ONCE and
+            # record so the sync loop snapshots it (bounded) instead of retrying
+            # every 60s. Cleared when the config changes (see _sync_agent_schedules).
+            if schedule.id not in self._permanent_add_failures:
+                logger.error(
+                    f"Failed to add schedule job {job_id} "
+                    f"(permanent — invalid cron/timezone, will not retry until "
+                    f"reconfigured): {e}"
+                )
+                self._permanent_add_failures.add(schedule.id)
+            return False
         except Exception as e:
-            logger.error(f"Failed to add schedule job {job_id}: {e}")
+            # #1472: transient (jobstore hiccup, etc.) — do NOT record; the sync
+            # loop leaves it un-snapshotted and retries on the next tick.
+            logger.error(f"Failed to add schedule job {job_id} (transient, will retry): {e}")
+            return False
 
     def _remove_job(self, schedule_id: str):
         """Remove a schedule job from APScheduler."""
@@ -422,6 +463,27 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"Failed to calculate next run time: {e}")
             return None
+
+    def _advance_next_run_only(self, schedule) -> None:
+        """#1472: advance the ``next_run_at`` projection to the next future cron
+        time WITHOUT recording a run (no ``last_run_at``, no execution row).
+
+        Used by the skip paths (autonomy-off) so an enabled schedule never shows
+        a stale past "Next". Advances only when the stored projection is missing
+        or already in the past — a write-amplification guard, since the
+        autonomy-off path is the default state and can fire every tick.
+        """
+        stored = schedule.next_run_at
+        if stored is not None:
+            # Compare tz-aware in UTC: a non-UTC schedule stores an aware
+            # next_run_at, so stripping tzinfo would mis-compare by the offset
+            # (the same class as the _get_missed_schedules bug fixed in #1472).
+            s = stored if stored.tzinfo is not None else stored.replace(tzinfo=pytz.utc)
+            if s > datetime.now(pytz.utc):
+                return  # projection already future — nothing to repair
+        next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
+        if next_run:
+            self.db.update_schedule_run_times(schedule.id, next_run_at=next_run)
 
     # =========================================================================
     # Schedule Sync (detect new/updated/deleted schedules)
@@ -469,7 +531,11 @@ class SchedulerService:
             schedule = schedule_map[schedule_id]
             if schedule.enabled:
                 logger.info(f"Sync: Adding new schedule {schedule.name} for agent {schedule.agent_name}")
-                self._add_job(schedule)
+                added = self._add_job(schedule)
+                # #1472: leave a transient add-failure un-snapshotted so the next
+                # sync retries it (a permanent failure IS snapshotted → bounded).
+                if not (added or schedule_id in self._permanent_add_failures):
+                    continue
             self._schedule_snapshot[schedule_id] = current_state[schedule_id]
 
         # Deleted schedules (in snapshot but not in database)
@@ -478,6 +544,7 @@ class SchedulerService:
             logger.info(f"Sync: Removing deleted schedule {schedule_id}")
             self._remove_job(schedule_id)
             del self._schedule_snapshot[schedule_id]
+            self._permanent_add_failures.discard(schedule_id)
 
         # Updated schedules (still exists but state changed)
         for schedule_id in (snapshot_ids & current_ids):
@@ -488,22 +555,29 @@ class SchedulerService:
                 schedule = schedule_map[schedule_id]
                 old_enabled, old_updated = old_state
                 new_enabled, new_updated = new_state
+                add_ok = True  # non-add transitions (disable) always snapshot
 
                 if old_enabled and not new_enabled:
                     # Schedule was disabled
                     logger.info(f"Sync: Disabling schedule {schedule.name}")
                     self._remove_job(schedule_id)
+                    self._permanent_add_failures.discard(schedule_id)
                 elif not old_enabled and new_enabled:
                     # Schedule was enabled
                     logger.info(f"Sync: Enabling schedule {schedule.name}")
-                    self._add_job(schedule)
+                    add_ok = self._add_job(schedule) or schedule_id in self._permanent_add_failures
                 elif new_enabled and old_updated != new_updated:
-                    # Schedule was updated (and still enabled)
+                    # Schedule was updated (and still enabled). Config changed, so a
+                    # prior permanent failure may now register — clear + re-attempt.
                     logger.info(f"Sync: Updating schedule {schedule.name}")
                     self._remove_job(schedule_id)
-                    self._add_job(schedule)
+                    self._permanent_add_failures.discard(schedule_id)
+                    add_ok = self._add_job(schedule) or schedule_id in self._permanent_add_failures
 
-                self._schedule_snapshot[schedule_id] = new_state
+                # #1472: advance the snapshot unless a transient (re-)add failed —
+                # then leave it stale so the next sync retries.
+                if add_ok:
+                    self._schedule_snapshot[schedule_id] = new_state
 
         if new_ids or deleted_ids:
             logger.info(f"Sync complete: {len(new_ids)} added, {len(deleted_ids)} removed")
@@ -716,6 +790,13 @@ class SchedulerService:
         # Check if agent has autonomy enabled (only for cron-triggered, not manual)
         if triggered_by == "schedule" and not self.db.get_autonomy_enabled(schedule.agent_name):
             logger.info(f"Schedule {schedule_id} skipped: agent {schedule.agent_name} autonomy is disabled")
+            # #1472: advance next_run_at ONLY so an enabled schedule on an
+            # autonomy-off agent never displays a receding "Next: Nd ago". No
+            # execution row (autonomy-off is a static config gate, not a per-fire
+            # event — a skipped row per tick would flood schedule_executions for
+            # the default-OFF fleet) and no last_run_at (nothing ran; setting it
+            # would suppress the _get_missed_schedules catch-up).
+            self._advance_next_run_only(schedule)
             return
 
         # Agent-owned pre-check gate (#454): may skip the firing entirely or
@@ -738,6 +819,16 @@ class SchedulerService:
         if not execution:
             logger.error(f"Failed to create execution record for schedule {schedule_id}")
             return
+
+        # #1472: advance the run-time projection ONCE, at fire time, regardless of
+        # the eventual outcome — the single "this window was consumed" write. It
+        # replaces the per-branch advances in _dispatch_and_record_outcome
+        # (success + dispatched) and covers the failure and dispatch-exception
+        # paths, which previously left next_run_at stale. Placed after the
+        # create_execution guard so a genuine INSERT failure doesn't advance.
+        _fire_now = datetime.utcnow()
+        _fire_next = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
+        self.db.update_schedule_run_times(schedule.id, last_run_at=_fire_now, next_run_at=_fire_next)
 
         # Broadcast execution started
         await self._publish_event({
@@ -839,9 +930,8 @@ class SchedulerService:
             # (to ensure missed schedule detection works on restart) and return.
             # The background task will handle completion events.
             if status == "dispatched":
-                now = datetime.utcnow()
-                next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
-                self.db.update_schedule_run_times(schedule.id, last_run_at=now, next_run_at=next_run)
+                # #1472: run-time projection already advanced at fire time in
+                # _execute_schedule_with_lock; the background poll finalizes.
                 logger.info(
                     f"Schedule {schedule.name} dispatched (fire-and-forget), "
                     f"execution_id={execution.id}, background poll running"
@@ -849,11 +939,7 @@ class SchedulerService:
                 return  # Background task handles completion events
 
             if status == ExecutionStatus.SUCCESS:
-                # Update schedule last run time
-                now = datetime.utcnow()
-                next_run = self._get_next_run_time(schedule.cron_expression, schedule.timezone)
-                self.db.update_schedule_run_times(schedule.id, last_run_at=now, next_run_at=next_run)
-
+                # #1472: run-time projection already advanced at fire time.
                 logger.info(f"Schedule {schedule.name} executed successfully")
 
                 # Broadcast execution completed
@@ -865,9 +951,9 @@ class SchedulerService:
                     "status": "success"
                 })
             else:
-                # TaskExecutionService already updated the execution record
-                # with failure status, but we still need to detect auth errors
-                # for logging and update schedule run times
+                # TaskExecutionService already updated the execution record with
+                # failure status. The run-time projection was advanced at fire
+                # time (#1472); here we only classify auth errors for logging.
                 if error_msg:
                     if _is_auth_failure(error_msg):
                         logger.error(
