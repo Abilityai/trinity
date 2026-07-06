@@ -1,6 +1,13 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1464_monitoring_leader_lock.py",
+      "feature": "#1464",
+      "added": "2026-07-06",
+      "categories": ["backend", "unit", "monitoring", "circuit-breaker"],
+      "description": "Cross-worker leader election on the fleet-health loop (#1464): only one of two workers (distinct worker ids, shared FakeRedis) becomes leader; the holder refreshes and keeps leadership; Redis-down and Redis-error fail open to leader; graceful release hands off immediately and only deletes the caller's own lease; TTL-expiry lets a sibling take over; _run_loop runs the check cycle iff this worker holds the lease. get_breaker_redis stubbed; no real Redis."
+    },
+    {
       "file": "unit/test_85_brain_orb_settings.py",
       "feature": "trinity-enterprise#85",
       "added": "2026-07-04",

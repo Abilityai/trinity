@@ -12,7 +12,9 @@ Alerts are sent via the notification system when status changes.
 
 import asyncio
 import logging
+import os
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +23,7 @@ import docker
 import httpx
 
 from database import db
+from redis_breaker_util import get_breaker_redis
 from services.agent_auth import agent_httpx_client
 from db_models import (
     AgentHealthStatus,
@@ -852,6 +855,12 @@ async def perform_fleet_health_check(
 # Background Task Management
 # =========================================================================
 
+# #1464: single Redis key holding the current fleet-health leader's worker id.
+# One leader across all uvicorn workers (and, if it ever moves there, the
+# scheduler process) — whoever holds it runs the probe; the rest idle.
+_LEADER_KEY = "monitoring:leader"
+
+
 class MonitoringService:
     """
     Background service for periodic health checks.
@@ -867,6 +876,11 @@ class MonitoringService:
         self.config = config
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        # #1464: unique per worker process so the cross-worker leader lock only
+        # ever refreshes/releases ITS OWN lease. pid is a readable prefix for
+        # log triage; the uuid suffix disambiguates a recycled pid.
+        self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._is_leader = False  # last observed leadership, for transition logs
 
     @property
     def is_running(self) -> bool:
@@ -890,13 +904,88 @@ class MonitoringService:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # #1464: best-effort release so a graceful shutdown hands leadership off
+        # immediately instead of leaving a sibling worker idle until the TTL
+        # expires. Never raises.
+        self._release_leadership()
         print("Monitoring service stopped")
+
+    def _leader_ttl(self) -> int:
+        """Lease TTL — 3× the cycle interval so one or two missed refreshes
+        don't drop leadership, but a dead holder's lock expires within ~3
+        cycles and a sibling takes over."""
+        return max(1, self.config.docker_check_interval) * 3
+
+    def _try_acquire_leadership(self) -> bool:
+        """#1464 — cross-worker leader election for the fleet-health loop.
+
+        The FastAPI lifespan starts this loop in EVERY uvicorn worker (prod runs
+        `--workers 2`). Without a guard, N workers each probe the whole fleet
+        per interval — duplicate `agent_health_checks` rows and, worse, an N×
+        `record_failure()` feed into the per-agent circuit breaker (#631),
+        effectively dividing the open threshold + dormant budget by N (amplifies
+        #1463). Mirrors the single-process + Redis-lock design the scheduler
+        already uses.
+
+        Every worker still RUNS the loop and re-evaluates leadership each cycle
+        (not once at startup), so if the current leader dies its lease expires
+        and a sibling transparently takes over — no restart needed.
+
+        Returns True iff this worker holds the lease for this cycle. Fail-open:
+        if Redis is unreachable, act as leader (single-worker dev keeps probing;
+        in a Redis-down prod the breaker is itself fail-open, so a doubled feed
+        is inert).
+        """
+        r = get_breaker_redis()
+        if r is None:
+            return True  # fail-open: no Redis → behave as the sole worker
+
+        ttl = self._leader_ttl()
+        try:
+            # Acquire only if free (atomic). `nx` guarantees a single winner
+            # across workers even under a simultaneous race.
+            if r.set(_LEADER_KEY, self._worker_id, nx=True, ex=ttl):
+                return True
+            # Already held — refresh the TTL only if the lease is OURS. We never
+            # touch another worker's key, so we can't steal or clobber it.
+            if r.get(_LEADER_KEY) == self._worker_id:
+                r.expire(_LEADER_KEY, ttl)
+                return True
+            return False
+        except Exception as e:
+            # Fail-open on a transient Redis error — a stray extra probe is far
+            # cheaper than silently stopping fleet monitoring.
+            logger.warning("monitoring leader lock check failed-open (%s)", e)
+            return True
+
+    def _release_leadership(self) -> None:
+        """Delete the lease iff we hold it (best-effort, never raises)."""
+        try:
+            r = get_breaker_redis()
+            if r is not None and r.get(_LEADER_KEY) == self._worker_id:
+                r.delete(_LEADER_KEY)
+        except Exception:
+            pass
 
     async def _run_loop(self):
         """Main monitoring loop."""
         while self._running:
             try:
-                await self._run_check_cycle()
+                # #1464: only the lease-holding worker performs the fleet probe.
+                # Non-leaders idle this cycle so checks aren't duplicated N×.
+                leader = self._try_acquire_leadership()
+                if leader and not self._is_leader:
+                    logger.info(
+                        "Monitoring loop acquired leadership (worker %s)", self._worker_id
+                    )
+                elif not leader and self._is_leader:
+                    logger.info(
+                        "Monitoring loop yielded leadership (worker %s)", self._worker_id
+                    )
+                self._is_leader = leader
+
+                if leader:
+                    await self._run_check_cycle()
             except Exception as e:
                 print(f"Monitoring check cycle failed: {e}")
 
