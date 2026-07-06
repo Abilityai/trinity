@@ -14,6 +14,7 @@
 > this index minimal and navigable.)
 
 | Date | ID | Change | Flow |
+| 2026-07-07 | #1077 | feat(canary): Phase 4 execution-row integrity invariants — E-03 (terminal rows have `completed_at`; `completed_at`-only predicate, dropping the catalog's `duration_ms` clause that false-fires on queue-terminated rows) + G-03 (`started_at ≤ completed_at`, ~1s tolerance, UTC-aware parse) over a shared `_collect_terminal_rows` collector (windowed on `started_at`, `LIMIT 5000`). Read-only, registry-driven, no endpoint/service/DB change. E-04/G-04 gated on #1450 | [architecture.md](architecture.md) |
 |------|-----|--------|------|
 | 2026-07-06 | #1450 | fix(canary): B-01 queue-status coherence — Side B (queued id-count) reads via the SAME `get_engine()`/`DATABASE_URL` seam as the accessor (backend-consistent on Postgres, not raw-sqlite vs engine; #300/#1093 gap), dedicated `queued_ids_via_engine` field leaves `queued_exec_ids` for B-02/E-02; collector does one confirm-re-read so a transient enqueue/drain race self-heals while a persistent drift still fires; engine-read failure → B-01 skip. Production residue of #1446 | [architecture.md](architecture.md) |
 | 2026-07-04 | #903 | fix(slack): thread-scoped session + per-speaker attribution + sender-filtered memory | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
