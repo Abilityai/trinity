@@ -77,11 +77,16 @@ Signal: `status='running' AND started_at < now() - (timeout_seconds + 300s)` →
 Once an execution is in a terminal state, its `status` is immutable for the rest of its life.
 Signal: audit-log every status transition; any `{success|failed|cancelled} → *` after that = violation.
 
-**E-03** Completed rows are fully populated *(Tier A, 🟡)*
+**E-03** Completed rows are fully populated *(Tier A, 🟡)* — ✅ **SHIPPED Phase 4, #1077** (registry id `E-03`).
 `status IN (success, failed, cancelled)` ⇒ `completed_at IS NOT NULL AND duration_ms IS NOT NULL`.
-Signal: `status IN (...) AND (completed_at IS NULL OR duration_ms IS NULL)` → 0.
+⚠️ **Implemented predicate deviates: `completed_at IS NOT NULL` ONLY.** The `+ duration_ms IS NOT NULL`
+clause was dropped because it false-fires in bulk on healthy queue-terminated rows — `cancel_queued_for_agent`
+/ `fail_queued_for_agent` / `expire_stale_queued` (`db/schedules.py`) set `completed_at` but never `duration_ms`
+(only ran-to-completion `update_execution_status` computes it). Windowed on `started_at` (`max timeout + 300s`,
+`LIMIT 5000`) — a leading-edge regression tripwire, not a 90-day backfill auditor. `skipped` rows are excluded
+by the collector (they legitimately have no `completed_at`).
 
-**E-04** Queued rows have metadata *(Tier A, 🟡)*
+**E-04** Queued rows have metadata *(Tier A, 🟡)* — ⏳ Phase 4, **#1077 (gated on #1450)**.
 `status='queued'` ⇒ `queued_at IS NOT NULL AND backlog_metadata IS NOT NULL AND json_valid(backlog_metadata)`.
 (Protects `backlog_service.drain_next` against `json.JSONDecodeError`.)
 
@@ -91,6 +96,7 @@ Signal: `status IN (...) AND (completed_at IS NULL OR duration_ms IS NULL)` → 
 **E-06** No stuck "completed-on-agent-but-not-reported" *(Tier B ≤ 5 min, 🔴)* — Issue #129 invariant.
 For every `status='running'` row with `started_at < now() - 60s`, the agent's `/api/executions/running` must report the `execution_id`. If not, watchdog must mark it failed within one cycle.
 Signal: cross-check DB × agent registry; violations older than one cycle are true orphans.
+> ⚠️ **Catalog-id ≠ registry-id drift:** the shipped registry id `E-06` is a *different* invariant — "no overdue `next_run_at`" (#1472) — not this catalog #129 check (which remains unimplemented). When stamping catalog entries "shipped", map to the registry id explicitly (as E-03/G-03 above do) rather than assuming a 1:1 correspondence.
 
 **E-07** Retry chain integrity *(Tier A, 🟢)*
 `retry_of_execution_id IS NOT NULL` ⇒ referenced row exists and has same `agent_name` and `schedule_id`.
@@ -336,11 +342,15 @@ After backend restart, cleanup-service startup sweep + `recover_orphaned_executi
 **G-02** Cleanup cycle completes within SLA *(Tier A, 🟡)*
 Every cleanup cycle completes within `poll_interval - 30s` (270 s). Exceeding = unresponsive agent starving watchdog → cascading invariant failures. Signal: `last_run_at - previous_last_run_at > 330s`.
 
-**G-03** Clock monotonicity on ordering fields *(Tier A, 🟢)*
+**G-03** Clock monotonicity on ordering fields *(Tier A, 🟢)* — ✅ **SHIPPED Phase 4, #1077** (registry id `G-03`).
 `created_at ≤ started_at ≤ completed_at` on every row where all three exist. Protects against clock-drift / mis-assignment bugs.
+⚠️ **Reduced to `started_at ≤ completed_at`** — `schedule_executions` has no `created_at` column. Fires only past a
+~1s tolerance (cross-worker / NTP jitter is not a bug). UTC-aware parse so a #1474 mixed naive/`Z` pair compares
+without raising; E-03 owns the NULL-`completed_at` case.
 
-**G-04** No credential leakage into backlog / logs *(Tier A, 🔴)* — BACKLOG-001 comment.
+**G-04** No credential leakage into backlog / logs *(Tier A, 🔴)* — ⏳ Phase 4, **#1077 (gated on #1450, rides E-04's read)**.
 `backlog_metadata` never contains raw credential values. Grep sampled rows for common patterns (`sk-`, `ghp_`, `xoxb-`); zero matches.
+(Folded into #1077 per gate decision; violations must report the matched pattern name + ids only, never the raw bytes.)
 
 **G-05** Watchdog idempotence *(Tier A, 🔴)*
 Running cleanup twice back-to-back produces an empty second report. Failure here ⇒ oscillation / double-failing bug.
