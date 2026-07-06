@@ -286,6 +286,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
+import { parseUTC } from '@/utils/timestamps'
 import { useExecutionsStore } from '../stores/executions'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
@@ -367,7 +368,7 @@ function triggerLabelClass(trigger) {
 
 function timeAgo(iso) {
   if (!iso) return ''
-  const diff = Math.floor((Date.now() - new Date(iso)) / 1000)
+  const diff = Math.floor((Date.now() - parseUTC(iso)) / 1000)
   if (diff < 60) return 'just now'
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`

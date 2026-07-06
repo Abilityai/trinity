@@ -759,6 +759,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import axios from 'axios'
+import { parseUTC } from '@/utils/timestamps'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
@@ -1295,7 +1296,7 @@ function setCronPreset(preset) {
 // Format helpers
 function formatRelativeTime(dateStr) {
   if (!dateStr) return ''
-  const date = new Date(dateStr)
+  const date = parseUTC(dateStr)
   const now = new Date()
   const diff = (date - now) / 1000
 
@@ -1321,11 +1322,11 @@ function formatRelativeTime(dateStr) {
 // "Overdue" during the brief fire→advance window.
 function isOverdue(schedule) {
   if (!schedule.enabled || !schedule.next_run_at) return false
-  return new Date(schedule.next_run_at).getTime() < Date.now() - 60_000
+  return parseUTC(schedule.next_run_at).getTime() < Date.now() - 60_000
 }
 
 function formatOverdue(dateStr) {
-  const diff = Math.max(0, (Date.now() - new Date(dateStr).getTime()) / 1000)
+  const diff = Math.max(0, (Date.now() - parseUTC(dateStr).getTime()) / 1000)
   if (diff < 60) return `${Math.round(diff)}s`
   if (diff < 3600) return `${Math.round(diff / 60)}m`
   if (diff < 86400) return `${Math.round(diff / 3600)}h`
@@ -1334,7 +1335,7 @@ function formatOverdue(dateStr) {
 
 function formatDateTime(dateStr) {
   if (!dateStr) return ''
-  return new Date(dateStr).toLocaleString()
+  return parseUTC(dateStr).toLocaleString()
 }
 
 function formatDuration(ms) {
