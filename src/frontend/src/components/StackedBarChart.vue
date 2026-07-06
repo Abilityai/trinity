@@ -87,7 +87,7 @@ function showLabel(i) {
         <div
           v-for="b in bucketsForDay(d)"
           :key="b"
-          class="w-full max-w-[56px] first:rounded-t-md"
+          class="w-full max-w-[56px] last:rounded-t-md"
           :style="{
             height: segHeight(d, b) + 'px',
             backgroundColor: colorFor(b),
