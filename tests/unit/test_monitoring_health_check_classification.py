@@ -55,9 +55,15 @@ class _FakeAsyncClient:
         raise self._raise_exc
 
 
-def _patch_httpx_and_circuit(monkeypatch, raise_exc):
+def _patch_httpx_and_circuit(monkeypatch, raise_exc, *, is_busy=False,
+                             busy_raises=False):
     """Patch httpx.AsyncClient to raise on .get() and inject a MagicMock
-    circuit. Returns (fake_circuit) so the test can assert on its calls."""
+    circuit. Returns (fake_circuit) so the test can assert on its calls.
+
+    #1463: also stub services.capacity_manager so the timeout handler's
+    in-flight-work lookup is hermetic. `is_busy` drives get_status().is_busy;
+    `busy_raises=True` makes the lookup raise so the fail-open path is tested.
+    """
     monkeypatch.setattr(
         monitoring_service.httpx,
         "AsyncClient",
@@ -72,6 +78,20 @@ def _patch_httpx_and_circuit(monkeypatch, raise_exc):
     fake_module = MagicMock()
     fake_module.CircuitState = MagicMock(return_value=fake_circuit)
     monkeypatch.setitem(sys.modules, "services.agent_client", fake_module)
+
+    # #1463: stub the capacity facade the timeout handler consults. Default
+    # idle so the existing classification tests keep their pre-#1463 verdicts
+    # without depending on a real Redis-backed capacity_manager.
+    async def _get_status(_agent_name, *_a, **_kw):
+        if busy_raises:
+            raise RuntimeError("slot lookup boom")
+        return MagicMock(is_busy=is_busy)
+
+    fake_cap = MagicMock()
+    fake_cap.get_capacity_manager = MagicMock(
+        return_value=MagicMock(get_status=_get_status)
+    )
+    monkeypatch.setitem(sys.modules, "services.capacity_manager", fake_cap)
 
     return fake_circuit
 
@@ -176,4 +196,56 @@ async def test_health_check_connect_error_still_records_failure(monkeypatch):
 
     assert result.reachable is False
     assert result.error == "Connection refused"
+    fake_circuit.record_failure.assert_called_once()
+
+
+# ── #1463: busy-but-healthy agent must not trip the breaker ───────────────────
+
+@pytest.mark.asyncio
+async def test_health_check_timeout_while_busy_stays_circuit_neutral(monkeypatch):
+    """#1463: a /health timeout while the agent holds an active execution
+    slot is 'busy', not 'wedged' — the long CPU-bound run starves the
+    event loop but completes SUCCESS. Must NOT record_failure (else the
+    breaker opens on every long run and fast-fails every other trigger),
+    while still reporting reachable=False for the aggregate rollup."""
+    fake_circuit = _patch_httpx_and_circuit(
+        monkeypatch, httpx.TimeoutException("timed out"), is_busy=True
+    )
+
+    result = await monitoring_service.check_network_health("agent-busy")
+
+    assert result.reachable is False
+    assert result.error == "HTTP timeout (agent busy)"
+    fake_circuit.record_failure.assert_not_called()
+    fake_circuit.record_success.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_health_check_timeout_while_idle_records_failure(monkeypatch):
+    """#1463: with NO active execution, a /health timeout keeps the original
+    liveness contract — a genuinely wedged idle agent still trips the breaker."""
+    fake_circuit = _patch_httpx_and_circuit(
+        monkeypatch, httpx.TimeoutException("timed out"), is_busy=False
+    )
+
+    result = await monitoring_service.check_network_health("agent-idle")
+
+    assert result.reachable is False
+    assert result.error == "HTTP timeout"
+    fake_circuit.record_failure.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_health_check_timeout_busy_lookup_failure_fails_open(monkeypatch):
+    """#1463: if the in-flight-work lookup itself errors (Redis down / import
+    failure), fail open to the pre-#1463 contract — treat as idle and
+    record_failure, so a broken slot lookup can't mask a real wedge."""
+    fake_circuit = _patch_httpx_and_circuit(
+        monkeypatch, httpx.TimeoutException("timed out"), busy_raises=True
+    )
+
+    result = await monitoring_service.check_network_health("agent-lookup-err")
+
+    assert result.reachable is False
+    assert result.error == "HTTP timeout"
     fake_circuit.record_failure.assert_called_once()

@@ -196,6 +196,31 @@ def check_docker_health(agent_name: str) -> DockerHealthCheck:
     )
 
 
+async def _agent_has_active_executions(agent_name: str) -> bool:
+    """True when the agent currently holds ≥1 admitted execution slot (#1463).
+
+    Read through the CapacityManager facade (Invariant #428) — a pure
+    backend/Redis lookup that never touches the (possibly unresponsive) agent.
+    Used to distinguish a genuinely wedged agent from one merely busy with a
+    long, still-progressing run when its /health probe times out.
+
+    Fail-open to False (treat as NOT busy → preserve the pre-#1463 liveness
+    contract): if the slot lookup errors, or Redis is down, we fall back to
+    counting the timeout as a failure — but the circuit breaker is itself
+    fail-open on Redis-down, so a stray False here can't wrongly trip it.
+    """
+    try:
+        from services.capacity_manager import get_capacity_manager
+        status = await get_capacity_manager().get_status(agent_name)
+        return bool(status.is_busy)
+    except Exception as e:
+        logger.debug(
+            "_agent_has_active_executions(%s) slot lookup failed, treating as idle: %s",
+            agent_name, e,
+        )
+        return False
+
+
 async def check_network_health(
     agent_name: str,
     timeout: float = 10.0
@@ -341,16 +366,28 @@ async def check_network_health(
         # of the transient one. Note: ConnectTimeout is intercepted by
         # CIRCUIT_FAILURE_EXCEPTIONS above (first-match wins) and never
         # reaches here.
+        #
+        # #1463 — EXCEPT when the agent has an execution in flight: a
+        # long CPU-bound run (Claude Code subprocess streaming, repo
+        # synthesis) starves the agent-server event loop enough that
+        # /health can't answer within the probe timeout, while the
+        # execution itself completes SUCCESS. That's "busy", not "wedged":
+        # counting it opened the breaker on every long run and fast-failed
+        # every other trigger until the ~1h dormant probe recovered. The
+        # backend already knows about in-flight work (slot service), so
+        # gate the liveness verdict on it — stay circuit-neutral while
+        # busy, but still report reachable=False for the aggregate rollup.
+        busy = await _agent_has_active_executions(agent_name)
         logger.debug(
-            "check_network_health(%s) timeout %s: %s",
-            agent_name, type(e).__name__, e,
+            "check_network_health(%s) timeout %s (busy=%s): %s",
+            agent_name, type(e).__name__, busy, e,
         )
-        if circuit is not None:
+        if circuit is not None and not busy:
             circuit.record_failure()
         return NetworkHealthCheck(
             agent_name=agent_name,
             reachable=False,
-            error="HTTP timeout",
+            error="HTTP timeout (agent busy)" if busy else "HTTP timeout",
             checked_at=now
         )
 

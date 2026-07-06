@@ -725,6 +725,13 @@
       "added": "2026-07-04",
       "categories": ["backend", "unit", "api"],
       "description": "GET /api/version payload builder: #926 git provenance fields + #1443 edition/enterprise_features passthrough, runtimes list, and the static guard that get_version imports entitlement_service function-locally (not at module top, so _set_for_testing stubs aren't bypassed)."
+    },
+    {
+      "file": "unit/test_monitoring_health_check_classification.py",
+      "feature": "#474/#1463",
+      "added": "2026-05-13",
+      "categories": ["backend", "unit", "monitoring", "circuit-breaker"],
+      "description": "check_network_health() /health-probe exception classification: #474 BrokenPipe/ConnectionReset stay circuit-neutral, httpx Read/Write/RemoteProtocol errors record_failure, Timeout/ConnectError record_failure. #1463: a Timeout while the agent has an active execution slot (CapacityManager is_busy, stubbed) stays circuit-neutral with error='HTTP timeout (agent busy)'; idle Timeout still records_failure; slot-lookup error fails open to record_failure. httpx.AsyncClient + circuit + capacity_manager stubbed; no Docker/Redis."
     }
   ]
 }
