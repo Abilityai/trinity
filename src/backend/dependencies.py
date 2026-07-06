@@ -170,6 +170,45 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
     return {"username": username, "mode": payload.get("mode", "prod")}
 
 
+# Scope marker for the Client Portal session token (enterprise `client_portal`,
+# epic #78). A portal client is a *verified email*, NOT a `users` row — this
+# token carries only the email and is fenced OUT of every platform endpoint
+# (get_current_user / decode_token reject it, mirroring MFA_CHALLENGE_SCOPE). It
+# only authorizes the entitled portal endpoints, which resolve identity via
+# `decode_portal_session`. Edition-agnostic: OSS owns the mint/decode primitive
+# + the fence; the enterprise module decides *when* to mint one (after email-code
+# verification of a client whose email has a share). No new secret — same
+# SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
+PORTAL_SESSION_SCOPE = "portal_session"
+PORTAL_SESSION_EXPIRE_HOURS = 12
+
+
+def create_portal_session_token(email: str, mode: str = "prod") -> str:
+    """Mint a Client Portal session token for a verified email. Carries no
+    ``sub`` (no platform identity) — only the email + the portal scope."""
+    return create_access_token(
+        data={"scope": PORTAL_SESSION_SCOPE, "email": email.lower()},
+        expires_delta=timedelta(hours=PORTAL_SESSION_EXPIRE_HOURS),
+        mode=mode,
+    )
+
+
+def decode_portal_session(token: str) -> Optional[str]:
+    """Validate a portal session token. Returns the verified email if the token
+    is a non-expired, non-revoked portal-scoped token; ``None`` otherwise. Used
+    by the entitled portal endpoints to resolve the client identity."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    if is_token_revoked(payload.get("jti")):
+        return None
+    email = payload.get("email")
+    return email.lower() if email else None
+
+
 def decode_token(token: str) -> Optional[dict]:
     """
     Decode a JWT token without FastAPI dependency.
@@ -189,6 +228,11 @@ def decode_token(token: str) -> Optional[dict]:
 
         # #5 — a half-authenticated 2FA challenge token is not a session token.
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
+            return None
+
+        # #78 — a Client Portal session token is not a platform session. It only
+        # authorizes the entitled portal endpoints (via decode_portal_session).
+        if payload.get("scope") == PORTAL_SESSION_SCOPE:
             return None
 
         # #187 — a token revoked via logout is no longer valid (also for WS).
@@ -234,6 +278,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # authorizes /api/enterprise/2fa/login/*; the second factor must be
         # completed there to obtain a real access token.
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
+            raise credentials_exception
+
+        # #78 — a Client Portal session token is fenced OUT of every platform
+        # endpoint. It carries no `sub` (so the check below would reject it
+        # anyway), but reject explicitly so a portal token can never resolve to
+        # a platform principal even if the claim shape changes.
+        if payload.get("scope") == PORTAL_SESSION_SCOPE:
             raise credentials_exception
 
         # #187 — reject a token revoked via logout.
