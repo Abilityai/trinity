@@ -1298,7 +1298,8 @@ class TestRunner:
 
         assert set(results.keys()) == {
             "S-01", "S-02", "S-03",
-            "E-01", "E-02", "E-05", "E-06",
+            "E-01", "E-02", "E-03", "E-05", "E-06",
+            "G-03",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1308,8 +1309,11 @@ class TestRunner:
         assert results["S-03"] == []
         assert results["E-01"] == []
         assert results["E-02"] == []
+        # E-03/G-03 (#1077) hold on a clean platform — no terminal rows seeded.
+        assert results["E-03"] == []
         assert results["E-05"] == []
         assert results["E-06"] == []
+        assert results["G-03"] == []
         assert len(results["L-03"]) == 1
         # B-01 now reads the SAME temp DB on both sides via reload_canary's
         # controlled `database` stub (get_queued_count over the temp
