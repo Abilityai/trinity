@@ -405,7 +405,7 @@ async function revoke(source, target) {
 
 function writeError(err, source) {
   const detail = err.response?.data?.detail
-  if (err.response?.status === 404) return `Can't modify grants for "${source}" — its container isn't running.`
+  if (err.response?.status === 404) return `Can't modify grants for "${source}" — it has no container (never started or deleted).`
   if (err.response?.status === 403) return `You can only modify grants for agents you own.`
   return detail || 'Permission change failed.'
 }
@@ -457,7 +457,7 @@ async function runBatch(pairs, isRevoke = false) {
   await refreshEdges()
   busy.value = false
   flash(fail ? 'error' : 'success',
-    `${isRevoke ? 'Revoked' : 'Granted'} ${ok} pair${ok === 1 ? '' : 's'}${fail ? `, ${fail} failed (container stopped or not owned)` : ''}.`)
+    `${isRevoke ? 'Revoked' : 'Granted'} ${ok} pair${ok === 1 ? '' : 's'}${fail ? `, ${fail} failed (no container or not owned)` : ''}.`)
 }
 
 onMounted(reload)
