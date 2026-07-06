@@ -440,6 +440,111 @@
           {{ expandedSchedule === schedule.id ? 'Hide' : 'Show' }} execution history
         </button>
 
+        <!-- ent#77: Webhook configuration toggle -->
+        <button
+          @click="toggleWebhook(schedule)"
+          class="mt-3 ml-4 text-xs text-action-primary-600 dark:text-action-primary-400 hover:text-action-primary-800 dark:hover:text-action-primary-300 inline-flex items-center"
+        >
+          <svg class="w-3 h-3 mr-1 transform transition-transform" :class="webhookOpen === schedule.id ? 'rotate-90' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+          </svg>
+          <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5m6.156-1.328a4 4 0 010-5.656l3-3a4 4 0 015.656 5.656l-1.5 1.5" />
+          </svg>
+          Webhook<span v-if="schedule.webhook_enabled" class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-status-success-100 text-status-success-800 dark:bg-status-success-900/40 dark:text-status-success-300">on</span>
+        </button>
+
+        <!-- ent#77: Webhook configuration panel -->
+        <div v-if="webhookOpen === schedule.id" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3 space-y-3 text-sm">
+          <div v-if="wh(schedule).loading" class="text-center py-3">
+            <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-action-primary-500 mx-auto"></div>
+          </div>
+
+          <template v-else>
+            <p class="text-xs text-gray-500 dark:text-gray-400">
+              Trigger this schedule from an external system by POSTing to a secret URL. Off by default; enable to mint a URL.
+            </p>
+
+            <!-- Disabled state -->
+            <div v-if="!wh(schedule).status || !wh(schedule).status.has_token">
+              <button @click="enableWebhook(schedule)" :disabled="wh(schedule).busy"
+                class="px-3 py-1.5 text-xs rounded bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">
+                Enable webhook
+              </button>
+            </div>
+
+            <!-- Enabled state -->
+            <div v-else class="space-y-3">
+              <!-- URL -->
+              <div>
+                <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Webhook URL</label>
+                <div class="flex items-center gap-2">
+                  <input readonly :value="wh(schedule).revealed ? wh(schedule).status.webhook_url : maskUrl(wh(schedule).status.webhook_url)"
+                    class="flex-1 font-mono text-xs px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-gray-200" />
+                  <button @click="wh(schedule).revealed = !wh(schedule).revealed" class="text-xs px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">
+                    {{ wh(schedule).revealed ? 'Hide' : 'Reveal' }}
+                  </button>
+                  <button @click="copyText(wh(schedule).status.webhook_url, schedule.id + ':url')" class="text-xs px-2 py-1.5 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-200">
+                    {{ copiedKey === schedule.id + ':url' ? 'Copied!' : 'Copy URL' }}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Example curl -->
+              <div>
+                <label class="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Example request</label>
+                <div class="relative">
+                  <pre class="font-mono text-[11px] whitespace-pre-wrap break-all px-2 py-2 rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ exampleCurl(schedule) }}</pre>
+                  <button @click="copyText(exampleCurl(schedule), schedule.id + ':curl')" class="absolute top-1.5 right-1.5 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 dark:text-gray-200">
+                    {{ copiedKey === schedule.id + ':curl' ? 'Copied!' : 'Copy' }}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Signature auth -->
+              <div class="rounded border border-gray-200 dark:border-gray-700 p-2.5">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <span class="text-xs font-medium text-gray-700 dark:text-gray-300">Signature authentication</span>
+                    <span v-if="wh(schedule).status.auth_enabled" class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-status-success-100 text-status-success-800 dark:bg-status-success-900/40 dark:text-status-success-300">required</span>
+                    <span v-else class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">off</span>
+                    <p class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">HMAC-SHA256 over the request body in <code>{{ wh(schedule).status.signature_header || 'X-Trinity-Signature' }}</code> — so a leaked URL alone can't trigger the schedule.</p>
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    <button v-if="!wh(schedule).status.auth_enabled" @click="enableSignature(schedule)" :disabled="wh(schedule).busy"
+                      class="text-xs px-2 py-1 rounded bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">Enable</button>
+                    <template v-else>
+                      <button @click="enableSignature(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">Rotate secret</button>
+                      <button @click="disableSignature(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">Disable</button>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Secret shown exactly once -->
+                <div v-if="wh(schedule).secretOnce" class="mt-2 rounded border border-status-warning-300 dark:border-status-warning-700 bg-status-warning-50 dark:bg-status-warning-900/20 p-2">
+                  <p class="text-[11px] font-medium text-status-warning-800 dark:text-status-warning-300 mb-1">Copy this signing secret now — it is shown only once.</p>
+                  <div class="flex items-center gap-2">
+                    <input readonly :value="wh(schedule).secretOnce" class="flex-1 font-mono text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200" />
+                    <button @click="copyText(wh(schedule).secretOnce, schedule.id + ':secret')" class="text-xs px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-200">
+                      {{ copiedKey === schedule.id + ':secret' ? 'Copied!' : 'Copy' }}
+                    </button>
+                    <button @click="wh(schedule).secretOnce = null" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">Done</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Destructive actions -->
+              <div class="flex items-center gap-2 pt-1">
+                <button @click="rotateWebhook(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-300">Rotate URL</button>
+                <button @click="revokeWebhook(schedule)" :disabled="wh(schedule).busy" class="text-xs px-2 py-1 rounded border border-status-danger-300 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20">Revoke</button>
+                <span class="text-[11px] text-gray-400 dark:text-gray-500">Rotating or revoking invalidates the old URL immediately.</span>
+              </div>
+            </div>
+
+            <p v-if="wh(schedule).error" class="text-xs text-status-danger-600 dark:text-status-danger-400">{{ wh(schedule).error }}</p>
+          </template>
+        </div>
+
         <!-- Execution History -->
         <div v-if="expandedSchedule === schedule.id" class="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3">
           <div v-if="executionsLoading" class="text-center py-4">
@@ -691,6 +796,163 @@ const expandedSchedule = ref(null)
 const executions = ref({})
 const executionsLoading = ref(false)
 const selectedExecution = ref(null)
+
+// ent#77: per-schedule webhook config state (id -> { loading, busy, status, revealed, secretOnce, error })
+const webhookOpen = ref(null)
+const webhookState = reactive({})
+const copiedKey = ref(null)
+const _EMPTY_WEBHOOK = Object.freeze({}) // safe default for the always-rendered badge/toggle
+
+// Return the reactive state for a schedule WITHOUT creating it during render
+// (entries are created in toggleWebhook). Read-only callers get a frozen {}.
+function wh(schedule) {
+  return webhookState[schedule.id] || _EMPTY_WEBHOOK
+}
+
+function maskUrl(url) {
+  if (!url) return ''
+  // Mask everything after /api/webhooks/ so the token isn't shoulder-surfed.
+  return url.replace(/(\/api\/webhooks\/)(.+)$/, (_, p, tok) => p + '•'.repeat(Math.min(tok.length, 20)))
+}
+
+function exampleCurl(schedule) {
+  const st = webhookState[schedule.id]?.status
+  if (!st?.webhook_url) return ''
+  const lines = [
+    `curl -X POST '${st.webhook_url}' \\`,
+    `  -H 'Content-Type: application/json' \\`,
+  ]
+  if (st.auth_enabled) {
+    const hdr = st.signature_header || 'X-Trinity-Signature'
+    lines.push(`  -H '${hdr}: sha256=<HMAC-SHA256(secret, body)>' \\`)
+  }
+  lines.push(`  -d '{"context": "optional data appended to the prompt"}'`)
+  return lines.join('\n')
+}
+
+async function copyText(text, key) {
+  try {
+    await navigator.clipboard.writeText(text || '')
+    copiedKey.value = key
+    setTimeout(() => { if (copiedKey.value === key) copiedKey.value = null }, 1500)
+  } catch (e) {
+    // Clipboard unavailable (insecure context) — leave the field for manual copy.
+  }
+}
+
+async function toggleWebhook(schedule) {
+  if (webhookOpen.value === schedule.id) { webhookOpen.value = null; return }
+  webhookOpen.value = schedule.id
+  if (!webhookState[schedule.id]) {
+    webhookState[schedule.id] = { loading: false, busy: false, status: null, revealed: false, secretOnce: null, error: '' }
+  }
+  await loadWebhook(schedule)
+}
+
+async function loadWebhook(schedule) {
+  const s = webhookState[schedule.id]
+  s.loading = true; s.error = ''
+  try {
+    const { data } = await axios.get(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook`,
+      { headers: authStore.authHeader }
+    )
+    s.status = data
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to load webhook config'
+  } finally {
+    s.loading = false
+  }
+}
+
+async function enableWebhook(schedule) {
+  const s = webhookState[schedule.id]
+  s.busy = true; s.error = ''
+  try {
+    const { data } = await axios.post(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook`, {},
+      { headers: authStore.authHeader }
+    )
+    s.status = data; s.revealed = true
+    schedule.webhook_enabled = true
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to enable webhook'
+  } finally {
+    s.busy = false
+  }
+}
+
+async function rotateWebhook(schedule) {
+  if (!confirm('Rotate the webhook URL? The current URL stops working immediately, and any signature secret is cleared.')) return
+  const s = webhookState[schedule.id]
+  s.busy = true; s.error = ''; s.secretOnce = null
+  try {
+    const { data } = await axios.post(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook`, {},
+      { headers: authStore.authHeader }
+    )
+    s.status = data; s.revealed = true
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to rotate webhook'
+  } finally {
+    s.busy = false
+  }
+}
+
+async function revokeWebhook(schedule) {
+  if (!confirm('Revoke this webhook? The URL is invalidated immediately and external callers will get 404.')) return
+  const s = webhookState[schedule.id]
+  s.busy = true; s.error = ''
+  try {
+    await axios.delete(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook`,
+      { headers: authStore.authHeader }
+    )
+    s.status = { has_token: false, webhook_enabled: false, webhook_url: null, auth_enabled: false, has_secret: false }
+    s.secretOnce = null; s.revealed = false
+    schedule.webhook_enabled = false
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to revoke webhook'
+  } finally {
+    s.busy = false
+  }
+}
+
+async function enableSignature(schedule) {
+  const s = webhookState[schedule.id]
+  if (s.status?.auth_enabled && !confirm('Rotate the signing secret? The current secret stops working immediately.')) return
+  s.busy = true; s.error = ''
+  try {
+    const { data } = await axios.post(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook/secret`, {},
+      { headers: authStore.authHeader }
+    )
+    s.secretOnce = data.signing_secret   // shown exactly once
+    // Merge auth state without discarding the URL.
+    s.status = { ...s.status, auth_enabled: true, has_secret: true, signature_header: data.signature_header }
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to enable signature auth'
+  } finally {
+    s.busy = false
+  }
+}
+
+async function disableSignature(schedule) {
+  if (!confirm('Disable signature auth? The webhook URL stays live but becomes unauthenticated again.')) return
+  const s = webhookState[schedule.id]
+  s.busy = true; s.error = ''
+  try {
+    const { data } = await axios.delete(
+      `/api/agents/${props.agentName}/schedules/${schedule.id}/webhook/secret`,
+      { headers: authStore.authHeader }
+    )
+    s.status = data; s.secretOnce = null
+  } catch (e) {
+    s.error = e.response?.data?.detail || 'Failed to disable signature auth'
+  } finally {
+    s.busy = false
+  }
+}
 let executionPollTimer = null
 
 // Confirm dialog state

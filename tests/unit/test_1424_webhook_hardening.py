@@ -44,6 +44,10 @@ class _FakeSchedule:
         self.name = "nightly"
         self.message = "do the thing"
         self.webhook_enabled = True
+        # ent#77: signature auth off by default (matches the real Schedule model);
+        # these hardening tests exercise the unauthenticated path.
+        self.webhook_auth_enabled = False
+        self.webhook_secret_encrypted = None
 
 
 _VALID_TOKEN = "V" * 43

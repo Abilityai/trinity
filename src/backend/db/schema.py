@@ -193,6 +193,12 @@ TABLES = {
             validation_timeout_seconds INTEGER DEFAULT 120,
             webhook_token TEXT,
             webhook_enabled INTEGER DEFAULT 0,
+            -- trinity-enterprise#77: optional HMAC signature auth on the public
+            -- webhook. webhook_secret_encrypted is an AES-256-GCM envelope
+            -- (Invariant #12); webhook_auth_enabled gates verification. Both
+            -- default off — a plain token-in-URL webhook is unchanged.
+            webhook_secret_encrypted TEXT,
+            webhook_auth_enabled INTEGER DEFAULT 0,
             deleted_at TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id)
         )

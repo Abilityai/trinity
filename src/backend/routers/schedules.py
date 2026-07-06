@@ -29,6 +29,7 @@ from models import (
 from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.webhook_signature import SIGNATURE_HEADER as WEBHOOK_SIGNATURE_HEADER
 
 _ANALYTICS_VALID_WINDOWS = frozenset({24, 168, 720})  # #868
 # #1115: Overview/Schedules-tab scorecard windows → hours (matches the #1107
@@ -514,11 +515,16 @@ async def generate_webhook(
     webhook_url = _build_webhook_url(request.base_url, token)
     logger.info(f"Webhook token generated for schedule {schedule_id} by {current_user.username}")
 
+    # ent#77: rotating the token clears any prior signing secret (revoke path in
+    # db resets auth), so a freshly-minted token always reports auth off — the
+    # caller re-enables signing via POST .../webhook/secret.
     return WebhookStatusResponse(
         schedule_id=schedule_id,
         has_token=True,
         webhook_enabled=True,
         webhook_url=webhook_url,
+        auth_enabled=False,
+        has_secret=False,
     )
 
 
@@ -549,6 +555,95 @@ async def get_webhook_status(
         has_token=status_data["has_token"],
         webhook_enabled=status_data["webhook_enabled"],
         webhook_url=webhook_url,
+        auth_enabled=status_data.get("auth_enabled", False),
+        has_secret=status_data.get("has_secret", False),
+        signature_header=WEBHOOK_SIGNATURE_HEADER,
+    )
+
+
+@router.post(
+    "/{name}/schedules/{schedule_id}/webhook/secret",
+    response_model=WebhookStatusResponse,
+)
+async def generate_webhook_secret(
+    name: AuthorizedAgent,
+    schedule_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Mint (or rotate) the HMAC signing secret and turn on signature auth.
+
+    Returns the plaintext `signing_secret` **exactly once** — it is never
+    persisted in the clear (only an AES-256-GCM envelope is stored) and never
+    returned by GET. Requires an existing webhook token (signing a schedule
+    with no webhook is meaningless → 409).
+
+    Access: `AuthorizedAgent`, matching schedule management + webhook token
+    minting (the credential-issuance model for this feature — settled per
+    ent#77 AC). Rotating the secret invalidates the previous one immediately.
+    """
+    schedule = db.get_schedule(schedule_id)
+    if not schedule or schedule.agent_name != name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+
+    if not schedule.webhook_token:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Enable the webhook (generate a URL) before adding signature auth",
+        )
+
+    secret = db.set_webhook_secret(schedule_id)
+    if secret is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate webhook signing secret",
+        )
+
+    webhook_url = _build_webhook_url(request.base_url, schedule.webhook_token)
+    logger.info(
+        f"Webhook signing secret generated for schedule {schedule_id} by {current_user.username}"
+    )
+    return WebhookStatusResponse(
+        schedule_id=schedule_id,
+        has_token=True,
+        webhook_enabled=True,
+        webhook_url=webhook_url,
+        auth_enabled=True,
+        has_secret=True,
+        signing_secret=secret,  # shown exactly once
+        signature_header=WEBHOOK_SIGNATURE_HEADER,
+    )
+
+
+@router.delete(
+    "/{name}/schedules/{schedule_id}/webhook/secret",
+    response_model=WebhookStatusResponse,
+)
+async def disable_webhook_secret(
+    name: AuthorizedAgent,
+    schedule_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Turn signature auth off and drop the stored secret. The webhook URL stays
+    live (unauthenticated again); use DELETE .../webhook to revoke it entirely."""
+    schedule = db.get_schedule(schedule_id)
+    if not schedule or schedule.agent_name != name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+
+    db.clear_webhook_secret(schedule_id)
+    logger.info(
+        f"Webhook signature auth disabled for schedule {schedule_id} by {current_user.username}"
+    )
+    token = schedule.webhook_token
+    return WebhookStatusResponse(
+        schedule_id=schedule_id,
+        has_token=token is not None,
+        webhook_enabled=schedule.webhook_enabled,
+        webhook_url=_build_webhook_url(request.base_url, token) if token else None,
+        auth_enabled=False,
+        has_secret=False,
+        signature_header=WEBHOOK_SIGNATURE_HEADER,
     )
 
 

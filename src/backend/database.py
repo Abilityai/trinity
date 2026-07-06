@@ -879,6 +879,14 @@ class DatabaseManager:
     def get_webhook_status(self, schedule_id: str):
         return self._schedule_ops.get_webhook_status(schedule_id)
 
+    def set_webhook_secret(self, schedule_id: str):
+        # ent#77: mint/rotate the HMAC signing secret; returns plaintext once.
+        return self._schedule_ops.set_webhook_secret(schedule_id)
+
+    def clear_webhook_secret(self, schedule_id: str):
+        # ent#77: disable signature auth + drop the stored secret.
+        return self._schedule_ops.clear_webhook_secret(schedule_id)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 

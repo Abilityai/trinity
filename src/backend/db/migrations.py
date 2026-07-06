@@ -1913,6 +1913,25 @@ def _migrate_agent_schedules_webhook(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_schedules_webhook_auth(cursor, conn):
+    """Add optional HMAC signature auth to schedule webhooks (trinity-enterprise#77).
+
+    webhook_secret_encrypted holds an AES-256-GCM envelope of the signing secret
+    (Invariant #12); webhook_auth_enabled gates verification in the public
+    trigger. Both default off, so an existing token-in-URL webhook is unchanged.
+    """
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_secret_encrypted",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_secret_encrypted TEXT",
+        log_msg="Adding webhook_secret_encrypted to agent_schedules for webhook signature auth (ent#77)...",
+    )
+    _safe_add_column(
+        cursor, "agent_schedules", "webhook_auth_enabled",
+        "ALTER TABLE agent_schedules ADD COLUMN webhook_auth_enabled INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_shared_files(cursor, conn):
     """Create agent_shared_files table and add file_sharing_enabled to agent_ownership.
 
@@ -2756,6 +2775,7 @@ MIGRATIONS = [
     ("sync_health", _migrate_sync_health),
     ("whatsapp_bindings", _migrate_whatsapp_bindings),
     ("agent_schedules_webhook", _migrate_agent_schedules_webhook),
+    ("agent_schedules_webhook_auth", _migrate_agent_schedules_webhook_auth),
     ("agent_shared_files", _migrate_agent_shared_files),
     ("agent_sessions_tables", _migrate_agent_sessions_tables),
     ("session_compact_events", _migrate_session_compact_events),

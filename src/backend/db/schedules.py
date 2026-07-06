@@ -184,6 +184,9 @@ class ScheduleOperations:
             # Webhook trigger (WEBHOOK-001 / #647 follow-up)
             webhook_enabled=bool(row["webhook_enabled"]) if "webhook_enabled" in row_keys and row["webhook_enabled"] is not None else False,
             webhook_token=row["webhook_token"] if "webhook_token" in row_keys else None,
+            # ent#77: signature-auth fields (graceful default for pre-migration rows)
+            webhook_auth_enabled=bool(row["webhook_auth_enabled"]) if "webhook_auth_enabled" in row_keys and row["webhook_auth_enabled"] is not None else False,
+            webhook_secret_encrypted=row["webhook_secret_encrypted"] if "webhook_secret_encrypted" in row_keys else None,
         )
 
     @staticmethod
@@ -838,7 +841,16 @@ class ScheduleOperations:
             result = conn.execute(
                 update(agent_schedules)
                 .where(agent_schedules.c.id == schedule_id)
-                .values(webhook_token=token, webhook_enabled=1, updated_at=now)
+                # ent#77: rotating the URL is a credential-rotation event — reset
+                # any prior signing secret so a leaked old secret can't sign for
+                # the new token. The caller re-enables signing explicitly.
+                .values(
+                    webhook_token=token,
+                    webhook_enabled=1,
+                    webhook_secret_encrypted=None,
+                    webhook_auth_enabled=0,
+                    updated_at=now,
+                )
             )
             if result.rowcount == 0:
                 return None
@@ -888,21 +900,100 @@ class ScheduleOperations:
             return result.rowcount > 0
 
     def revoke_webhook_token(self, schedule_id: str) -> bool:
-        """Revoke a webhook token, immediately invalidating the URL."""
+        """Revoke a webhook token, immediately invalidating the URL.
+
+        ent#77: also clears the signing secret + auth flag — a revoked webhook
+        must not leave a live secret behind, and a re-minted token should start
+        auth-off (the caller re-enables signing explicitly).
+        """
         now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(agent_schedules)
                 .where(agent_schedules.c.id == schedule_id)
-                .values(webhook_token=None, webhook_enabled=0, updated_at=now)
+                .values(
+                    webhook_token=None,
+                    webhook_enabled=0,
+                    webhook_secret_encrypted=None,
+                    webhook_auth_enabled=0,
+                    updated_at=now,
+                )
+            )
+            return result.rowcount > 0
+
+    # ---- ent#77: webhook signature-auth secret --------------------------------
+
+    @staticmethod
+    def _encrypt_webhook_secret(secret: str) -> str:
+        from services.credential_encryption import get_credential_encryption_service
+        from services.webhook_signature import SECRET_ENVELOPE_KEY
+        return get_credential_encryption_service().encrypt({SECRET_ENVELOPE_KEY: secret})
+
+    @staticmethod
+    def _decrypt_webhook_secret(encrypted: Optional[str]) -> Optional[str]:
+        if not encrypted:
+            return None
+        try:
+            from services.credential_encryption import get_credential_encryption_service
+            from services.webhook_signature import SECRET_ENVELOPE_KEY
+            return get_credential_encryption_service().decrypt(encrypted).get(SECRET_ENVELOPE_KEY)
+        except Exception as e:
+            logger.error(f"Failed to decrypt webhook secret: {e}")
+            return None
+
+    def set_webhook_secret(self, schedule_id: str) -> Optional[str]:
+        """Mint (or rotate) the HMAC signing secret and enable signature auth.
+
+        Returns the PLAINTEXT secret exactly once (the caller surfaces it to the
+        user and never persists it in the clear); only the AES-256-GCM envelope
+        is stored. Returns None if the schedule row is gone. Requires an existing
+        webhook token — signature auth on a schedule with no webhook is a no-op,
+        so the router gates on `has_token` first.
+        """
+        secret = "whsec_" + secrets.token_urlsafe(32)
+        encrypted = self._encrypt_webhook_secret(secret)
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(
+                    and_(
+                        agent_schedules.c.id == schedule_id,
+                        agent_schedules.c.webhook_token.isnot(None),
+                    )
+                )
+                .values(
+                    webhook_secret_encrypted=encrypted,
+                    webhook_auth_enabled=1,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 0:
+                return None
+        return secret
+
+    def clear_webhook_secret(self, schedule_id: str) -> bool:
+        """Disable signature auth and drop the stored secret (webhook stays live)."""
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_schedules)
+                .where(agent_schedules.c.id == schedule_id)
+                .values(
+                    webhook_secret_encrypted=None,
+                    webhook_auth_enabled=0,
+                    updated_at=now,
+                )
             )
             return result.rowcount > 0
 
     def get_webhook_status(self, schedule_id: str) -> Optional[Dict]:
-        """Return webhook configuration for a schedule."""
+        """Return webhook configuration for a schedule (never the secret)."""
         stmt = select(
             agent_schedules.c.webhook_token,
             agent_schedules.c.webhook_enabled,
+            agent_schedules.c.webhook_auth_enabled,
+            agent_schedules.c.webhook_secret_encrypted,
         ).where(
             and_(
                 agent_schedules.c.id == schedule_id,
@@ -917,6 +1008,9 @@ class ScheduleOperations:
             "webhook_token": row["webhook_token"],
             "webhook_enabled": bool(row["webhook_enabled"]),
             "has_token": row["webhook_token"] is not None,
+            # ent#77 — surface the auth STATE only, never the secret material
+            "auth_enabled": bool(row["webhook_auth_enabled"]),
+            "has_secret": row["webhook_secret_encrypted"] is not None,
         }
 
     # =========================================================================

@@ -160,6 +160,44 @@ async def trigger_webhook(
     except Exception:
         chunks = []
     raw_body = b"".join(chunks)
+
+    # ent#77: HMAC signature auth. When enabled on the schedule, the caller must
+    # sign the RAW request body with the per-webhook secret and send it in the
+    # X-Trinity-Signature header. FAIL-CLOSED: a missing/invalid signature is
+    # rejected 401 before any dispatch, so a leaked URL token alone is not enough.
+    # We only fail-closed on the signature itself — an unreadable stored secret is
+    # a 500 (operator misconfig), never a silent bypass.
+    if schedule.webhook_auth_enabled:
+        from services.credential_encryption import get_credential_encryption_service
+        from services.webhook_signature import (
+            SECRET_ENVELOPE_KEY,
+            SIGNATURE_HEADER,
+            verify_signature,
+        )
+
+        secret: Optional[str] = None
+        if schedule.webhook_secret_encrypted:
+            try:
+                secret = get_credential_encryption_service().decrypt(
+                    schedule.webhook_secret_encrypted
+                ).get(SECRET_ENVELOPE_KEY)
+            except Exception:
+                logger.error(
+                    "webhook 500: signing secret decrypt failed for schedule %s",
+                    schedule.id,
+                )
+        if not secret:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Webhook signature secret unavailable",
+            )
+        if not verify_signature(secret, raw_body, request.headers.get(SIGNATURE_HEADER)):
+            logger.info("webhook 401: invalid or missing signature")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing webhook signature",
+            )
+
     body: Optional[WebhookTriggerRequest] = None
     if raw_body.strip():
         try:

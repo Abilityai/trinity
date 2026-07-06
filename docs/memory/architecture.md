@@ -841,9 +841,12 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 ### Webhook Triggers (WEBHOOK-001)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) | Trigger schedule execution; rate-limited 10/60s per token via `rate_limiter.py` (#1023); returns 202 |
+| POST | `/api/webhooks/{webhook_token}` | Token (URL-embedded) + optional HMAC | Trigger schedule execution; rate-limited 10/60s per token via `rate_limiter.py` (#1023); returns 202. When the schedule has signature auth on, an `X-Trinity-Signature: sha256=HMAC-SHA256(secret, raw_body)` header is required (fail-closed 401 on missing/invalid) (ent#77) |
+| POST/DELETE | `/api/agents/{name}/schedules/{id}/webhook/secret` | JWT (`AuthorizedAgent`) | Enable/rotate signature auth — mints the signing secret, returns it **exactly once** (`whsec_…`, then only the AES-256-GCM envelope is kept) / disable auth, URL stays live (ent#77) |
 
-Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_token` (partial unique index, O(1) lookup); re-POST rotates (old URL instantly invalid); DELETE nulls (subsequent triggers 404). Optional `{"context": "..."}` body (max 4000 chars) appended to the schedule message wrapped in a framing header to reduce prompt-injection surface. All triggers audit-logged with `triggered_by="webhook"`; auto-derives idempotency key `(token, body_hash)` (Invariant #18).
+Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_token` (partial unique index, O(1) lookup); re-POST rotates (old URL instantly invalid) and clears any signing secret; DELETE nulls (subsequent triggers 404). Optional `{"context": "..."}` body (max 4000 chars) appended to the schedule message wrapped in a framing header to reduce prompt-injection surface. All triggers audit-logged with `triggered_by="webhook"`; auto-derives idempotency key `(token, body_hash)` (Invariant #18).
+
+**Signature auth (ent#77):** optional per-schedule HMAC layer so a leaked URL alone can't trigger the schedule — off by default. `POST .../webhook/secret` mints a `whsec_` secret (returned once; stored only as an AES-256-GCM envelope, Invariant #12), sets `webhook_auth_enabled`. The public trigger verifies `X-Trinity-Signature = sha256=HMAC-SHA256(secret, raw_body)` (`services/webhook_signature.py`, constant-time) after the body is read + size-capped, **fail-closed** (401 on missing/invalid, 500 on an unreadable stored secret — never a silent bypass). Rotating the URL or revoking clears the secret. Mint/rotate/disable are `AuthorizedAgent` (aligns with schedule management). UI: the Schedules-tab per-schedule **Webhook** panel (enable/reveal/copy URL, example `curl`, rotate/revoke, enable/rotate/disable signing, secret shown once).
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
@@ -1166,6 +1169,8 @@ CREATE TABLE agent_schedules (
     timeout_seconds INTEGER,                     -- #913: NULL = inherit agent cap
     webhook_token TEXT,                          -- WEBHOOK-001: 43-char urlsafe token, nullable
     webhook_enabled INTEGER DEFAULT 0,           -- WEBHOOK-001
+    webhook_secret_encrypted TEXT,               -- ent#77: AES-256-GCM HMAC signing secret (Invariant #12), nullable
+    webhook_auth_enabled INTEGER DEFAULT 0,      -- ent#77: gate signature verification in the public trigger
     deleted_at TEXT,                             -- #834: NULL = live; set = soft-deleted
     FOREIGN KEY (owner_id) REFERENCES users(id)
 );
