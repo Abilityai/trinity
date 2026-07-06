@@ -217,6 +217,17 @@ class AgentSnapshot:
     # completed) → B-01 skips this agent rather than comparing against a
     # different backend's row set.
     queued_ids_via_engine: Optional[Set[str]] = None
+    # E-04 / G-04 input (#1077): per-queued-execution metadata
+    # `{eid: {"queued_at": ..., "backlog_metadata": ...}}`, scoped STRICTLY to
+    # `status='queued'` rows in `_collect_executions` — never terminal rows, so
+    # #1449 (deferred; NULLs `backlog_metadata` on terminal rows) cannot make
+    # E-04 false-fire. Populated only when the `queued_at` + `backlog_metadata`
+    # columns both exist (BACKLOG-001); on an older/minimal DDL the map is left
+    # empty for that agent so E-04/G-04 skip its queued eids (older-image
+    # fail-open). An eid in `queued_exec_ids` but ABSENT from this map means the
+    # metadata columns weren't observable — E-04/G-04 skip it; a PRESENT entry
+    # with a NULL value is a real E-04 violation.
+    queued_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Per-slot Redis TTL on the companion `agent:slot:{name}:{eid}` HASH.
     # Value semantics from `redis.ttl()`: positive int = seconds until
     # expiry; -2 = key does not exist; -1 = key exists with no TTL. S-03
@@ -319,6 +330,15 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
     query so the canary cycle stays O(N agents) and never grows per-row.
     The column has been on `schedule_executions` since #106; rows predating
     that migration return NULL and are tolerated by the E-05 grace window.
+
+    Also captures `queued_at` + `backlog_metadata` for **queued** rows (E-04 /
+    G-04, #1077) in the same query, keyed by execution_id in `queued_meta`.
+    Both columns are PRAGMA-guarded (added by BACKLOG-001): when either is
+    absent (older/minimal DDL) `queued_meta` is left empty so E-04/G-04 skip
+    those eids (older-image fail-open) rather than firing on a column that never
+    existed. The metadata is read STRICTLY off queued rows — never terminal ones
+    — so #1449 (deferred; NULLs `backlog_metadata` on terminal rows) can't make
+    E-04 false-fire.
     """
     from db.connection import get_db_connection
 
@@ -330,9 +350,15 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         cursor.execute("PRAGMA table_info(schedule_executions)")
         cols = {c["name"] for c in cursor.fetchall()}
         has_session_col = "claude_session_id" in cols
+        # E-04/G-04 (#1077): both queued-metadata columns must exist to observe
+        # queued metadata at all. Guard on BOTH (they land together in
+        # BACKLOG-001) so a partial DDL degrades to older-image fail-open.
+        has_queued_meta = "queued_at" in cols and "backlog_metadata" in cols
         select_cols = "id, status, started_at"
         if has_session_col:
             select_cols += ", claude_session_id"
+        if has_queued_meta:
+            select_cols += ", queued_at, backlog_metadata"
         cursor.execute(
             f"SELECT {select_cols} FROM schedule_executions "
             "WHERE agent_name = ? AND status IN ('running', 'queued')",
@@ -343,6 +369,7 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
             "queued": set(),
             "started_at": {},
             "claude_session_ids": {},
+            "queued_meta": {},
         }
         for row in cursor.fetchall():
             if row["status"] == "running":
@@ -354,6 +381,14 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                 )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
+                if has_queued_meta:
+                    # A NULL value here IS a violation (real E-04 case); leaving
+                    # the eid out of the map only happens when the columns are
+                    # absent (older image → skipped above).
+                    out["queued_meta"][row["id"]] = {
+                        "queued_at": row["queued_at"],
+                        "backlog_metadata": row["backlog_metadata"],
+                    }
         return out
 
 
@@ -826,6 +861,7 @@ def collect_snapshot() -> Snapshot:
                 "queued": set(),
                 "started_at": {},
                 "claude_session_ids": {},
+                "queued_meta": {},
             }
 
         # B-01 inputs (#1450): both sides go through the `get_engine()` seam so
@@ -888,6 +924,7 @@ def collect_snapshot() -> Snapshot:
                 running_started_at=execs.get("started_at", {}),
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
                 queued_exec_ids=execs["queued"],
+                queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,
                 queued_ids_via_engine=engine_qids,
             )
