@@ -232,10 +232,14 @@ class TestAdminOnlyEndpoints:
 
 
 class TestOwnerOnlyEndpoints:
-    """Verify non-owner users get 403 on owner-only agent endpoints.
+    """Verify non-owner users are denied on owner-only agent endpoints.
 
     Uses an agent created by admin that the regular user does NOT own
     and is NOT shared with.
+
+    #186: these endpoints route through the OwnedAgent(_by_name) dependency,
+    which now returns a uniform 404 for both a non-existent and an existing-but-
+    unowned agent (was 403) so agent existence can't be enumerated.
     """
 
     # -- credentials.py (inject/export/import) --
@@ -247,7 +251,7 @@ class TestOwnerOnlyEndpoints:
             f"/api/agents/{admin_owned_agent}/credentials/inject",
             json={"files": {".env": "TEST=1"}},
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_credential_export_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -255,7 +259,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/credentials/export",
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_credential_import_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -263,7 +267,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/credentials/import",
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     # -- chat.py (delete history) --
 
@@ -273,7 +277,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.delete(
             f"/api/agents/{admin_owned_agent}/chat/history"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     # -- agents.py (queue mutations) --
 
@@ -283,7 +287,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/queue/clear"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_queue_release_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -291,7 +295,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/queue/release"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     # -- skills.py (write operations) --
 
@@ -302,7 +306,7 @@ class TestOwnerOnlyEndpoints:
             f"/api/agents/{admin_owned_agent}/skills",
             json={"skills": []},
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_assign_skill_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -310,7 +314,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/skills/some-skill",
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_unassign_skill_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -318,7 +322,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.delete(
             f"/api/agents/{admin_owned_agent}/skills/some-skill",
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_inject_skills_requires_owner(
         self, regular_user_client, admin_owned_agent
@@ -326,7 +330,7 @@ class TestOwnerOnlyEndpoints:
         response = regular_user_client.post(
             f"/api/agents/{admin_owned_agent}/skills/inject",
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
 
 # =============================================================================
@@ -335,7 +339,12 @@ class TestOwnerOnlyEndpoints:
 
 
 class TestAgentAccessCheckEndpoints:
-    """Verify non-owner/non-shared users get 403 on agent-scoped read endpoints."""
+    """Verify non-owner/non-shared users are denied on agent-scoped read endpoints.
+
+    #186: these route through the AuthorizedAgent(_by_name) dependency, which now
+    returns a uniform 404 for both a non-existent and an inaccessible agent (was
+    403) so agent existence can't be enumerated.
+    """
 
     def test_agent_stats_requires_access(
         self, regular_user_client, admin_owned_agent
@@ -343,7 +352,7 @@ class TestAgentAccessCheckEndpoints:
         response = regular_user_client.get(
             f"/api/agents/{admin_owned_agent}/stats"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_agent_queue_requires_access(
         self, regular_user_client, admin_owned_agent
@@ -351,7 +360,7 @@ class TestAgentAccessCheckEndpoints:
         response = regular_user_client.get(
             f"/api/agents/{admin_owned_agent}/queue"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_get_agent_skills_requires_access(
         self, regular_user_client, admin_owned_agent
@@ -359,7 +368,7 @@ class TestAgentAccessCheckEndpoints:
         response = regular_user_client.get(
             f"/api/agents/{admin_owned_agent}/skills"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_get_agent_detail_requires_access(
         self, regular_user_client, admin_owned_agent
@@ -367,7 +376,7 @@ class TestAgentAccessCheckEndpoints:
         response = regular_user_client.get(
             f"/api/agents/{admin_owned_agent}"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
     def test_agent_logs_requires_access(
         self, regular_user_client, admin_owned_agent
@@ -375,7 +384,7 @@ class TestAgentAccessCheckEndpoints:
         response = regular_user_client.get(
             f"/api/agents/{admin_owned_agent}/logs"
         )
-        assert_status(response, 403)
+        assert_status(response, 404)
 
 
 # =============================================================================

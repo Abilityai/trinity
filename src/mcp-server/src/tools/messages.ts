@@ -175,8 +175,17 @@ export function createMessageTools(
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`[send_message] Error: ${errorMessage}`);
 
-          // Parse specific error types
-          if (errorMessage.includes("403") || errorMessage.includes("Not authorized")) {
+          // Parse specific error types.
+          // #186: the backend agent-access dependency now returns a uniform 404
+          // "Agent not found" for both a non-existent and an inaccessible agent
+          // (was 403). Match that exact detail here — before the generic 404
+          // recipient-not-found branch below — so an agent-access denial is
+          // reported as not-authorized, not misclassified as recipient_not_found.
+          if (
+            errorMessage.includes("403") ||
+            errorMessage.includes("Not authorized") ||
+            errorMessage.includes("Agent not found")
+          ) {
             return JSON.stringify({
               success: false,
               error: "Not authorized to message this recipient. They must opt in via allow_proactive flag.",

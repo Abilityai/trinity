@@ -56,9 +56,9 @@ By default, Telegram bots have **Privacy Mode enabled**. This means:
 ### Connect Bot to Agent (Agent Detail -> Sharing Tab)
 
 1. Open the agent detail page
-2. Select the **Sharing** tab
-3. In the Telegram section, paste your bot token
-4. Click **Connect Bot**
+2. Select the **Sharing** tab and find the **Telegram** row under **Channels**
+3. Click **Configure** — the Telegram configuration opens in a dialog
+4. Paste your bot token and click **Connect Bot**
 5. Trinity validates the token and registers the webhook
 
 After connecting:
@@ -94,6 +94,10 @@ Voice notes sent to the bot are automatically transcribed with Google Gemini 2.0
 | Config required | `GEMINI_API_KEY` set on the backend |
 
 If transcription fails or `GEMINI_API_KEY` is not configured, the agent receives a placeholder such as `[Voice message received — transcription failed]` so the conversation still progresses.
+
+### Voice Replies (Outbound)
+
+The agent can also *speak its replies* as Telegram voice notes (OGG/Opus via `sendVoice`; in groups the note replies to the triggering message). This is a per-agent setting shared across all messaging channels — enable it with the **Voice replies** toggle inside the Telegram dialog. See [Voice Replies](../advanced/voice-replies.md) for setup and fallback behavior.
 
 ### Bot Commands
 

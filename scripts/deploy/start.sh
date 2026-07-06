@@ -227,6 +227,31 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 export BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# --- Docker Desktop Vector log-source fix (#1432) -----------------------------
+# On Docker Desktop / VM-based Docker runtimes, Vector's default `docker_logs`
+# source busy-loops and pegs the Docker VM at ~4 cores. Swap it for an on-disk
+# file source via docker-compose.override.yml (auto-merged by `docker compose up`).
+# Native Linux dockerd is unaffected. Opt out: TRINITY_LOCAL_LOG_SOURCE=docker.
+# Force on: TRINITY_LOCAL_LOG_SOURCE=file. Default: auto-detect Docker Desktop.
+_log_src="${TRINITY_LOCAL_LOG_SOURCE:-auto}"
+if [ "$_log_src" = "auto" ]; then
+    if docker info 2>/dev/null | grep -qi 'Docker Desktop'; then
+        _log_src=file
+    else
+        _log_src=docker
+    fi
+fi
+if [ "$_log_src" = "file" ]; then
+    if [ ! -f docker-compose.override.yml ]; then
+        cp docker-compose.override.example.yml docker-compose.override.yml
+        echo "Docker Desktop detected → using the on-disk Vector log source (#1432)."
+        echo "  Created docker-compose.override.yml. To opt out: delete it, or set"
+        echo "  TRINITY_LOCAL_LOG_SOURCE=docker. Local logs land in /data/logs/local-*.json;"
+        echo "  prefer 'docker compose logs -f <service>' to tail a single service."
+    fi
+fi
+# -----------------------------------------------------------------------------
+
 echo "Starting services..."
 docker compose up -d
 

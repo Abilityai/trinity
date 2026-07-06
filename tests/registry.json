@@ -1,6 +1,20 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1464_monitoring_leader_lock.py",
+      "feature": "#1464",
+      "added": "2026-07-06",
+      "categories": ["backend", "unit", "monitoring", "circuit-breaker"],
+      "description": "Cross-worker leader election on the fleet-health loop (#1464): only one of two workers (distinct worker ids, shared FakeRedis) becomes leader; the holder refreshes and keeps leadership; Redis-down and Redis-error fail open to leader; graceful release hands off immediately and only deletes the caller's own lease; TTL-expiry lets a sibling take over; _run_loop runs the check cycle iff this worker holds the lease. get_breaker_redis stubbed; no real Redis."
+    },
+    {
+      "file": "unit/test_85_brain_orb_settings.py",
+      "feature": "trinity-enterprise#85",
+      "added": "2026-07-04",
+      "categories": ["backend", "unit", "settings", "brain-orb", "feature-flags"],
+      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old→new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base ∧ voice ∧ key; 200 despite brain-orb DB failure)."
+    },
+    {
       "file": "unit/test_1332_cancelled_activity_state.py",
       "feature": "#1332",
       "added": "2026-06-26",
@@ -711,6 +725,20 @@
       "added": "2026-06-23",
       "categories": ["backend", "unit", "api", "voip", "voice"],
       "description": "HTTP-level tests for the #28 endpoints via FastAPI TestClient with auth deps overridden + db/voip_service stubbed (reviewer I1). PUT /api/agents/{name}/voice/name: owner-gated (403 when the get_owned_agent dep denies), 400 on a voice outside GEMINI_VOICE_NAMES, empty body clears to NULL->default, valid voice persists; GET returns voice_name + available_voices + default_voice. PUT /api/agents/{name}/voip/enabled: owner-gated (403), 404 when no binding (db.set_voip_enabled False), 404 when voip_available off, 200 reflecting new enabled state with no auth_token in the response. Mounts the real routers on minimal apps; no Docker/Redis."
+    },
+    {
+      "file": "unit/test_926_version_endpoint.py",
+      "feature": "#1443",
+      "added": "2026-07-04",
+      "categories": ["backend", "unit", "api"],
+      "description": "GET /api/version payload builder: #926 git provenance fields + #1443 edition/enterprise_features passthrough, runtimes list, and the static guard that get_version imports entitlement_service function-locally (not at module top, so _set_for_testing stubs aren't bypassed)."
+    },
+    {
+      "file": "unit/test_monitoring_health_check_classification.py",
+      "feature": "#474/#1463",
+      "added": "2026-05-13",
+      "categories": ["backend", "unit", "monitoring", "circuit-breaker"],
+      "description": "check_network_health() /health-probe exception classification: #474 BrokenPipe/ConnectionReset stay circuit-neutral, httpx Read/Write/RemoteProtocol errors record_failure, Timeout/ConnectError record_failure. #1463: a Timeout while the agent has an active execution slot (CapacityManager is_busy, stubbed) stays circuit-neutral with error='HTTP timeout (agent busy)'; idle Timeout still records_failure; slot-lookup error fails open to record_failure. httpx.AsyncClient + circuit + capacity_manager stubbed; no Docker/Redis."
     }
   ]
 }

@@ -20,15 +20,18 @@ import logging
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
-from config import (
-    BRAIN_ORB_ENABLED,
-    BRAIN_ORB_VOICE_ENABLED,
-    BRAIN_ORB_WRITE_ENABLED,
-    GEMINI_API_KEY,
-)
+from config import GEMINI_API_KEY
 from database import db
 from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName
 from services import brain_orb_voice_service, idempotency_service, rate_limiter
+# Runtime-resolved flags (#85): system_settings override → BRAIN_ORB_* env
+# opt-in → OFF. Imported as module-level names so tests can monkeypatch the
+# gate seam (`monkeypatch.setattr(bo, "is_brain_orb_enabled", ...)`).
+from services.settings_service import (
+    is_brain_orb_enabled,
+    is_brain_orb_voice_enabled,
+    is_brain_orb_write_enabled,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
@@ -67,7 +70,7 @@ async def _agent_request(agent_name: str, method: str, path: str, *, content: by
     mapped ``HTTPException`` on flag-off (404 — flag is the single source of
     truth), missing/stopped agent (404 / 503), or transport failure (503 / 504).
     """
-    if not BRAIN_ORB_ENABLED:
+    if not is_brain_orb_enabled():
         raise HTTPException(status_code=404, detail="Brain Orb is not enabled")
     container = get_agent_container(agent_name)
     if not container:
@@ -139,8 +142,8 @@ async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_
     surface, single new-session use, short expiry) are the security envelope; this
     route's job is the JWT gate + a per-user mint budget.
 
-    Gated on the **voice** flag (distinct from ``BRAIN_ORB_ENABLED``): 404 when
-    ``BRAIN_ORB_VOICE_ENABLED`` is off, 503 when no Gemini key, 502 on mint error.
+    Gated on the **base AND voice** flags (both runtime-resolved, #85): 404 when
+    either is off, 503 when no Gemini key, 502 on mint error.
 
     The response field is deliberately named ``ephemeral_token``, never a bare
     ``token`` — defensive/explicit (the voice iframe only ever sees the single-use
@@ -149,7 +152,10 @@ async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_
     4a); the backend ``/action`` route is the hard gate regardless. The agent is not
     contacted (no container check) — the mint is a Google call, not an agent call.
     """
-    if not BRAIN_ORB_VOICE_ENABLED:
+    # Composed with the base flag (#85): with base OFF the orb is down, so the
+    # mint must be too — otherwise a direct API call could still spin up Gemini
+    # Live sessions on the platform key while the feature is disabled.
+    if not (is_brain_orb_enabled() and is_brain_orb_voice_enabled()):
         raise HTTPException(status_code=404, detail="Brain Orb voice is not enabled")
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=503, detail="Voice is not configured")
@@ -163,7 +169,7 @@ async def post_brain_orb_voice_token(agent_name: AuthorizedAgentByName, current_
     # Phase 4a). The mint route is AuthorizedAgentByName (shared users may voice-chat),
     # so compute owner access here — same predicate OwnedAgentByName enforces. Shared
     # users get the read-only manifest; the backend /action route is the hard gate.
-    can_write = BRAIN_ORB_WRITE_ENABLED and db.can_user_share_agent(current_user.username, agent_name)
+    can_write = is_brain_orb_write_enabled() and db.can_user_share_agent(current_user.username, agent_name)
     try:
         result = await brain_orb_voice_service.mint_voice_token(
             agent_name,
@@ -201,7 +207,7 @@ def _require_write_enabled() -> None:
     """404 unless the KB-write surface flag is on. Combines with ``_agent_request``'s
     ``BRAIN_ORB_ENABLED`` gate so both flags are required. Separate kill-switch so
     writes can be disabled without downing the read path / voice tile (#58 Phase 4a)."""
-    if not BRAIN_ORB_WRITE_ENABLED:
+    if not is_brain_orb_write_enabled():
         raise HTTPException(status_code=404, detail="Brain Orb writes are not enabled")
 
 

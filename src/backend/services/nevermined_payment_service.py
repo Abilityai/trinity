@@ -273,14 +273,15 @@ class NeverminedPaymentService:
         execution_id: Optional[str],
         base_url: str = "",
     ) -> NeverminedPaymentResult:
-        """Settle exactly once per Nevermined ``agent_request_id`` (#1084).
+        """Settle at-most-once per local ``agent_request_id`` guard claim (#1084).
 
         Wraps :meth:`settle_payment` in the effect guard keyed on
-        ``payment:{agent_request_id}`` — Nevermined's native exactly-once token.
-        A retried paid chat reusing the same token replays the stored settle
-        receipt instead of burning credits twice; the native token remains the
-        real on-chain guarantee, this just avoids even attempting a duplicate
-        and gives a fast local replay.
+        ``payment:{agent_request_id}``. Nevermined's agent_request_id is an
+        observability id (NOT a provider exactly-once token — the facilitator burns
+        on every successful settle_permissions call), so THIS local guard is the
+        dedup: a retry reusing the SAME id replays the stored receipt instead of
+        burning twice. A retry that re-verifies gets a fresh id and is not deduped
+        here (at-least-once residual, tracked by #1408).
 
         - completed replay → returns the stored receipt, no re-settle.
         - a FAILED settle → releases the claim so a later retry can re-attempt

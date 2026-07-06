@@ -23,11 +23,13 @@ This release is **outbound only** — agents place calls; they do not answer inc
 
 ## How It Works
 
-There is no UI for VoIP yet — binding configuration and call triggering are API/MCP-only.
-
 ### 1. Configure the Agent's Twilio Binding
 
-The agent **owner** configures the binding:
+The agent **owner** configures the binding — either in the UI or via the API.
+
+**UI:** open the agent's **Sharing** tab → **Channels** → **Voice calls** row → **Configure** (the row appears only when VoIP is enabled platform-wide). The dialog ("Voice Calls (Twilio / VoIP)") takes the Twilio Account SID, Auth Token, From Number, and an optional daily call cap. Once connected, an **Enable/Disable** control flips calling on and off without re-entering credentials, and an **Agent voice** picker selects the Gemini voice used on calls (see below).
+
+**API:**
 
 ```bash
 curl -X PUT http://localhost:8000/api/agents/my-agent/voip \
@@ -46,7 +48,11 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/voip \
 - **From number** — a voice-capable Twilio number in E.164 format.
 - **Daily call cap** — optional per-agent override of the platform default (50 calls/day).
 
-`GET` the same endpoint to check binding status (returns the Twilio account's display name when configured); `DELETE` removes the binding.
+`GET` the same endpoint to check binding status (returns the Twilio account's display name when configured); `DELETE` removes the binding. `PUT /api/agents/{name}/voip/enabled` with `{"enabled": false}` disables calling in place — the binding and credentials are kept, and outbound calls are refused until re-enabled.
+
+### The Agent's Voice
+
+Calls speak with the agent's persisted Gemini voice, shared with the in-app voice overlay. Pick it in the VoIP dialog's **Agent voice** selector or via `PUT /api/agents/{name}/voice/name`. Available voices: **Kore** (firm, the default), **Zephyr** (bright), **Puck** (upbeat), **Aoede** (breezy), **Charon** (informational), **Fenrir** (excitable), and **Gacrux** (mature). Clearing the setting reverts to Kore.
 
 ### 2. Place a Call
 
@@ -90,6 +96,8 @@ The optional `context` (up to 2,000 characters) becomes the call's purpose in th
 | `/api/agents/{name}/voip` | GET | Binding status (owner-only) |
 | `/api/agents/{name}/voip` | PUT | Configure Twilio voice binding — validates credentials with Twilio, encrypts the Auth Token (owner-only) |
 | `/api/agents/{name}/voip` | DELETE | Remove the binding (owner-only) |
+| `/api/agents/{name}/voip/enabled` | PUT | Enable/disable calling without re-entering credentials (owner-only; 404 if no binding) |
+| `/api/agents/{name}/voice/name` | GET / PUT | The agent's persisted Gemini voice (PUT owner-only; applies to VoIP calls and the in-app voice overlay) |
 | `/api/agents/{name}/voip/call` | POST | Place an outbound call; returns `{call_id, status: "ringing", to_number, twilio_call_sid, chat_session_id}` |
 | `/api/voip/voice/{call_id}` | WebSocket | Twilio Media Streams audio bridge (ticket-authed, used by Twilio — not called directly) |
 
@@ -128,7 +136,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/voip/call \
 ## Limitations
 
 - **Outbound only** — Agents cannot receive calls in this release.
-- **No web UI** — Binding setup and call history are API-only for now.
+- **No call history UI** — Binding setup is in the Sharing tab, but call logs are API-only for now.
 - **10-minute cap** — Calls end automatically at `VOIP_MAX_CALL_DURATION`.
 - **Public deployment required** — Twilio must reach your instance over WSS; VoIP does not work on a localhost-only install.
 - **Owner pays** — Calls bill to the agent owner's Twilio account at Twilio's voice rates.

@@ -282,6 +282,20 @@ class ScheduleOperations:
         if not self._agent_ops.can_user_access_agent(username, agent_name):
             return None
 
+        # #1445: no-orphan invariant enforced at the actual chokepoint.
+        # `can_user_access_agent` returns True unconditionally for admins with
+        # no existence check, so without this guard an admin could mint a
+        # schedule (and a real webhook token) on a never-created agent — whose
+        # token then 404s deterministically at `get_schedule_by_webhook_token`
+        # (INNER JOIN on agent_ownership, #1423). Refuse creation on an agent
+        # with no live ownership row so the invariant holds for every caller
+        # (router, MCP, system-manifest deploy, future/internal). The router
+        # maps this `None` to 403. Safe for the one direct caller today —
+        # system-manifest deploy creates the agent (register_agent_owner)
+        # before its schedules.
+        if not self._agent_ops.is_agent_live(agent_name):
+            return None
+
         schedule_id = self._generate_id()
         now = utc_now_iso()
 
@@ -831,11 +845,29 @@ class ScheduleOperations:
         return token
 
     def get_schedule_by_webhook_token(self, token: str) -> Optional[Schedule]:
-        """Look up a schedule by its webhook token (O(1) via index)."""
-        stmt = select(agent_schedules).where(
-            and_(
-                agent_schedules.c.webhook_token == token,
-                agent_schedules.c.deleted_at.is_(None),
+        """Look up a schedule by its webhook token (O(1) via index).
+
+        Applies the same two soft-delete filters as `list_all_enabled_schedules`
+        (#834, #1423): skip a soft-deleted *schedule* (`agent_schedules.deleted_at`)
+        AND a schedule whose *agent* is soft-deleted (`agent_ownership.deleted_at`).
+        Without the agent join, a webhook could still fire a schedule of a
+        soft-deleted (recoverable) agent during the retention window — the exact
+        hole the cron path guards against.
+        """
+        stmt = (
+            select(agent_schedules)
+            .select_from(
+                agent_schedules.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_schedules.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_schedules.c.webhook_token == token,
+                    agent_schedules.c.deleted_at.is_(None),
+                    agent_ownership.c.deleted_at.is_(None),
+                )
             )
         )
         with get_engine().connect() as conn:

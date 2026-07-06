@@ -1813,7 +1813,7 @@ After execution completes, the count is incremented and the summarizer fires eve
 
 1. Reads `ANTHROPIC_API_KEY` via `get_anthropic_api_key()`; skips silently if absent.
 2. Calls `db.get_or_create_public_user_memory()` and reads the current `conversation_summary` (not `agent_notes` — the summarizer must not see deliberate writes).
-3. Calls `db.get_recent_public_chat_messages(session_id, limit=20)` for the last 20 messages.
+3. Calls `db.get_recent_public_chat_messages(session_id, limit=20, sender_email=user_email)` for the current user's last 20 turns. **The `sender_email` filter (#903)** keeps a thread-scoped multi-participant Slack session from feeding one user's turns into another user's memory. It is a no-op on single-participant sessions — web **and any channel DM** (Slack/Telegram/WhatsApp) — where **both** the user turn and the assistant reply are stamped with that user's email, so the summarizer still sees the full user+assistant conversation (as it did pre-#903). Only a multi-participant session (a Slack channel thread or a group chat) leaves the assistant turn's `sender_email` null, excluding the shared reply from any one participant's memory.
 4. Formats `_SUMMARIZATION_PROMPT` with `existing_memory` and `conversation` fields.
 5. POSTs to `https://api.anthropic.com/v1/messages` using model `claude-haiku-4-5-20251001`, `max_tokens=512`, 30-second timeout.
 6. On success, writes the returned text to `db.update_public_user_memory_conversation_summary()` — touches only the summary section.

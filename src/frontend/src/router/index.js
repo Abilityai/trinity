@@ -52,14 +52,13 @@ const routes = [
     name: 'AgentWorkspace',
     component: () => import('../views/AgentWorkspace.vue'),
     meta: { requiresAuth: true, title: (to) => `${to.params.name} · Workspace` },
-    beforeEnter: async (to, from, next) => {
+    beforeEnter: async (to, from) => {
       const sessionsStore = useSessionsStore()
       await sessionsStore.loadFeatureFlags()
       if (!sessionsStore.workspaceAvailable) {
-        next({ name: 'AgentDetail', params: { name: to.params.name } })
-      } else {
-        next()
+        return { name: 'AgentDetail', params: { name: to.params.name } }
       }
+      return true
     },
   },
   {
@@ -72,16 +71,16 @@ const routes = [
     name: 'AgentBrainOrb',
     component: () => import('../views/AgentBrainOrb.vue'),
     meta: { requiresAuth: true },
-    beforeEnter: async (to, from, next) => {
+    beforeEnter: async (to, from) => {
       const sessionsStore = useSessionsStore()
       const authStore = useAuthStore()
       await sessionsStore.loadFeatureFlags()
-      const bail = () => next({ name: 'AgentDetail', params: { name: to.params.name } })
+      const bail = () => ({ name: 'AgentDetail', params: { name: to.params.name } })
       if (!sessionsStore.brainOrbAvailable) return bail()
       try {
         const r = await axios.get(`/api/agents/${to.params.name}/info`, { headers: authStore.authHeader })
         const caps = Array.isArray(r.data?.capabilities) ? r.data.capabilities : []
-        return caps.includes('brain-orb') ? next() : bail()
+        return caps.includes('brain-orb') ? true : bail()
       } catch (_) {
         return bail()
       }
@@ -219,7 +218,9 @@ async function checkSetupStatus() {
 }
 
 // Navigation guard
-router.beforeEach(async (to, from, next) => {
+// Vue Router 5 deprecated the `next` callback; guards now signal intent by
+// returning a value (true/undefined = proceed, a location = redirect).
+router.beforeEach(async (to, from) => {
   const authStore = useAuthStore()
 
   // Wait for auth initialization to complete (PERF-269: replaced blind 100ms sleep)
@@ -235,17 +236,14 @@ router.beforeEach(async (to, from, next) => {
     if (!setupCompleted) {
       // Allow access to public routes that don't need setup
       if (to.path === '/chat' || to.path.startsWith('/chat/')) {
-        next()
-        return
+        return true
       }
-      next('/setup')
-      return
+      return '/setup'
     }
 
     // If setup completed and trying to access setup page, redirect to login
     if (to.path === '/setup') {
-      next('/login')
-      return
+      return '/login'
     }
   }
 
@@ -270,26 +268,24 @@ router.beforeEach(async (to, from, next) => {
         if (entitlement && !enterpriseStore.isEntitled(entitlement)) {
           // Non-entitled per-feature → bounce to the catalogue if
           // the user can see ANY enterprise feature, else dashboard.
-          next(enterpriseStore.hasAnyEnterprise ? '/enterprise' : '/')
-          return
+          return enterpriseStore.hasAnyEnterprise ? '/enterprise' : '/'
         }
         if (requireAny && !enterpriseStore.hasAnyEnterprise) {
-          next('/')
-          return
+          return '/'
         }
       }
-      next()
+      return true
     } else {
       // User is not authenticated, redirect to login
-      next('/login')
+      return '/login'
     }
   } else if (to.path === '/login' && authStore.isAuthenticated) {
     // User is authenticated but trying to access login page
     // Redirect to dashboard
-    next('/')
+    return '/'
   } else {
     // Public route, allow access
-    next()
+    return true
   }
 })
 

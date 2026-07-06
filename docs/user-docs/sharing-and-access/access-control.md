@@ -45,15 +45,17 @@ This default is **on** out of the box (secure-by-default). It applies at agent-c
 
 ### Access Modes
 
-**Restrictive (default)**: Only owner, admins, and explicitly shared users can chat. Others see "Your access request is pending approval."
+The Sharing tab presents this as a single **Restricted ↔ Open** switch under "Who can chat with this agent?":
 
-**Open access**: Any user with a verified email can chat immediately. Enable via the **Open access** toggle.
+**🔒 Restricted (default)**: Only owner, admins, and explicitly approved users can chat. Others see "Your access request is pending approval."
+
+**🌐 Open**: Any user with a verified email can chat immediately.
 
 ### Approving Access Requests
 
 When someone requests access:
 
-1. Their request appears in the **Sharing** tab under "Pending access requests."
+1. Their request appears in the **Sharing** tab as a "Pending requests" list under the Restricted/Open switch.
 2. Click **Approve** to grant access (adds them to the share list).
 3. Click **Deny** to reject.
 

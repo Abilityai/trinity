@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, AuthorizedAgentByName
 from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
@@ -262,11 +262,15 @@ async def set_agent_resources(
 
 @router.get("/{agent_name}/capabilities")
 async def get_agent_capabilities(
-    agent_name: str,
-    current_user: User = Depends(get_current_user)
+    agent_name: AuthorizedAgentByName,
 ):
     """
     Get the capabilities setting for an agent.
+
+    Read access is enforced by AuthorizedAgentByName (uniform 404 for a
+    non-existent OR inaccessible agent), closing the prior authz hole and the
+    404-vs-200 existence oracle where any authenticated user could read a
+    running agent's config (#186).
 
     Returns:
     - full_capabilities: True if agent has full Docker capabilities (apt-get works)
@@ -473,11 +477,13 @@ async def set_agent_capacity(
 
 @router.get("/{agent_name}/timeout")
 async def get_agent_timeout(
-    agent_name: str,
-    current_user: User = Depends(get_current_user)
+    agent_name: AuthorizedAgentByName,
 ):
     """
     Get the execution timeout setting for an agent.
+
+    Read access enforced by AuthorizedAgentByName (uniform 404) — closes the
+    open-GET authz hole + existence oracle (#186).
 
     Returns:
     - execution_timeout_seconds: Timeout in seconds (default 900 = 15 minutes)
@@ -574,10 +580,12 @@ async def set_agent_timeout(
 
 @router.get("/{agent_name}/public-channel-model")
 async def get_public_channel_model(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: AuthorizedAgentByName,
 ):
     """Get the per-agent model override for public-facing channels (#894).
+
+    Read access enforced by AuthorizedAgentByName (uniform 404) — closes the
+    open-GET authz hole + existence oracle (#186).
 
     Public-facing = public chat link, Slack/Telegram/WhatsApp channels, and x402
     paid chat. The override is owner-set; NULL means inherit the platform
@@ -719,10 +727,13 @@ def _validate_guardrails_payload(body: dict) -> dict:
 
 @router.get("/{agent_name}/guardrails")
 async def get_agent_guardrails(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: AuthorizedAgentByName,
 ):
-    """Return per-agent guardrails overrides (empty object if none configured)."""
+    """Return per-agent guardrails overrides (empty object if none configured).
+
+    Read access enforced by AuthorizedAgentByName (uniform 404) — closes the
+    open-GET authz hole + existence oracle (#186).
+    """
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

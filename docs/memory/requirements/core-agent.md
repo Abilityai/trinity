@@ -99,6 +99,7 @@
 - **Description**: Real-time status labels in Chat tab and Public Chat reflecting agent activity (replaces static "Thinking...")
 - **Key Features**: SSE stream subscription, tool-name-to-label mapping, 500ms anti-flicker, 10s heartbeat timeout, async_mode task execution with session persistence
 - **Scope**: Authenticated Chat tab + Public Chat links (both use async_mode + SSE streaming)
+- **Persistence hardening (#1444)**: `async_mode` + `save_to_session` chat-session persistence is **fail-loud** (a write error logs at ERROR with a stack trace and a `chat_persist_failed` marker on the sync response; never silently swallowed, never 500s a billed turn) and **owner-checks** a caller-supplied `chat_session_id` (IDOR fix). Guarded on a SUCCESS terminal only (FAILED/CANCELLED turns write no session). Covered by a **fast unit regression guard** (`tests/unit/test_1444_chat_session_persistence.py`) — the slow `requires_agent` integration tests (`test_dynamic_thinking_status.py::TestAsyncModeSessionPersistence`) now also assert the execution reached `success` before demanding a session, disambiguating an execution failure from a persistence failure.
 - **Spec**: `docs/requirements/DYNAMIC_THINKING_STATUS.md`
 - **Flow**: `docs/memory/feature-flows/authenticated-chat-tab.md`
 
@@ -195,6 +196,14 @@
 - **Status**: ❌ Removed (2025-12-23)
 - **Reason**: Individual agent planning deferred to orchestrator-level. Claude Code handles task management internally.
 
+### 9.8 Dashboard Grid View (trinity-enterprise#47)
+- **Status**: ✅ Implemented (2026-07-06)
+- **Description**: Third dashboard mode (Grid / Graph / Timeline) — a magnetic tile canvas: rich 384×216 landscape agent tiles snapping to a sparse, unbounded lattice the operator arranges freely, on the same pan/zoom dotted-canvas language as the graph view. Not the default (Timeline remains default for new users); selection persists to localStorage.
+- **Key Features**: iPhone-style drag with live socket preview + swap-with-preview; Tidy up / Reset; keyboard arrow reorder; per-user layout (`agent → {col,row}`, localStorage v1, self-healing); five-zone tile (identity with half-out avatar, adaptive chip strip with live working timer, Activity·14d stacked-by-trigger + Context·7d trend charts, success micro-meter + stats, Run/Auto toggles); system agent keeps its purple treatment; `prefers-reduced-motion` honored.
+- **Performance (first-class)**: skeleton-first render from `/api/agents`; per-tile analytics hydrate lazily (viewport-gated, concurrency-capped) into the existing `(agent, window)` cache with stale-while-revalidate; batch endpoints for chip data (sync-health, operator-queue) on a visibility-aware poll that tears down when the mode is inactive; viewport culling for 50+ fleets. **No new backend endpoints** — reads `/api/agents/{name}/analytics` (#1107), fleet context/execution/slot stats, `/api/agents/sync-health` (#389), operator-queue pending.
+- **Out of scope (follow-ups)**: fleet KPI strip; "Needs your attention" + live-activity right rail.
+- **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md`
+
 ---
 
 ---
@@ -216,8 +225,9 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
   change. Only mechanical orb edits (externalize, vendor, repoint data fetch, neutralize the
   deferred voice proxy, hide deferred panels). Note bodies are DOMPurify-sanitized (H-005).
 - **FR-2 — Capability gating**: a `/agents/:name/brain` route (lazy + `beforeEnter` platform-flag
-  guard) and a Brain tab shown only when `brain_orb_available` (platform flag `BRAIN_ORB_ENABLED`,
-  default OFF) **AND** the agent's `template.yaml capabilities` list contains the generalizable
+  guard) and a Brain tab shown only when `brain_orb_available` (runtime-resolved platform flag —
+  admin setting → `BRAIN_ORB_ENABLED` env fallback, default OFF; FR-11) **AND** the agent's
+  `template.yaml capabilities` list contains the generalizable
   `brain-orb` token (surfaced by `/api/agents/{name}/info`) — never a hardcoded agent name.
 - **FR-3 — Same-origin iframe host**: `views/AgentBrainOrb.vue` embeds the first-party page in a
   same-origin iframe (not agent-origin → avoids the #979 CSP trap, no Vue rewrite of the renderer).
@@ -308,6 +318,23 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
   control, an "integrating…" state, and a "graph updated · +N notes, +M links" confirmation toast (#68). No DB
   change. **Confirmed on localhost**: capture → refresh folds the note in as a real graph node (`1072 → 1079`),
   and the UI control rebuilds with the confirmation toast.
+- **FR-11 — Admin-configurable platform flags (trinity-enterprise#85)**: the three platform flags
+  (`brain_orb_enabled`, `brain_orb_voice_enabled`, `brain_orb_write_enabled`) are **runtime-resolved**,
+  not import-time env constants: `system_settings` row ("true"/"false", wins in both directions) →
+  `BRAIN_ORB_*` env var honored as **opt-in** fallback → default OFF (the `workspace_enabled` idiom via
+  one shared `_resolve_bool_flag` helper). Resolvers are fail-open (a settings-read failure falls back
+  to the env/default leg — a raise would 500 `feature-flags` and zero every flag in the frontend store)
+  and deliberately uncached (`--workers 2` cross-worker consistency, #506 rationale). All route gates in
+  `routers/agent_brain_orb.py` and the three `feature-flags` values read the resolvers, so an admin flip
+  applies without restart; the voice-token mint additionally composes with the base flag
+  (`base ∧ voice`, closing the base-OFF mint gap) and `brain_orb_voice_available = base ∧ voice ∧
+  GEMINI_API_KEY`. **Admin surface**: `GET/PUT /api/settings/brain-orb` (admin-only, registered before
+  the `/{key}` catch-all) — GET returns per-flag `{value, source: override|env|default}` +
+  `gemini_key_configured`; PUT takes partial booleans and/or `clear: [flag,…]` to **revert a flag to its
+  env/default** (the env var is otherwise dead once a DB override exists), audit-logged with per-flag
+  old→new values. Settings → General hosts the panel (per-flag source display, write-surface warning,
+  post-save `loadFeatureFlags(force)`; other open sessions pick the change up on next page load).
+  GEMINI_API_KEY stays env-only (secret). No migration (`system_settings` KV).
 
 **Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
 with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh

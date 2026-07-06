@@ -110,11 +110,23 @@ mkdir -p /srv/trinity-data
 
 ### Database backend
 
-Trinity stores all platform state in **SQLite** by default, in `trinity.db` under your `TRINITY_DATA_PATH` bind mount (`/data/trinity.db` inside the container). This is the only database backend you need to configure — the steps above are complete as written.
+Trinity stores platform state in **SQLite** by default, in `trinity.db` under your `TRINITY_DATA_PATH` bind mount (`/data/trinity.db` inside the container). SQLite works with zero configuration — but **PostgreSQL is now the recommended backend for production**, and **SQLite support ends September 1, 2026** (after that date it stops receiving schema migrations and fixes).
 
-On every backend boot, a versioned migration runner brings the SQLite schema up to date. The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque.
+To run on PostgreSQL, set one variable in `.env`:
 
-A PostgreSQL backend is being introduced as the next step in this work, with Postgres migrations handled by Alembic instead of the SQLite runner. **It is not yet a user-selectable backend** — there is no supported environment variable to point a deployment at Postgres today. The migration-runner safety work above is the groundwork that makes that switch possible; until it lands, run on the default SQLite backend.
+```
+DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity
+```
+
+Both the backend and the scheduler pick it up. Notes for the prod compose:
+
+- `docker-compose.prod.yml` ships **no bundled PostgreSQL service** — point `DATABASE_URL` at an operator-managed instance (a managed cloud database or your own PostgreSQL server). The bundled `--profile postgres` container exists only in the dev compose.
+- Selection is non-sticky and non-destructive: comment `DATABASE_URL` out and the next restart is back on SQLite.
+- A fresh PostgreSQL database is initialized automatically on first boot (Alembic-managed migrations).
+- **Migrating an existing SQLite instance?** Use the Trinity Ops Agent's `/migrate-to-postgres` skill ([ops-agent guide](ops-agent.md)) — a validate-then-cutover flow that never writes to your SQLite file, so rollback is one line. New-instance setup details: `docs/POSTGRESQL_SETUP.md` in the repo.
+- On PostgreSQL, back up with `pg_dump` instead of copying `trinity.db` — see [Backup and Restore](backup-and-restore.md).
+
+On every backend boot, a versioned migration runner brings the schema up to date (the bespoke SQLite runner or Alembic for PostgreSQL). The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque.
 
 ## 3. Build the Base Agent Image
 

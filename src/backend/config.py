@@ -257,27 +257,13 @@ GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-
 # also requires a per-agent voip_bindings row to function. `voip_available`
 # in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
-# Brain Orb (#58, trinity-enterprise) — capability-gated per-agent 3D knowledge
-# visualization. Default OFF. The static-render foundation has NO Gemini/voice
-# dependency, so the platform flag is the bare env var (the deferred voice
-# follow-up adds its own GEMINI_API_KEY gate). The per-agent half of the gate is
-# the `brain-orb` capability token in the agent's template.yaml, checked in the
-# frontend. `brain_orb_available` in GET /api/settings/feature-flags == this flag.
-BRAIN_ORB_ENABLED = os.getenv("BRAIN_ORB_ENABLED", "false").lower() == "true"
-# Brain Orb voice tile (#58 Phase 3, trinity-enterprise#60) — the client-held
-# Gemini Live voice surface. DISTINCT from BRAIN_ORB_ENABLED (which gates the
-# static render + scope control, no Gemini dependency): the voice tile also needs
-# a Gemini key, so `brain_orb_voice_available` = BRAIN_ORB_VOICE_ENABLED and
-# bool(GEMINI_API_KEY) (mirrors voice_available). Default OFF. The frontend hides
-# the voice tile unless this is on AND the agent has the `brain-orb` capability.
-BRAIN_ORB_VOICE_ENABLED = os.getenv("BRAIN_ORB_VOICE_ENABLED", "false").lower() == "true"
-# Brain Orb KB-write surface (#58 Phase 4a, trinity-enterprise#61) — owner-gated
-# capture/link actions. DISTINCT from BRAIN_ORB_ENABLED so the write/exec surface
-# has its own kill-switch that does NOT down the Phase-1 read path or the Phase-3
-# voice tile. Default OFF. The write routes 404 unless BRAIN_ORB_ENABLED AND this
-# are both on (and the caller owns the agent). `run_skill` + the transcript
-# pipeline are deferred to Phase 4b (trinity-enterprise#66).
-BRAIN_ORB_WRITE_ENABLED = os.getenv("BRAIN_ORB_WRITE_ENABLED", "false").lower() == "true"
+# Brain Orb flags (trinity-enterprise#58/#60/#61) are RUNTIME-RESOLVED as of #85
+# — no import-time constants here, so a stale module value can never shadow an
+# admin toggle. Resolution lives in services/settings_service.py
+# (is_brain_orb_enabled / is_brain_orb_voice_enabled / is_brain_orb_write_enabled):
+# system_settings override → BRAIN_ORB_ENABLED / BRAIN_ORB_VOICE_ENABLED /
+# BRAIN_ORB_WRITE_ENABLED env opt-in → default OFF. Admin surface:
+# GET/PUT /api/settings/brain-orb.
 # VoIP-specific max call duration (seconds) — deliberately distinct from the
 # inherited 300s VOICE_MAX_DURATION so phone calls aren't silently cut at 5min.
 VOIP_MAX_CALL_DURATION = int(os.getenv("VOIP_MAX_CALL_DURATION", "600"))

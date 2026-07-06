@@ -27,6 +27,11 @@ export const useNetworkStore = defineStore('network', () => {
   const contextStats = ref({}) // Map of agent name -> context stats
   const executionStats = ref({}) // Map of agent name -> execution stats
   const slotStats = ref({}) // Map of agent name -> { max, active } for capacity meters
+  const circuitBreakers = ref({}) // Map of agent name -> dispatch-breaker state (#526; only OPEN breakers present)
+  // #47: agents with a WS-observed in-flight execution — agent name -> { since }.
+  // Drives the Grid tiles' "▶ working" chip + elapsed timer between the 15s
+  // context-stats polls; the poll reconciles any entry a missed event leaks.
+  const workingState = ref({})
   const contextPollingInterval = ref(null) // Interval ID for context polling
   const agentRefreshInterval = ref(null) // Interval ID for agent list refresh
   const activityRefreshInterval = ref(null) // Interval ID for activity refresh (fallback)
@@ -44,9 +49,13 @@ export const useNetworkStore = defineStore('network', () => {
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
 
-  // View mode state (graph vs timeline) - default to timeline, persist to localStorage
+  // View mode state (grid | graph | timeline) — default timeline, persisted.
+  // trinity-enterprise#47 adds 'grid' as a third mode; legacy saved values
+  // ('graph'/'timeline') keep working unchanged.
+  const VIEW_MODES = ['grid', 'graph', 'timeline']
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
-  const isTimelineMode = ref(savedViewMode ? savedViewMode === 'timeline' : true)
+  const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : 'timeline')
+  const isTimelineMode = computed(() => viewMode.value === 'timeline')
   const isPlaying = ref(false)
   const replaySpeed = ref(10) // 10x default
   const currentEventIndex = ref(0)
@@ -616,6 +625,13 @@ export const useNetworkStore = defineStore('network', () => {
             handleCollaborationEvent(data)
           } else if (data.type === 'agent_status') {
             handleAgentStatusChange(data)
+          } else if (data.type === 'agent_started' || data.type === 'agent_stopped') {
+            // #47: the backend broadcasts these on start/stop — sync both
+            // render surfaces so another session's toggle propagates live.
+            handleAgentStatusChange({
+              agent_name: data.name,
+              status: data.type === 'agent_started' ? 'running' : 'stopped'
+            })
           } else if (data.type === 'agent_deleted') {
             handleAgentDeleted(data)
           } else if (data.type === 'agent_activity') {
@@ -721,8 +737,37 @@ export const useNetworkStore = defineStore('network', () => {
     agents.value = agents.value.filter(a => a.name !== event.agent_name)
   }
 
+  // #47: keep the WS-driven working map current. `chat_start`/`schedule_start`
+  // beginning marks the agent working; the same activity reaching a terminal
+  // state — or the matching `_end` activity — clears it. Parallel executions
+  // per agent are approximated (last event wins); the 15s context-stats poll
+  // reconciles.
+  function _updateWorkingState(event) {
+    const name = event.agent_name
+    if (!name) return
+    const type = event.activity_type || ''
+    const state = event.activity_state
+    if ((type === 'chat_start' || type === 'schedule_start') && state === 'started') {
+      workingState.value = {
+        ...workingState.value,
+        [name]: { since: event.timestamp || new Date().toISOString() }
+      }
+    } else if (
+      type === 'chat_end' ||
+      type === 'schedule_end' ||
+      ((type === 'chat_start' || type === 'schedule_start') && state !== 'started')
+    ) {
+      if (workingState.value[name]) {
+        const next = { ...workingState.value }
+        delete next[name]
+        workingState.value = next
+      }
+    }
+  }
+
   // Handle activity status changes (completion, failure) from WebSocket
   function handleActivityStatusChange(event) {
+    _updateWorkingState(event)
     // Update activity in historicalCollaborations
     const activity = historicalCollaborations.value.find(
       a => a.activity_id === event.activity_id
@@ -1023,6 +1068,23 @@ export const useNetworkStore = defineStore('network', () => {
       })
       contextStats.value = newStats
 
+      // #47: reconcile the WS working map — drop entries for agents the
+      // authoritative poll no longer reports active (missed end events).
+      // Entries younger than one poll period are spared: a response computed
+      // before the execution started must not evict a fresh WS entry.
+      const staleCutoff = Date.now() - 20000
+      const leaked = Object.keys(workingState.value).filter(
+        name =>
+          newStats[name] &&
+          newStats[name].activityState !== 'active' &&
+          new Date(workingState.value[name].since || 0).getTime() < staleCutoff
+      )
+      if (leaked.length > 0) {
+        const next = { ...workingState.value }
+        leaked.forEach(name => delete next[name])
+        workingState.value = next
+      }
+
       // Update node data with new stats
       nodes.value.forEach(node => {
         const stats = newStats[node.id]
@@ -1104,6 +1166,9 @@ export const useNetworkStore = defineStore('network', () => {
         }
       })
       slotStats.value = newStats
+      // #47: expose the breaker map directly for non-VueFlow consumers
+      // (the Grid tiles read it by agent name).
+      circuitBreakers.value = circuitMap
 
       // Thread slot stats + circuit-breaker state onto node data. Setting
       // circuitBreaker to null when absent clears a badge once the breaker
@@ -1239,26 +1304,21 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  // View Mode Functions (graph vs timeline)
+  // View Mode Functions (grid | graph | timeline)
   function setViewMode(mode) {
-    const isTimeline = mode === 'timeline'
-    isTimelineMode.value = isTimeline
+    if (!VIEW_MODES.includes(mode)) mode = 'graph'
+    viewMode.value = mode
     localStorage.setItem('trinity-dashboard-view', mode)
 
-    // Keep WebSocket and polling active in BOTH views for live updates
-    // Timeline view now shows live events, so we need real-time data
-    if (isTimeline) {
-      // Entering timeline mode - stop any active replay playback
-      stopReplay()
-      // Start activity refresh polling as fallback
+    // Keep WebSocket and shared stats polling active in ALL views for live
+    // updates; only the timeline's activity-refresh fallback is mode-scoped.
+    stopReplay()
+    if (mode === 'timeline') {
       startActivityRefresh()
       console.log('[Collaboration] Switched to Timeline view (live mode)')
     } else {
-      // Entering graph mode
-      stopReplay()
-      // Stop activity refresh polling (not needed in graph mode)
       stopActivityRefresh()
-      console.log('[Collaboration] Switched to Graph view')
+      console.log(`[Collaboration] Switched to ${mode === 'grid' ? 'Grid' : 'Graph'} view`)
     }
   }
 
@@ -1574,14 +1634,17 @@ export const useNetworkStore = defineStore('network', () => {
 
   // Toggle autonomy mode for an agent
   async function toggleAutonomy(agentName) {
-    // Find the node to get current state
+    // #47: both render surfaces must reflect the change — the graph reads
+    // node.data, the Grid tiles read the agents[] list. Resolve current
+    // state from either (an owner-filtered graph may lack the node).
     const node = nodes.value.find(n => n.id === agentName)
-    if (!node) {
+    const agent = agents.value.find(a => a.name === agentName)
+    if (!node && !agent) {
       console.error('[Network] Agent not found:', agentName)
       return { success: false, error: 'Agent not found' }
     }
 
-    const currentState = node.data.autonomy_enabled
+    const currentState = node ? node.data.autonomy_enabled : agent.autonomy_enabled
     const newState = !currentState
 
     try {
@@ -1592,8 +1655,9 @@ export const useNetworkStore = defineStore('network', () => {
         { headers: { Authorization: `Bearer ${token}` } }
       )
 
-      // Update the node data
-      node.data.autonomy_enabled = newState
+      // Update both render surfaces
+      if (node) node.data.autonomy_enabled = newState
+      if (agent) agent.autonomy_enabled = newState
 
       console.log(`[Network] Autonomy ${newState ? 'enabled' : 'disabled'} for ${agentName}`)
 
@@ -1627,38 +1691,34 @@ export const useNetworkStore = defineStore('network', () => {
 
   // Toggle agent running state (start/stop)
   async function toggleAgentRunning(agentName) {
+    // #47: update both render surfaces (graph nodes AND the agents[] list
+    // the Grid tiles read).
     const node = nodes.value.find(n => n.id === agentName)
-    if (!node) {
+    const agent = agents.value.find(a => a.name === agentName)
+    if (!node && !agent) {
       console.error('[Network] Agent not found:', agentName)
       return { success: false, error: 'Agent not found' }
     }
 
-    const isRunning = node.data.status === 'running'
+    const isRunning = (node ? node.data.status : agent.status) === 'running'
     runningToggleLoading.value[agentName] = true
 
     try {
       const token = localStorage.getItem('token')
-      if (isRunning) {
-        await axios.post(
-          `/api/agents/${agentName}/stop`,
-          {},
-          { headers: { Authorization: `Bearer ${token}` } }
-        )
-        node.data.status = 'stopped'
-        node.data.activityState = 'offline'
-        console.log(`[Network] Agent ${agentName} stopped`)
-      } else {
-        await axios.post(
-          `/api/agents/${agentName}/start`,
-          {},
-          { headers: { Authorization: `Bearer ${token}` } }
-        )
-        node.data.status = 'running'
-        node.data.activityState = 'idle'
-        console.log(`[Network] Agent ${agentName} started`)
+      const newStatus = isRunning ? 'stopped' : 'running'
+      await axios.post(
+        `/api/agents/${agentName}/${isRunning ? 'stop' : 'start'}`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      if (node) {
+        node.data.status = newStatus
+        node.data.activityState = isRunning ? 'offline' : 'idle'
       }
+      if (agent) agent.status = newStatus
+      console.log(`[Network] Agent ${agentName} ${isRunning ? 'stopped' : 'started'}`)
 
-      return { success: true, status: node.data.status }
+      return { success: true, status: newStatus }
     } catch (error) {
       console.error('[Network] Failed to toggle agent running:', error)
       return {
@@ -1693,10 +1753,13 @@ export const useNetworkStore = defineStore('network', () => {
     contextStats,
     executionStats,
     slotStats,
+    circuitBreakers,
+    workingState,
     schedules,
     filterTags,
     filterOwner,
     // View mode / Replay state
+    viewMode,
     isTimelineMode,
     isPlaying,
     replaySpeed,

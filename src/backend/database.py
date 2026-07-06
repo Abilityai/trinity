@@ -424,6 +424,9 @@ class DatabaseManager:
     def is_agent_name_reserved(self, agent_name: str):
         return self._agent_ops.is_agent_name_reserved(agent_name)
 
+    def is_agent_live(self, agent_name: str):
+        return self._agent_ops.is_agent_live(agent_name)
+
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
 
@@ -1463,14 +1466,25 @@ class DatabaseManager:
     def get_public_chat_session(self, session_id: str):
         return self._public_chat_ops.get_session(session_id)
 
-    def add_public_chat_message(self, session_id: str, role: str, content: str, cost: float = None):
-        return self._public_chat_ops.add_message(session_id, role, content, cost)
+    def add_public_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        cost: float = None,
+        sender_email: str = None,
+        sender_label: str = None,
+    ):
+        return self._public_chat_ops.add_message(
+            session_id, role, content, cost,
+            sender_email=sender_email, sender_label=sender_label,
+        )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_session_messages(session_id, limit)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_recent_messages(session_id, limit)
+    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)

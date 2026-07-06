@@ -1020,6 +1020,31 @@ def _migrate_agent_ownership_public_channel_prompt(cursor, conn):
     conn.commit()
 
 
+def _migrate_public_chat_messages_sender(cursor, conn):
+    """Add per-message speaker attribution to public_chat_messages (#903).
+
+    Thread-scoped Slack channel sessions drop ``sender_id`` from the session key
+    so multi-participant threads share one context. Who-said-what moves onto each
+    message row: ``sender_email`` (verified email, drives sender-filtered MEM-001
+    summarization) + ``sender_label`` (display name for attributed history
+    replay). Both nullable — pre-migration rows replay via role fallback.
+    Mirrored by Alembic 0013_public_chat_messages_sender for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "public_chat_messages",
+        "sender_email",
+        "ALTER TABLE public_chat_messages ADD COLUMN sender_email TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "public_chat_messages",
+        "sender_label",
+        "ALTER TABLE public_chat_messages ADD COLUMN sender_label TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_slack_channel_agents(cursor, conn):
     """Add multi-agent Slack support: workspace table + channel-agent bindings.
 
@@ -2763,4 +2788,5 @@ MIGRATIONS = [
     ("agent_ownership_mcp_exposed", _migrate_agent_ownership_mcp_exposed),
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
+    ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
 ]

@@ -890,6 +890,7 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".ssh/",
     ".trinity/",
     ".tmp/",  # #1098 disk-backed scratch (TMPDIR); #1187 relocated CODEX_HOME
+    ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
     "content/",
     # Claude Code runtime — commit commands/skills/agents, exclude runtime data

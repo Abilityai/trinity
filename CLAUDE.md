@@ -53,7 +53,7 @@ Enterprise **feature designs, paid-module schema, and the open-core gating/monet
 
 - New enterprise design → write it in `trinity-enterprise/docs/`, not here.
 - Touching the seam in public docs → describe the mechanism, never enumerate the modules behind it.
-- `.github/workflows/enterprise-docs-guard.yml` greps live public docs for paid-feature/private-schema tokens and fails the build on a hit; keep historical point-in-time docs (`docs/archive/`, `docs/releases/`, `docs/security-reports/`) out of scope (covered by the separate git-history-scrub follow-up).
+- `.github/workflows/enterprise-docs-guard.yml` greps live public docs **and the open-core seam files** (`src/backend/main.py`, `src/backend/services/entitlement_service.py` — a code comment can name the catalog just as a doc can, #1461) for paid-feature/private-schema tokens and fails the build on a hit; keep historical point-in-time docs (`docs/archive/`, `docs/releases/`, `docs/security-reports/`) out of scope (covered by the separate git-history-scrub follow-up).
 
 ---
 
@@ -76,15 +76,29 @@ This repository has a remote counterpart running on Trinity (`trinity` agent) fo
 
 ## Development Skills (`.claude` submodule)
 
-Skills, agents, and methodology guides live in the `.claude/` directory, which is a **git submodule** pointing to [abilityai/trinity-dev](https://github.com/Abilityai/trinity-dev) (private). This is where `/sprint`, `/cso`, `/autoplan`, `/implement`, `/review`, `/validate-pr`, etc. come from.
+Skills, agents, and methodology guides live in the `.claude/` directory, which is a **git submodule** pointing to [abilityai/trinity-dev](https://github.com/Abilityai/trinity-dev) (private, core-team only). This is where `/sprint`, `/cso`, `/autoplan`, `/implement`, `/review`, `/validate-pr`, etc. come from.
 
-### One-time setup after cloning
+Both of this repo's submodules (`.claude` and `src/backend/enterprise`) are **private and optional**, marked `update = none` in `.gitmodules` (#1443) — a plain `git submodule update --init --recursive` skips them, so OSS clones never hit an auth prompt. Mounting one is an explicit per-clone opt-in.
+
+### One-time setup after cloning (core team)
 ```bash
-git submodule update --init --recursive
-git config submodule.recurse true  # auto-syncs .claude when switching branches
+git config submodule..claude.update checkout  # durable opt-in: overrides the update=none default for this clone
+git submodule update --init .claude           # now actually clones (needs trinity-dev access)
+git config submodule.recurse true             # auto-syncs .claude when switching branches
 ```
 
-Without `submodule.recurse true`, switching branches will leave `.claude` stale and skills will disappear. The `fetchRecurseSubmodules = true` in `.gitmodules` handles `git pull` automatically, but branch switching requires the local config above.
+The config line must come **first** — with the `update = none` default, a plain `--init` is skipped, and **any** init path (plain `--init`, `--init --checkout`, `clone --recurse-submodules`) copies `none` into your local config, so *future* updates keep skipping until the override is set. Without `submodule.recurse true`, switching branches will leave `.claude` stale and skills will disappear. The `fetchRecurseSubmodules = true` in `.gitmodules` handles `git pull` automatically, but branch switching requires the local config above. (Clones initialized before #1443 already carry the `update = checkout` local override — no action needed.)
+
+### External contributors
+
+You don't need `.claude` — it's internal tooling. The public [abilities](https://github.com/abilityai/abilities) marketplace ships the `dev-methodology` plugin with the equivalent development workflow skills (implement, review, validate-pr, release, and more):
+
+```bash
+/plugin marketplace add abilityai/abilities
+/plugin install dev-methodology@abilityai
+```
+
+For the optional enterprise submodule (`src/backend/enterprise`), see [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 ---
 
@@ -102,6 +116,8 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 - **Done**: Release PR merged to `main`, issue auto-closed via `Closes #N`
 
 **Two trackers (open-core).** Issues route by type: `type-bug`/`type-refactor`/`type-docs` → public `abilityai/trinity`; `type-feature`/`type-epic` → private `abilityai/trinity-enterprise`. Tracker ≠ code repo — core code still lands as a public-repo PR. Query/picking skills union both trackers.
+
+**Enterprise-tracker features are entitlement-gated by default.** Treat every feature filed in `abilityai/trinity-enterprise` as a gated enterprise module (private logic behind `requires_entitlement(...)`, gated Vue behind `enterprise_features`) **unless the user explicitly decides it should be OSS-core.** Do NOT infer "generic OSS" just because it reuses OSS tables/endpoints — "can build in OSS" ≠ "should"; monetization is the user's call. If OSS-core is chosen, the OSS side keeps only the edition-agnostic *enforcement* primitive; the feature stays in the private submodule. Confirm the gating shape before building.
 
 **Full details**: `.claude/DEVELOPMENT_WORKFLOW.md` (→ Repository Routing)
 

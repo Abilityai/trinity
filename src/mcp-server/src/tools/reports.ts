@@ -127,7 +127,10 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[report] Error: ${message}`);
           const flags: Record<string, boolean> = {};
-          if (/\b403\b/.test(message)) flags.not_authorized = true;
+          // #186: the backend agent-access dependency now returns a uniform 404
+          // for both non-existent and inaccessible agents (was 403), so treat a
+          // 404 on this dep-gated endpoint as not-authorized too.
+          if (/\b403\b/.test(message) || /\b404\b/.test(message)) flags.not_authorized = true;
           if (/\b413\b/.test(message)) flags.payload_too_large = true;
           if (/\b422\b/.test(message)) flags.invalid = true;
           if (/\b429\b/.test(message)) flags.rate_limited = true;

@@ -141,3 +141,40 @@ def test_alembic_schema_matches_legacy_build(pg):
     runner.upgrade_to_head()
     alembic_built = _table_names(eng)
     assert alembic_built == legacy
+
+
+def test_concurrent_upgrade_does_not_deadlock(pg):
+    """Two workers booting at once against a fresh DB must not deadlock (#1425).
+
+    Pre-fix, both entered ``command.upgrade()`` concurrently and PostgreSQL
+    raised ``DeadlockDetected`` inside a revision; the ``pg_advisory_lock`` in
+    ``upgrade_to_head`` now serialises them. A barrier maximises contention;
+    each worker uses its own session (separate ``engine.connect()``), exactly
+    like two uvicorn workers. Both must finish cleanly and the schema end at
+    head.
+    """
+    import threading
+
+    runner, eng = pg
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def _boot():
+        try:
+            barrier.wait(timeout=10)
+            runner.upgrade_to_head()
+        except BaseException as e:  # capture, assert on the main thread
+            errors.append(e)
+
+    threads = [threading.Thread(target=_boot) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+
+    assert not any(t.is_alive() for t in threads), "a worker hung (possible deadlock)"
+    assert not errors, f"concurrent upgrade raised: {errors!r}"
+    assert inspect(eng).has_table("alembic_version")
+    with eng.connect() as c:
+        ver = c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert ver is not None

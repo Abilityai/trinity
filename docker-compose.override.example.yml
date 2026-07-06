@@ -1,0 +1,26 @@
+# docker-compose.override.example.yml — LOCAL Docker Desktop / VM-runtime fix (#1432)
+#
+# Copy to docker-compose.override.yml to activate:
+#     cp docker-compose.override.example.yml docker-compose.override.yml
+# `docker compose up` auto-merges any docker-compose.override.yml (no -f needed),
+# so scripts/deploy/start.sh picks it up automatically. start.sh also creates it
+# for you when it detects Docker Desktop (opt out with TRINITY_LOCAL_LOG_SOURCE=docker).
+#
+# It swaps ONLY the Vector config to the on-disk file-source tailer
+# (config/vector.local.yaml) and mounts the raw container-log dir read-only, so the
+# `docker_logs` busy-loop that pegs the Docker VM never engages. Native Linux dockerd
+# is UNAFFECTED and does not need this. Prod (`docker compose -f docker-compose.prod.yml`)
+# passes an explicit -f, which disables override auto-merge — prod never sees this.
+#
+# Compose merges the `volumes:` list by target path, so the config-file mount below
+# replaces the base ./config/vector.yaml mount cleanly; the docker.sock and
+# trinity-logs mounts from docker-compose.yml are inherited unchanged.
+services:
+  vector:
+    volumes:
+      - ./config/vector.local.yaml:/etc/vector/vector.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - trinity-vector-data:/vector-data-dir
+
+volumes:
+  trinity-vector-data:

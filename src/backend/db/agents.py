@@ -143,6 +143,30 @@ class AgentOperations(
             ).first()
             return row is not None
 
+    def is_agent_live(self, agent_name: str) -> bool:
+        """True if `agent_name` has a live (non-soft-deleted) ownership row.
+
+        Deliberately checks ONLY `agent_ownership` with `deleted_at IS NULL`
+        — no `users` join — so it matches the webhook token-lookup predicate
+        (`get_schedule_by_webhook_token`, db/schedules.py) *exactly*. This is
+        the schedule/webhook creation gate (#1445): a schedule may only be
+        created on an agent the trigger lookup would actually serve.
+
+        Do NOT "fix" this to reuse `get_agent_owner` — that INNER-JOINs
+        `users`, so it returns None for a live agent whose owner-user row is
+        missing (FKs are disabled platform-wide). That would be a false
+        negative: the gate would 404 an agent the webhook lookup happily
+        resolves, re-opening the mismatch this predicate closes.
+        """
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(agent_ownership.c.agent_name).where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            ).first()
+            return row is not None
+
     def get_agent_owner(self, agent_name: str) -> Optional[Dict]:
         """Get the owner of an agent, including is_system flag.
 

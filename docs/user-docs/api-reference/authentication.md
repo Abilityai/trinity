@@ -4,7 +4,7 @@ Trinity supports three authentication methods: admin password login, email verif
 
 ## Concepts
 
-- **JWT Token** -- All authenticated API calls require a Bearer token in the `Authorization` header. Tokens use HS256 signing, are valid for 7 days, and are invalidated when the backend restarts.
+- **JWT Token** -- All authenticated API calls require a Bearer token in the `Authorization` header. Tokens use HS256 signing, are valid for 7 days, and are invalidated when the backend restarts. Logging out revokes the token immediately (server-side blacklist until its natural expiry) — an exfiltrated token dies with the session instead of living out its 7 days.
 - **MCP API Key** -- Keys prefixed with `trinity_mcp_` also work as Bearer tokens. Used for MCP server authentication and agent-to-agent communication.
 - **Agent-Scoped Key** -- An MCP API key restricted to a specific agent, used for agent-to-agent calls.
 
@@ -12,7 +12,7 @@ Trinity supports three authentication methods: admin password login, email verif
 
 ### Admin Login
 
-Send a form-encoded POST (not JSON) to the token endpoint:
+Send a form-encoded POST (not JSON) to the token endpoint. The `username` field accepts `admin` **or** the admin's registered email address:
 
 ```bash
 curl -s -X POST http://localhost:8000/api/token \
@@ -46,7 +46,8 @@ MCP API keys (`trinity_mcp_*`) can be used in the same way as JWT tokens.
 | `/api/auth/email/request` | POST | None | Request email verification code |
 | `/api/auth/email/verify` | POST | None | Verify email code, returns token |
 | `/api/auth/mode` | GET | None | Get auth mode configuration |
-| `/api/auth/validate` | GET | JWT | Validate current token |
+| `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
+| `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
 | `/api/users/me` | GET | JWT | Get current user info |
 | `/api/setup/status` | GET | None | First-time setup status |
 | `/api/health` | GET | None | Health check |
@@ -62,4 +63,4 @@ The following endpoints do not require a Bearer token:
 ## See Also
 
 - [Backend API docs](http://localhost:8000/docs) -- Interactive Swagger UI
-- [MCP Server](../mcp-server.md) -- MCP API key usage and agent-to-agent auth
+- [MCP Server](../integrations/mcp-server.md) -- MCP API key usage and agent-to-agent auth

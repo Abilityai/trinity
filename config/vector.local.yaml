@@ -1,0 +1,90 @@
+# Vector — LOCAL config for Docker Desktop / VM-based Docker runtimes (#1432)
+#
+# WHY THIS EXISTS
+# The default source (config/vector.yaml) uses Vector's `docker_logs` source,
+# which talks to the Docker log API. On Docker Desktop (macOS confirmed, Windows
+# very likely) and other VM-based runtimes (Colima, Rancher Desktop, Podman
+# machine), that path busy-loops:
+#   * Docker Desktop's virtualized log relay closes a `follow=1` stream right
+#     after flushing backlog instead of transitioning to follow; and
+#   * Vector's `docker_logs` source reconnects-on-stream-end with NO backoff
+#     (hardcoded across Vector 0.43–0.56).
+# The result is a hundreds-per-second "Started/Stopped watching" reconnect storm
+# that re-dumps every container's full log history through the VM — pegging the
+# Docker VM at ~4 cores (~386% CPU observed) and growing the log file GB/day.
+# Native Linux dockerd blocks-to-follow (the stream never closes), so it watches
+# once and follows forever — production is UNAFFECTED and stays on vector.yaml.
+#
+# WHAT THIS DOES
+# Bypasses the Docker log API entirely: it tails the raw json-file container
+# logs on disk (`/var/lib/docker/containers/*/*-json.log`), which is immune to
+# the follow-close bug. Applied via docker-compose.override.yml (see
+# docker-compose.override.example.yml), which also bind-mounts the container-log
+# dir read-only and a checkpoint volume. Prod (`-f docker-compose.prod.yml`)
+# never merges an override file, so it never sees this config.
+#
+# TRADE-OFF
+# The file source keys logs by container ID, not name, so the output is a single
+# ID-keyed `/data/logs/local-*.json` rather than the name-split platform-*.json /
+# agents-*.json the docker_logs enrichment produces. For local dev, prefer
+# `docker compose logs -f <service>` as the primary tail.
+
+# Checkpoint dir so a Vector restart resumes where it left off instead of
+# re-reading (compose mounts trinity-vector-data here).
+data_dir: /vector-data-dir
+
+api:
+  enabled: true            # keep :8686 up so the backend `depends_on` health stays green
+  address: 0.0.0.0:8686
+
+sources:
+  container_files:
+    type: file
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    read_from: end          # only new lines — never re-ingest history (the GB/day cause)
+
+transforms:
+  parse:
+    type: remap
+    inputs:
+      - container_files
+    source: |
+      # Unwrap the Docker json-file envelope: {"log": "...", "stream": "...", "time": "..."}
+      envelope, err = parse_json(.message)
+      if err == null {
+        .message = string(envelope.log) ?? .message
+        if exists(envelope.stream) { .stream = envelope.stream }
+        if exists(envelope.time) { .timestamp = envelope.time }
+      }
+
+      # Extract the container id from the source file path:
+      #   /var/lib/docker/containers/<id>/<id>-json.log
+      matched, merr = parse_regex(string!(.file), r'/containers/(?P<cid>[0-9a-f]{12,64})/')
+      if merr == null { .container_id = matched.cid }
+
+      # Derive a log level (mirrors config/vector.yaml). The unwrapped line is
+      # often itself JSON (Python/Node structured logs).
+      parsed, perr = parse_json(string!(.message))
+      if perr == null { .parsed = parsed }
+      if exists(.parsed.level) {
+        .level = .parsed.level
+      } else if exists(.parsed.levelname) {
+        .level = .parsed.levelname
+      } else if match(string!(.message), r'(?i)\b(error|err)\b') {
+        .level = "error"
+      } else if match(string!(.message), r'(?i)\b(warn|warning)\b') {
+        .level = "warning"
+      } else {
+        .level = "info"
+      }
+
+sinks:
+  local_logs:
+    type: file
+    inputs:
+      - parse
+    path: /data/logs/local-%Y-%m-%d.json
+    encoding:
+      codec: json
+    compression: none
