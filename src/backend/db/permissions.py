@@ -69,17 +69,11 @@ class PermissionOperations:
                               If provided, only returns edges where BOTH
                               source and target are in the set.
 
-        Returns list of {"source", "target", "granted_by", "granted_at"} dicts.
-        The grant-provenance fields (ent#84) let the fleet permissions matrix
-        render its pair inspector ("granted by X on <date>") from this single
-        bulk read — no per-agent follow-up calls. Extra keys are additive; the
-        dashboard graph consumer ignores them.
+        Returns list of {"source": str, "target": str} dicts.
         """
         stmt = select(
             agent_permissions.c.source_agent,
             agent_permissions.c.target_agent,
-            agent_permissions.c.created_by,
-            agent_permissions.c.created_at,
         )
 
         if accessible_agents:
@@ -99,12 +93,7 @@ class PermissionOperations:
 
         with get_engine().connect() as conn:
             return [
-                {
-                    "source": row["source_agent"],
-                    "target": row["target_agent"],
-                    "granted_by": row["created_by"],
-                    "granted_at": row["created_at"],
-                }
+                {"source": row["source_agent"], "target": row["target_agent"]}
                 for row in conn.execute(stmt).mappings()
             ]
 

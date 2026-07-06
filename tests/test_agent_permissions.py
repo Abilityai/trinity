@@ -576,9 +576,6 @@ class TestBulkPermissionEdges:
                 assert "target" in edge, "Edge missing 'target' field"
                 assert isinstance(edge["source"], str)
                 assert isinstance(edge["target"], str)
-                # ent#84: grant provenance for the fleet matrix pair inspector
-                assert "granted_by" in edge, "Edge missing 'granted_by' field"
-                assert "granted_at" in edge, "Edge missing 'granted_at' field"
 
         finally:
             if not request.config.getoption("--skip-cleanup"):

@@ -345,25 +345,7 @@ function formatDate(iso) {
   catch { return iso }
 }
 
-async function reload() {
-  loading.value = true
-  loadError.value = null
-  try {
-    await agentsStore.fetchAgents()
-    agents.value = (agentsStore.agents || [])
-      .filter(a => !a.is_system)
-      .map(a => ({ name: a.name }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-    await refreshEdges()
-  } catch (err) {
-    loadError.value = err.response?.data?.detail || 'Failed to load permissions matrix.'
-  } finally {
-    loading.value = false
-  }
-}
-
-async function refreshEdges() {
-  const edges = await agentsStore.getPermissionEdges()
+function applyEdges(edges) {
   const set = new Set()
   const meta = new Map()
   for (const e of edges) {
@@ -373,6 +355,28 @@ async function refreshEdges() {
   }
   grants.value = set
   grantMetaMap.value = meta
+}
+
+async function reload() {
+  loading.value = true
+  loadError.value = null
+  try {
+    // Single gated read: both axes (accessible, non-system agents, already
+    // filtered + is_owner-tagged server-side) plus every grant edge.
+    const m = await agentsStore.getPermissionsMatrix()
+    agents.value = [...m.agents].sort((a, b) => a.name.localeCompare(b.name))
+    applyEdges(m.edges)
+  } catch (err) {
+    loadError.value = err.response?.data?.detail || 'Failed to load permissions matrix.'
+  } finally {
+    loading.value = false
+  }
+}
+
+// After a write, re-read only the edges (the axis rarely changes mid-session).
+async function refreshEdges() {
+  const m = await agentsStore.getPermissionsMatrix()
+  applyEdges(m.edges)
 }
 
 async function grant(source, target) {

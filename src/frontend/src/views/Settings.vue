@@ -2107,7 +2107,7 @@ const ALL_TABS = [
   { id: 'access',       label: 'Access',       adminOnly: true  },
   { id: 'integrations', label: 'Integrations', adminOnly: true  },
   { id: 'mcp-keys',     label: 'MCP Keys',     adminOnly: false },
-  { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false },
+  { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false, requires: 'permissions_matrix' },
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
