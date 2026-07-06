@@ -946,12 +946,19 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     (bash can't hold NUL bytes), then a NUL-delimited pipe to xargs so paths
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
+
+    ``.trinity/brain-orb/`` is exempt: Brain-Orb-capable templates COMMIT their
+    convention hooks there (trinity-enterprise#76), while the fleet-wide
+    ``.trinity/`` ignore appended above makes them look ignored-but-tracked —
+    without the pathspec exclusion the first push would untrack the hooks and
+    push their deletion, so a later re-clone/recreate boots hookless.
     """
+    hook_exempt = '":!.trinity/brain-orb"'
     script = (
         f"cd {shlex.quote(git_dir)} && "
-        "ignored=$(git ls-files -ci --exclude-standard) && "
+        f"ignored=$(git ls-files -ci --exclude-standard -- . {hook_exempt}) && "
         'if [ -n "$ignored" ]; then '
-        "git ls-files -ci -z --exclude-standard | "
+        f"git ls-files -ci -z --exclude-standard -- . {hook_exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
         "fi"
     )
