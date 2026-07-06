@@ -289,20 +289,26 @@ def test_rm_cached_exempts_brain_orb_hooks(tmp_path):
     git("config", "commit.gpgsign", "false")
 
     hook = tmp_path / ".trinity" / "brain-orb" / "action"
+    setup = tmp_path / ".trinity" / "setup.sh"
     leaked_state = tmp_path / ".trinity" / "runtime-state.yaml"
-    for f, content in [(hook, "#!/usr/bin/env python3\n"), (leaked_state, "x: 1\n")]:
+    for f, content in [(hook, "#!/usr/bin/env python3\n"),
+                       (setup, "#!/bin/bash\n"),
+                       (leaked_state, "x: 1\n")]:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(content)
 
-    # Template shape: parent star-ignored, hook dir re-included (a dir-form
-    # `.trinity/` exclusion can't be re-included under, so templates use `*`).
-    (tmp_path / ".gitignore").write_text(".trinity/*\n!.trinity/brain-orb/\n")
-    git("add", str(hook))
+    # Template shape: parent star-ignored, setup.sh + hook dir re-included (a
+    # dir-form `.trinity/` exclusion can't be re-included under, so templates
+    # use `*`).
+    (tmp_path / ".gitignore").write_text(
+        ".trinity/*\n!.trinity/setup.sh\n!.trinity/brain-orb/\n")
+    git("add", str(hook), str(setup))
     git("add", "-f", str(leaked_state))  # simulate an old agent that committed state
     git("commit", "-q", "-m", "template ships brain-orb hooks")
 
     tracked_before = set(git("ls-files").stdout.splitlines())
     assert ".trinity/brain-orb/action" in tracked_before
+    assert ".trinity/setup.sh" in tracked_before
     assert ".trinity/runtime-state.yaml" in tracked_before
 
     # Run the real migration: fleet merge (appends `.trinity/`) + rm-cached.
@@ -326,7 +332,11 @@ def test_rm_cached_exempts_brain_orb_hooks(tmp_path):
     assert ".trinity/brain-orb/action" in tracked_after, (
         f"brain-orb hook was untracked by the sweep; tracked={tracked_after}"
     )
+    assert ".trinity/setup.sh" in tracked_after, (
+        f"setup.sh was untracked by the sweep (caught live in the #76 e2e Push); "
+        f"tracked={tracked_after}"
+    )
     assert ".trinity/runtime-state.yaml" not in tracked_after, (
         f"sibling .trinity/ state must still be swept; tracked={tracked_after}"
     )
-    assert hook.exists() and leaked_state.exists()
+    assert hook.exists() and setup.exists() and leaked_state.exists()

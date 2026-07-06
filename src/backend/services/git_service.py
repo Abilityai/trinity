@@ -947,18 +947,20 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
 
-    ``.trinity/brain-orb/`` is exempt: Brain-Orb-capable templates COMMIT their
-    convention hooks there (trinity-enterprise#76), while the fleet-wide
-    ``.trinity/`` ignore appended above makes them look ignored-but-tracked —
-    without the pathspec exclusion the first push would untrack the hooks and
-    push their deletion, so a later re-clone/recreate boots hookless.
+    ``.trinity/brain-orb/`` and ``.trinity/setup.sh`` are exempt: Brain-Orb /
+    setup-convention templates COMMIT those files (trinity-enterprise#76), while
+    the fleet-wide ``.trinity/`` ignore appended above makes them look
+    ignored-but-tracked — without the pathspec exclusions the first push would
+    untrack them and push the deletion, so a later re-clone/recreate boots
+    hookless and never runs its startup setup (verified live: the e2e Push
+    swept setup.sh before the second exemption was added).
     """
-    hook_exempt = '":!.trinity/brain-orb"'
+    exempt = '":!.trinity/brain-orb" ":!.trinity/setup.sh"'
     script = (
         f"cd {shlex.quote(git_dir)} && "
-        f"ignored=$(git ls-files -ci --exclude-standard -- . {hook_exempt}) && "
+        f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
         'if [ -n "$ignored" ]; then '
-        f"git ls-files -ci -z --exclude-standard -- . {hook_exempt} | "
+        f"git ls-files -ci -z --exclude-standard -- . {exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
         "fi"
     )
