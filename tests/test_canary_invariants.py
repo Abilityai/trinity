@@ -2728,3 +2728,303 @@ class TestE06OverdueNextRun:
         from canary.invariants import e06_no_overdue_next_run as e06
         fired = [v.observed_state["schedule_id"] for v in e06.check(snap)]
         assert fired == ["sch-stale"]
+
+
+# ---------------------------------------------------------------------------
+# Terminal-row collector (#1077 — shared by E-03 / G-03)
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalRowCollector:
+    def test_window_in_vs_out(self, canary_db, reload_canary):
+        # Agent timeout 900s → window = 900 + 300 = 1200s (20 min).
+        _add_agent(canary_db, "a1", timeout=900)
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-in", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=60)),
+            completed_at=_iso_z(now),
+        )
+        _add_execution(
+            canary_db, "e-out", "a1", "success",
+            started_at=_iso_z(now - _td(hours=3)),
+            completed_at=_iso_z(now - _td(hours=3) + _td(seconds=5)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        ids = {r["id"] for r in snap.terminal_rows}
+        assert "e-in" in ids
+        assert "e-out" not in ids
+        assert snap.sources_unavailable == []
+
+    def test_null_completed_at_still_collected(self, canary_db, reload_canary):
+        # Windowed on started_at, so a half-written row (NULL completed_at) is
+        # still collected — E-03 must be able to see it.
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-halfwritten", "a1", "failed",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        rows = {r["id"]: r for r in snap.terminal_rows}
+        assert "e-halfwritten" in rows
+        assert rows["e-halfwritten"]["completed_at"] is None
+
+    def test_skipped_status_excluded(self, canary_db, reload_canary):
+        # A `skipped` row legitimately has NULL completed_at/duration_ms — it
+        # must NOT be pulled into terminal_rows (else E-03 false-fires).
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-skip", "a1", "skipped",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=None, duration_ms=None,
+        )
+        _add_execution(
+            canary_db, "e-ok", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=_iso_z(now),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        ids = {r["id"] for r in snap.terminal_rows}
+        assert "e-ok" in ids
+        assert "e-skip" not in ids
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_column_absent_skips_collection(self, monkeypatch):
+        # An ABSENT completed_at/duration_ms column (minimal/older DDL) must
+        # skip the source (recorded in `unavailable`) rather than default the
+        # column to None and false-fire E-03 on every row.
+        import tempfile as _tf
+
+        db_file = _tf.NamedTemporaryFile(suffix="_ta.db", delete=False)
+        db_file.close()
+        c = sqlite3.connect(db_file.name)
+        c.row_factory = sqlite3.Row
+        c.executescript(
+            """
+            CREATE TABLE schedule_executions (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL
+            );
+            """
+        )
+        c.execute(
+            "INSERT INTO schedule_executions (id, agent_name, status, started_at) "
+            "VALUES ('e1', 'a1', 'success', ?)",
+            (_iso_z(datetime.utcnow()),),
+        )
+        c.commit()
+        c.close()
+
+        class _Ctx:
+            def __enter__(self_):
+                self_._c = sqlite3.connect(db_file.name)
+                self_._c.row_factory = sqlite3.Row
+                return self_._c
+
+            def __exit__(self_, *a):
+                self_._c.close()
+
+        fake = types.ModuleType("db.connection")
+        fake.get_db_connection = lambda: _Ctx()
+        monkeypatch.setitem(sys.modules, "db.connection", fake)
+
+        from canary.snapshot import _collect_terminal_rows
+
+        res = _collect_terminal_rows(1200)
+        assert res["rows"] == []
+        assert res["unavailable"] and (
+            "completed_at" in res["unavailable"]
+            or "duration_ms" in res["unavailable"]
+        )
+        os.unlink(db_file.name)
+
+    def test_cap_and_sampled_flag(self, canary_db, reload_canary, monkeypatch):
+        _add_agent(canary_db, "a1")
+        from canary import snapshot as snap_mod
+
+        monkeypatch.setattr(snap_mod, "_TERMINAL_ROWS_CAP", 2)
+        now = datetime.utcnow()
+        for i in range(3):
+            _add_execution(
+                canary_db, f"e{i}", "a1", "success",
+                started_at=_iso_z(now - _td(seconds=i)),
+                completed_at=_iso_z(now),
+            )
+        res = snap_mod._collect_terminal_rows(3600)
+        assert res["sampled"] is True
+        assert len(res["rows"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# E-03 — completed rows fully populated (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE03:
+    @staticmethod
+    def _snap(rows):
+        from canary.snapshot import Snapshot
+        return Snapshot(snapshot_time="2026-05-18T12:00:00Z", terminal_rows=rows)
+
+    def test_holds_when_completed_at_populated(self):
+        snap = self._snap([
+            {"id": "e1", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:05:00Z", "duration_ms": 300000},
+            # cancelled-from-queue: completed_at set, duration_ms NULL — healthy.
+            {"id": "e2", "agent_name": "a1", "status": "cancelled",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:00:01Z", "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_fires_when_completed_at_null(self):
+        snap = self._snap([
+            {"id": "e-bad", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": None, "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        v = e03.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "E-03"
+        assert v[0].tier == "A"
+        assert v[0].severity == "major"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["completed_at"] is None
+
+    def test_null_duration_ms_alone_does_not_fire(self):
+        # C1: duration_ms NULL is legitimate on queue-terminated rows; E-03
+        # asserts completed_at only.
+        snap = self._snap([
+            {"id": "e-cancel", "agent_name": "a1", "status": "cancelled",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:00:00Z", "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_e2e_cancelled_from_queue_holds_clean(self, canary_db, reload_canary):
+        # C1 regression guard through the REAL collector: a cancelled-from-queue
+        # row (completed_at set, duration_ms NULL) must produce zero E-03
+        # violations.
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-cancel", "a1", "cancelled",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=_iso_z(now), duration_ms=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_e2e_half_written_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-half", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=30)), completed_at=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e03_completed_rows_populated as e03
+        fired = [x.observed_state["execution_id"] for x in e03.check(snap)]
+        assert fired == ["e-half"]
+
+
+# ---------------------------------------------------------------------------
+# G-03 — clock sanity on terminal rows (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantG03:
+    @staticmethod
+    def _snap(rows):
+        from canary.snapshot import Snapshot
+        return Snapshot(snapshot_time="2026-05-18T12:00:00Z", terminal_rows=rows)
+
+    def test_holds_when_started_le_completed(self):
+        snap = self._snap([
+            {"id": "e1", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:05:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_fires_when_started_after_completed(self):
+        snap = self._snap([
+            {"id": "e-bad", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:05:00Z",
+             "completed_at": "2026-05-18T11:00:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        v = g03.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "G-03"
+        assert v[0].tier == "A"
+        assert v[0].severity == "minor"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["skew_seconds"] == 300.0
+
+    def test_sub_second_skew_does_not_fire(self):
+        # 0.5s backward step is clock jitter (< 1s tolerance), not a bug.
+        snap = self._snap([
+            {"id": "e-jitter", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00.500000Z",
+             "completed_at": "2026-05-18T11:00:00.000000Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_1474_naive_vs_z_compares_without_raising(self):
+        # #1474: a legacy naive started_at beside a Z completed_at must compare
+        # without raising and not false-fire when started <= completed.
+        snap = self._snap([
+            {"id": "e-mixed", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00",
+             "completed_at": "2026-05-18T11:05:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_skips_null_completed_at(self):
+        # E-03 owns the NULL-completed_at case; G-03 skips it (no double-fire).
+        snap = self._snap([
+            {"id": "e-null", "agent_name": "a1", "status": "failed",
+             "started_at": "2026-05-18T11:00:00Z", "completed_at": None},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_e2e_bad_clock_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-badclock", "a1", "success",
+            started_at=_iso_z(now),
+            completed_at=_iso_z(now - _td(seconds=10)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g03_clock_sanity as g03
+        fired = [x.observed_state["execution_id"] for x in g03.check(snap)]
+        assert fired == ["e-badclock"]
+
+    def test_e2e_sub_second_skew_does_not_fire(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-jitter", "a1", "success",
+            started_at=_iso_z(now),
+            completed_at=_iso_z(now - _td(milliseconds=500)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
