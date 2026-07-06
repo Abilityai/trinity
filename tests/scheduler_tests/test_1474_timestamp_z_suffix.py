@@ -19,7 +19,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from scheduler.database import SchedulerDatabase
 from scheduler.models import ExecutionStatus
+from scheduler.service import SchedulerService
 from scheduler.utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 # Backend utc_now_iso() format: "2026-01-15T10:30:00.123456Z"
@@ -151,6 +153,40 @@ def test_update_execution_status_duration_mixed_legacy_naive_started(db):
     row = _raw(db, "SELECT duration_ms FROM schedule_executions WHERE id = ?", ("legacy1",))
     assert row["duration_ms"] is not None
     assert 29_000 <= row["duration_ms"] <= 60_000
+
+
+# ---------------------------------------------------------------------------
+# Service-layer write: _update_business_status stores validated_at with 'Z'
+# (VALIDATE-001 write path in service.py — the one write site outside
+# database.py that got the #1474 fix; sibling-path coverage per the
+# incomplete-fix rule).
+# ---------------------------------------------------------------------------
+
+def test_update_business_status_validated_at_has_z(db, mock_lock_manager):
+    ex = db.create_execution("s1", "agent-a", "hello")
+    # VALIDATE-001 columns aren't in the lightweight test DDL; add them so the
+    # UPDATE has a target (prod schema carries both).
+    conn = sqlite3.connect(db.database_path)
+    for col in ("business_status TEXT", "validated_at TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE schedule_executions ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # already present
+    conn.commit()
+    conn.close()
+
+    service = SchedulerService(database=db, lock_manager=mock_lock_manager)
+
+    service._update_business_status(ex.id, "on_track")
+
+    row = _raw(
+        db,
+        "SELECT business_status, validated_at FROM schedule_executions WHERE id = ?",
+        (ex.id,),
+    )
+    assert row["business_status"] == "on_track"
+    assert row["validated_at"].endswith("Z")
+    assert _ISO_Z_RE.match(row["validated_at"])
 
 
 # ---------------------------------------------------------------------------
