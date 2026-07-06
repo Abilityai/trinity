@@ -4,7 +4,7 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 
 ## Concepts
 
-- **Channel Adapter** -- Pluggable abstraction for external messaging platforms. Slack is the first implementation; Telegram and Discord are planned.
+- **Channel Adapter** -- Pluggable abstraction for external messaging platforms. Slack, Telegram, and WhatsApp are implemented on the same interface.
 - **Socket Mode** -- Default transport using a WebSocket connection. No public URL required. Configured via a Slack App Token (`xapp-...`).
 - **Webhook Mode** -- HTTP webhook transport for production environments (fallback option).
 - **Multi-Agent Routing** -- Multiple agents can share one Slack workspace. Each agent is bound to a dedicated channel. DMs are routed to a default agent; @mentions in channels route to the bound agent.
@@ -23,8 +23,8 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 ### Per-Agent Channel Binding (Agent Sharing Tab)
 
 1. Open the agent detail page and select the **Sharing** tab.
-2. In the Slack Channel section, click **Create Channel**.
-3. A dedicated Slack channel is created and bound to this agent.
+2. Under **Channels**, click **Configure** on the **Slack** row — the Slack configuration opens in a dialog.
+3. Click **Create Channel**. A dedicated Slack channel is created and bound to this agent.
 4. All messages in that channel are routed to the bound agent.
 5. To disconnect, click **Unbind**.
 
@@ -54,6 +54,24 @@ Transport -> Adapter -> Router -> Agent -> Response
 | @mention in channel | Bound agent for that channel |
 | Thread reply (no @mention) | Same agent that was originally mentioned |
 
+### Agent Identity in Channels
+
+- **The agent sees who's talking and where.** Channel (non-DM) messages reach the agent with an identity prefix such as `[Channel: #engineering]` / `[From: John Smith (@johndoe)]`, so it can address people by name and adapt to the room. DMs stay clean — no prefix.
+- **The agent replies as itself.** Replies post with the agent's name and its avatar as the per-message bot icon (via the `chat:write.customize` scope), so multiple agents in one workspace are visually distinct.
+
+### Voice Replies (Outbound)
+
+The agent can speak its replies as inline MP3 voice clips uploaded into the thread (Slack renders MP3 with a built-in player). Enable the shared **Voice replies** toggle inside the Slack dialog — see [Voice Replies](../advanced/voice-replies.md).
+
+### Proactive Channel Messages
+
+Agents can post to their bound Slack channels without waiting to be mentioned — for scheduled digests, alerts, or follow-ups:
+
+- MCP tools: `list_channel_groups(channel_type: "slack")` discovers the agent's bound channels; `send_group_message(channel_type: "slack", chat_id, message, thread_ts?)` posts to one, optionally into an existing thread via `thread_ts`.
+- REST: `GET /api/agents/{name}/slack/channels` lists bound channels; `POST /api/agents/{name}/slack/channels/{channel_id}/messages` posts (owner-gated).
+- Rate limits: 10 messages/hour per channel, 100/hour per agent. Message cap 4,000 characters.
+- Proactive posts carry the agent's identity (name + avatar icon), same as replies.
+
 ### Rate Limiting
 
 | Setting | Default |
@@ -79,6 +97,8 @@ Rate limit and timeout values are configurable via settings (`channel_rate_limit
 | `/api/agents/{name}/slack/channel` | POST | Create and bind channel |
 | `/api/agents/{name}/slack/channel` | DELETE | Unbind channel |
 | `/api/agents/{name}/slack/channel/dm-default` | PUT | Set this agent as the DM default for its workspace |
+| `/api/agents/{name}/slack/channels` | GET | List channels bound to this agent (for proactive messaging) |
+| `/api/agents/{name}/slack/channels/{channel_id}/messages` | POST | Post a proactive message to a bound channel (owner-gated, rate-limited) |
 
 ## Limitations
 
@@ -89,5 +109,13 @@ Rate limit and timeout values are configurable via settings (`channel_rate_limit
 
 ## See Also
 
-- [Channel Adapters](../../memory/feature-flows/slack-channel-adapter.md)
-- [Agent Sharing](../agents/sharing.md)
+**Trinity docs:**
+
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the Slack dialog
+- [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
+- [Telegram Integration](telegram-integration.md) · [WhatsApp Integration](whatsapp-integration.md)
+
+**External references:**
+
+- [Slack: Socket Mode](https://api.slack.com/apis/socket-mode) — the default transport (no public URL needed)
+- [Slack: chat.postMessage](https://api.slack.com/methods/chat.postMessage) — the message-posting primitive, including `username`/`icon_url` customization

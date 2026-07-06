@@ -304,7 +304,8 @@ class TestPublicLinkLifecycle:
             json={"name": "Test Link for Lifecycle"}
         )
 
-        if create_response.status_code == 403:
+        # #186: the owner dependency now denies with a uniform 404 (was 403).
+        if create_response.status_code in (403, 404):
             pytest.skip(f"User doesn't own agent {agent_name}")
 
         assert create_response.status_code == 200, f"Failed to create link: {create_response.text}"
@@ -752,7 +753,8 @@ class TestUnifiedAccessPolicy:
             headers=auth_headers,
             json={"name": "Legacy Payload", "require_email": True},
         )
-        if resp.status_code == 403:
+        # #186: the owner dependency now denies with a uniform 404 (was 403).
+        if resp.status_code in (403, 404):
             pytest.skip(f"User doesn't own agent {agent_name}")
         assert resp.status_code == 200, resp.text
         link = resp.json()

@@ -1,6 +1,7 @@
 """
 Authentication routes for the Trinity backend.
 """
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -31,6 +32,10 @@ from dependencies import (
 from models import User
 
 logger = logging.getLogger(__name__)
+
+# Strong refs for fire-and-forget email dispatch tasks (#186) so an in-flight
+# send isn't garbage-collected before it completes (the asyncio GC footgun).
+_email_dispatch_tasks: set = set()
 
 # Login rate limiting — split per-account (tight) + per-IP (loose).
 #
@@ -455,32 +460,49 @@ async def request_email_login_code(request: Request):
     login_request = EmailLoginRequest(**body)
     email = login_request.email.lower()
 
-    # Check if email is whitelisted
-    if not db.is_email_whitelisted(email):
-        # For security, return generic message (don't reveal if email is whitelisted)
-        # Return success to prevent email enumeration
-        return {"success": True, "message": "If your email is registered, you'll receive a code shortly"}
+    # #186: every branch below returns a byte-identical body + status, and the
+    # email send is dispatched fire-and-forget, so a caller cannot distinguish a
+    # whitelisted (registered) email from a non-whitelisted one by body, status,
+    # or response latency. Do NOT reintroduce a distinct message, extra fields
+    # (e.g. expires_in_seconds), a 429, or a blocking send — each re-opens the
+    # enumeration oracle (pentest 3.3.3).
+    generic_response = {
+        "success": True,
+        "message": "If your email is registered, you'll receive a code shortly",
+    }
 
-    # Check rate limit
+    # Non-whitelisted: return the generic body without revealing membership.
+    if not db.is_email_whitelisted(email):
+        return generic_response
+
+    # Rate limit: over-limit returns the SAME generic body (not a 429) so a
+    # repeat-request status differential can't be used as a membership oracle.
+    # WARN server-side (fail-loud) so ops can still distinguish a rate-limit
+    # suppression from a mail outage.
     recent_requests = db.count_recent_code_requests(email, minutes=10)
     if recent_requests >= 3:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please try again in 10 minutes"
-        )
+        logger.warning("email-code suppressed: rate limit for %s", email)
+        return generic_response
 
     # Generate code
     code_data = db.create_login_code(email, expiry_minutes=10)
 
-    # Send email
-    email_service = EmailService()
-    success = await email_service.send_verification_code(email, code_data["code"], context_label="Trinity login")
+    # Dispatch the email fire-and-forget so the whitelisted path's latency matches
+    # the immediate-return non-whitelisted / rate-limited paths (#186 timing oracle).
+    async def _dispatch_code(target_email: str, code: str) -> None:
+        try:
+            email_service = EmailService()
+            await email_service.send_verification_code(
+                target_email, code, context_label="Trinity login"
+            )
+        except Exception:
+            logger.exception("Failed to send email login code")
 
-    return {
-        "success": True,
-        "message": "Verification code sent to your email",
-        "expires_in_seconds": code_data["expires_in_seconds"]
-    }
+    task = asyncio.create_task(_dispatch_code(email, code_data["code"]))
+    _email_dispatch_tasks.add(task)
+    task.add_done_callback(_email_dispatch_tasks.discard)
+
+    return generic_response
 
 
 @router.post("/api/auth/email/verify")

@@ -466,7 +466,7 @@ def _build_webhook_url(request_base_url: str, token: str) -> str:
 
 @router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
 async def generate_webhook(
-    name: str,
+    name: AuthorizedAgent,
     schedule_id: str,
     request: Request,
     current_user: User = Depends(get_current_user)
@@ -475,13 +475,14 @@ async def generate_webhook(
 
     Creates an opaque 32-byte random token stored in the DB.
     Calling again replaces the old token, immediately invalidating the old URL.
+
+    Agent access is validated by AuthorizedAgent first (uniform 404), so the
+    schedule-not-found 404 below is only ever reached by an authorized accessor
+    — never an existence oracle for a stranger (#186).
     """
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-
-    if not db.can_user_access_agent(current_user.username, name):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     token = db.generate_webhook_token(schedule_id)
     if not token:
@@ -503,18 +504,18 @@ async def generate_webhook(
 
 @router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
 async def get_webhook_status(
-    name: str,
+    name: AuthorizedAgent,
     schedule_id: str,
     request: Request,
-    current_user: User = Depends(get_current_user)
 ):
-    """Get webhook configuration for a schedule."""
+    """Get webhook configuration for a schedule.
+
+    AuthorizedAgent gives a uniform 404 for a non-existent/inaccessible agent, so
+    the schedule-not-found 404 is accessor-only — not an existence oracle (#186).
+    """
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-
-    if not db.can_user_access_agent(current_user.username, name):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     status_data = db.get_webhook_status(schedule_id)
     if status_data is None:
@@ -533,17 +534,18 @@ async def get_webhook_status(
 
 @router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_webhook(
-    name: str,
+    name: AuthorizedAgent,
     schedule_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Revoke the webhook token for a schedule, immediately invalidating the URL."""
+    """Revoke the webhook token for a schedule, immediately invalidating the URL.
+
+    AuthorizedAgent gives a uniform 404 for a non-existent/inaccessible agent, so
+    the schedule-not-found 404 is accessor-only — not an existence oracle (#186).
+    """
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-
-    if not db.can_user_access_agent(current_user.username, name):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     db.revoke_webhook_token(schedule_id)
     logger.info(f"Webhook token revoked for schedule {schedule_id} by {current_user.username}")

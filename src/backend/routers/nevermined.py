@@ -24,27 +24,36 @@ router = APIRouter(prefix="/api/nevermined", tags=["nevermined"])
 logger = logging.getLogger(__name__)
 
 
-def _require_agent_exists(agent_name: str):
-    """Verify the agent exists in the system."""
+def _agent_exists(agent_name: str) -> bool:
+    """True if the agent exists in the system (container or ownership row)."""
     from services.docker_service import get_agent_by_name
-    if not get_agent_by_name(agent_name) and not db.get_agent_owner(agent_name):
-        raise HTTPException(status_code=404, detail="Agent not found")
+    return bool(get_agent_by_name(agent_name)) or bool(db.get_agent_owner(agent_name))
 
 
 def _require_read_access(agent_name: str, current_user: User):
-    """Verify the user can view agent payment config (owner, shared, or admin)."""
-    _require_agent_exists(agent_name)
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    """Verify the user can view agent payment config (owner, shared, or admin).
+
+    Uniform 404 for both non-existent and inaccessible agents so config
+    presence can't be used as an existence oracle (#186).
+    """
+    # Evaluate existence AND access unconditionally (no short-circuit) so the
+    # query count — hence timing — is identical for the non-existent and the
+    # existing-but-inaccessible case, mirroring _require_write_access and the
+    # dependencies.py helpers (#186 equal-query-count discipline).
+    exists = _agent_exists(agent_name)
+    allowed = db.can_user_access_agent(current_user.username, agent_name)
+    if not (exists and allowed):
+        raise HTTPException(status_code=404, detail="Agent not found")
 
 
 def _require_write_access(agent_name: str, current_user: User):
-    """Verify the user can modify agent payment config (owner or admin only)."""
-    _require_agent_exists(agent_name)
-    if current_user.role == "admin":
-        return
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Owner access required")
+    """Verify the user can modify agent payment config (owner or admin only).
+
+    Uniform 404 for both non-existent and unowned agents (#186).
+    """
+    allowed = current_user.role == "admin" or db.can_user_share_agent(current_user.username, agent_name)
+    if not (_agent_exists(agent_name) and allowed):
+        raise HTTPException(status_code=404, detail="Agent not found")
 
 
 def _check_sdk():

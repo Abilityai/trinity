@@ -421,7 +421,8 @@ class TestAsyncModeSessionPersistence:
         # Wait for execution to complete
         max_wait = 120
         start = time.time()
-        completed = False
+        final_status = None
+        final_error = None
 
         while time.time() - start < max_wait:
             poll_response = api_client.get(
@@ -429,13 +430,26 @@ class TestAsyncModeSessionPersistence:
                 timeout=10.0,
             )
             if poll_response.status_code == 200:
-                if poll_response.json().get("status") in ["success", "failed", "cancelled"]:
-                    completed = True
+                data = poll_response.json()
+                if data.get("status") in ["success", "failed", "cancelled"]:
+                    final_status = data.get("status")
+                    final_error = data.get("error")
                     break
             time.sleep(3)
 
-        if not completed:
+        if final_status is None:
             pytest.skip(f"Execution did not complete within {max_wait}s")
+
+        # #1444: persistence is guarded on a SUCCESS terminal — a FAILED /
+        # CANCELLED turn correctly writes no session. Assert success FIRST so a
+        # failing execution is attributed to the execution, not miscounted as a
+        # persistence bug (the original test accepted any terminal here and then
+        # demanded a session, conflating the two failure modes).
+        if final_status != "success":
+            pytest.fail(
+                f"Execution {execution_id} did not succeed (status={final_status}, "
+                f"error={final_error}); cannot assert session persistence."
+            )
 
         # Wait for background session persistence to complete
         # The background task saves to chat_sessions asynchronously after execution finishes
@@ -487,15 +501,30 @@ class TestAsyncModeSessionPersistence:
         # Wait for completion
         max_wait = 120
         start = time.time()
+        final_status = None
+        final_error = None
         while time.time() - start < max_wait:
             poll_response = api_client.get(
                 f"/api/agents/{agent_name}/executions/{execution_id}",
                 timeout=10.0,
             )
             if poll_response.status_code == 200:
-                if poll_response.json().get("status") in ["success", "failed", "cancelled"]:
+                data = poll_response.json()
+                if data.get("status") in ["success", "failed", "cancelled"]:
+                    final_status = data.get("status")
+                    final_error = data.get("error")
                     break
             time.sleep(3)
+
+        # #1444: only a SUCCESS turn is expected to persist — assert success
+        # first so a failing execution isn't miscounted as a persistence bug.
+        if final_status is None:
+            pytest.skip(f"Execution did not complete within {max_wait}s")
+        if final_status != "success":
+            pytest.fail(
+                f"Execution {execution_id} did not succeed (status={final_status}, "
+                f"error={final_error}); cannot assert session persistence."
+            )
 
         # Wait for background session persistence to complete
         max_persist_wait = 10
