@@ -484,6 +484,18 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // ent#84: one bulk read of every caller→target grant edge for the fleet
+    // permissions matrix. Backend filters edges to the caller's accessible
+    // agents (admins see all). Each edge carries grant provenance
+    // (granted_by / granted_at) for the pair inspector.
+    async getPermissionEdges() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/agents/permissions-edges', {
+        headers: authStore.authHeader
+      })
+      return response.data.edges || []
+    },
+
     // Session Activity Actions
     async getSessionActivity(name) {
       const authStore = useAuthStore()
