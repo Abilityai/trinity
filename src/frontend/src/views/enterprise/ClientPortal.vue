@@ -72,23 +72,27 @@
               <span v-if="a.shared_at">shared {{ formatDate(a.shared_at) }}</span>
             </span>
             <button
-              class="text-xs px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed"
-              disabled
-              title="Chat arrives in a later Client Portal slice"
-            >Chat — soon</button>
+              class="text-xs px-2.5 py-1 rounded-md bg-action-primary-600 hover:bg-action-primary-700 text-white"
+              @click="chatAgent = a"
+            >Chat</button>
           </div>
         </div>
       </div>
     </div>
+
+    <!-- Chat drawer -->
+    <PortalChat v-if="chatAgent" :agent="chatAgent" @close="chatAgent = null" />
   </div>
 </template>
 
 <script setup>
-import { reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import PortalChat from './PortalChat.vue'
 
 const store = useClientPortalStore()
 const failed = reactive({})   // avatar_url that 401'd / failed → fall back to initials
+const chatAgent = ref(null)   // the agent whose chat drawer is open
 
 function initials(name) {
   const parts = (name || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim().split(' ')
