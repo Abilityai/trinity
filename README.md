@@ -133,6 +133,8 @@ cp .env.example .env
 
 > Prefer a guided setup? `./quickstart.sh` walks you through it interactively (or `./quickstart.sh --defaults` for non-interactive bring-up with auto-generated secrets).
 
+> **Note**: the repo's git submodules are private and optional — cloning (even with `--recurse-submodules`) needs no credentials; they're skipped automatically. See [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
+
 **First-time setup**
 
 1. Open http://localhost — you'll be redirected to the setup wizard

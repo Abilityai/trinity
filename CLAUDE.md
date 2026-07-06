@@ -76,15 +76,29 @@ This repository has a remote counterpart running on Trinity (`trinity` agent) fo
 
 ## Development Skills (`.claude` submodule)
 
-Skills, agents, and methodology guides live in the `.claude/` directory, which is a **git submodule** pointing to [abilityai/trinity-dev](https://github.com/Abilityai/trinity-dev) (private). This is where `/sprint`, `/cso`, `/autoplan`, `/implement`, `/review`, `/validate-pr`, etc. come from.
+Skills, agents, and methodology guides live in the `.claude/` directory, which is a **git submodule** pointing to [abilityai/trinity-dev](https://github.com/Abilityai/trinity-dev) (private, core-team only). This is where `/sprint`, `/cso`, `/autoplan`, `/implement`, `/review`, `/validate-pr`, etc. come from.
 
-### One-time setup after cloning
+Both of this repo's submodules (`.claude` and `src/backend/enterprise`) are **private and optional**, marked `update = none` in `.gitmodules` (#1443) — a plain `git submodule update --init --recursive` skips them, so OSS clones never hit an auth prompt. Mounting one is an explicit per-clone opt-in.
+
+### One-time setup after cloning (core team)
 ```bash
-git submodule update --init --recursive
-git config submodule.recurse true  # auto-syncs .claude when switching branches
+git config submodule..claude.update checkout  # durable opt-in: overrides the update=none default for this clone
+git submodule update --init .claude           # now actually clones (needs trinity-dev access)
+git config submodule.recurse true             # auto-syncs .claude when switching branches
 ```
 
-Without `submodule.recurse true`, switching branches will leave `.claude` stale and skills will disappear. The `fetchRecurseSubmodules = true` in `.gitmodules` handles `git pull` automatically, but branch switching requires the local config above.
+The config line must come **first** — with the `update = none` default, a plain `--init` is skipped, and **any** init path (plain `--init`, `--init --checkout`, `clone --recurse-submodules`) copies `none` into your local config, so *future* updates keep skipping until the override is set. Without `submodule.recurse true`, switching branches will leave `.claude` stale and skills will disappear. The `fetchRecurseSubmodules = true` in `.gitmodules` handles `git pull` automatically, but branch switching requires the local config above. (Clones initialized before #1443 already carry the `update = checkout` local override — no action needed.)
+
+### External contributors
+
+You don't need `.claude` — it's internal tooling. The public [abilities](https://github.com/abilityai/abilities) marketplace ships the `dev-methodology` plugin with the equivalent development workflow skills (implement, review, validate-pr, release, and more):
+
+```bash
+/plugin marketplace add abilityai/abilities
+/plugin install dev-methodology@abilityai
+```
+
+For the optional enterprise submodule (`src/backend/enterprise`), see [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 ---
 

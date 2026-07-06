@@ -197,22 +197,25 @@ if request.async_mode:
     return { "status": "accepted", "execution_id": execution_id, ... }
 ```
 
-**Session persistence in background** (`src/backend/routers/chat.py:513-551`):
+**Session persistence in background** (`_persist_chat_session`, shared by the async wrapper `_run_async_task_with_persistence` and the sync `/task` branch; guarded on a **SUCCESS** terminal — FAILED/CANCELLED turns write no session):
 ```python
-if request.save_to_session and user_id and user_email:
+if request.save_to_session and user_id and user_email:  # gate
+  if result.status == SUCCESS:                            # only persist a completed turn
     if request.create_new_session:
         session = db.create_new_chat_session(...)
     elif request.chat_session_id:
-        # Use the explicit session ID from the frontend
         session = db.get_chat_session(request.chat_session_id)
-        if not session:
-            session = db.get_or_create_chat_session(...)  # Fallback
+        # #1444 (Security F2): a caller-supplied id must belong to this user —
+        # otherwise fall through to the caller's own session (IDOR fix).
+        if not session or session.user_id != user_id:
+            session = db.get_or_create_chat_session(...)
     else:
         session = db.get_or_create_chat_session(...)
     db.add_chat_message(session_id=session.id, role="user", content=original_user_message)
     db.add_chat_message(session_id=session.id, role="assistant", content=sanitized_resp, ...)
     # Broadcast chat_session_id via WebSocket
 ```
+**Fail-loud (#1444):** the persistence body is wrapped so a DB error is **not** silently swallowed — it logs at ERROR with a stack trace (message carries agent + execution_id + exception-type only, never user content — Security F3) and returns None without re-raising past the completed, billed turn. The stack trace is param-safe because the SQLAlchemy engine sets `hide_parameters=True` (`db/engine.py`) — otherwise a `DBAPIError` from the `add_chat_message` INSERT would append `[parameters: [{'content': …}]]` (the user message / assistant reply) to `str(e)`, which `exc_info=True` would then write to the log. Regression-guarded by `test_dbapi_error_params_not_leaked_by_fail_loud_log`. The sync branch then surfaces a `chat_persist_failed` marker on the response so a dropped write is visible; the async wrapper's `_on_task_done` callback surfaces unhandled errors. The in-process path is the **only** persister: the #1083 fire-and-forget callback path (which does not persist) is structurally unreachable by a manual `/task` (`ASYNC_DISPATCH_ELIGIBLE_TRIGGERS` = `{schedule, webhook}`), so callback-path persistence is deferred to the pull-mode epic (#1045/#1081). Fast CI guard: `tests/unit/test_1444_chat_session_persistence.py`.
 
 ### SSE Stream Proxy (`src/backend/routers/chat.py:1496-1563`)
 
@@ -722,6 +725,7 @@ When detected (lines 147-150):
 
 | Date | Change |
 |------|--------|
+| 2026-07-04 | **#1444: fail-loud + owner-gated `/task` session persistence**. `_persist_chat_session` (async wrapper + sync branch) no longer swallows a DB error with a `logger.warning; return None` — it logs at ERROR with a stack trace (message = agent + execution_id + exc-type only; no user content, Security F3), never re-raises past a billed turn, and the sync branch surfaces a `chat_persist_failed` marker on the response. The `chat_session_id` branch is now owner-checked (`session.user_id == caller`) before appending — a forged/leaked id falls through to the caller's own session (IDOR fix). Added a fast unit regression guard (`tests/unit/test_1444_chat_session_persistence.py`); the slow `requires_agent` integration tests (`test_dynamic_thinking_status.py::TestAsyncModeSessionPersistence`) now assert `success` before demanding a session. Triage confirmed the in-process path is correct on stock config and the #1083 callback path is unreachable by a manual `/task` (`ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`={schedule,webhook}); callback-path persistence deferred to the pull-mode epic. |
 | 2026-03-14 | **Model selector in Chat tab**. Added `ModelSelector` component (compact mode) above the chat input area in `ChatPanel.vue`. Users can now select a model (e.g., Opus, Sonnet, Haiku) before sending messages. Selection is persisted to `localStorage` (`trinity_chat_model`) and passed as the `model` parameter in the `/task` payload. Empty selection uses the agent's default model. Reuses the existing `ModelSelector.vue` component already used by Tasks and Schedules panels. |
 | 2026-03-14 | **Message timestamps**. ChatBubble now accepts optional `timestamp` prop (line 41-44) with `formattedTime` computed (line 51-59). Today's messages show time only ("3:42 PM"), older messages show date + time ("Mar 14, 3:42 PM"). ChatMessages passes `msg.timestamp` to ChatBubble (line 24). ChatPanel includes `timestamp: new Date().toISOString()` when pushing local user/assistant messages (lines 515, 570). Backend-loaded messages include `timestamp` from `msg.timestamp` in `selectSession()` (line 306). |
 | 2026-03-14 | **Bug Fix: Messages saved to wrong session**. Frontend was not passing `currentSessionId` to backend. When continuing in an existing (possibly closed) session, backend's `get_or_create_chat_session()` found a different active session or created a new one. Fix: Added `chat_session_id` field to `ParallelTaskRequest` (models.py:95). Frontend now sends `chat_session_id: currentSessionId.value` in payload (ChatPanel.vue:534). Both async (`_run_async_task_with_persistence`, chat.py:462-471) and sync (chat.py:803-810) backend paths use explicit session ID via `db.get_chat_session()`, falling back to `get_or_create_chat_session()` if not found. |

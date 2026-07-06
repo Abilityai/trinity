@@ -84,6 +84,28 @@ export const useSettingsStore = defineStore('settings', {
     },
 
     /**
+     * trinity-enterprise#85: Brain Orb platform flags. Returns
+     * { flags: { enabled|voice_enabled|write_enabled: { value, source } },
+     *   gemini_key_configured }. `source` is override|env|default. Admin-only.
+     */
+    async getBrainOrbSettings() {
+      const response = await axios.get('/api/settings/brain-orb')
+      return response.data
+    },
+
+    /**
+     * trinity-enterprise#85: Update Brain Orb platform flags. `payload` may
+     * carry enabled / voice_enabled / write_enabled booleans and/or a
+     * `clear: [flag,...]` list reverting flags to their env/default value.
+     * Returns the same shape as getBrainOrbSettings plus updated/cleared.
+     * Admin-only; takes effect on the next request — no restart.
+     */
+    async setBrainOrbSettings(payload) {
+      const response = await axios.put('/api/settings/brain-orb', payload)
+      return response.data
+    },
+
+    /**
      * Get a specific setting by key.
      */
     async getSetting(key) {

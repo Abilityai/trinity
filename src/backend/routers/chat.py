@@ -1009,7 +1009,11 @@ async def _persist_chat_session(
             )
         elif request.chat_session_id:
             session = db.get_chat_session(request.chat_session_id)
-            if not session:
+            # Security F2 (#1444): a caller-supplied chat_session_id must belong
+            # to this user. Without this gate a forged/leaked id would append
+            # into another user's session (IDOR). On absence OR ownership
+            # mismatch, fall through to the caller's own active session.
+            if not session or session.user_id != user_id:
                 session = db.get_or_create_chat_session(
                     agent_name=agent_name,
                     user_id=user_id,
@@ -1046,7 +1050,23 @@ async def _persist_chat_session(
         logger.debug(f"[Task] Saved to chat session {session.id} for agent '{agent_name}'")
         return session.id
     except Exception as e:
-        logger.warning(f"[Task] Failed to save to chat session for agent '{agent_name}': {e}")
+        # Fail-loud (#1444): a swallowed error here silently loses the user's
+        # Chat-tab history. Log at ERROR with a stack trace so the exact raise
+        # site is named on the next run. Security F3: the message string carries
+        # ONLY non-sensitive identifiers — agent name, execution_id, exception
+        # type — never user_message, user_email, or result.response. We do NOT
+        # re-raise: the execution is already complete and billed. The sync branch
+        # surfaces a `chat_persist_failed` marker to the caller, and the async
+        # wrapper's done-callback surfaces unhandled errors; persistence is also
+        # asserted by tests, so silent drift is caught by tests, not only logs.
+        logger.error(
+            "[Task] Failed to persist chat session for agent '%s' "
+            "(execution_id=%s, exc=%s)",
+            agent_name,
+            getattr(result, "execution_id", None),
+            type(e).__name__,
+            exc_info=True,
+        )
         return None
 
 
@@ -1164,9 +1184,10 @@ async def _persist_and_broadcast_chat_session(
     broadcast chat_response_ready. Returns the chat_session_id (or None when
     persistence isn't applicable) — the caller threads it to signal_sync_waiter.
 
-    The persist call is intentionally un-wrapped (a persistence failure
-    propagates, after the caller's finally signals the waiter); only the
-    best-effort broadcast is isolated — preserving the pre-refactor behavior.
+    The persist body is fail-loud but non-fatal (#1444): `_persist_chat_session`
+    logs a DB error at ERROR (stack trace, no user content) and returns None
+    rather than propagating — so a dropped write never breaks the caller's
+    finally / waiter signal. The broadcast is separately best-effort.
     """
     if not (request.save_to_session and user_id and user_email):
         return None
@@ -1886,6 +1907,12 @@ async def execute_parallel_task(
         )
         if chat_session_id:
             response_data["chat_session_id"] = chat_session_id
+        elif result.status == TaskExecutionStatus.SUCCESS:
+            # Fail-loud (#1444): the turn succeeded so persistence was expected,
+            # but it returned no session id — surface a marker so the caller sees
+            # the Chat-tab history write was dropped (the ERROR log names the
+            # raise). Never 500 a completed, billed turn.
+            response_data["chat_persist_failed"] = True
 
     # Add database execution ID to response for frontend tracking
     response_data["task_execution_id"] = execution_id

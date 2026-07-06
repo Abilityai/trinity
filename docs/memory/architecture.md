@@ -682,12 +682,20 @@ Trinity reads/renders + brokers control. Default OFF — no impact on other agen
   subprocess (timeout-kill, output cap, JSON-parse + non-zero-exit guards); **404 when the
   hook is absent**. Trinity never runs `export_data.py` itself — the agent owns generation +
   scope state (Invariant #8).
-- Platform flags: `brain_orb_available = BRAIN_ORB_ENABLED` (env, default OFF — static
-  render, no Gemini dependency); **`brain_orb_voice_available = BRAIN_ORB_VOICE_ENABLED &&
-  GEMINI_API_KEY`** (default OFF — Phase 3 voice tile, distinct because voice needs a Gemini
-  key). Voice frontend assets are CSP-clean (hand-rolled Gemini client, externalized
-  `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src` already allows `wss:`).
-  No DB change, no migration, no new secret.
+- Platform flags (**runtime-resolved, admin-configurable — trinity-enterprise#85**): the three
+  flags resolve at request time via `settings_service.is_brain_orb_enabled()` /
+  `..._voice_enabled()` / `..._write_enabled()` — `system_settings` row (wins in both
+  directions) → `BRAIN_ORB_*` env var as opt-in fallback → default OFF (one shared
+  `_resolve_bool_flag` helper; fail-open on a settings-read failure; deliberately uncached,
+  #506 `--workers 2` rationale). **Precedence note:** once a stored row exists the env var is
+  ignored until the override is cleared (`PUT /api/settings/brain-orb {clear: [...]}` or
+  generic `DELETE /api/settings/{key}`). Compositions: `brain_orb_available = base`;
+  `brain_orb_voice_available = base && voice && GEMINI_API_KEY` (key stays env-only — secret);
+  `brain_orb_write_available = base && write`; the voice-token mint route gates on
+  `base && voice` too. Admin surface: `GET/PUT /api/settings/brain-orb` (Settings → General
+  panel with per-flag source display). Voice frontend assets are CSP-clean (hand-rolled Gemini
+  client, externalized `voice/voice.js`, same-origin `voice/mic-worklet.js`; `connect-src`
+  already allows `wss:`). No DB change, no migration, no new secret.
 
 ---
 
@@ -745,7 +753,7 @@ Trinity reads/renders + brokers control. Default OFF — no impact on other agen
 | GET | `/api/agents/{name}/brain-orb/data` | Read-only proxy of the agent's Brain Orb `data.json` (`AuthorizedAgentByName`; byte pass-through; 404 when flag off / no export, 503/504 unreachable, 502 agent error). See [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58) |
 | GET | `/api/agents/{name}/brain-orb/scopes` | List the agent's selectable + active vault scopes for the orb scope panel (`AuthorizedAgentByName`; 404 when unsupported). (#58 Phase 2) |
 | POST | `/api/agents/{name}/brain-orb/scope` | Mutate the active scope set → agent re-export (**`OwnedAgentByName`** — owner/admin; body-capped; 404 when unsupported). (#58 Phase 2) |
-| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when `BRAIN_ORB_VOICE_ENABLED` off, 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
+| POST | `/api/agents/{name}/brain-orb/voice-token` | Mint a short-lived, config-locked Gemini Live **ephemeral token** for the client-held voice tile (`AuthorizedAgentByName`; per-(user,agent) rate-limited; 404 when the runtime-resolved base or voice flag is off (#85), 503 no key, 502 mint error). Response field `ephemeral_token`. (#60 Phase 3) |
 | POST | `/api/agents/{name}/brain-orb/tool` | Read-only KB search — proxies to the agent's `~/.trinity/brain-orb/search` hook (`AuthorizedAgentByName`; 404 when unsupported). (#60 Phase 3) |
 | GET | `/api/agents/{name}/compatibility` | Compatibility report (`?include_ai=` forces fresh AI; STATIC live + persisted AI). Non-blocking; `unavailable` when stopped. See [Agent Compatibility Validation](#agent-compatibility-validation-668) (#668) |
 | POST | `/api/agents/{name}/compatibility/fix` | Owner/admin; apply a gitignore auto-fix (`{check_id}`). 400 non-fixable, 409 concurrent fix. Uncommitted until next git sync (#668) |
@@ -853,7 +861,7 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | POST/GET/DELETE | `/api/mcp/keys` (`/{id}`) | Create / list / delete API keys |
 | GET | `/oauth/{provider}/authorize` / `/callback` | OAuth start / callback |
 | GET | `/health` | Health check (unauthenticated, top-level — no `/api/` prefix) |
-| GET | `/api/version` | Platform version + build-time git provenance (`git_commit`, `git_commit_short`, `git_commit_subject`, `git_commit_timestamp`, `git_branch`, `build_date`) from Dockerfile ARG/ENV wired through compose build args + `start.sh`; all default `"unknown"` when absent (#926) |
+| GET | `/api/version` | Platform version + build-time git provenance (`git_commit`, `git_commit_short`, `git_commit_subject`, `git_commit_timestamp`, `git_branch`, `build_date`) from Dockerfile ARG/ENV wired through compose build args + `start.sh`; all default `"unknown"` when absent (#926). Also `edition: "oss"\|"enterprise"` + `enterprise_features` — effective entitlement state from `entitlement_service.list_entitled_features()`, same source as feature-flags (#1443) |
 
 ### Soft-Delete Admin Recovery (#834 Phase 1c)
 | Method | Path | Auth | Description |
@@ -946,10 +954,11 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
-| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (`BRAIN_ORB_ENABLED`, default OFF; gates the Brain Orb page — #58), `brain_orb_voice_available` (`BRAIN_ORB_VOICE_ENABLED && GEMINI_API_KEY`, default OFF; gates the client-held voice tile — #60), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
+| GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && GEMINI_API_KEY`), `workspace_available` (voice AND `WORKSPACE_ENABLED`, #860), `voip_available` (#1056), `brain_orb_available` (runtime-resolved: `system_settings` override → `BRAIN_ORB_ENABLED` env opt-in → OFF; gates the Brain Orb page — #58/#85), `brain_orb_voice_available` (`base && voice && GEMINI_API_KEY`, all but the key runtime-resolved, default OFF; gates the client-held voice tile — #60/#85), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
 | GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |
+| GET/PUT | `/api/settings/brain-orb` | Brain Orb platform flags (admin-only, trinity-enterprise#85). GET: per-flag `{value, source: override\|env\|default}` + `gemini_key_configured` (boolean only — never the key). PUT: partial booleans (`enabled`/`voice_enabled`/`write_enabled`) and/or `clear: [flag,…]` reverting a flag to its env/default (400 on unknown name or set+clear conflict); audit-logged with per-flag old→new. Stored in `system_settings` (no migration); route gates resolve at request time — no restart. Registered before `/{key}` (Invariant #4) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) |
 
 ### Session Tab
 | Method | Path | Description |
@@ -964,6 +973,8 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 ### Enterprise Modules (#847)
 
 Open-core seam (generic mechanism only). The public backend exposes an extension point: `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds); each registered module calls `entitlement_service.register_module("<id>")`, and the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide gated surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates an entitled endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Private enterprise tables migrate via the separate two-track runner (Invariant #3).
+
+Install/verification surface (#1443): both private submodules carry `update = none` in `.gitmodules` — OSS clones init without credentials; mounting is a config-first per-clone opt-in (`git config submodule.<path>.update checkout`, then init) documented in `docs/ENTERPRISE.md` (mount, HTTPS-PAT override, rebuild, verify). `GET /api/version` reports `edition` + `enterprise_features` from the same registry.
 
 > The catalog of specific enterprise modules, their private schema, and the commercial rationale are intentionally **not** documented in this public repo — they live in the private `trinity-enterprise` repository (see `docs/memory/ENTERPRISE_DOCS.md` there). Public docs describe the generic seam only.
 
@@ -1277,7 +1288,7 @@ CREATE INDEX idx_activities_execution ON agent_activities(related_execution_id);
 
 Data strategy: `chat_messages.tool_calls` holds the aggregated JSON summary; `agent_activities` holds granular per-tool rows; observability fields (cost, context) live in `chat_messages`/`schedule_executions` only — activity queries JOIN for them.
 
-**chat_sessions / chat_messages** (persistent chat — survives container restarts/deletions; auto-created per user+agent; access control: own messages only, admins all):
+**chat_sessions / chat_messages** (persistent chat — survives container restarts/deletions; auto-created per user+agent; access control: own messages only, admins all). The authenticated Chat tab's `/task` writer (`routers/chat.py::_persist_chat_session`, shared by the sync + async branches; guarded on a SUCCESS terminal) is **fail-loud** (#1444): a persistence error logs at ERROR with a stack trace (message carries agent + execution_id + exc-type only, and the SQLAlchemy engine sets `hide_parameters=True` in `db/engine.py` so a DB-error traceback can't leak bound values either — no user content in message or trace) and never re-raises past a completed, billed turn — the sync branch surfaces a `chat_persist_failed` marker on the response. A caller-supplied `chat_session_id` is **owner-checked** (`session.user_id == caller`) before appending (closes an IDOR); on mismatch the write falls through to the caller's own session. The in-process path is the only persister — the #1083 fire-and-forget callback path is structurally unreachable by a manual `/task` (`ASYNC_DISPATCH_ELIGIBLE_TRIGGERS` = `{schedule, webhook}`), so callback-path persistence is deferred to the pull-mode epic. Schema:
 ```sql
 CREATE TABLE chat_sessions (
     id TEXT PRIMARY KEY,                  -- urlsafe token
