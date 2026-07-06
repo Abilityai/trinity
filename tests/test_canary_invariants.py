@@ -924,6 +924,30 @@ class TestSnapshotCollector:
         assert snap.terminal_exec_statuses["e-recent"] == "success"
         assert "e-old" not in snap.terminal_exec_statuses
 
+    def test_queued_meta_collected_for_queued_rows_only(self, canary_db, reload_canary):
+        # #1077 E-04/G-04: queued rows expose queued_at + backlog_metadata via
+        # `queued_meta`, keyed by execution_id and scoped STRICTLY to queued
+        # rows — a terminal row's metadata must NOT appear (so #1449's future
+        # terminal-row NULL-out can't false-fire E-04).
+        _add_agent(canary_db, "a1")
+        _add_execution(
+            canary_db, "e-q", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"trigger": "schedule"}',
+        )
+        # A terminal row that also carries backlog_metadata — must be excluded.
+        _add_execution(
+            canary_db, "e-done", "a1", "success",
+            completed_at="2026-05-18T10:05:00Z",
+            queued_at="2026-05-18T09:00:00Z",
+            backlog_metadata='{"trigger": "schedule"}',
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        agent = snap.agents[0]
+        assert set(agent.queued_meta.keys()) == {"e-q"}
+        assert agent.queued_meta["e-q"]["queued_at"] == "2026-05-18T10:00:00Z"
+        assert agent.queued_meta["e-q"]["backlog_metadata"] == '{"trigger": "schedule"}'
+
 
 # ---------------------------------------------------------------------------
 # Invariant: S-01 slot–row bijection
@@ -1298,8 +1322,8 @@ class TestRunner:
 
         assert set(results.keys()) == {
             "S-01", "S-02", "S-03",
-            "E-01", "E-02", "E-03", "E-05", "E-06",
-            "G-03",
+            "E-01", "E-02", "E-03", "E-04", "E-05", "E-06",
+            "G-03", "G-04",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1309,11 +1333,14 @@ class TestRunner:
         assert results["S-03"] == []
         assert results["E-01"] == []
         assert results["E-02"] == []
-        # E-03/G-03 (#1077) hold on a clean platform — no terminal rows seeded.
+        # E-03/G-03/E-04/G-04 (#1077) hold on a clean platform — no terminal or
+        # queued rows seeded.
         assert results["E-03"] == []
+        assert results["E-04"] == []
         assert results["E-05"] == []
         assert results["E-06"] == []
         assert results["G-03"] == []
+        assert results["G-04"] == []
         assert len(results["L-03"]) == 1
         # B-01 now reads the SAME temp DB on both sides via reload_canary's
         # controlled `database` stub (get_queued_count over the temp
@@ -3028,3 +3055,232 @@ class TestInvariantG03:
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import g03_clock_sanity as g03
         assert g03.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-04 — queued rows carry valid backlog metadata (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE04:
+    @staticmethod
+    def _snap(queued_meta):
+        """One-agent snapshot whose queued_exec_ids == queued_meta.keys()."""
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_meta.keys()),
+                    queued_meta=queued_meta,
+                )
+            ],
+        )
+
+    def test_holds_when_queued_at_and_json_metadata_present(self):
+        snap = self._snap({
+            "e1": {"queued_at": "2026-05-18T11:00:00Z",
+                   "backlog_metadata": '{"trigger": "schedule", "request_id": "r-1"}'},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_fires_when_queued_at_null(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": None,
+                      "backlog_metadata": '{"trigger": "schedule"}'},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "E-04"
+        assert v[0].tier == "A"
+        assert v[0].severity == "major"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["reason"] == "queued_at_null"
+
+    def test_fires_when_backlog_metadata_null(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": "2026-05-18T11:00:00Z",
+                      "backlog_metadata": None},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["reason"] == "backlog_metadata_null"
+
+    def test_fires_when_backlog_metadata_not_json(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": "2026-05-18T11:00:00Z",
+                      "backlog_metadata": "not-a-json-blob {oops"},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["reason"] == "backlog_metadata_invalid_json"
+        # SECURITY: the raw (malformed) metadata value must NEVER be echoed.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert "not-a-json-blob" not in blob
+
+    def test_skips_eid_missing_from_queued_meta(self):
+        # Older-image snapshot: eid queued but no metadata observed → skip
+        # (fail-open), don't fire.
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1", is_system=False, max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids={"e-legacy"},
+                    queued_meta={},  # column absent → no entry
+                )
+            ],
+        )
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_e2e_valid_queued_row_holds_clean(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        _add_execution(
+            canary_db, "e-q", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"trigger": "schedule", "request_id": "r-1"}',
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_e2e_malformed_queued_metadata_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        # NULL queued_at
+        _add_execution(
+            canary_db, "e-noqa", "a1", "queued",
+            queued_at=None, backlog_metadata='{"ok": true}',
+        )
+        # NULL backlog_metadata
+        _add_execution(
+            canary_db, "e-nometa", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z", backlog_metadata=None,
+        )
+        # Non-JSON backlog_metadata
+        _add_execution(
+            canary_db, "e-badjson", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z", backlog_metadata="{broken",
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        fired = {v.observed_state["execution_id"]: v.observed_state["reason"]
+                 for v in e04.check(snap)}
+        assert fired == {
+            "e-noqa": "queued_at_null",
+            "e-nometa": "backlog_metadata_null",
+            "e-badjson": "backlog_metadata_invalid_json",
+        }
+
+
+# ---------------------------------------------------------------------------
+# G-04 — no raw credentials in backlog metadata (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantG04:
+    @staticmethod
+    def _snap(queued_meta):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_meta.keys()),
+                    queued_meta=queued_meta,
+                )
+            ],
+        )
+
+    def test_holds_when_no_secret_pattern(self):
+        # Benign metadata whose text includes "task-" (contains "sk-") must NOT
+        # false-fire — the patterns are word-boundary anchored.
+        snap = self._snap({
+            "e1": {"queued_at": "2026-05-18T11:00:00Z",
+                   "backlog_metadata":
+                       '{"trigger": "schedule", "task-name": "risky-task-42"}'},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        assert g04.check(snap) == []
+
+    def test_fires_on_github_pat(self):
+        secret = "ghp_ABCDEFghij0123456789KLMNOPqrstuv"
+        snap = self._snap({
+            "e-leak": {"queued_at": "2026-05-18T11:00:00Z",
+                       "backlog_metadata": '{"token": "%s"}' % secret},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "G-04"
+        assert v[0].tier == "A"
+        assert v[0].severity == "critical"
+        assert v[0].observed_state["execution_id"] == "e-leak"
+        assert v[0].observed_state["matched_pattern"] == "github_pat"
+        # SECURITY: the secret value must appear NOWHERE in the violation record.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert secret not in blob
+        assert "ABCDEFghij" not in blob
+
+    def test_fires_on_openai_and_slack_and_aws(self):
+        cases = {
+            "e-openai": "sk-proj-ABCDEFGHIJ0123456789abcdefghij",
+            "e-slack": "xoxb-1234-5678-abcdEFGHijklMNOP",
+            "e-aws": "AKIAIOSFODNN7EXAMPLE",
+        }
+        meta = {
+            eid: {"queued_at": "2026-05-18T11:00:00Z",
+                  "backlog_metadata": '{"cred": "%s"}' % val}
+            for eid, val in cases.items()
+        }
+        snap = self._snap(meta)
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert len(v) == 3
+        # No secret bytes leak into any record.
+        for viol in v:
+            blob = json.dumps(viol.observed_state) + (viol.signal_query or "")
+            for secret in cases.values():
+                assert secret not in blob
+
+    def test_skips_null_metadata(self):
+        # E-04 owns the NULL case; G-04 has nothing to scan.
+        snap = self._snap({
+            "e-null": {"queued_at": "2026-05-18T11:00:00Z",
+                       "backlog_metadata": None},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        assert g04.check(snap) == []
+
+    def test_e2e_credential_in_backlog_metadata_fires_no_leak(
+        self, canary_db, reload_canary
+    ):
+        _add_agent(canary_db, "a1")
+        secret = "ghp_zzzzYYYYxxxx0000111122223333WWWW"
+        _add_execution(
+            canary_db, "e-leak", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"github_pat": "%s"}' % secret,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert [x.observed_state["execution_id"] for x in v] == ["e-leak"]
+        assert v[0].observed_state["matched_pattern"] == "github_pat"
+        # SECURITY end-to-end: the persisted violation carries no secret bytes.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert secret not in blob
