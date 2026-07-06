@@ -17,6 +17,7 @@
 |------|-----|--------|------|
 | 2026-07-04 | #903 | fix(slack): thread-scoped session + per-speaker attribution + sender-filtered memory | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-07-04 | #1445 | fix(webhooks): gate schedule/webhook **creation** on a live owning agent (`is_agent_live` → 404; access-check-first so non-owners see a uniform 403) so a webhook token always resolves to a schedule of a live agent — closes the orphan-schedule class that made valid tokens 404 after #1423's soft-delete-aware token-lookup INNER JOIN | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
+| 2026-07-06 | trinity-enterprise#47 | feat(ui): Dashboard **Grid view** — third mode (Grid/Graph/Timeline, not default): magnetic tile canvas on an unbounded pan/zoom lattice; five-zone 384×216 tiles (adaptive chips, Activity·14d + Context·7d charts, Run/Auto toggles); drag with socket preview + swap, tidy/reset, keyboard reorder; skeleton-first render, viewport-gated cached analytics hydration, visibility-aware batch polling. No new backend endpoints | [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md) |
 | 2026-07-04 | #1018 | fix(nevermined): settlement-ordering — honest `success_unsettled` on settle-fail (was lying `"success"`); `Idempotency-Key` on the paid boundary keyed on `(payment-signature ∥ message)` with in-flight-409 / settled-replay / unsettled-re-drive-converge; `/retry-settlement` stub → honest 501. Tier 2 durable retry split to a follow-up | [nevermined-payments.md](feature-flows/nevermined-payments.md), [effect-idempotency.md](feature-flows/effect-idempotency.md) |
 | 2026-07-04 | #186 | fix(security): close user & agent enumeration oracles — uniform 404 across the agent-access dependency family + router sweep + Tier-4 GETs; identical email-request body/status/timing; MCP `checkAgentAccess` uniform reason + owner-username removal (pentest 3.3.3) | [email-authentication.md](feature-flows/email-authentication.md), [agent-permissions.md](feature-flows/agent-permissions.md) |
 | 2026-07-04 | #1444 | fix(chat): fail-loud + owner-gated `/task` chat-session persistence (no silent swallow, IDOR fix, SUCCESS-guarded) + fast unit regression guard | [authenticated-chat-tab.md](feature-flows/authenticated-chat-tab.md) |
@@ -84,6 +85,7 @@
 |------|----------|-------------|
 | Agent Network (Dashboard) | [agent-network.md](feature-flows/agent-network.md) | Real-time visual graph at `/` |
 | Dashboard Timeline View | [dashboard-timeline-view.md](feature-flows/dashboard-timeline-view.md) | Graph/Timeline mode toggle with execution boxes |
+| Dashboard Grid View | [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md) | Magnetic tile canvas — third dashboard mode (trinity-enterprise#47) |
 | Replay Timeline | [replay-timeline.md](feature-flows/replay-timeline.md) | Waterfall-style timeline visualization |
 | Activity Stream | [activity-stream.md](feature-flows/activity-stream.md) | Centralized persistent activity tracking |
 | Activity Monitoring | [activity-monitoring.md](feature-flows/activity-monitoring.md) | Real-time tool execution tracking |

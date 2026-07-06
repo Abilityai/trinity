@@ -1998,11 +1998,21 @@ class ExecutionResponse(BaseModel):
 
 
 class WebhookStatusResponse(BaseModel):
-    """Webhook configuration for a schedule."""
+    """Webhook configuration for a schedule.
+
+    ent#77: `auth_enabled`/`has_secret` describe the optional HMAC signature
+    layer. `signing_secret` is populated **only** in the response to a
+    mint/rotate call — the plaintext secret is shown exactly once and never
+    returned by GET or persisted in the clear.
+    """
     schedule_id: str
     has_token: bool
     webhook_enabled: bool
     webhook_url: Optional[str] = None
+    auth_enabled: bool = False
+    has_secret: bool = False
+    signing_secret: Optional[str] = None
+    signature_header: Optional[str] = None  # header name to send the signature in
 
 
 # =============================================================================

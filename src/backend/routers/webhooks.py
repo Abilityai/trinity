@@ -81,6 +81,15 @@ async def trigger_webhook(
 
     Returns 202 Accepted immediately; execution runs asynchronously.
     Poll GET /api/agents/{name}/executions to track the result.
+
+    Idempotency (#1422): de-duplication happens ONLY when the caller supplies an
+    explicit ``Idempotency-Key`` header — a repeat with the same key inside the
+    24h window replays the first result (``X-Idempotent-Replay: true``) instead
+    of firing again. A call WITHOUT the header fires a fresh execution every
+    time, so the canonical body-less "ping to trigger" (CI hooks, monitors,
+    external cron) is never silently swallowed. At-least-once senders that need
+    resend-dedup send a stable key. The dedup layer is fail-open — it never
+    blocks a real trigger.
     """
     # Pre-auth per-IP rate limit (#1424) — enforced FIRST, before the regex/DB
     # steps, so a flood of well-formed-but-unknown tokens is throttled even
@@ -160,6 +169,44 @@ async def trigger_webhook(
     except Exception:
         chunks = []
     raw_body = b"".join(chunks)
+
+    # ent#77: HMAC signature auth. When enabled on the schedule, the caller must
+    # sign the RAW request body with the per-webhook secret and send it in the
+    # X-Trinity-Signature header. FAIL-CLOSED: a missing/invalid signature is
+    # rejected 401 before any dispatch, so a leaked URL token alone is not enough.
+    # We only fail-closed on the signature itself — an unreadable stored secret is
+    # a 500 (operator misconfig), never a silent bypass.
+    if schedule.webhook_auth_enabled:
+        from services.credential_encryption import get_credential_encryption_service
+        from services.webhook_signature import (
+            SECRET_ENVELOPE_KEY,
+            SIGNATURE_HEADER,
+            verify_signature,
+        )
+
+        secret: Optional[str] = None
+        if schedule.webhook_secret_encrypted:
+            try:
+                secret = get_credential_encryption_service().decrypt(
+                    schedule.webhook_secret_encrypted
+                ).get(SECRET_ENVELOPE_KEY)
+            except Exception:
+                logger.error(
+                    "webhook 500: signing secret decrypt failed for schedule %s",
+                    schedule.id,
+                )
+        if not secret:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Webhook signature secret unavailable",
+            )
+        if not verify_signature(secret, raw_body, request.headers.get(SIGNATURE_HEADER)):
+            logger.info("webhook 401: invalid or missing signature")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing webhook signature",
+            )
+
     body: Optional[WebhookTriggerRequest] = None
     if raw_body.strip():
         try:
@@ -184,17 +231,21 @@ async def trigger_webhook(
                 f"---"
             )
 
-    # RELIABILITY-006 (#525): idempotency gate. External senders retry on 5xx
-    # and perceived timeouts; without a key we auto-derive one from
-    # (token, body_hash) so naive re-deliveries don't fire the schedule twice.
+    # RELIABILITY-006 (#525) idempotency gate — dedupe ONLY when the caller sends
+    # an explicit Idempotency-Key. #1422: auto-deriving the key from
+    # (token, raw_body) silently deduped the canonical body-less "ping to
+    # trigger" for 24h — CI hooks, monitors, IFTTT, external cron re-send the
+    # same/empty body, so only the first call each day fired while every later
+    # 202 falsely reported success. A key-less call is now a fresh, intentional
+    # trigger every time; at-least-once senders that need de-dup send a key
+    # (which preserves #525's anti-double-fire). Fail-open either way.
     # `raw_body` was read + size-capped above (single read).
-    idem_key = idempotency_key or idempotency_service.derive_webhook_key(
-        webhook_token, raw_body
-    )
-    idem = idempotency_service.begin(
-        idempotency_service.make_webhook_scope(webhook_token), idem_key
-    )
-    if idem.replay:
+    idem = None
+    if idempotency_key:
+        idem = idempotency_service.begin(
+            idempotency_service.make_webhook_scope(webhook_token), idempotency_key
+        )
+    if idem is not None and idem.replay:
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="idempotent_replay",
@@ -206,7 +257,6 @@ async def trigger_webhook(
             details={
                 "schedule_id": schedule.id,
                 "in_flight": idem.in_flight,
-                "auto_derived_key": idempotency_key is None,
             },
         )
         if idem.in_flight:
@@ -250,12 +300,15 @@ async def trigger_webhook(
 
     except HTTPException:
         # Nothing dispatched — release the claim so a legitimate re-delivery
-        # can retry rather than getting a stuck 409 (#525).
-        idempotency_service.fail(idem)
+        # can retry rather than getting a stuck 409 (#525). Only when a key gate
+        # was engaged (#1422).
+        if idem is not None:
+            idempotency_service.fail(idem)
         raise
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.error(f"Webhook trigger: cannot reach scheduler — {exc}")
-        idempotency_service.fail(idem)
+        if idem is not None:
+            idempotency_service.fail(idem)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Scheduler service unavailable — try again later",
@@ -294,8 +347,9 @@ async def trigger_webhook(
         "agent_name": schedule.agent_name,
         "message": "Execution started — poll GET /api/agents/{name}/executions for status",
     }
-    # Store the ack so a duplicate delivery within the TTL replays it instead of
-    # firing the schedule again (#525). No execution_id here — the webhook is
-    # fire-and-forget into the scheduler.
-    idempotency_service.complete(idem, None, trigger_payload)
+    # Store the ack so an explicit-key duplicate within the TTL replays it
+    # instead of firing again (#525). No execution_id — the webhook is
+    # fire-and-forget into the scheduler. Only when a key gate was engaged (#1422).
+    if idem is not None:
+        idempotency_service.complete(idem, None, trigger_payload)
     return trigger_payload

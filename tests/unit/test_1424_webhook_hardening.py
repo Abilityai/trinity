@@ -44,6 +44,10 @@ class _FakeSchedule:
         self.name = "nightly"
         self.message = "do the thing"
         self.webhook_enabled = True
+        # ent#77: signature auth off by default (matches the real Schedule model);
+        # these hardening tests exercise the unauthenticated path.
+        self.webhook_auth_enabled = False
+        self.webhook_secret_encrypted = None
 
 
 _VALID_TOKEN = "V" * 43
@@ -141,9 +145,18 @@ def test_oversized_body_rejected_with_413(client, monkeypatch):
 
 
 def test_small_valid_body_passes_the_size_gate(client, monkeypatch):
-    """A within-cap body clears the 413 gate (reaches dispatch → benign 409)."""
+    """A within-cap body clears the 413 gate (reaches dispatch → benign 409).
+
+    Sends an explicit Idempotency-Key: since #1422 the idempotency gate engages
+    only for keyed calls, and the key-gated in-flight replay (409) is the benign
+    short-circuit this test uses to prove the request got past the size gate.
+    """
     monkeypatch.setattr(webhooks, "WEBHOOK_IP_RATE_LIMIT", 1000)
     _short_circuit_dispatch(monkeypatch)
-    r = client.post(f"/api/webhooks/{_VALID_TOKEN}", json={"context": "small"})
+    r = client.post(
+        f"/api/webhooks/{_VALID_TOKEN}",
+        json={"context": "small"},
+        headers={"Idempotency-Key": "k-1424-small-body"},
+    )
     # Past the 413 gate → hits the idempotency short-circuit, not a size rejection.
     assert r.status_code == 409, r.text

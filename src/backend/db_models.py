@@ -178,6 +178,13 @@ class Schedule(BaseModel):
     # carried these fields — every webhook trigger raised AttributeError.
     webhook_enabled: bool = False
     webhook_token: Optional[str] = None
+    # trinity-enterprise#77: optional HMAC signature auth. `webhook_auth_enabled`
+    # gates verification in the public trigger; `webhook_secret_encrypted` is the
+    # AES-256-GCM envelope the trigger decrypts to verify the signature. Neither
+    # is ever surfaced in an API response model (the plaintext secret is returned
+    # exactly once, at mint time, and never persisted in the clear).
+    webhook_auth_enabled: bool = False
+    webhook_secret_encrypted: Optional[str] = None
 
 
 class ScheduleExecution(BaseModel):

@@ -21,6 +21,12 @@
                   <span class="font-medium text-status-success-600 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
                   <span>agents</span>
                 </span>
+                <!-- Working-now count (trinity-enterprise#47) -->
+                <span class="text-gray-300 dark:text-gray-600">·</span>
+                <span class="flex items-center space-x-1">
+                  <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ workingNowCount }}</span>
+                  <span>working now</span>
+                </span>
                 <span class="text-gray-300 dark:text-gray-600">·</span>
                 <span class="flex items-center space-x-1">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ totalCollaborationCount }}</span>
@@ -112,27 +118,38 @@
 
               <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
 
-              <!-- Mode Toggle -->
+              <!-- Mode Toggle (Grid / Graph / Timeline — trinity-enterprise#47) -->
               <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
                 <button
-                  @click="toggleMode('graph')"
+                  v-for="mode in ['grid', 'graph', 'timeline']"
+                  :key="mode"
+                  @click="toggleMode(mode)"
                   :class="[
-                    'px-2 py-1 rounded text-xs font-medium transition-all',
-                    !isTimelineMode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+                    'px-2 py-1 rounded text-xs font-medium transition-all capitalize',
+                    viewMode === mode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                   ]"
                 >
-                  Graph
-                </button>
-                <button
-                  @click="toggleMode('timeline')"
-                  :class="[
-                    'px-2 py-1 rounded text-xs font-medium transition-all',
-                    isTimelineMode ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                  ]"
-                >
-                  Timeline
+                  {{ mode }}
                 </button>
               </div>
+
+              <!-- Grid-mode controls (trinity-enterprise#47) -->
+              <template v-if="viewMode === 'grid'">
+                <button
+                  @click="fleetGridRef?.tidyUp()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Compact tiles row-by-row, preserving reading order"
+                >
+                  Tidy up
+                </button>
+                <button
+                  @click="fleetGridRef?.resetToDefault()"
+                  class="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                  title="Restore the default tile layout"
+                >
+                  Reset
+                </button>
+              </template>
 
               <!-- Time Range -->
               <select
@@ -174,8 +191,9 @@
                 </svg>
               </button>
 
-              <!-- Reset Layout -->
+              <!-- Reset Layout (graph mode only — grid has its own Reset pill) -->
               <button
+                v-if="viewMode === 'graph'"
                 @click="resetLayout"
                 class="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-colors"
                 title="Reset Layout"
@@ -235,8 +253,51 @@
       />
     </template>
 
-    <!-- Graph Canvas - Full Height (expands to fill remaining space) - Hidden in Timeline mode -->
-    <div v-if="!isTimelineMode" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
+    <!-- Grid View (trinity-enterprise#47) — magnetic tile canvas. v-if so its
+         polling and timers tear down whenever the mode is not active. -->
+    <div v-if="viewMode === 'grid'" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
+      <!-- Loading skeleton: immediate feedback while the fleet list loads -->
+      <div
+        v-if="isFleetLoading && agents.length === 0"
+        class="absolute inset-0 flex items-center justify-center"
+      >
+        <SkeletonLoader variant="nodes" :count="5" />
+      </div>
+      <!-- Error state -->
+      <div
+        v-else-if="fleetLoadError && agents.length === 0"
+        class="absolute inset-0 flex items-center justify-center"
+      >
+        <div class="text-center">
+          <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">Couldn't load agents</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Something went wrong fetching the fleet.</p>
+          <button
+            @click="refreshAll"
+            class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+          >Retry</button>
+        </div>
+      </div>
+      <!-- Empty state -->
+      <div
+        v-else-if="gridAgents.length === 0"
+        class="absolute inset-0 flex items-center justify-center"
+      >
+        <div class="text-center">
+          <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
+          <button
+            @click="openOnboarding"
+            class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+          >
+            Get started
+          </button>
+        </div>
+      </div>
+      <FleetGrid v-else ref="fleetGridRef" :agents="gridAgents" />
+    </div>
+
+    <!-- Graph Canvas - Full Height (expands to fill remaining space) - Hidden in Timeline/Grid mode -->
+    <div v-if="viewMode === 'graph'" class="relative bg-white dark:bg-gray-800 shadow-sm dark:shadow-gray-900 flex-1 min-h-0">
       <!-- Loading skeleton (#1266): graph node placeholders instead of the "No agents" empty state -->
       <div
         v-if="isFleetLoading && nodes.length === 0"
@@ -503,6 +564,7 @@ import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import AgentNode from '@/components/AgentNode.vue'
 import SystemAgentNode from '@/components/SystemAgentNode.vue'
+import FleetGrid from '@/components/FleetGrid.vue'
 import TagClouds from '@/components/TagClouds.vue'
 import { useNotification } from '@/composables/useNotification'
 
@@ -593,8 +655,10 @@ const {
   contextStats,
   executionStats,
   slotStats,
+  workingState,
   schedules,
   // Timeline/Replay state
+  viewMode,
   isTimelineMode,
   isPlaying,
   replaySpeed,
@@ -673,6 +737,28 @@ const runningCount = computed(() => {
   return agents.value.filter(a => a.status?.toLowerCase() === 'running').length
 })
 
+// Grid view (trinity-enterprise#47)
+const fleetGridRef = ref(null)
+
+// Agents shown on the grid: same owner filter the graph applies to nodes
+// (the tag filter is already applied server-side by fetchAgents).
+const gridAgents = computed(() => {
+  if (!selectedOwner.value) return agents.value
+  const owner = selectedOwner.value === '__unassigned__' ? null : selectedOwner.value
+  return agents.value.filter(a => (a.owner || null) === owner)
+})
+
+// Agents executing right now: WS-observed in-flight work unioned with the
+// polled context-stats activity state.
+const workingNowCount = computed(() => {
+  const working = new Set(Object.keys(workingState.value))
+  for (const [name, s] of Object.entries(contextStats.value)) {
+    if (s.activityState === 'active') working.add(name)
+  }
+  const names = new Set(agents.value.map(a => a.name))
+  return [...working].filter(n => names.has(n)).length
+})
+
 const stoppedCount = computed(() => {
   return agents.value.filter(a => a.status?.toLowerCase() !== 'running').length
 })
@@ -718,10 +804,13 @@ onMounted(async () => {
   // Add click outside listener for tag dropdown
   document.addEventListener('click', handleClickOutside)
 
-  // Fit view after initial load
-  setTimeout(() => {
-    fitView({ padding: 0.2, duration: 800 })
-  }, 100)
+  // Fit view after initial load (graph mode only — grid fits itself,
+  // and calling Vue Flow's fitView with no viewport just warns)
+  if (networkStore.viewMode === 'graph') {
+    setTimeout(() => {
+      fitView({ padding: 0.2, duration: 800 })
+    }, 100)
+  }
 })
 
 onUnmounted(() => {
@@ -735,6 +824,11 @@ onUnmounted(() => {
 async function refreshAll() {
   await networkStore.fetchAgents()
   await networkStore.fetchHistoricalCommunications()
+  if (networkStore.viewMode === 'grid') {
+    // Grid mode: re-pull chip batch data + re-hydrate visible tiles.
+    fleetGridRef.value?.refresh()
+    return
+  }
   setTimeout(() => {
     fitView({ padding: 0.2, duration: 800 })
   }, 100)

@@ -356,6 +356,61 @@ class TestWebhookTrigger:
         finally:
             _delete_schedule(api_client, webhook_agent, sid)
 
+    def _fresh_webhook_token(self, api_client, agent, sid):
+        return api_client.post(
+            f"/api/agents/{agent}/schedules/{sid}/webhook"
+        ).json()["webhook_url"].split("/api/webhooks/")[1]
+
+    def test_bodyless_repeats_are_not_deduped(
+        self, api_client: TrinityApiClient, webhook_agent: str
+    ):
+        """#1422 (AC a): two body-less pings seconds apart each fire — no silent
+        24h replay. Pre-fix the 2nd carried X-Idempotent-Replay and did nothing."""
+        import httpx
+        schedule = _create_test_schedule(api_client, webhook_agent)
+        sid = schedule["id"]
+        try:
+            token = self._fresh_webhook_token(api_client, webhook_agent, sid)
+            r1 = httpx.post(f"http://localhost:8000/api/webhooks/{token}", timeout=15.0)
+            r2 = httpx.post(f"http://localhost:8000/api/webhooks/{token}", timeout=15.0)
+            assert r1.status_code in (202, 503) and r2.status_code in (202, 503)
+            # Neither key-less delivery is a replay — each is a fresh trigger.
+            assert "x-idempotent-replay" not in {k.lower() for k in r1.headers}
+            assert "x-idempotent-replay" not in {k.lower() for k in r2.headers}
+        finally:
+            _delete_schedule(api_client, webhook_agent, sid)
+
+    def test_explicit_key_resend_is_deduped(
+        self, api_client: TrinityApiClient, webhook_agent: str
+    ):
+        """#1422 (AC b): a resend with the same explicit Idempotency-Key replays
+        the first result (X-Idempotent-Replay) — anti-double-fire preserved."""
+        import httpx
+        import uuid as _uuid
+        schedule = _create_test_schedule(api_client, webhook_agent)
+        sid = schedule["id"]
+        try:
+            token = self._fresh_webhook_token(api_client, webhook_agent, sid)
+            key = f"ci-{_uuid.uuid4().hex}"
+            r1 = httpx.post(
+                f"http://localhost:8000/api/webhooks/{token}",
+                headers={"Idempotency-Key": key}, timeout=15.0,
+            )
+            # Only assert dedup when the first call actually fired (202); if the
+            # scheduler is down (503) no claim completes and there's nothing to replay.
+            if r1.status_code == 202:
+                r2 = httpx.post(
+                    f"http://localhost:8000/api/webhooks/{token}",
+                    headers={"Idempotency-Key": key}, timeout=15.0,
+                )
+                assert r2.headers.get("X-Idempotent-Replay") == "true", (
+                    f"explicit-key resend should replay, got {r2.status_code} {dict(r2.headers)}"
+                )
+            else:
+                assert r1.status_code == 503
+        finally:
+            _delete_schedule(api_client, webhook_agent, sid)
+
     def test_soft_deleted_agent_webhook_returns_404_then_recovers(
         self, api_client: TrinityApiClient
     ):

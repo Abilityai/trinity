@@ -1,6 +1,20 @@
 {
   "test_files": [
     {
+      "file": "unit/test_77_webhook_signature.py",
+      "feature": "trinity-enterprise#77",
+      "added": "2026-07-06",
+      "categories": ["backend", "unit", "webhooks", "security"],
+      "description": "Webhook HMAC-SHA256 signature helper (ent#77): compute_signature canonical sha256= prefix + body/secret binding + determinism; verify_signature valid, prefix-optional, tampered-body/wrong-secret/missing-header/empty-secret/garbage rejected, empty-body signs, header+envelope constants. Pure, spec-loaded, no Redis/DB."
+    },
+    {
+      "file": "unit/test_77_webhook_secret_db.py",
+      "feature": "trinity-enterprise#77",
+      "added": "2026-07-06",
+      "categories": ["backend", "unit", "webhooks", "database", "security"],
+      "description": "Schedule webhook signing-secret DB lifecycle (ent#77) on db_harness: mint requires a token, returns whsec_ plaintext once + stores AES-256-GCM ciphertext, status reflects auth_enabled/has_secret (never leaks secret), trigger-path row decrypts to the mint, rotating the URL clears the secret, disable keeps URL, revoke clears token+secret, rotating the secret changes ciphertext."
+    },
+    {
       "file": "unit/test_1464_monitoring_leader_lock.py",
       "feature": "#1464",
       "added": "2026-07-06",

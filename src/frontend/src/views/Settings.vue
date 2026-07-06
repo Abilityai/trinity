@@ -42,6 +42,11 @@
           <!-- MCP Keys Tab Content (extracted to component, #302) -->
           <McpKeysTab v-if="activeTab === 'mcp-keys'" />
 
+          <!-- ent#84 — Fleet-wide agent-to-agent permissions matrix -->
+          <div v-if="activeTab === 'agent-permissions'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+            <AgentPermissionsMatrix />
+          </div>
+
           <!-- #5 — Security / Two-Factor (enterprise, gated by `2fa`) -->
           <TwoFactorPanel v-if="activeTab === 'security'" />
 
@@ -2066,6 +2071,7 @@ import { useSessionsStore } from '../stores/sessions'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -2101,6 +2107,7 @@ const ALL_TABS = [
   { id: 'access',       label: 'Access',       adminOnly: true  },
   { id: 'integrations', label: 'Integrations', adminOnly: true  },
   { id: 'mcp-keys',     label: 'MCP Keys',     adminOnly: false },
+  { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false, requires: 'permissions_matrix' },
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
