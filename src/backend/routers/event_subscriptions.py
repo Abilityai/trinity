@@ -192,16 +192,16 @@ async def create_event_subscription(
     Permission check: the subscribing agent must have permission to call
     the source agent (via agent_permissions).
     """
-    # Validate source agent exists
-    owner = db.get_agent_owner(data.source_agent)
-    if not owner:
-        raise HTTPException(status_code=400, detail=f"Source agent '{data.source_agent}' not found")
-
-    # Check agent_permissions: subscriber must be permitted to call source
-    # (This ensures the existing permission model gates event subscriptions)
-    if name != data.source_agent:  # Self-subscription always allowed
+    # Validate the source agent and the subscriber's permission to call it.
+    # For a cross-agent subscription, collapse "source not found" (was a 400)
+    # and "not permitted" (403) into a single uniform 403 so the body's
+    # source_agent can't be used as an existence oracle (#186). Self-subscription
+    # is always allowed — the subscribing agent {name} is owner-validated by the
+    # OwnedAgent dependency, so it necessarily exists.
+    if name != data.source_agent:
+        source_exists = db.get_agent_owner(data.source_agent) is not None
         is_permitted = db.is_agent_permitted(name, data.source_agent)
-        if not is_permitted:
+        if not (source_exists and is_permitted):
             raise HTTPException(
                 status_code=403,
                 detail=(

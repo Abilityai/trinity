@@ -9,9 +9,13 @@
 #                  up -d backend frontend mcp-server scheduler
 #
 # What this does:
-#   * Bind-mounts the host's `src/backend/enterprise/` (populated by
-#     `git submodule update --init --recursive` before compose runs)
-#     into `/app/enterprise/` inside the container.
+#   * Bind-mounts the host's `src/backend/enterprise/` into
+#     `/app/enterprise/` inside the container. Populate it BEFORE compose
+#     runs — since #1443 the submodule is `update = none`, so a plain
+#     `--init` silently skips it; set the one-time local override first:
+#       git config submodule.src/backend/enterprise.update checkout
+#       git submodule update --init --recursive src/backend/enterprise
+#     (full recipe: docs/ENTERPRISE.md)
 #   * Python's import path is `/app` (Dockerfile WORKDIR), so the file
 #     `/app/enterprise/backend/__init__.py` resolves the conditional
 #     `from enterprise.backend import register_enterprise` in main.py.
@@ -26,7 +30,8 @@
 #     COPY (even guarded by an ARG).
 #   * Updating to a new enterprise SHA only requires
 #     `git submodule update --remote && docker compose up -d backend` —
-#     no rebuild.
+#     no rebuild. (Requires the `update = checkout` local override above —
+#     `--remote` also respects `update = none` and silently skips, #1443.)
 #
 # For an air-gapped customer who needs a self-contained tarballed image,
 # we'll add a Dockerfile.enterprise variant + build-arg gate as a

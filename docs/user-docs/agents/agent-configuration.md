@@ -8,7 +8,15 @@ Each agent has independent configuration options that control its behavior, reso
 
 ### The Settings Tab
 
-The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Its first section is **Guardrails** (see [Agent Guardrails](agent-guardrails.md)); more configuration sections will move here over time. Until then, the settings below are managed from the agent header controls, toggles on the Dashboard and Agents pages, or the API.
+The Agent Detail page has a **Settings** tab (visible to owners only) -- a sectioned home for per-agent configuration. Current sections: **Guardrails** (see [Agent Guardrails](agent-guardrails.md)), **Parallel Capacity** (below), and **Expose via MCP** (publish the agent as a dedicated MCP tool — see [MCP Server](../integrations/mcp-server.md#dedicated-agent-tools-expose-via-mcp)). The remaining settings below are managed from the agent header controls, toggles on the Dashboard and Agents pages, or the API.
+
+### Parallel Capacity
+
+How many tasks the agent may run concurrently (`max_parallel_tasks`, default 3). Work beyond the limit queues and drains as slots free up.
+
+- Set it in the Settings tab's **Parallel Capacity** section; the panel shows current slot usage ("using X / Y slots").
+- **Fleet ceiling (admin):** an admin caps the whole fleet via `GET`/`PUT /api/settings/max-parallel-tasks-ceiling` (default 10, range 1–32). Owners pick any value up to the ceiling. If an agent's stored value exceeds a later-lowered ceiling, the stored value is kept but the *effective* limit is clamped to the ceiling — the panel shows a notice when this applies.
+- API: `GET /api/agents/{name}/capacity` returns the stored value, the ceiling, and the effective limit.
 
 ### Autonomy Mode
 
@@ -93,6 +101,9 @@ Set via `runtime.type` in `template.yaml`.
 
 - `claude-code` (default)
 - `gemini-cli`
+- `codex` (OpenAI Codex)
+
+See [Agent Runtimes](agent-runtimes.md) for capability differences (session resume, cost reporting, MCP support).
 
 ## For Agents
 

@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 80 tools for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication.
+Trinity's MCP server exposes 93 tools for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -44,7 +44,7 @@ Add Trinity as an MCP server in your Claude Code configuration:
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` | 19 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT |
+| `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT, runtime-data export/import, compatibility report |
 | `chat.ts` | 4 | Chat (gateway-timeout safe), fan-out, history, logs |
 | `schedules.ts` | 8 | Schedule CRUD and execution history |
 | `executions.ts` | 3 | Execution queries, async polling, activity monitoring |
@@ -57,13 +57,29 @@ Add Trinity as an MCP server in your Claude Code configuration:
 | `notifications.ts` | 1 | Agent-to-platform notifications |
 | `events.ts` | 4 | Agent event pub/sub |
 | `docs.ts` | 1 | Agent documentation |
-| `channels.ts` | 2 | Channel group discovery + proactive group messaging |
+| `channels.ts` | 2 | Channel group discovery + proactive group messaging (Telegram and Slack) |
 | `messages.ts` | 1 | Proactive user messaging by verified email |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
 | `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 2 | `list_operator_queue`, `get_operator_queue_item` — read-only Operating Room queue |
+| `operator_queue.ts` | 3 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` — read and resolve Operating Room queue items |
+| `git.ts` | 6 | Deterministic git operations — status, sync, log, pull, sync-state, and the destructive reset-to-main recovery |
+| `pipelines.ts` | 2 | Read-only introspection of an agent's self-published pipelines |
+| `reports.ts` | 1 | `report` — publish a structured report to the dashboard |
+
+### Dedicated Agent Tools (Expose via MCP)
+
+An owner can publish an agent as its own first-class MCP tool. On the agent's **Settings** tab, the **Expose via MCP** section has a toggle; when enabled, the MCP server registers a dedicated `chat_with_<slug>` tool (the slug is derived from the agent name, with a short suffix on name collisions — the resolved tool name is shown next to the toggle).
+
+- No restart needed — the MCP server picks up the change on its next poll, and connected MCP clients see the tool appear (or disappear) within a few seconds.
+- The tool behaves exactly like `chat_with_agent` with the agent name pre-filled, including idempotency and timeout handling.
+- Exposure publishes the *tool*, not access: callers still need ownership or a share to actually chat with the agent.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agents/{name}/mcp-exposed` | GET | Exposure flag + the resolved `tool_name` |
+| `/api/agents/{name}/mcp-exposed` | PUT | Toggle exposure (`{"enabled": true}`, owner-only) |
 
 ### Key Tools Worth Knowing
 

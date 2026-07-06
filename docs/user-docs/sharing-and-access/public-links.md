@@ -12,7 +12,7 @@ Shareable URLs that let unauthenticated users chat with agents. Supports optiona
 
 ## How It Works
 
-1. Open the agent detail page and go to the **Sharing** tab.
+1. Open the agent detail page and go to the **Sharing** tab. Public links live under **Distribution → Public links**.
 2. Click **Create Public Link**.
 3. Configure the link: email verification on/off, rate limits, custom welcome message.
 4. Copy the generated URL and share it with recipients.
@@ -20,6 +20,10 @@ Shareable URLs that let unauthenticated users chat with agents. Supports optiona
 6. If email verification is enabled: the user enters their email, receives a verification code, verifies, then chats.
 7. Conversations persist -- the user can return later and continue where they left off.
 8. Click **New Conversation** to start a fresh session.
+
+### Model and Instructions for Public Chats
+
+Two per-agent settings on the Sharing tab shape public-link conversations (and channel chats) without touching the agent's core configuration: the **Public chat model** override and the **Additional instructions — public & channel chats only** field. Both apply to public links, Slack/Telegram/WhatsApp, and paid chat — never to the owner's own chats or schedules. See [Agent Sharing & Access](agent-sharing.md#public-chat-model).
 
 ### Chat History for Logged-In Users
 

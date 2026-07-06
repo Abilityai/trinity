@@ -670,6 +670,21 @@ class AgentCapacityUpdate(BaseModel):
     max_parallel_tasks: int
 
 
+class BrainOrbSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/brain-orb (trinity-enterprise#85).
+
+    Partial update: only non-None booleans are written. `clear` lists flag
+    names ("enabled" / "voice_enabled" / "write_enabled") whose stored
+    override should be deleted, reverting that flag to its env/default value
+    — without it the BRAIN_ORB_* env var is silently dead once a DB row
+    exists. A flag may not appear in both a boolean field and `clear` (400).
+    """
+    enabled: Optional[bool] = None
+    voice_enabled: Optional[bool] = None
+    write_enabled: Optional[bool] = None
+    clear: Optional[List[str]] = None
+
+
 # Max length for the public/channel custom-instructions fragment (#1205).
 PUBLIC_CHANNEL_PROMPT_MAX_LEN = 4000
 

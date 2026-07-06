@@ -205,6 +205,18 @@
   - `src/backend/routers/subscriptions.py` - manual sub→sub under lock + key-rollover fan-out
 - **Known limitations**: cross-worker race on the process-local `agent_switch_lock` (prod `--workers 2`) is flagged for #1166/#799 (escalate to Redis `SETNX`); a bulk `delete_subscription` still leaves the deleted token live until next start (pre-existing, out of scope). Both self-heal via the durable override / `check_api_key_env_matches` reconciliation.
 
+### 20.7 Enumeration Hardening — Differential-Response Oracles (#186)
+- **Status**: ✅ Implemented (2026-07-04)
+- **GitHub Issue**: #186 (Epic #1054 Security Hardening) — UnderDefense pentest 3.3.3 (CVSS 2.0 Low)
+- **Description**: Closed two enumeration oracles built from differential API responses. (1) **User (email) enumeration** — `POST /api/auth/email/request` returned a distinct body (`"Verification code sent…"` + `expires_in_seconds`), a whitelist-only 429, and a slower whitelisted latency (blocking SMTP send). (2) **Agent enumeration** — the agent-access dependency family (and routers re-implementing it ad-hoc) returned `404 "Agent not found"` for a non-existent agent but `403 "Access denied"` for an existing-but-inaccessible one across 30+ endpoints; some `agent_config` GETs had no access check at all (404-vs-200 oracle + read-hole); the MCP `chat.ts` layer additionally **disclosed the owner username**.
+- **Fix**:
+  - **Deps (`dependencies.py`)**: all four helpers return a **uniform 404**, evaluating existence AND access before branching (equal timing) and running `_enforce_connector_scope` first. See architecture Invariant #8 (self-uniform rule).
+  - **Email (`routers/auth.py`)**: identical generic body/status for all branches; over-limit returns the generic 200 (WARN-logged, no 429); email dispatched fire-and-forget (latency parity). See auth requirements §2.1.
+  - **Router sweep**: `avatar.py` (→ `OwnedAgentByName`), `nevermined.py` (uniform 404 helpers), `event_subscriptions.py` (source-agent 400/403 → uniform 403), `schedules.py` webhook endpoints (→ `AuthorizedAgent`), `agent_config.py` capabilities/timeout/public-channel-model/guardrails GETs (→ `AuthorizedAgentByName`, closing the authz hole).
+  - **MCP (Invariant #13)**: `chat.ts checkAgentAccess` returns one uniform reason and no owner username; `reports.ts`/`messages.ts` consumer classifiers treat the dep's 404 as not-authorized; `nevermined.ts` reports `configured:false` for an inaccessible agent (enumeration-safe).
+- **Contract note**: access-first inline handlers stay **uniform 403** (already self-uniform); `DELETE /{agent_name}` stays 403 (system-agent semantics). The rule is *self-uniform, never 404-then-403* — not "always 404".
+- **Tests**: `tests/unit/test_186_enumeration_uniformity.py` (real-DB dep uniformity + email body/no-429 + Tier-4 wiring guard); flipped asserts in `tests/test_access_control.py` and dep-override unit tests.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)

@@ -42,14 +42,22 @@ def _await(coro):
 # paid.py — no settle on cancel (CRITICAL money bug)
 # ---------------------------------------------------------------------------
 class _PaidRequest:
-    def __init__(self):
-        self.headers = {"payment-signature": "tok-abc"}
+    def __init__(self, token: str = "tok-abc"):
+        self.headers = {"payment-signature": token}
         self.base_url = "http://localhost/"
 
 
 def _drive_paid(exec_status: str):
     """Drive paid_chat to the post-execute branch with a scripted result status.
-    Returns (response_json, settle_mock)."""
+    Returns (response_json, settle_mock).
+
+    Each status uses a distinct (payment-signature, message) pair so the #1018
+    idempotency key — sha256(token \\x00 body) over the REAL persistent
+    ``database.db`` (idempotency_service is not mocked) — is unique per test.
+    A shared key made these order-dependent: if the success case ran first it
+    left a completed+settled snapshot that the cancelled/failed cases then
+    replayed as ``status="success"`` (regression-diff flake under pytest-randomly).
+    """
     import routers.paid as paid
 
     config = SimpleNamespace(
@@ -85,7 +93,11 @@ def _drive_paid(exec_status: str):
         patch.object(paid, "get_nevermined_payment_service", return_value=payment_service),
         patch.object(paid, "get_task_execution_service", return_value=task_service),
     ):
-        resp = _await(paid.paid_chat("agent-a", SimpleNamespace(message="hi", session_id=None), _PaidRequest()))
+        resp = _await(paid.paid_chat(
+            "agent-a",
+            SimpleNamespace(message=f"hi-{exec_status}", session_id=None),
+            _PaidRequest(token=f"tok-{exec_status}"),
+        ))
     # The success path returns a plain dict; the failed/cancelled path returns a
     # JSONResponse (whose body is the JSON we want to inspect).
     if hasattr(resp, "body"):

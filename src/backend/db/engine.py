@@ -45,6 +45,13 @@ def is_sqlite(url: str | None = None) -> bool:
 
 
 def _build_engine(url: str) -> Engine:
+    # hide_parameters=True: keep bound values OUT of DBAPIError.__str__ (the
+    # `[parameters: [...]]` tail) so a statement error's traceback can't leak
+    # user content — chat message bodies, emails, credentials — into logs when
+    # a caller logs it with exc_info=True / logger.exception (#1444). The masking
+    # this platform does at the app layer is defeated if SQLAlchemy re-prints the
+    # values in an error; this closes that class engine-wide. Load-bearing for
+    # the fail-loud persistence path in routers/chat.py — do not remove.
     if make_url(url).get_backend_name() == "sqlite":
         # NullPool: one connection per checkout, opened and closed on demand —
         # matches the legacy connection.py semantics exactly (no shared
@@ -56,6 +63,7 @@ def _build_engine(url: str) -> Engine:
             poolclass=NullPool,
             connect_args={"timeout": 30.0, "check_same_thread": False},
             future=True,
+            hide_parameters=True,
         )
     # Server-based backends (PostgreSQL): real connection pooling.
     return create_engine(
@@ -64,6 +72,7 @@ def _build_engine(url: str) -> Engine:
         max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
         pool_pre_ping=True,
         future=True,
+        hide_parameters=True,
     )
 
 

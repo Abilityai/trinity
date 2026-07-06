@@ -107,13 +107,14 @@ class TestEmailLoginRequest:
             auth=False
         )
 
-        # Should return 200 (success) to prevent email enumeration
-        # OR 429 (rate limited) if too many requests
-        assert_status_in(response, [200, 429])
-
-        if response.status_code == 200:
-            data = response.json()
-            assert "success" in data or "message" in data
+        # #186: an unknown (non-whitelisted) email always returns the generic 200
+        # body — never a 429 — so a repeat-request status can't be used as a
+        # membership oracle. (The old dead 429 branch is removed.)
+        assert_status(response, 200)
+        data = response.json()
+        assert "success" in data or "message" in data
+        # The generic body must NOT carry the whitelisted-only fields.
+        assert "expires_in_seconds" not in data
 
     def test_request_code_invalid_email_format_accepted_for_security(self, unauthenticated_client: TrinityApiClient):
         """POST /api/auth/email/request accepts any email format for security (prevent enumeration)."""

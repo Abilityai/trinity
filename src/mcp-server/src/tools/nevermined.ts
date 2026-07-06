@@ -96,6 +96,11 @@ export function createNeverminedTools(
           const result = await apiClient.getNeverminedConfig(params.agent_name);
           return JSON.stringify(result, null, 2);
         } catch (error: any) {
+          // #186: the backend read-access check now returns a uniform 404 for a
+          // non-existent OR inaccessible agent (was 403 for inaccessible). So an
+          // inaccessible agent is reported here as `configured: false`, same as a
+          // genuinely-unconfigured one — intentional and enumeration-safe (the
+          // caller cannot distinguish inaccessible / non-existent / unconfigured).
           if (error?.response?.status === 404) {
             return JSON.stringify({ configured: false, agent_name: params.agent_name }, null, 2);
           }

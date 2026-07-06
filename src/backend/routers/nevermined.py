@@ -24,27 +24,36 @@ router = APIRouter(prefix="/api/nevermined", tags=["nevermined"])
 logger = logging.getLogger(__name__)
 
 
-def _require_agent_exists(agent_name: str):
-    """Verify the agent exists in the system."""
+def _agent_exists(agent_name: str) -> bool:
+    """True if the agent exists in the system (container or ownership row)."""
     from services.docker_service import get_agent_by_name
-    if not get_agent_by_name(agent_name) and not db.get_agent_owner(agent_name):
-        raise HTTPException(status_code=404, detail="Agent not found")
+    return bool(get_agent_by_name(agent_name)) or bool(db.get_agent_owner(agent_name))
 
 
 def _require_read_access(agent_name: str, current_user: User):
-    """Verify the user can view agent payment config (owner, shared, or admin)."""
-    _require_agent_exists(agent_name)
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    """Verify the user can view agent payment config (owner, shared, or admin).
+
+    Uniform 404 for both non-existent and inaccessible agents so config
+    presence can't be used as an existence oracle (#186).
+    """
+    # Evaluate existence AND access unconditionally (no short-circuit) so the
+    # query count — hence timing — is identical for the non-existent and the
+    # existing-but-inaccessible case, mirroring _require_write_access and the
+    # dependencies.py helpers (#186 equal-query-count discipline).
+    exists = _agent_exists(agent_name)
+    allowed = db.can_user_access_agent(current_user.username, agent_name)
+    if not (exists and allowed):
+        raise HTTPException(status_code=404, detail="Agent not found")
 
 
 def _require_write_access(agent_name: str, current_user: User):
-    """Verify the user can modify agent payment config (owner or admin only)."""
-    _require_agent_exists(agent_name)
-    if current_user.role == "admin":
-        return
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Owner access required")
+    """Verify the user can modify agent payment config (owner or admin only).
+
+    Uniform 404 for both non-existent and unowned agents (#186).
+    """
+    allowed = current_user.role == "admin" or db.can_user_share_agent(current_user.username, agent_name)
+    if not (_agent_exists(agent_name) and allowed):
+        raise HTTPException(status_code=404, detail="Agent not found")
 
 
 def _check_sdk():
@@ -160,8 +169,15 @@ async def retry_settlement(
 ):
     """Retry a failed settlement (admin only).
 
-    Looks up the original payment log entry, retrieves agent credentials,
-    and attempts settlement again.
+    Honest not-implemented (#1018): server-side retry is not supported because the
+    payer's x402 access token is never stored (it is a whole-plan-budget bearer
+    credential — storing it durably is the Tier 2 follow-up to #1018, pending a
+    security review). This used to return HTTP 200 "Settlement retry queued" while
+    doing nothing — a misleading stub. The workable path today is client-driven:
+    the caller re-presents the same ``payment-signature`` to
+    ``POST /api/paid/{agent}/chat``, which replays the completed work
+    (Idempotency-Key, #1018) and re-attempts settlement deterministically via the
+    ``payment:{agent_request_id}`` effect guard (#1084) — no re-charge, no re-run.
     """
     _check_sdk()
     if current_user.role != "admin":
@@ -174,17 +190,18 @@ async def retry_settlement(
     if log_entry.action != "settle_failed":
         raise HTTPException(status_code=400, detail="Only failed settlements can be retried")
 
-    # Get agent config with decrypted key
-    config_data = db.get_nevermined_config_with_key(log_entry.agent_name)
-    if not config_data:
-        raise HTTPException(status_code=404, detail="Agent Nevermined config not found")
+    logger.info(
+        f"retry-settlement requested for {log_id} (agent '{log_entry.agent_name}') "
+        f"by {current_user.username} — returning 501 (server-side retry not supported)"
+    )
 
-    logger.info(f"Retrying settlement {log_id} for agent '{log_entry.agent_name}' by {current_user.username}")
-
-    return {
-        "detail": "Settlement retry queued",
-        "log_id": log_id,
-        "agent_name": log_entry.agent_name,
-        "note": "Manual settlement retry requires the original access token, which is not stored. "
-                "Use the Nevermined dashboard to reconcile unsettled transactions.",
-    }
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Server-side settlement retry is not supported: the payer access token "
+            "is not stored. Ask the caller to re-present the same payment-signature to "
+            "POST /api/paid/{agent}/chat — it replays the completed work and re-attempts "
+            "settlement without re-charging. Durable server-side retry is tracked as a "
+            "follow-up to #1018."
+        ),
+    )
