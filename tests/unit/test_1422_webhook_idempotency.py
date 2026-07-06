@@ -37,6 +37,10 @@ class _FakeSchedule:
     name = "nightly"
     message = "do the thing"
     webhook_enabled = True
+    # ent#77: signature auth off by default (matches the real Schedule model);
+    # these idempotency tests exercise the unauthenticated path.
+    webhook_auth_enabled = False
+    webhook_secret_encrypted = None
 
 
 class _FakeResp:
