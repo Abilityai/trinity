@@ -484,6 +484,22 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // ent#84: one gated read for the fleet permissions matrix — returns both
+    // axes (accessible, non-system agents) and every caller→target grant edge
+    // among them with provenance (granted_by / granted_at). Entitlement-gated
+    // enterprise endpoint (permissions_matrix); 404/403 in OSS/unentitled
+    // builds — the Settings tab is hidden then, so it's never called there.
+    async getPermissionsMatrix() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/enterprise/permissions-matrix', {
+        headers: authStore.authHeader
+      })
+      return {
+        agents: response.data.agents || [],
+        edges: response.data.edges || []
+      }
+    },
+
     // Session Activity Actions
     async getSessionActivity(name) {
       const authStore = useAuthStore()

@@ -196,6 +196,14 @@
 - **Status**: ❌ Removed (2025-12-23)
 - **Reason**: Individual agent planning deferred to orchestrator-level. Claude Code handles task management internally.
 
+### 9.8 Dashboard Grid View (trinity-enterprise#47)
+- **Status**: ✅ Implemented (2026-07-06)
+- **Description**: Third dashboard mode (Grid / Graph / Timeline) — a magnetic tile canvas: rich 384×216 landscape agent tiles snapping to a sparse, unbounded lattice the operator arranges freely, on the same pan/zoom dotted-canvas language as the graph view. Not the default (Timeline remains default for new users); selection persists to localStorage.
+- **Key Features**: iPhone-style drag with live socket preview + swap-with-preview; Tidy up / Reset; keyboard arrow reorder; per-user layout (`agent → {col,row}`, localStorage v1, self-healing); five-zone tile (identity with half-out avatar, adaptive chip strip with live working timer, Activity·14d stacked-by-trigger + Context·7d trend charts, success micro-meter + stats, Run/Auto toggles); system agent keeps its purple treatment; `prefers-reduced-motion` honored.
+- **Performance (first-class)**: skeleton-first render from `/api/agents`; per-tile analytics hydrate lazily (viewport-gated, concurrency-capped) into the existing `(agent, window)` cache with stale-while-revalidate; batch endpoints for chip data (sync-health, operator-queue) on a visibility-aware poll that tears down when the mode is inactive; viewport culling for 50+ fleets. **No new backend endpoints** — reads `/api/agents/{name}/analytics` (#1107), fleet context/execution/slot stats, `/api/agents/sync-health` (#389), operator-queue pending.
+- **Out of scope (follow-ups)**: fleet KPI strip; "Needs your attention" + live-activity right rail.
+- **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md`
+
 ---
 
 ---
