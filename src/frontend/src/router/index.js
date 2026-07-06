@@ -173,6 +173,12 @@ const routes = [
     component: () => import('../views/enterprise/Audit.vue'),
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
+  {
+    path: '/enterprise/client-portal',
+    name: 'EnterpriseClientPortal',
+    component: () => import('../views/enterprise/ClientPortal.vue'),
+    meta: { requiresAuth: true, requiresEntitlement: 'client_portal', title: 'Client Portal' }
+  },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {
     path: '/m',
