@@ -6,6 +6,19 @@ External event triggers and internal execution endpoints for programmatic agent 
 
 ## Endpoints
 
+### Schedule Webhook Triggers (WEBHOOK-001)
+
+Expose a public URL that fires an agent schedule from an external system (CI/CD, CRM, monitoring) — no Trinity account or JWT needed; a 256-bit opaque token in the URL is the credential.
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/agents/{name}/schedules/{id}/webhook` | POST | JWT | Generate (or rotate) a webhook token for a schedule |
+| `/api/agents/{name}/schedules/{id}/webhook` | GET | JWT | Get the current token status + URL |
+| `/api/agents/{name}/schedules/{id}/webhook` | DELETE | JWT | Revoke the token (old URL immediately 404s) |
+| `/api/webhooks/{token}` | POST | Token (in URL) | Public trigger — returns `202 Accepted`; optional `{"context": "..."}` body (≤4000 chars) is appended to the schedule message |
+
+**Creation precondition (#1445):** creating a schedule (`POST /api/agents/{name}/schedules`) and generating a webhook token both require the target agent to **exist and be live** (not deleted). Calling either on a nonexistent or deleted agent returns **404 Not Found**; callers without access to the agent get **403 Forbidden** regardless of whether the agent exists. This guarantees a webhook URL always points at a schedule of a live agent — you cannot mint a token that would later 404 at trigger time.
+
 ### Internal Execution (no auth -- internal network only)
 
 | Endpoint | Method | Description |

@@ -39,6 +39,32 @@ def _delete_schedule(api_client: TrinityApiClient, agent_name: str, schedule_id:
 
 
 # ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def webhook_agent(api_client: TrinityApiClient):
+    """A real agent with a live `agent_ownership` row, for the whole module.
+
+    #1445: schedule/webhook creation is now gated on a live ownership row, so
+    every test that calls `_create_test_schedule` (asserts 201) needs a real
+    agent, not the name-only `test_agent_name` fixture (which mints no
+    ownership row → orphan schedules whose tokens 404). Mirrors the #1423
+    throwaway-agent pattern: `POST /api/agents` and use it immediately — a
+    webhook 202 needs only the ownership row + scheduler, NOT a running
+    container, so there is no flaky running-wait. One agent per module.
+    """
+    agent = f"test-webhook-{uuid.uuid4().hex[:6]}"
+    created = api_client.post("/api/agents", json={"name": agent})
+    if created.status_code not in (200, 201):
+        pytest.skip(f"could not create webhook test agent: {created.text}")
+    try:
+        yield agent
+    finally:
+        api_client.delete(f"/api/agents/{agent}")
+
+
+# ---------------------------------------------------------------------------
 # Webhook CRUD (authenticated)
 # ---------------------------------------------------------------------------
 
@@ -46,13 +72,13 @@ class TestWebhookGeneration:
     """Webhook token generation, status, and revocation endpoints."""
 
     def test_generate_webhook_creates_token(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             assert_status(resp, 200)
             data = assert_json_response(resp)
@@ -61,86 +87,86 @@ class TestWebhookGeneration:
             assert data["webhook_enabled"] is True
             assert "/api/webhooks/" in data["webhook_url"]
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_generate_webhook_twice_changes_url(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
-            r1 = api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
-            r2 = api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            r1 = api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
+            r2 = api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
             assert_status(r1, 200)
             assert_status(r2, 200)
             assert r1.json()["webhook_url"] != r2.json()["webhook_url"]
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_get_webhook_status_no_token(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
-            resp = api_client.get(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            resp = api_client.get(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
             assert_status(resp, 200)
             data = resp.json()
             assert data["has_token"] is False
             assert data["webhook_enabled"] is False
             assert data["webhook_url"] is None
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_get_webhook_status_after_generate(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
-            api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
-            resp = api_client.get(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
+            resp = api_client.get(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
             assert_status(resp, 200)
             data = resp.json()
             assert data["has_token"] is True
             assert data["webhook_enabled"] is True
             assert data["webhook_url"] is not None
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_revoke_webhook_clears_token(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
-            api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
             resp_del = api_client.delete(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             assert_status(resp_del, 204)
             resp_get = api_client.get(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             data = resp_get.json()
             assert data["has_token"] is False
             assert data["webhook_url"] is None
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_generate_webhook_unknown_schedule_404(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         resp = api_client.post(
-            f"/api/agents/{test_agent_name}/schedules/nonexistent-id/webhook"
+            f"/api/agents/{webhook_agent}/schedules/nonexistent-id/webhook"
         )
         assert_status(resp, 404)
 
-    def test_webhook_endpoints_require_auth(self, test_agent_name: str):
+    def test_webhook_endpoints_require_auth(self, webhook_agent: str):
         import httpx
         base = "http://localhost:8000"
         r = httpx.post(
-            f"{base}/api/agents/{test_agent_name}/schedules/any-id/webhook"
+            f"{base}/api/agents/{webhook_agent}/schedules/any-id/webhook"
         )
         assert r.status_code == 401
 
@@ -165,35 +191,35 @@ class TestWebhookTrigger:
         assert resp.status_code == 404
 
     def test_disabled_webhook_returns_403(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             gen_resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             webhook_url = gen_resp.json()["webhook_url"]
             token = webhook_url.split("/api/webhooks/")[1]
 
             # Revoke → disabled
-            api_client.delete(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            api_client.delete(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
 
             resp = httpx.post(f"http://localhost:8000/api/webhooks/{token}")
             assert resp.status_code == 404  # token no longer exists in DB
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_valid_webhook_returns_202(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             gen_resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             webhook_url = gen_resp.json()["webhook_url"]
             token = webhook_url.split("/api/webhooks/")[1]
@@ -209,17 +235,17 @@ class TestWebhookTrigger:
                 assert data["status"] == "triggered"
                 assert data["schedule_id"] == sid
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_webhook_with_context_body(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             gen_resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             webhook_url = gen_resp.json()["webhook_url"]
             token = webhook_url.split("/api/webhooks/")[1]
@@ -231,17 +257,17 @@ class TestWebhookTrigger:
             )
             assert resp.status_code in (202, 503)
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_webhook_context_too_long_rejected(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             gen_resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             webhook_url = gen_resp.json()["webhook_url"]
             token = webhook_url.split("/api/webhooks/")[1]
@@ -253,18 +279,18 @@ class TestWebhookTrigger:
             )
             assert resp.status_code == 422
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_oversized_body_returns_413(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         """A body over the size cap is rejected (413) before it is parsed (#1424)."""
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
             gen_resp = api_client.post(
-                f"/api/agents/{test_agent_name}/schedules/{sid}/webhook"
+                f"/api/agents/{webhook_agent}/schedules/{sid}/webhook"
             )
             webhook_url = gen_resp.json()["webhook_url"]
             token = webhook_url.split("/api/webhooks/")[1]
@@ -281,7 +307,7 @@ class TestWebhookTrigger:
                 f"Expected 413 for oversized body, got {resp.status_code}"
             )
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_invalid_token_flood_is_rate_limited(self):
         """A flood of well-formed-but-unknown tokens is throttled per-IP (#1424).
@@ -312,23 +338,23 @@ class TestWebhookTrigger:
         assert retry_after_ok, "429 response is missing the Retry-After header"
 
     def test_old_token_invalid_after_regenerate(
-        self, api_client: TrinityApiClient, test_agent_name: str
+        self, api_client: TrinityApiClient, webhook_agent: str
     ):
         import httpx
-        schedule = _create_test_schedule(api_client, test_agent_name)
+        schedule = _create_test_schedule(api_client, webhook_agent)
         sid = schedule["id"]
         try:
-            r1 = api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            r1 = api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
             old_url = r1.json()["webhook_url"]
             old_token = old_url.split("/api/webhooks/")[1]
 
             # Regenerate
-            api_client.post(f"/api/agents/{test_agent_name}/schedules/{sid}/webhook")
+            api_client.post(f"/api/agents/{webhook_agent}/schedules/{sid}/webhook")
 
             resp = httpx.post(f"http://localhost:8000/api/webhooks/{old_token}")
             assert resp.status_code == 404
         finally:
-            _delete_schedule(api_client, test_agent_name, sid)
+            _delete_schedule(api_client, webhook_agent, sid)
 
     def test_soft_deleted_agent_webhook_returns_404_then_recovers(
         self, api_client: TrinityApiClient
@@ -377,4 +403,65 @@ class TestWebhookTrigger:
         finally:
             if sid:
                 _delete_schedule(api_client, agent, sid)
+            api_client.delete(f"/api/agents/{agent}")
+
+
+# ---------------------------------------------------------------------------
+# Creation gate — no orphan schedules (#1445)
+# ---------------------------------------------------------------------------
+
+class TestWebhookCreationGate:
+    """#1445: schedule/webhook creation is gated on a live owning agent.
+
+    An admin's `can_user_access_agent` returns True unconditionally, so before
+    this gate an admin could mint a schedule (and a real webhook token) on a
+    never-created agent — a token that then 404s deterministically at the
+    #1423 INNER-JOIN token lookup. The gate rejects creation up front, so a
+    webhook token always resolves to a schedule of a live agent.
+    """
+
+    def test_create_schedule_on_missing_agent_returns_404(
+        self, api_client: TrinityApiClient
+    ):
+        """Creating a schedule on a never-created agent now 404s (was 201 →
+        orphan). This is the exact fixture artifact behind the #1445 flaky
+        webhook 404s."""
+        ghost = f"test-1445-ghost-{uuid.uuid4().hex[:6]}"
+        data = {
+            "name": f"gate-{uuid.uuid4().hex[:8]}",
+            "cron_expression": "0 0 1 1 *",
+            "message": "should never be created",
+            "enabled": True,
+            "timezone": "UTC",
+        }
+        resp = api_client.post(f"/api/agents/{ghost}/schedules", json=data)
+        assert resp.status_code == 404, (
+            f"schedule on a non-existent agent must 404, got {resp.status_code}"
+        )
+
+    def test_generate_webhook_on_soft_deleted_agent_returns_404(
+        self, api_client: TrinityApiClient
+    ):
+        """Defense-in-depth: minting a token for a schedule whose agent is no
+        longer live 404s (a token that would 404 at trigger time is never
+        issued). Exercised via soft-delete since the gate prevents creating an
+        orphan schedule directly."""
+        agent = f"test-1445-del-{uuid.uuid4().hex[:6]}"
+        created = api_client.post("/api/agents", json={"name": agent})
+        if created.status_code not in (200, 201):
+            pytest.skip(f"could not create throwaway agent: {created.text}")
+
+        sid = None
+        try:
+            sid = _create_test_schedule(api_client, agent)["id"]
+            # Soft-delete the agent → is_agent_live(name) is now False.
+            assert api_client.delete(f"/api/agents/{agent}").status_code in (200, 204)
+
+            resp = api_client.post(
+                f"/api/agents/{agent}/schedules/{sid}/webhook"
+            )
+            assert resp.status_code == 404, (
+                f"generate_webhook on a soft-deleted agent must 404, got {resp.status_code}"
+            )
+        finally:
             api_client.delete(f"/api/agents/{agent}")

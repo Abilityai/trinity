@@ -424,6 +424,9 @@ class DatabaseManager:
     def is_agent_name_reserved(self, agent_name: str):
         return self._agent_ops.is_agent_name_reserved(agent_name)
 
+    def is_agent_live(self, agent_name: str):
+        return self._agent_ops.is_agent_live(agent_name)
+
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
 

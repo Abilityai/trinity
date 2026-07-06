@@ -1182,12 +1182,18 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now()}
 
 
-def _build_version_payload(voice_enabled: bool) -> dict:
+def _build_version_payload(
+    voice_enabled: bool, edition: str, enterprise_features: list
+) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
     Extracted from the FastAPI handler so the env-var → response mapping
     can be tested without pulling main.py's full router graph through
-    importlib (opentelemetry, slack_sdk, twilio, …).
+    importlib (opentelemetry, slack_sdk, twilio, …). Keep it stdlib-only:
+    the unit tests exec-slice this function out of the source, so any
+    dependency on module state (e.g. entitlement_service) would break
+    them — `edition`/`enterprise_features` are computed by the handler
+    and threaded in as parameters (#1443).
     """
     import os
     from pathlib import Path
@@ -1217,12 +1223,19 @@ def _build_version_payload(voice_enabled: bool) -> dict:
     return {
         "version": version,
         "platform": "trinity",
+        # Effective edition (#1443): mirrors `enterprise_features`
+        # non-emptiness — "enterprise" iff ≥1 enterprise module is
+        # registered AND entitled at runtime. TRINITY_OSS_ONLY=1 or a
+        # fully-failed registration reports "oss"; consult the boot log
+        # for mounted-but-degraded states.
+        "edition": edition,
+        "enterprise_features": enterprise_features,
         "components": {
             "backend": version,
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli"],
+        "runtimes": ["claude-code", "gemini-cli", "codex"],
         "build_date": os.getenv("BUILD_DATE", "unknown"),
         "git_commit": git_commit,
         "git_commit_short": git_commit_short,
@@ -1243,8 +1256,26 @@ async def get_version(current_user: User = Depends(get_current_user)):
     come from Dockerfile ARG/ENV wired through docker-compose
     `backend.build.args` and `scripts/deploy/start.sh`. Default to "unknown"
     when the build args are absent (local dev / volume-mount workflows).
+
+    `edition` (#1443) is the effective open-core edition: "enterprise" iff
+    `entitlement_service.list_entitled_features()` is non-empty (same source
+    as `enterprise_features` in GET /api/settings/feature-flags, so the two
+    surfaces can never diverge). It reflects runtime entitlement state, not
+    submodule presence on disk — a mounted-but-failed registration reports
+    "oss"; a partial registration reports "enterprise" with the surviving
+    modules listed in `enterprise_features`. See docs/ENTERPRISE.md.
     """
-    return _build_version_payload(VOICE_ENABLED and bool(GEMINI_API_KEY))
+    # Function-local import (matches routers/settings.py): the module
+    # global is rebound by `_set_for_testing`, so a top-level
+    # `from … import entitlement_service` would freeze the boot-time
+    # instance and bypass test stubs.
+    from services.entitlement_service import entitlement_service
+
+    features = entitlement_service.list_entitled_features()
+    edition = "enterprise" if features else "oss"
+    return _build_version_payload(
+        VOICE_ENABLED and bool(GEMINI_API_KEY), edition, features
+    )
 
 
 # User info endpoint

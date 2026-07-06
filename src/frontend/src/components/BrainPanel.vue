@@ -32,7 +32,8 @@
 
       <template v-if="!writeAvailable">
         <p class="text-sm text-gray-500 dark:text-gray-400">
-          Enable the Brain Orb write surface (<code class="text-xs">BRAIN_ORB_WRITE_ENABLED</code>) to configure post-voice processing.
+          Enable the Brain Orb write surface (Settings → General → Brain Orb → KB-write actions)
+          to configure post-voice processing.
         </p>
       </template>
       <template v-else-if="!running">

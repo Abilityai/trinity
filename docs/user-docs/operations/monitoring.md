@@ -37,9 +37,9 @@ The tab shows summary cards (Total Agents, Healthy, Degraded, Unhealthy, Critica
 
 ### Enabling Monitoring
 
-The periodic health-check loop is **disabled by default**. A status badge at the top of the Health tab shows the current state: "Monitoring Active" or "Monitoring Disabled".
+The periodic health-check loop is **disabled by default**. A status badge at the top of the Health tab shows the current state: "Monitoring Active" or "Monitoring Disabled", with an **Enable monitoring** / **Disable monitoring** button next to it (admin only) — no API call needed.
 
-Enable or disable it via the API (admin only):
+The same control is available via the API (admin only):
 
 ```
 POST /api/monitoring/enable

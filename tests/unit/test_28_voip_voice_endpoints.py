@@ -106,12 +106,13 @@ class TestVoiceNameEndpoint:
     def test_put_is_owner_gated(self, voice_client):
         client, app = voice_client
 
+        # #186: the owner dependency now denies with a uniform 404 (was 403).
         def _deny():
-            raise HTTPException(status_code=403, detail="Owner access required")
+            raise HTTPException(status_code=404, detail="Agent not found")
 
         app.dependency_overrides[get_owned_agent] = _deny
         r = client.put(f"/api/agents/{_AGENT}/voice/name", json={"voice_name": "Puck"})
-        assert r.status_code == 403
+        assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +167,10 @@ class TestVoipEnabledEndpoint:
     def test_is_owner_gated(self, voip_client):
         client, app = voip_client
 
+        # #186: the owner dependency now denies with a uniform 404 (was 403).
         def _deny():
-            raise HTTPException(status_code=403, detail="Owner access required")
+            raise HTTPException(status_code=404, detail="Agent not found")
 
         app.dependency_overrides[get_owned_agent_by_name] = _deny
         r = client.put(f"/api/agents/{_AGENT}/voip/enabled", json={"enabled": True})
-        assert r.status_code == 403
+        assert r.status_code == 404

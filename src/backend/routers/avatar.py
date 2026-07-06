@@ -6,6 +6,7 @@ REST endpoints for AI-generated agent avatars and emotion variants.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from database import db
-from dependencies import get_current_user
+from dependencies import OwnedAgentByName, get_current_user
 from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
@@ -25,6 +26,26 @@ router = APIRouter(prefix="/api/agents", tags=["avatars"])
 logger = logging.getLogger(__name__)
 
 AVATAR_DIR = Path("/data/avatars")
+
+
+def _avatar_path(agent_name: str, suffix: str) -> Path:
+    """Build a path under AVATAR_DIR from the URL-derived ``agent_name``, proven
+    contained within the root before use.
+
+    The mutating handlers authorize via the ``OwnedAgentByName`` dependency (#186)
+    rather than an inline ``db.get_agent_owner`` check; that dependency guarantees
+    the agent exists and is owned (and agent names are charset-restricted at
+    creation), so traversal is not reachable in practice — but the constraint now
+    lives in a callee that CodeQL's ``py/path-injection`` taint tracking can't
+    follow. This restores an explicit, statically-recognized barrier: normalize
+    with ``os.path.normpath`` then require the result stay under ``AVATAR_DIR``
+    (CodeQL SafeAccessCheck). Defense-in-depth at runtime; a uniform 404 on escape
+    preserves #186's no-existence-oracle contract."""
+    base = str(AVATAR_DIR)
+    fullpath = os.path.normpath(os.path.join(base, f"{agent_name}{suffix}"))
+    if not fullpath.startswith(base):
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return Path(fullpath)
 
 
 # #957: Map image-generation error_kind → (HTTP status, user-facing detail).
@@ -297,7 +318,7 @@ async def _generate_emotions_background(
     mid-loop the task aborts.
     """
     service = get_image_generation_service()
-    ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
+    ref_path = _avatar_path(agent_name, "_ref.png")
 
     logger.info(f"[AVATAR-002] Starting background emotion generation for {agent_name}")
 
@@ -325,7 +346,7 @@ async def _generate_emotions_background(
                 agent_name=agent_name,
             )
             if result.success and result.image_data:
-                emotion_path = AVATAR_DIR / f"{agent_name}_emotion_{emotion}.webp"
+                emotion_path = _avatar_path(agent_name, f"_emotion_{emotion}.webp")
                 emotion_path.write_bytes(optimize_avatar(result.image_data))
                 logger.info(
                     f"[AVATAR-002] Saved emotion '{emotion}' for {agent_name}: "
@@ -386,21 +407,14 @@ async def get_avatar_emotion(agent_name: str, emotion: str):
 
 @router.post("/{agent_name}/avatar/generate")
 async def generate_avatar(
-    agent_name: str,
+    agent_name: OwnedAgentByName,
     request: AvatarGenerateRequest,
-    current_user: User = Depends(get_current_user),
 ):
-    """Generate an avatar from an identity prompt using the image generation service."""
-    # Only owner/admin can generate
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Generate an avatar from an identity prompt using the image generation service.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can generate avatars")
-
+    Owner/admin only via the OwnedAgentByName dependency — a uniform 404 for both
+    non-existent and unowned agents (no existence oracle, #186).
+    """
     identity_prompt = request.identity_prompt.strip()
     if not identity_prompt:
         raise HTTPException(status_code=400, detail="identity_prompt cannot be empty")
@@ -427,20 +441,20 @@ async def generate_avatar(
 
     # Save optimized display avatar (.webp) and full-quality reference (.png)
     AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-    avatar_path = AVATAR_DIR / f"{agent_name}.webp"
-    ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
+    avatar_path = _avatar_path(agent_name, ".webp")
+    ref_path = _avatar_path(agent_name, "_ref.png")
     avatar_path.write_bytes(optimize_avatar(result.image_data))
     ref_path.write_bytes(result.image_data)  # Full quality PNG for Gemini input
 
     # Remove legacy .png display avatar if present
-    legacy_avatar = AVATAR_DIR / f"{agent_name}.png"
+    legacy_avatar = _avatar_path(agent_name, ".png")
     if legacy_avatar.exists():
         legacy_avatar.unlink()
 
     # Delete any existing emotion files (AVATAR-002) — new reference invalidates them
     for emotion in AVATAR_EMOTIONS:
         for ext in (".webp", ".png"):
-            ep = AVATAR_DIR / f"{agent_name}_emotion_{emotion}{ext}"
+            ep = _avatar_path(agent_name, f"_emotion_{emotion}{ext}")
             if ep.exists():
                 ep.unlink()
 
@@ -465,21 +479,14 @@ async def generate_avatar(
 
 @router.post("/{agent_name}/avatar/regenerate")
 async def regenerate_avatar(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: OwnedAgentByName,
 ):
-    """Regenerate avatar as a variation of the reference image."""
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Regenerate avatar as a variation of the reference image.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can regenerate avatars")
-
+    Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
+    """
     # Need a reference image and stored prompt
-    ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
+    ref_path = _avatar_path(agent_name, "_ref.png")
     if not ref_path.exists():
         raise HTTPException(status_code=404, detail="No reference image found. Generate an avatar first.")
 
@@ -505,7 +512,7 @@ async def regenerate_avatar(
         raise HTTPException(status_code=status, detail=detail)
 
     # Save as optimized display avatar only (reference stays the same)
-    avatar_path = AVATAR_DIR / f"{agent_name}.webp"
+    avatar_path = _avatar_path(agent_name, ".webp")
     avatar_path.write_bytes(optimize_avatar(result.image_data))
 
     now = datetime.now(timezone.utc).isoformat()
@@ -522,30 +529,23 @@ async def regenerate_avatar(
 
 @router.delete("/{agent_name}/avatar")
 async def delete_avatar(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: OwnedAgentByName,
 ):
-    """Remove avatar file and clear DB fields."""
-    owner = db.get_agent_owner(agent_name)
-    if not owner:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    """Remove avatar file and clear DB fields.
 
-    is_admin = current_user.role == "admin"
-    is_owner = owner["owner_username"] == current_user.username
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Only the agent owner can remove avatars")
-
+    Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
+    """
     # Delete files (display + reference + emotion variants, both formats)
     for ext in (".webp", ".png"):
-        p = AVATAR_DIR / f"{agent_name}{ext}"
+        p = _avatar_path(agent_name, ext)
         if p.exists():
             p.unlink()
-    ref_path = AVATAR_DIR / f"{agent_name}_ref.png"
+    ref_path = _avatar_path(agent_name, "_ref.png")
     if ref_path.exists():
         ref_path.unlink()
     for emotion in AVATAR_EMOTIONS:
         for ext in (".webp", ".png"):
-            ep = AVATAR_DIR / f"{agent_name}_emotion_{emotion}{ext}"
+            ep = _avatar_path(agent_name, f"_emotion_{emotion}{ext}")
             if ep.exists():
                 ep.unlink()
 

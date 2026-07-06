@@ -83,10 +83,18 @@ async function checkAgentAccess(
   // User-scoped keys: use existing ownership/sharing rules
   const callerOwner = authContext.userId;
 
+  // #186: a non-existent agent and an existing-but-inaccessible one MUST return
+  // a byte-identical reason, and we MUST NOT disclose the owner's username — a
+  // user-scoped caller could otherwise enumerate agents and learn who owns them.
+  const uniformDenied = {
+    allowed: false as const,
+    reason: `Agent '${targetAgentName}' not found or not accessible`,
+  };
+
   // Get target agent info
   const targetAgent = await client.getAgentAccessInfo(targetAgentName);
   if (!targetAgent) {
-    return { allowed: false, reason: `Target agent '${targetAgentName}' not found` };
+    return uniformDenied;
   }
 
   // Check access rules
@@ -105,12 +113,8 @@ async function checkAgentAccess(
     return { allowed: true };
   }
 
-  // Otherwise - denied
-  return {
-    allowed: false,
-    reason: `Access denied: Agent '${targetAgentName}' is owned by '${targetAgent.owner}' (not shared). ` +
-      `Caller '${callerOwner}' cannot access it.`
-  };
+  // Otherwise - denied (uniform reason, no owner disclosure)
+  return uniformDenied;
 }
 
 /**

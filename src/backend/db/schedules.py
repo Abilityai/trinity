@@ -282,6 +282,20 @@ class ScheduleOperations:
         if not self._agent_ops.can_user_access_agent(username, agent_name):
             return None
 
+        # #1445: no-orphan invariant enforced at the actual chokepoint.
+        # `can_user_access_agent` returns True unconditionally for admins with
+        # no existence check, so without this guard an admin could mint a
+        # schedule (and a real webhook token) on a never-created agent — whose
+        # token then 404s deterministically at `get_schedule_by_webhook_token`
+        # (INNER JOIN on agent_ownership, #1423). Refuse creation on an agent
+        # with no live ownership row so the invariant holds for every caller
+        # (router, MCP, system-manifest deploy, future/internal). The router
+        # maps this `None` to 403. Safe for the one direct caller today —
+        # system-manifest deploy creates the agent (register_agent_owner)
+        # before its schedules.
+        if not self._agent_ops.is_agent_live(agent_name):
+            return None
+
         schedule_id = self._generate_id()
         now = utc_now_iso()
 

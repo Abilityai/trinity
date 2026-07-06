@@ -13,6 +13,7 @@
 | Component | Back up? | Where it lives | Notes |
 |---|---|---|---|
 | `trinity.db` (SQLite) | **Yes — primary target** | Named volume `trinity_trinity-data` (dev) or bind-mount at `TRINITY_DATA_PATH` (prod) | Agents, schedules, chat history, credentials metadata, audit log |
+| PostgreSQL database | **Yes — if `DATABASE_URL` is set** | Bundled `trinity-postgres` container (dev) or your managed PostgreSQL (prod) | Same contents as `trinity.db`; back up with `pg_dump` (see below) instead of a file copy |
 | `.env` file | **Yes** | Host filesystem | **Not in git.** Losing it means losing `CREDENTIAL_ENCRYPTION_KEY`, which makes all encrypted credentials unrecoverable. |
 | Agent code | Not separately | Git repositories | Each agent's code lives in a git repo — already versioned there. |
 | Redis data | Not separately | Named volume `trinity_redis-data` | Ephemeral: JWT tokens, capacity counters. All regenerated on next start. |
@@ -47,6 +48,14 @@ docker run --rm \
 > ```
 
 The volume name prefix `trinity_` comes from the Docker Compose project name (the directory name). If you cloned Trinity into a differently-named directory, the prefix will differ — check with `docker volume ls | grep trinity`.
+
+> **PostgreSQL deployments:** if your instance runs with `DATABASE_URL` set, the state lives in PostgreSQL, not `trinity.db`. Back it up with `pg_dump` instead:
+> ```bash
+> # Bundled dev container
+> docker exec trinity-postgres pg_dump -U trinity trinity > ~/backups/trinity-pg-$(date +%Y%m%d-%H%M%S).sql
+> # Managed/external PostgreSQL: use your provider's snapshot tooling or pg_dump against the host
+> ```
+> Restore with `psql -U trinity trinity < backup.sql` into an empty database (services stopped first).
 
 ### Step 2: Back Up `.env`
 

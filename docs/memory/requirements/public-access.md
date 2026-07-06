@@ -218,6 +218,7 @@
   - Optional `context` field (max 4000 chars) appended to schedule message with framing wrapper to reduce prompt injection surface
   - All trigger events audit-logged with `triggered_by="webhook"` in execution records
   - O(1) token lookup via partial unique index on `agent_schedules.webhook_token`
+  - **Creation gated on a live owning agent (#1445)**: schedule creation and webhook generation are rejected (fail-loud **404**) when the agent has no live `agent_ownership` row (`deleted_at IS NULL`); non-owners get a uniform **403** regardless of existence (no enumeration oracle). Guarantees a webhook token always resolves to a schedule of a live agent — no orphan schedules whose tokens 404 at trigger time under the #1423 soft-delete-aware token lookup
 - **Database Changes**:
   - `agent_schedules.webhook_token TEXT` — nullable 43-char urlsafe token
   - `agent_schedules.webhook_enabled INTEGER DEFAULT 0`
@@ -381,9 +382,28 @@
 - **Requirement ID**: NVM-001
 - **Description**: Public x402 endpoint for external callers
 - **Endpoints**:
-  - `POST /api/paid/{agent_name}/chat` — 402/403/200 flow
+  - `POST /api/paid/{agent_name}/chat` — 402/403/200 flow; accepts `Idempotency-Key` (#1018)
   - `GET /api/paid/{agent_name}/info` — Public agent info + payment requirements
-- **Flow**: No header → 402; invalid token → 403; valid → verify → execute → settle → receipt
+- **Flow**: No header → 402; invalid token → 403; valid → verify → (idempotency gate) → execute → settle → receipt
+- **Settlement-ordering / honest status (#1018)**: `verify_payment` does **not** burn credits —
+  only `settle` does. When a settle fails after retries the endpoint keeps HTTP 200 + the delivered
+  `response` (deliver-then-reconcile) but the top-level `status` is **`"success_unsettled"`** (NOT the
+  old lying `"success"`), with `payment:{settled:false, settle_retry_needed:true, error}`. A concurrent
+  settle held by the #1084 effect guard returns `status:"success_unsettled"` +
+  `payment:{settled:false, settle_in_progress:true}` — the concurrently-running settle (holding the same
+  local `agent_request_id` guard claim) completes it once; the guard, not a provider token, is what
+  prevents a double-burn (`agent_request_id` is a Nevermined observability id, not an exactly-once token —
+  residual at-least-once retry tracked by #1408). A `failed` execution no longer echoes the response body
+  (a `cancelled` turn still does, #679).
+- **Idempotency (Invariant #18, #1018)**: the boundary accepts an optional `Idempotency-Key` header
+  but always keys on `sha256(payment-signature ∥ message)` (the native client-retry unit) — a client
+  re-POST replays the completed work and re-attempts settle rather than re-running the LLM (double cost).
+  In-flight duplicate → 409; a completed **settled** snapshot replays verbatim (`X-Idempotent-Replay: true`);
+  a completed **unsettled** snapshot re-drives `settle_payment_once` (deduped only against a *concurrent*
+  same-id settle via the `payment:{agent_request_id}` guard — not provider-idempotent; #1408) and
+  converges the stored snapshot to settled. A divergent
+  client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
+  never a constant collision).
 
 ### 23.4 Admin Configuration
 - **Status**: ✅ Implemented (2026-03-04)
@@ -394,7 +414,11 @@
   - `PUT /api/nevermined/agents/{name}/config/toggle`
   - `GET /api/nevermined/agents/{name}/payments`
   - `GET /api/nevermined/settlement-failures` (admin)
-  - `POST /api/nevermined/retry-settlement/{log_id}` (admin)
+  - `POST /api/nevermined/retry-settlement/{log_id}` (admin) — honest **501** (#1018): server-side
+    retry is unsupported because the payer access token is not stored (it is a whole-plan-budget bearer
+    credential). Previously a misleading 200 "queued" stub that did nothing. The workable path is
+    client-driven — re-present the same `payment-signature` to `/api/paid/{agent}/chat` (replays +
+    re-settles deterministically). Durable stored-credential server-side retry is a Tier 2 follow-up.
 
 ### 23.5 Frontend UI
 - **Status**: ✅ Implemented (2026-03-04)

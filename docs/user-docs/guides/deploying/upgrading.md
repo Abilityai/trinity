@@ -46,6 +46,8 @@ sqlite3 ~/backups/trinity-<timestamp>.db ".tables"
 # Expected: a list of table names, no errors
 ```
 
+> **PostgreSQL deployments** (instances running with `DATABASE_URL` set): back up with `pg_dump` instead of copying `trinity.db` — see [Backup and Restore](backup-and-restore.md). PostgreSQL schema migrations run automatically on backend boot, same as SQLite.
+
 ### Step 2: Pull Latest Changes
 
 ```bash
