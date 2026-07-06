@@ -1250,7 +1250,7 @@ async def _finalize_self_task(
         try:
             # Validate session exists and belongs to user
             session = db.get_chat_session(request.chat_session_id)
-            if session and session.get("user_id") == user_id:
+            if session and session.user_id == user_id:
                 # Add self-task result as a chat message
                 db.add_chat_message(
                     session_id=request.chat_session_id,
