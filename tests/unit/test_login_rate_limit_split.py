@@ -133,6 +133,13 @@ def auth_module(monkeypatch):
     deps_mod = types.ModuleType("dependencies")
     deps_mod.authenticate_user = lambda *a, **k: None
     deps_mod.create_access_token = lambda *a, **k: ""
+    # auth.py grew these imports via the #187 JWT-revocation/logout work; keep the
+    # dependencies stub in sync or `from dependencies import (...)` fails at import.
+    # None are exercised by the rate-limit paths — bare lambdas resolve the import.
+    deps_mod.get_current_user = lambda *a, **k: None
+    deps_mod.is_token_revoked = lambda *a, **k: False
+    deps_mod.oauth2_scheme = lambda *a, **k: None
+    deps_mod.revoke_token_jti = lambda *a, **k: None
     stubs["dependencies"] = deps_mod
 
     # Token must be a real Pydantic model — FastAPI validates response_model=
@@ -145,6 +152,10 @@ def auth_module(monkeypatch):
 
     models_mod = types.ModuleType("models")
     models_mod.Token = _Token
+    # auth.py also imports `User` (a `Depends(get_current_user)` param annotation,
+    # not a response_model) via the #187 logout endpoint — a bare class resolves
+    # the import; it is never instantiated on the rate-limit paths under test.
+    models_mod.User = type("User", (), {})
     stubs["models"] = models_mod
 
     services_pkg = types.ModuleType("services")
