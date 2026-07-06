@@ -86,9 +86,14 @@ clause was dropped because it false-fires in bulk on healthy queue-terminated ro
 `LIMIT 5000`) — a leading-edge regression tripwire, not a 90-day backfill auditor. `skipped` rows are excluded
 by the collector (they legitimately have no `completed_at`).
 
-**E-04** Queued rows have metadata *(Tier A, 🟡)* — ⏳ Phase 4, **#1077 (gated on #1450)**.
-`status='queued'` ⇒ `queued_at IS NOT NULL AND backlog_metadata IS NOT NULL AND json_valid(backlog_metadata)`.
-(Protects `backlog_service.drain_next` against `json.JSONDecodeError`.)
+**E-04** Queued rows have metadata *(Tier A, 🟡)* — ✅ **SHIPPED Phase 4, #1077** (registry id `E-04`; stacked on #1450).
+`status='queued'` ⇒ `queued_at IS NOT NULL AND backlog_metadata IS NOT NULL AND json_valid(backlog_metadata)`
+(the implemented predicate uses `json.loads`, catching `JSONDecodeError`/`TypeError`). Protects
+`backlog_service.drain_next` against `json.JSONDecodeError`. Reads the queued-row metadata `_collect_executions`
+captures, scoped strictly to `status='queued'` rows (never terminal — #1449-safe). Older-image DDL without the
+`queued_at`/`backlog_metadata` columns → skips the eid (fail-open). **SECURITY:** `observed_state`/`signal_query`
+report only the failed-predicate reason code (`queued_at_null`/`backlog_metadata_null`/`backlog_metadata_invalid_json`)
++ ids — never the raw `backlog_metadata` (may carry credentials; violations persist to `canary_violations`).
 
 **E-05** Dispatched rows have session *(Tier B ≤ 60 s, 🟡)* — Issue #106 guard.
 `status='running' AND started_at < now() - 60s` ⇒ `claude_session_id IS NOT NULL` (even just `'dispatched'`). If not, `mark_no_session_executions_failed` should have fired.
@@ -348,9 +353,14 @@ Every cleanup cycle completes within `poll_interval - 30s` (270 s). Exceeding = 
 ~1s tolerance (cross-worker / NTP jitter is not a bug). UTC-aware parse so a #1474 mixed naive/`Z` pair compares
 without raising; E-03 owns the NULL-`completed_at` case.
 
-**G-04** No credential leakage into backlog / logs *(Tier A, 🔴)* — ⏳ Phase 4, **#1077 (gated on #1450, rides E-04's read)**.
-`backlog_metadata` never contains raw credential values. Grep sampled rows for common patterns (`sk-`, `ghp_`, `xoxb-`); zero matches.
-(Folded into #1077 per gate decision; violations must report the matched pattern name + ids only, never the raw bytes.)
+**G-04** No credential leakage into backlog / logs *(Tier A, 🔴)* — ✅ **SHIPPED Phase 4, #1077** (registry id `G-04`; stacked on #1450, rides E-04's read).
+`backlog_metadata` never contains raw credential values. Regex-scans each queued row's `backlog_metadata` for
+common secret prefixes (`sk-`, `ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`, `xoxb-`, `xoxp-`, `AKIA`, `AIza`,
+`sk_live_`), word-boundary anchored so common substrings (e.g. "task-") don't false-fire; fires on any match.
+Scope note: the implemented check covers the **backlog** half of the catalog title (queued `backlog_metadata`) —
+log-line credential scanning is out of scope for #1077. Folded into #1077 per gate decision. **SECURITY:** one
+violation per row, reporting only the matched pattern NAME + ids — never the matched secret, surrounding bytes, or
+raw `backlog_metadata`.
 
 **G-05** Watchdog idempotence *(Tier A, 🔴)*
 Running cleanup twice back-to-back produces an empty second report. Failure here ⇒ oscillation / double-failing bug.

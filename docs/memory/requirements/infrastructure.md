@@ -268,13 +268,20 @@
   yields the same output. No LLM reasoning anywhere in the canary path.
 - **Phase 2 / 3 (shipped, #882)**: S-02, E-01, E-05, B-01 (Phase 2) and
   S-03, B-02, R-01 (Phase 3). E-06 shipped separately (#1472).
-- **Phase 4 (shipped, #1077)**: E-03 (completed rows populated —
+- **Phase 4 (shipped, #1077)**: four pure single-table predicates over
+  `schedule_executions`, no new source types. E-03 (completed rows populated —
   `completed_at IS NOT NULL`, `completed_at`-only predicate) and G-03 (clock
-  sanity — `started_at ≤ completed_at`, ~1s tolerance, UTC-aware parse), both
-  over a shared terminal-row collector (`_collect_terminal_rows`, windowed on
-  `started_at`, `LIMIT 5000`). The remaining Phase 4 pair — E-04 (queued-row
-  metadata integrity) and G-04 (no raw credentials in `backlog_metadata`) —
-  is gated on #1450's queued-read rework and lands with it.
+  sanity — `started_at ≤ completed_at`, ~1s tolerance, UTC-aware parse) ride a
+  shared terminal-row collector (`_collect_terminal_rows`, windowed on
+  `started_at`, `LIMIT 5000`). E-04 (queued-row metadata integrity —
+  `queued_at NOT NULL` AND `backlog_metadata` non-NULL + JSON-parseable) and
+  G-04 (no raw credentials in `backlog_metadata` — secret-prefix regex scan)
+  ride the queued-row metadata `_collect_executions` captures, scoped strictly
+  to `status='queued'` rows (so #1449's deferred terminal-row NULL-out can't
+  false-fire). E-04/G-04 are stacked on #1450's queued-read rework and land
+  after it. **Credential safety:** E-04/G-04 violations persist to
+  `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
+  reports the failed-predicate reason code, G-04 the matched pattern name only.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API
