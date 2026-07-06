@@ -22,6 +22,17 @@ from models import ActivityState, ActivityType
 from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
 
 
+def _norm_ts(value):
+    """Normalize a stored ISO timestamp to UTC with an explicit 'Z' suffix (#1474).
+
+    The activity mappers return raw stored strings; a scheduler-written
+    ``schedule_start``/``schedule_end`` activity carries a naive timestamp that
+    JS parses as local time. Assume-UTC for naive (matching the Python read
+    paths), re-emit the 'Z' form. None passes through.
+    """
+    return to_utc_iso(parse_iso_timestamp(value)) if value else None
+
+
 # Columns in DDL order so positional row access ([0]..[14]) stays correct.
 _ACTIVITY_COLUMNS = (
     agent_activities.c.id,
@@ -54,8 +65,8 @@ class ActivityOperations:
             "activity_type": row[2],
             "activity_state": row[3],
             "parent_activity_id": row[4],
-            "started_at": row[5],
-            "completed_at": row[6],
+            "started_at": _norm_ts(row[5]),
+            "completed_at": _norm_ts(row[6]),
             "duration_ms": row[7],
             "user_id": row[8],
             "triggered_by": row[9],
@@ -63,7 +74,7 @@ class ActivityOperations:
             "related_execution_id": row[11],
             "details": json.loads(row[12]) if row[12] else None,
             "error": row[13],
-            "created_at": row[14]
+            "created_at": _norm_ts(row[14])
         }
 
     @staticmethod
@@ -81,8 +92,8 @@ class ActivityOperations:
             "activity_type": row["activity_type"],
             "activity_state": row["activity_state"],
             "parent_activity_id": row["parent_activity_id"],
-            "started_at": row["started_at"],
-            "completed_at": row["completed_at"],
+            "started_at": _norm_ts(row["started_at"]),
+            "completed_at": _norm_ts(row["completed_at"]),
             "duration_ms": row["duration_ms"],
             "user_id": row["user_id"],
             "triggered_by": row["triggered_by"],
@@ -90,7 +101,7 @@ class ActivityOperations:
             "related_execution_id": row["related_execution_id"],
             "details": json.loads(row["details"]) if row["details"] else None,
             "error": row["error"],
-            "created_at": row["created_at"],
+            "created_at": _norm_ts(row["created_at"]),
         }
 
     def create_activity(self, activity: 'ActivityCreate') -> str:

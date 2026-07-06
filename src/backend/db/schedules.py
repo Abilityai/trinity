@@ -31,6 +31,20 @@ from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timesta
 
 logger = logging.getLogger(__name__)
 
+
+def _norm_ts(value: Optional[str]) -> Optional[str]:
+    """Normalize a stored ISO timestamp to UTC with an explicit 'Z' suffix (#1474).
+
+    Summary/list readers return raw ``dict(row)`` values straight from the DB.
+    A scheduler-written naive string (no offset) then serializes naive out of
+    Pydantic, and JS ``new Date(naive)`` parses it as *local* time — shifting
+    the row by the viewer's UTC offset. ``parse_iso_timestamp`` assumes UTC for
+    naive strings (matching every Python read path), and ``to_utc_iso`` re-emits
+    the 'Z' form the already-correct sibling readers produce. None passes through.
+    """
+    return to_utc_iso(parse_iso_timestamp(value)) if value else None
+
+
 # Cap on rows fed into percentile compute and tool-call aggregation
 # (#868). Counts and the daily timeline always use the unsampled rowset;
 # only the percentile / tool-call pool is bounded. Test-only override is
@@ -1675,7 +1689,16 @@ class ScheduleOperations:
             .limit(limit)
         )
         with get_engine().connect() as conn:
-            return [dict(row) for row in conn.execute(stmt).mappings()]
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: normalize naive scheduler-written timestamps to UTC 'Z'
+                # so the ExecutionSummary response never serializes naive (the
+                # reported TasksPanel relative-time shift).
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
 
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
@@ -2187,7 +2210,10 @@ class ScheduleOperations:
                 "cost_total": cost_total,
                 "context_avg": context_avg,
                 "tool_call_total": tool_total_by_sched.get(sid, 0),
-                "last_run_at": last["last_run_at"] if last else None,
+                # #1474: normalize to UTC 'Z' — ScheduleSummaryRow.last_run_at is
+                # a str field, so a naive scheduler-written value would pass
+                # through unshifted and render wrong in a non-UTC browser.
+                "last_run_at": _norm_ts(last["last_run_at"]) if last else None,
                 "last_run_status": last["last_status"] if last else None,
             })
 
@@ -3415,7 +3441,17 @@ class ScheduleOperations:
                 ORDER BY started_at DESC
                 LIMIT :lim OFFSET :off
             """), bind).mappings().all()
-            return [dict(row) for row in rows]
+            out = []
+            for row in rows:
+                d = dict(row)
+                # #1474: normalize naive scheduler-written timestamps to UTC 'Z'
+                # so the FleetExecutionSummary response (ExecutionsPanel) never
+                # serializes naive.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                d["queued_at"] = _norm_ts(d.get("queued_at"))
+                out.append(d)
+            return out
 
     def get_fleet_execution_stats(
         self,
