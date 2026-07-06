@@ -15,6 +15,7 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-06 | #1474 | fix: scheduler timestamps now serialize as UTC `Z` (vendored `src/scheduler/utils.py`; write+read atomic — naive-UTC parse preserves duration math); backend read boundaries + 5 execution panels normalize historical naive rows so non-UTC browsers stop showing shifted relative times | [scheduler-service.md](feature-flows/scheduler-service.md) |
 | 2026-07-04 | #903 | fix(slack): thread-scoped session + per-speaker attribution + sender-filtered memory | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-07-04 | #1445 | fix(webhooks): gate schedule/webhook **creation** on a live owning agent (`is_agent_live` → 404; access-check-first so non-owners see a uniform 403) so a webhook token always resolves to a schedule of a live agent — closes the orphan-schedule class that made valid tokens 404 after #1423's soft-delete-aware token-lookup INNER JOIN | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
 | 2026-07-06 | trinity-enterprise#47 | feat(ui): Dashboard **Grid view** — third mode (Grid/Graph/Timeline, not default): magnetic tile canvas on an unbounded pan/zoom lattice; five-zone 384×216 tiles (adaptive chips, Activity·14d + Context·7d charts, Run/Auto toggles); drag with socket preview + swap, tidy/reset, keyboard reorder; skeleton-first render, viewport-gated cached analytics hydration, visibility-aware batch polling. No new backend endpoints | [dashboard-grid-view.md](feature-flows/dashboard-grid-view.md) |
