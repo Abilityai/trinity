@@ -1,6 +1,6 @@
 # Channel Adapter Message Routing (SLACK-002)
 
-> **Status**: Complete (updated 2026-03-31 — router generalized for multi-channel)
+> **Status**: Complete (updated 2026-07-04 — thread-scoped session + per-speaker attribution + sender-filtered memory, #903)
 > **Created**: 2026-03-23
 > **Extends**: SLACK-001
 > **See also**: [telegram-integration.md](telegram-integration.md) — TGRAM-001 (second adapter implementation)
@@ -170,7 +170,20 @@ Priority in `SlackAdapter.get_agent_name()`:
 - Bot tokens encrypted at rest (AES-256-GCM via `credential_encryption.py`)
 - Rate limiting: 30 msg/min per Slack user (configurable)
 - Execution timeout: 120s (configurable)
-- Session identifiers: `{team_id}:{user_id}:{channel_id}` — no PII
+- Session identifiers (`SlackAdapter.get_session_identifier`) — no PII:
+  - **Channel** (@mention / thread reply): `{team_id}:{channel_id}:{thread_id}` — **thread-scoped** (#903). `sender_id` is dropped so two concurrent threads in a channel stay isolated, a fresh top-level @mention (`thread_id = thread_ts or ts` → a new id) starts with clean history, and a multi-participant thread shares one context. `thread_id` is guaranteed non-None on the channel path.
+  - **DM**: `{team_id}:{sender_id}:{channel_id}` — unchanged (one continuous per-user convo; a DM `thread_ts` is ignored).
+  - Per-speaker attribution + per-user memory moved off the key onto `public_chat_messages.sender_label` / `sender_email` (see [Per-speaker attribution & memory](#per-speaker-attribution--memory-903)).
+  - `get_or_create_public_chat_session` on a brand-new thread key is race-guarded (savepoint + `IntegrityError` re-SELECT) — dropping `sender_id` newly lets two different users race the same key.
+
+### Per-speaker attribution & memory (#903)
+
+Thread-scoping lets several users share one channel session, so who-said-what and whose-memory move onto each message row:
+
+- `public_chat_messages.sender_label` (nullable) — persisted with each channel user turn from the #350 `enrich_message` display name (`"John Smith (@johndoe)"`); the assistant turn is labelled by agent name. `build_public_chat_context` replays history attributed (`Alice: …` / `Bob: …`) instead of a flat `User:`, falling back to the role label when null (DM/web turns and pre-migration rows). The #350 `[Channel: #x]\n[From: …]` prefix stays on the **current** turn only — history attribution now comes from the stored label, so there's no double-prefix.
+- `public_chat_messages.sender_email` (nullable) — the verified speaker. `summarize_user_memory_background` reads `get_recent_public_chat_messages(session_id, sender_email=user_email)`, so a shared thread never feeds one user's turns into another user's durable, re-injected MEM-001 memory. Single-participant paths (web public-chat + **any channel DM** — Slack/Telegram/WhatsApp) stamp `sender_email` on **both** the user turn and the assistant reply, so the filter is a no-op there — the summarizer keeps the full user+assistant conversation, as it did pre-#903. Only a multi-participant session — a Slack **channel thread** or a **group chat** — leaves the assistant turn's `sender_email` null so the shared reply is excluded from any single participant's memory. The DM-vs-shared decision (`_assistant_sender_email`) combines each adapter's own signal: Slack sets `is_dm` (never `is_group`), Telegram sets `is_group` (never `is_dm`), WhatsApp (DM-only) sets neither — so keying on `is_dm` alone would regress Telegram/WhatsApp DMs and `not is_group` alone would wrongly stamp Slack channel threads.
+
+Both columns are dual-track migrated (SQLite `public_chat_messages_sender` + Alembic `0013_public_chat_messages_sender`). No migration of pre-existing channel-keyed session rows — a one-time "forget," expected.
 
 ### Audit Trail
 - All executions recorded with `triggered_by=adapter.channel_type` and `source_user_email=adapter.get_source_identifier(message)`
@@ -342,9 +355,14 @@ A token that doesn't start with `xapp-` (operator pasted a `xoxb-` bot token by 
 - [ ] Bot invited to #general (non-agent channel) → only responds to @mentions
 - [ ] Thread started by another user (not via @mention) → bot ignores replies
 - [ ] Agent stopped while message in flight → "not available" response
-- [ ] Two users in same channel → separate sessions (per-user isolation)
+- [ ] Two concurrent threads in one channel → distinct sessions; reply / re-@mention inside a thread → same session (#903, thread isolation)
+- [ ] Fresh top-level @mention → brand-new session, empty history (#903)
+- [ ] Multi-participant thread (Alice + Bob) → shared context; agent's replay shows `Alice:` / `Bob:`; Bob's MEM-001 memory contains no Alice content (#903)
+- [ ] DM continuity: a user's DMs stay on one session across messages/threads (#903)
 - [ ] Non-owner views Sharing tab → SlackChannelPanel shows "Only the agent owner can manage Slack channel bindings"
 - [ ] `CREDENTIAL_ENCRYPTION_KEY` mismatch → bot token decryption fails → Slack API calls fail (logged, no crash)
+
+**Unit-test coverage (#903):** `tests/unit/test_903_slack_session_thread.py` (parser-driven session-key cases: thread isolation, fresh-mention clean history, DM continuity, F-TEAMID) + `tests/unit/test_903_public_chat_sender.py` (attribution, sender-filtered memory, race guard, schema accessor).
 
 **Last Tested**: 2026-05-08 (#708 startup-recovery + bad-creds zombie smoke verified end-to-end against running backend)
 **Tested By**: claude + human (manual + 15 integration tests + 65 unit tests)

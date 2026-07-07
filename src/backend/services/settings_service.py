@@ -238,6 +238,60 @@ class SettingsService:
         return False
 
     # =========================================================================
+    # Brain Orb feature flags (trinity-enterprise#58/#60/#61; admin-configurable #85)
+    # =========================================================================
+
+    def _resolve_bool_flag(self, setting_key: str, env_var: str, default: bool = False) -> bool:
+        """Shared stored→env→default boolean flag resolution (#85).
+
+        Resolves in this order:
+        1. system_settings row `setting_key` ("true"/"false") — wins in BOTH
+           directions, so an admin toggle overrides the env var until cleared
+        2. `env_var` honored as OPT-IN ("true"/"1"/"yes") — existing deployments
+           with the env flag keep working unchanged
+        3. `default`
+
+        Fail-open (the #506 `clamp_to_ceiling` discipline): a settings-read
+        failure falls back to the env/default leg instead of raising — these
+        resolvers feed GET /api/settings/feature-flags, where an exception
+        would 500 the endpoint and zero EVERY flag in the frontend store.
+
+        Deliberately NO TTL cache: the backend runs `--workers 2`; a cache
+        would let a stale worker keep serving a just-flipped flag (#506
+        rationale). One SQLite read per gate check is negligible at brain-orb
+        QPS — don't "helpfully" add one.
+        """
+        try:
+            stored = self.get_setting(setting_key)
+        except Exception:
+            stored = None
+        if stored is not None:
+            return str(stored).lower() in ("true", "1", "yes")
+        env_val = os.getenv(env_var, "").strip().lower()
+        if env_val in ("true", "1", "yes"):
+            return True
+        return default
+
+    def is_brain_orb_enabled(self) -> bool:
+        """Brain Orb base platform flag — gates the orb page, tab, and every
+        proxied `/brain-orb/*` route (trinity-enterprise#58). Runtime-resolved
+        so an admin toggle applies without a backend restart (#85)."""
+        return self._resolve_bool_flag("brain_orb_enabled", "BRAIN_ORB_ENABLED")
+
+    def is_brain_orb_voice_enabled(self) -> bool:
+        """Brain Orb voice tile flag (trinity-enterprise#60). Voice additionally
+        requires the base flag AND GEMINI_API_KEY (env-only secret) — composed
+        at the consumers, not here."""
+        return self._resolve_bool_flag("brain_orb_voice_enabled", "BRAIN_ORB_VOICE_ENABLED")
+
+    def is_brain_orb_write_enabled(self) -> bool:
+        """Brain Orb KB-write kill-switch (trinity-enterprise#61). Distinct from
+        the base flag so the write/exec surface can be downed without downing
+        read/voice. Write routes also require the base flag (composed at the
+        router)."""
+        return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
+
+    # =========================================================================
     # GitHub Templates (TMPL-001)
     # =========================================================================
 
@@ -356,6 +410,32 @@ def get_slack_app_token() -> str:
 def is_session_tab_enabled() -> bool:
     """Session tab feature flag (Phase 1.6 of SESSION_TAB_2026-04)."""
     return settings_service.is_session_tab_enabled()
+
+
+# Brain Orb flags (trinity-enterprise#85) — the (setting_key, env_var) registry
+# shared by the resolvers above and the dedicated admin routes in
+# routers/settings.py (GET/PUT /api/settings/brain-orb). Field names match the
+# BrainOrbSettingsUpdate model.
+BRAIN_ORB_FLAGS = {
+    "enabled": ("brain_orb_enabled", "BRAIN_ORB_ENABLED"),
+    "voice_enabled": ("brain_orb_voice_enabled", "BRAIN_ORB_VOICE_ENABLED"),
+    "write_enabled": ("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED"),
+}
+
+
+def is_brain_orb_enabled() -> bool:
+    """Brain Orb base platform flag — runtime-resolved (#85)."""
+    return settings_service.is_brain_orb_enabled()
+
+
+def is_brain_orb_voice_enabled() -> bool:
+    """Brain Orb voice tile flag — runtime-resolved (#85)."""
+    return settings_service.is_brain_orb_voice_enabled()
+
+
+def is_brain_orb_write_enabled() -> bool:
+    """Brain Orb KB-write kill-switch — runtime-resolved (#85)."""
+    return settings_service.is_brain_orb_write_enabled()
 
 
 def get_ops_setting(key: str, as_type: type = str):

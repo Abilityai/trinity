@@ -424,6 +424,9 @@ class DatabaseManager:
     def is_agent_name_reserved(self, agent_name: str):
         return self._agent_ops.is_agent_name_reserved(agent_name)
 
+    def is_agent_live(self, agent_name: str):
+        return self._agent_ops.is_agent_live(agent_name)
+
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
 
@@ -876,6 +879,14 @@ class DatabaseManager:
     def get_webhook_status(self, schedule_id: str):
         return self._schedule_ops.get_webhook_status(schedule_id)
 
+    def set_webhook_secret(self, schedule_id: str):
+        # ent#77: mint/rotate the HMAC signing secret; returns plaintext once.
+        return self._schedule_ops.set_webhook_secret(schedule_id)
+
+    def clear_webhook_secret(self, schedule_id: str):
+        # ent#77: disable signature auth + drop the stored secret.
+        return self._schedule_ops.clear_webhook_secret(schedule_id)
+
     def set_schedule_enabled(self, schedule_id: str, enabled: bool):
         return self._schedule_ops.set_schedule_enabled(schedule_id, enabled)
 
@@ -1011,6 +1022,10 @@ class DatabaseManager:
 
     def get_git_config(self, agent_name: str):
         return self._schedule_ops.get_git_config(agent_name)
+
+    def get_git_config_agent_names_for_repo(self, github_repo: str):
+        """trinity-enterprise#93: fork-to-own destination-binding guard."""
+        return self._schedule_ops.get_git_config_agent_names_for_repo(github_repo)
 
     def update_git_sync(self, agent_name: str, commit_sha: str):
         return self._schedule_ops.update_git_sync(agent_name, commit_sha)
@@ -1463,14 +1478,25 @@ class DatabaseManager:
     def get_public_chat_session(self, session_id: str):
         return self._public_chat_ops.get_session(session_id)
 
-    def add_public_chat_message(self, session_id: str, role: str, content: str, cost: float = None):
-        return self._public_chat_ops.add_message(session_id, role, content, cost)
+    def add_public_chat_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        cost: float = None,
+        sender_email: str = None,
+        sender_label: str = None,
+    ):
+        return self._public_chat_ops.add_message(
+            session_id, role, content, cost,
+            sender_email=sender_email, sender_label=sender_label,
+        )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_session_messages(session_id, limit)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
 
-    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20):
-        return self._public_chat_ops.get_recent_messages(session_id, limit)
+    def get_recent_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
+        return self._public_chat_ops.get_recent_messages(session_id, limit, sender_email=sender_email)
 
     def clear_public_chat_session(self, session_id: str):
         return self._public_chat_ops.clear_session(session_id)

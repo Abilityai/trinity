@@ -11,6 +11,40 @@ Trinity uses Vector to aggregate all container logs into daily-rotated JSON file
 
 Files rotate automatically at midnight UTC.
 
+## Docker Desktop (macOS / Windows) — file-source log override (#1432)
+
+> **Applies to Docker Desktop and other VM-based Docker runtimes** (Colima, Rancher
+> Desktop, Podman machine). Native Linux dockerd is unaffected and needs none of this.
+
+Vector's default `docker_logs` source (`config/vector.yaml`) talks to the Docker log
+API. On Docker Desktop that API closes each `follow` stream right after flushing
+backlog, and `docker_logs` reconnects with no backoff — a reconnect storm that pegs
+the Docker VM at ~4 cores and grows the log file GB/day. To avoid it, the local stack
+tails the raw on-disk container logs instead (`config/vector.local.yaml`), which
+bypasses the Docker log API entirely.
+
+**Activation is automatic:** `scripts/deploy/start.sh` detects Docker Desktop and
+creates `docker-compose.override.yml` (from `docker-compose.override.example.yml`),
+which `docker compose up` auto-merges. To do it by hand, or on a runtime start.sh
+doesn't detect:
+
+```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
+./scripts/deploy/start.sh
+```
+
+- **Opt out** (force the default `docker_logs` source): `TRINITY_LOCAL_LOG_SOURCE=docker ./scripts/deploy/start.sh`, or just delete `docker-compose.override.yml`.
+- **Force on** (undetected VM runtime): `TRINITY_LOCAL_LOG_SOURCE=file ./scripts/deploy/start.sh`.
+- **Production is never affected:** prod deploys with an explicit `-f docker-compose.prod.yml`, which disables Compose's override auto-merge, so the override file is never read.
+
+**Trade-off:** the file source keys logs by **container ID**, not name, so the output
+is a single ID-keyed `/data/logs/local-YYYY-MM-DD.json` instead of the name-split
+`platform-*.json` / `agents-*.json`. For everyday local tailing, prefer:
+
+```bash
+docker compose logs -f <service>     # e.g. backend, scheduler, agent-<name>
+```
+
 ## Accessing Logs
 
 Logs are stored in the `trinity-logs` Docker volume. To access them:

@@ -35,7 +35,7 @@
     "uplot": "^1.6.32",
     "vue": "^3.5.39",
     "vue-chartjs": "^5.3.2",
-    "vue-router": "^4.5.0"
+    "vue-router": "^5.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

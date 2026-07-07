@@ -321,7 +321,11 @@ def c_s004(snap):  # .claude/projects/ ignored
 
 
 def c_s005(snap):  # .trinity/ ignored
-    return _ok(".trinity/ is gitignored") if _has_ignore(snap, ".trinity/", ".trinity") \
+    # ".trinity/*" satisfies the same intent: Brain-Orb templates use it with a
+    # "!.trinity/brain-orb/" re-include so committed hooks stay tracked while
+    # runtime state stays ignored (trinity-enterprise#76). Git can't re-include
+    # under a dir-form exclusion, so the star-form is the only committable shape.
+    return _ok(".trinity/ is gitignored") if _has_ignore(snap, ".trinity/", ".trinity", ".trinity/*") \
         else _fail(".trinity/ is not excluded — platform runtime state would be committed")
 
 

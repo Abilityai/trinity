@@ -84,10 +84,13 @@ function showLabel(i) {
           class="w-full max-w-[56px] rounded-sm bg-gray-200 dark:bg-gray-700"
           style="height: 2px"
         ></div>
+        <!-- cap rounding by index, not :last-child — the hover tooltip is a
+             later sibling, so last: would drop the cap's rounding mid-hover -->
         <div
-          v-for="b in bucketsForDay(d)"
+          v-for="(b, bi) in bucketsForDay(d)"
           :key="b"
-          class="w-full max-w-[56px] first:rounded-t-md"
+          class="w-full max-w-[56px]"
+          :class="{ 'rounded-t-md': bi === bucketsForDay(d).length - 1 }"
           :style="{
             height: segHeight(d, b) + 'px',
             backgroundColor: colorFor(b),

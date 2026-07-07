@@ -287,6 +287,15 @@ def canary_db(monkeypatch):
             message TEXT NOT NULL DEFAULT '',
             triggered_by TEXT NOT NULL DEFAULT 'test'
         );
+        CREATE TABLE agent_schedules (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            name TEXT DEFAULT '',
+            cron_expression TEXT DEFAULT '0 4 * * *',
+            enabled INTEGER DEFAULT 1,
+            next_run_at TEXT,
+            deleted_at TEXT
+        );
         CREATE TABLE agent_sharing (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL,
@@ -482,15 +491,96 @@ def fake_docker(monkeypatch):
 
 
 @pytest.fixture
-def reload_canary(canary_db, fake_redis, fake_docker):
-    """Force reimport of canary modules so they bind to the patched modules."""
+def reload_canary(canary_db, fake_redis, fake_docker, monkeypatch):
+    """Force reimport of canary modules so they bind to the patched modules.
+
+    Also installs a *controlled* `database` stub whose `db.get_queued_count`
+    reads the SAME temp SQLite the raw snapshot side reads — via the
+    production `get_engine()` seam (DATABASE_URL is pinned to the temp file by
+    `canary_db`). This is what makes B-01 (queue-status coherence) both
+    deterministic and leak-immune (#1446):
+
+    - The snapshot's `_collect_queued_count_via_service` does
+      `from database import db; int(db.get_queued_count(name))` at *call* time,
+      so it resolves whatever `sys.modules["database"]` holds. Under full-suite
+      load another module leaks a bare `sys.modules.setdefault("database",
+      MagicMock())` (e.g. tests/test_watchdog_unit.py) that never gets torn
+      down; `int(MagicMock().get_queued_count("a1")) == 1`, so B-01 saw
+      `service_count=1` against a temp DB with 0 queued rows and false-fired.
+    - `monkeypatch.setitem` here *overrides* any such leaked entry for the test's
+      duration (auto-restored LIFO at teardown), and delegates to the temp DB
+      through the exact production count path — not a hand-fed constant — so
+      B-01 is genuinely exercised, not turned into a tautology.
+
+    We deliberately do NOT evict-and-reimport the real `database` module:
+    `database.py` imports `DB_PATH` (absent on the `canary_db` fake) and its
+    `__init__` runs `init_database()`/migrations (heavy, module-identity churn).
+    """
     for mod in list(sys.modules):
         if mod.startswith("canary") or mod == "db.canary":
             del sys.modules[mod]
+
+    class _TempDB:
+        """Minimal `database.db` stand-in for B-01.
+
+        `get_queued_count` counts `schedule_executions` queued rows over the
+        temp `DATABASE_URL` using the same `get_engine()` factory the real
+        `ScheduleOperations.get_queued_count` uses — so both B-01 sides read
+        the same rows in the same backend.
+        """
+
+        def get_queued_count(self, agent_name: str) -> int:
+            from sqlalchemy import text as _text
+            from db.engine import get_engine
+
+            with get_engine().connect() as conn:
+                row = conn.execute(
+                    _text(
+                        "SELECT COUNT(*) AS c FROM schedule_executions "
+                        "WHERE agent_name = :n AND status = 'queued'"
+                    ),
+                    {"n": agent_name},
+                ).first()
+            return int(row[0]) if row else 0
+
+    database_stub = types.ModuleType("database")
+    database_stub.db = _TempDB()
+    monkeypatch.setitem(sys.modules, "database", database_stub)
+
     import canary as canary_pkg  # noqa: F401
     import db.canary as db_canary
 
-    return {"canary": canary_pkg, "db_canary": db_canary, "redis": fake_redis}
+    return {
+        "canary": canary_pkg,
+        "db_canary": db_canary,
+        "redis": fake_redis,
+        "database_stub": database_stub,
+    }
+
+
+@pytest.fixture
+def leaked_magicmock_database(monkeypatch):
+    """Reproduce the #1446 flake: a foreign `database` MagicMock leaked into
+    `sys.modules` by another test module.
+
+    Faithful to the real leak — `tests/test_watchdog_unit.py` (and siblings)
+    do a module-level `sys.modules.setdefault("database", MagicMock())` that is
+    never restored. `int(MagicMock().get_queued_count("a1")) == 1`, so under
+    full-suite ordering the canary's `_collect_queued_count_via_service` read
+    `service_count=1` against a temp DB with 0 queued rows and B-01 false-fired.
+
+    Declare this fixture *ahead of* `reload_canary` in a test's signature so the
+    leak is installed BEFORE `reload_canary` (mirroring the real world: the leak
+    precedes the canary test). Both use `monkeypatch.setitem` on the shared
+    monkeypatch (last-write-wins); `reload_canary` therefore overrides this leak,
+    which is exactly the property under test. Auto-restored LIFO at teardown.
+    """
+    from unittest.mock import MagicMock
+
+    leaked = types.ModuleType("database")
+    leaked.db = MagicMock()
+    monkeypatch.setitem(sys.modules, "database", leaked)
+    return leaked
 
 
 # Override the package-wide autouse fixtures.
@@ -530,6 +620,17 @@ def _add_execution(path, eid, agent_name, status, started_at=None, completed_at=
     c.execute(
         "INSERT INTO schedule_executions (id, agent_name, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?)",
         (eid, agent_name, status, started_at or "2026-04-30T00:00:00Z", completed_at),
+    )
+    c.commit()
+    c.close()
+
+
+def _add_schedule(path, sid, agent_name, next_run_at, enabled=1, deleted_at=None):
+    c = _conn(path)
+    c.execute(
+        "INSERT INTO agent_schedules (id, agent_name, enabled, next_run_at, deleted_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (sid, agent_name, enabled, next_run_at, deleted_at),
     )
     c.commit()
     c.close()
@@ -1070,8 +1171,11 @@ class TestRunner:
         assert results["E-02"] == []
         assert results["E-05"] == []
         assert len(results["L-03"]) == 1
-        # B-01 is skipped in unit-test mode (no live `database` facade), so
-        # queued_count_via_service is None per agent → no violations.
+        # B-01 now reads the SAME temp DB on both sides via reload_canary's
+        # controlled `database` stub (get_queued_count over the temp
+        # DATABASE_URL). With zero queued rows the service count == the
+        # snapshot id-list count == 0, so the check is genuinely green — not
+        # skipped, and immune to a leaked foreign `database` stub (#1446).
         assert results["B-01"] == []
         # B-02 / R-01 are green on a clean platform.
         assert results["B-02"] == []
@@ -1348,6 +1452,94 @@ class TestInvariantB01:
         snap = self._snap(queued_ids={"q1"}, service_count=None)
         from canary.invariants import b01_queue_status_coherence as b01
         assert b01.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# B-01 — end-to-end coherence over the real snapshot collector (#1446)
+# ---------------------------------------------------------------------------
+#
+# The synthetic tests above hand-build a Snapshot. These drive the full
+# `collect_snapshot()` → `run_invariants`/`b01.check` path against the temp
+# SQLite, so the service side (`db.get_queued_count`) and the id-list side
+# (`_collect_executions`) both read the same DB — the first genuine e2e
+# exercise of B-01, and the regression net for the #1446 `sys.modules`
+# `database` leak that let it false-fire under full-suite load.
+
+
+class TestInvariantB01EndToEnd:
+    def test_coherent_with_queued_rows(self, canary_db, reload_canary):
+        """N real queued rows → both sides count N → B-01 green.
+
+        Proves the controlled stub delegates to the temp DB (not a hand-fed
+        constant): insert queued rows and B-01 stays green because the service
+        count tracks them.
+        """
+        _add_agent(canary_db, "a1")
+        for i in range(3):
+            _add_execution(canary_db, f"q{i}", "a1", "queued")
+
+        snap = reload_canary["canary"].collect_snapshot()
+        agent = next(a for a in snap.agents if a.name == "a1")
+        assert agent.queued_count_via_service == 3
+        assert len(agent.queued_exec_ids) == 3
+
+        results = reload_canary["canary"].run_invariants(snap)
+        assert results["B-01"] == []
+
+    def test_immune_to_leaked_database_magicmock(
+        self, canary_db, leaked_magicmock_database, reload_canary
+    ):
+        """#1446 regression — the exact 2026-07-03/04 flake.
+
+        A foreign `database` MagicMock is leaked into `sys.modules` BEFORE
+        `reload_canary` runs (via the `leaked_magicmock_database` fixture
+        declared ahead of `reload_canary` in the signature). Left unchecked,
+        `int(MagicMock().get_queued_count("a1")) == 1` would make B-01 fire
+        with `service_count=1` against a 0-queued temp DB. `reload_canary`'s
+        controlled stub must override the leak so B-01 stays green.
+        """
+        # Sanity: the leak really does yield the tell-tale service_count=1.
+        assert int(leaked_magicmock_database.db.get_queued_count("a1")) == 1
+
+        _add_agent(canary_db, "a1")  # zero queued rows
+
+        snap = reload_canary["canary"].collect_snapshot()
+        agent = next(a for a in snap.agents if a.name == "a1")
+        assert agent.queued_count_via_service == 0, (
+            "controlled temp-DB stub must override the leaked MagicMock"
+        )
+
+        results = reload_canary["canary"].run_invariants(snap)
+        assert results["B-01"] == [], (
+            "leaked foreign `database` must not trip B-01 after the #1446 fix"
+        )
+
+    def test_fires_on_service_count_drift(self, canary_db, reload_canary):
+        """Real tripwire coverage: force the accessor to disagree with the
+        snapshot id-list → B-01 fires once with the correct observed counts.
+
+        This is the drift B-01 exists to catch — a cache / status-filter
+        regression on `db.get_queued_count`. Overriding the controlled stub to
+        undercount simulates exactly that.
+        """
+        _add_agent(canary_db, "a1")
+        _add_execution(canary_db, "q1", "a1", "queued")
+        _add_execution(canary_db, "q2", "a1", "queued")
+
+        # Simulate a cache/status-filter regression: the accessor undercounts.
+        reload_canary["database_stub"].db.get_queued_count = lambda name: 0
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import b01_queue_status_coherence as b01
+
+        violations = b01.check(snap)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "B-01"
+        assert v.severity == "critical"
+        assert v.observed_state["agent_name"] == "a1"
+        assert v.observed_state["service_count"] == 0
+        assert v.observed_state["snapshot_count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2202,3 +2394,53 @@ class TestCanarySlackEmit:
         assert "last red" in second_ctx, (
             "second transition must carry the prior snapshot_time"
         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant: E-06 no overdue next_run_at (#1472)
+# ---------------------------------------------------------------------------
+
+def _iso_z(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+class TestE06OverdueNextRun:
+    """Enabled, non-deleted schedule whose next_run_at is >misfire-grace in the
+    past — the "Next: Nd ago" projection the scheduler never advanced (#1472)."""
+
+    def test_synthetic_overdue_fires_future_null_and_grace_hold(self):
+        from datetime import timezone
+        from canary.snapshot import Snapshot
+        from canary.invariants import e06_no_overdue_next_run as e06
+
+        now = datetime.utcnow()
+        kiev_past = (
+            now.replace(tzinfo=timezone.utc) - _td(hours=2)
+        ).astimezone(timezone(_td(hours=3)))  # non-UTC render of a 2h-past instant
+        rows = [
+            {"schedule_id": "s-overdue-utc", "agent_name": "a", "next_run_at": _iso_z(now - _td(hours=2))},
+            {"schedule_id": "s-future", "agent_name": "a", "next_run_at": _iso_z(now + _td(hours=1))},
+            {"schedule_id": "s-within-grace", "agent_name": "a", "next_run_at": _iso_z(now - _td(minutes=30))},
+            {"schedule_id": "s-null", "agent_name": "a", "next_run_at": None},
+            {"schedule_id": "s-overdue-kiev", "agent_name": "a", "next_run_at": kiev_past.isoformat()},
+        ]
+        snap = Snapshot(snapshot_time=_iso_z(now), enabled_schedules=rows)
+        fired = sorted(v.observed_state["schedule_id"] for v in e06.check(snap))
+        assert fired == ["s-overdue-kiev", "s-overdue-utc"]
+
+    def test_collector_predicate_and_end_to_end(self, canary_db, reload_canary):
+        now = datetime.utcnow()
+        _add_agent(canary_db, "a1")
+        _add_schedule(canary_db, "sch-stale", "a1", _iso_z(now - _td(hours=2)))
+        _add_schedule(canary_db, "sch-future", "a1", _iso_z(now + _td(hours=1)))
+        _add_schedule(canary_db, "sch-disabled", "a1", _iso_z(now - _td(hours=2)), enabled=0)
+        _add_schedule(canary_db, "sch-deleted", "a1", _iso_z(now - _td(hours=2)), deleted_at=_iso_z(now))
+
+        snap = reload_canary["canary"].collect_snapshot()
+        # collector predicate mirrors the scheduler: enabled = 1 AND deleted_at IS NULL
+        collected = {s["schedule_id"] for s in snap.enabled_schedules}
+        assert collected == {"sch-stale", "sch-future"}
+
+        from canary.invariants import e06_no_overdue_next_run as e06
+        fired = [v.observed_state["schedule_id"] for v in e06.check(snap)]
+        assert fired == ["sch-stale"]

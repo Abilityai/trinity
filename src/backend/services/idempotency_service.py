@@ -91,6 +91,36 @@ def derive_schedule_key(execution_id: str) -> str:
     return f"sched:{execution_id}"
 
 
+def derive_payment_key(
+    access_token: Optional[str], body: Optional[bytes]
+) -> Optional[str]:
+    """Client-stable idempotency key for the paid x402 boundary (#1018).
+
+    Keys on ``sha256(access_token \\x00 message_body)`` so a client that re-POSTs
+    the same ``payment-signature`` + message dedups BOTH the LLM execution AND the
+    settle. Deliberately NOT keyed on Nevermined's ``agent_request_id``: that is a
+    per-verify observability id that is likely fresh on each re-POST, so keying on
+    it would silently defeat the client-retry dedup (double LLM cost). The token +
+    body IS the native client-retry unit, mirroring ``derive_webhook_key``.
+
+    One-way: only the SHA-256 of the token lands in the key — no bearer credential
+    at rest.
+
+    Returns ``None`` on ANY falsy input (no token OR no body) so ``begin()``
+    disables dedup (fail-open). It MUST NEVER hash empty input to a constant — a
+    constant key would collide unrelated requests into one row (409 / cross-request
+    snapshot replay = data leak + wrong billing). Two requests with no derivable
+    key each run independently with no dedup, which is the safe default.
+    """
+    if not access_token or not body:
+        return None
+    h = hashlib.sha256()
+    h.update(access_token.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(body)
+    return f"paid:{h.hexdigest()}"
+
+
 # ---------------------------------------------------------------------------
 # Effect-scoped idempotency (#1084)
 #
@@ -105,7 +135,8 @@ def derive_schedule_key(execution_id: str) -> str:
 # channel + provider account) — NEVER the LLM-generated message body, which is
 # non-deterministic across a re-run and would defeat dedup. Effects scope by
 # `effect:{execution_id}`; Nevermined settles scope by `payment:{agent_request_id}`
-# (its native exactly-once token). Long TTL is inherited from the shared 24h
+# (a Nevermined observability id — the local guard, not the provider, enforces
+# at-most-once per id; fresh-id retry residual is #1408). Long TTL is inherited from the shared 24h
 # default, which already exceeds the lease window (agent_timeout + buffer ≤ ~2h),
 # so a completed row outlives a late re-delivery. See the contract doc at
 # docs/memory/feature-flows/effect-idempotency.md.
@@ -121,10 +152,16 @@ def make_effect_scope(execution_id: str) -> str:
 
 
 def make_payment_scope(agent_request_id: str) -> str:
-    """Scope a settlement to its Nevermined `agent_request_id` (native token).
+    """Scope a settlement to its Nevermined `agent_request_id`.
 
-    The agent_request_id is the payment's natural exactly-once unit — one
-    settle per request — so it is the dedup scope as well as the on-chain key.
+    Per the Nevermined x402 docs the agent_request_id is an OBSERVABILITY/tracking
+    id (returned fresh by each `verify_permissions`), NOT a provider-enforced
+    exactly-once token — the facilitator burns credits on *every* successful
+    `settle_permissions` call until the token's limit. So this local effect-guard
+    row is the actual dedup, and it only stops a double-burn when the SAME
+    agent_request_id is re-presented (a concurrent duplicate settle). A retry that
+    re-verifies gets a fresh id and is not deduped here — the residual at-least-once
+    double-settle is tracked by #1408.
     """
     return f"payment:{agent_request_id}"
 
@@ -357,6 +394,28 @@ def complete(decision: IdempotencyDecision, execution_id: Optional[str], snapsho
         db.idempotency_complete(decision.scope, decision.key, execution_id, snapshot)
     except Exception as e:
         logger.warning("Idempotency complete failed: %s", e)
+
+
+def upgrade_snapshot(scope: Optional[str], key: Optional[str], snapshot: Optional[dict]) -> None:
+    """Overwrite an already-COMPLETED trigger snapshot in place, by (scope, key) (#1018).
+
+    Used on the paid replay-resettle convergence path: a completed-but-*unsettled*
+    paid snapshot is re-driven through settle, and on success the stored snapshot
+    must converge unsettled→settled so a THIRD request replays the settled receipt
+    and does NOT re-drive settle wastefully. Also serves the fresh settled path
+    (completes the in-flight claim with the settled snapshot in one call).
+
+    This deliberately bypasses ``complete()``'s ``decision.replay`` no-op guard — we
+    ARE mutating an existing completed row, addressed by ``(scope, key)`` rather than
+    finalizing a fresh claim. No-op (and no error) when dedup is disabled, i.e. when
+    ``key`` is falsy. Best-effort; never raises (fail-open, same as ``complete``).
+    """
+    if not scope or not key:
+        return
+    try:
+        db.idempotency_complete(scope, key, None, snapshot)
+    except Exception as e:
+        logger.warning("Idempotency upgrade_snapshot failed (scope=%s): %s", scope, e)
 
 
 def fail(decision: IdempotencyDecision) -> None:

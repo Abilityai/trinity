@@ -183,6 +183,8 @@ agent_schedules = Table(
     Column("validation_timeout_seconds", Integer),
     Column("webhook_token", Text),
     Column("webhook_enabled", Integer),
+    Column("webhook_secret_encrypted", Text),  # ent#77: AES-256-GCM HMAC secret
+    Column("webhook_auth_enabled", Integer),    # ent#77: gate signature verify
     Column("deleted_at", Text),
 )
 
@@ -518,6 +520,9 @@ public_chat_messages = Table(
     Column("content", Text),
     Column("timestamp", Text),
     Column("cost", Float),
+    # #903: per-message speaker attribution for thread-scoped channel sessions.
+    Column("sender_email", Text),
+    Column("sender_label", Text),
 )
 
 public_user_memory = Table(

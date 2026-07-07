@@ -258,6 +258,16 @@ def test_create_schedule_path_skips_enforcement_when_timeout_none(monkeypatch):
     def fake_enforce(agent_name, requested_seconds):
         enforcer_calls.append((agent_name, requested_seconds))
 
+    # #1445: create_schedule now gates on the caller's access AND a live agent
+    # ownership row before the timeout enforcer runs. Stub both truthy so this
+    # direct route-handler call reaches the enforcement path under test.
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: True, raising=False
+    )
+    monkeypatch.setattr(
+        sched_router.db, "is_agent_live", lambda *_a, **_k: True, raising=False
+    )
+
     monkeypatch.setattr(
         sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
     )
@@ -335,6 +345,16 @@ def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
     def fake_enforce(agent_name, requested_seconds):
         enforcer_calls.append((agent_name, requested_seconds))
 
+    # #1445: create_schedule now gates on the caller's access AND a live agent
+    # ownership row before the timeout enforcer runs. Stub both truthy so this
+    # direct route-handler call reaches the enforcement path under test.
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: True, raising=False
+    )
+    monkeypatch.setattr(
+        sched_router.db, "is_agent_live", lambda *_a, **_k: True, raising=False
+    )
+
     monkeypatch.setattr(
         sched_router, "_enforce_timeout_below_agent_cap", fake_enforce
     )
@@ -390,6 +410,94 @@ def test_create_schedule_path_runs_enforcement_when_timeout_set(monkeypatch):
     )
 
     assert enforcer_calls == [("alice", 600)]
+
+
+# ---------------------------------------------------------------------------
+# #1445 creation gate — no-orphan + access-first ordering (enumeration oracle)
+# ---------------------------------------------------------------------------
+
+
+def test_create_schedule_denies_access_before_existence_check(monkeypatch):
+    """#1445: a caller without access gets a UNIFORM 403 whether or not the
+    agent exists — the access check runs BEFORE `is_agent_live`, so a low-priv
+    user can't probe agent existence via 404-vs-403 (Decision #5). Pinned so a
+    future reorder can't silently open the enumeration oracle."""
+    import asyncio
+    from fastapi import HTTPException
+
+    sched_router = _load_sched_router(monkeypatch)
+
+    # No access. is_agent_live would say the agent EXISTS — the access check
+    # must still win, and it must be a 403 (not the 404 that leaks existence).
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: False, raising=False
+    )
+    live_calls = []
+    monkeypatch.setattr(
+        sched_router.db,
+        "is_agent_live",
+        lambda *a, **k: live_calls.append(a) or True,
+        raising=False,
+    )
+    # If the gate is wrong and falls through, this would blow up loudly.
+    monkeypatch.setattr(
+        sched_router.db, "create_schedule", lambda *_a, **_k: None, raising=False
+    )
+
+    schedule_data = sched_router.ScheduleCreate(
+        name="test", cron_expression="*/5 * * * *", message="hi",
+    )
+    fake_user = types.SimpleNamespace(username="probe", role="user")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            sched_router.create_schedule(
+                name="alice", schedule_data=schedule_data, current_user=fake_user,
+            )
+        )
+    assert exc_info.value.status_code == 403
+    assert live_calls == [], (
+        "is_agent_live must NOT run before the access check — that would leak "
+        "existence to a low-priv caller"
+    )
+
+
+def test_create_schedule_missing_agent_returns_404(monkeypatch):
+    """#1445: an authorised caller (admin) creating a schedule on a non-live
+    agent gets a fail-loud 404 — the no-orphan gate. `create_schedule` must
+    never be reached for a dead agent."""
+    import asyncio
+    from fastapi import HTTPException
+
+    sched_router = _load_sched_router(monkeypatch)
+
+    monkeypatch.setattr(
+        sched_router.db, "can_user_access_agent", lambda *_a, **_k: True, raising=False
+    )
+    monkeypatch.setattr(
+        sched_router.db, "is_agent_live", lambda *_a, **_k: False, raising=False
+    )
+    create_calls = []
+    monkeypatch.setattr(
+        sched_router.db,
+        "create_schedule",
+        lambda *a, **k: create_calls.append(a) or None,
+        raising=False,
+    )
+
+    schedule_data = sched_router.ScheduleCreate(
+        name="test", cron_expression="*/5 * * * *", message="hi",
+    )
+    fake_user = types.SimpleNamespace(username="admin", role="admin")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            sched_router.create_schedule(
+                name="ghost", schedule_data=schedule_data, current_user=fake_user,
+            )
+        )
+    assert exc_info.value.status_code == 404
+    assert create_calls == [], "db.create_schedule must not run for a dead agent"
 
 
 # ---------------------------------------------------------------------------

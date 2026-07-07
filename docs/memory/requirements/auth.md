@@ -11,6 +11,7 @@
 - **Description**: Passwordless email login with 6-digit verification codes
 - **Key Features**: 2-step verification, admin-managed whitelist, auto-whitelist on agent sharing, rate limiting (IP-based + per-email OTP lockout after 5 failures)
 - **Security**: OTP brute-force prevented by dual rate limits — `login_attempts:{ip}` (shared with admin login) and `otp_attempts:{email}` (max 5 failures → 10-min lockout). Both `POST /api/auth/email/verify` and `POST /api/public/verify/confirm` are protected. (pentest 3.1.5 / #176)
+- **Enumeration-safety (#186)**: `POST /api/auth/email/request` returns an **identical body + status** regardless of whitelist membership (`{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` — no distinct message, no `expires_in_seconds`). The rate-limit path returns the **same generic 200** (never a 429 differential; suppression is WARN-logged server-side), and the verification email is dispatched **fire-and-forget** so the whitelisted path's latency matches the non-whitelisted/rate-limited paths — closing the body, status, and timing membership oracles (pentest 3.3.3).
 - **Flow**: `docs/memory/feature-flows/email-authentication.md`
 
 ### 2.2 Admin Password Login

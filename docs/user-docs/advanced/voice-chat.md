@@ -61,6 +61,10 @@ Set a custom voice system prompt for an agent by placing a file named `voice-age
 
 If no file is present, Trinity auto-generates a prompt from the agent's template info and falls back to a generic prompt.
 
+### Per-Agent Voice
+
+Each agent has a persisted Gemini voice (default **Kore**) that applies to both this browser voice overlay and outbound [VoIP calls](voip-telephony.md#the-agents-voice) — the full selectable list and the UI picker are documented there. Read or set it via `GET`/`PUT /api/agents/{name}/voice/name` (PUT is owner-only; an empty value reverts to the default).
+
 ## Tool Calling
 
 When Gemini encounters a request that requires complex reasoning, file access, or external actions, it calls the `run_task` function:
@@ -128,6 +132,7 @@ All canvas content is sanitized before display (DOMPurify, the same trust model 
 | `/api/agents/{name}/voice/status` | GET | Get current session state |
 | `/api/agents/{name}/voice/{session_id}/panel` | GET | Current workspace canvas state (`type`, `content`, `title`, `updated_at`); polled by the canvas |
 | `/api/agents/{name}/voice/prompt` | GET / PUT | Read or set the per-agent voice system prompt |
+| `/api/agents/{name}/voice/name` | GET / PUT | Read (with `available_voices`) or set the persisted per-agent Gemini voice |
 | `/ws/voice/{session_id}` | WebSocket | Bidirectional audio bridge |
 
 ### WebSocket Message Types

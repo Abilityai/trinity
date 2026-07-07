@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
 from .tables import public_chat_sessions, public_chat_messages
@@ -55,7 +56,11 @@ class PublicChatOperations:
             role=row["role"],
             content=row["content"],
             timestamp=datetime.fromisoformat(row["timestamp"]),
-            cost=row["cost"]
+            cost=row["cost"],
+            # #903: nullable on pre-migration rows — `row.get` keeps the mapper
+            # backward-compatible if a row is projected without the columns.
+            sender_email=row.get("sender_email"),
+            sender_label=row.get("sender_label"),
         )
 
     def get_or_create_session(
@@ -78,16 +83,16 @@ class PublicChatOperations:
         # Normalize email identifiers
         normalized_identifier = session_identifier.lower() if identifier_type == 'email' else session_identifier
 
+        select_existing = select(public_chat_sessions).where(
+            and_(
+                public_chat_sessions.c.link_id == link_id,
+                public_chat_sessions.c.session_identifier == normalized_identifier,
+            )
+        )
+
         with get_engine().begin() as conn:
             # Try to find existing session
-            row = conn.execute(
-                select(public_chat_sessions).where(
-                    and_(
-                        public_chat_sessions.c.link_id == link_id,
-                        public_chat_sessions.c.session_identifier == normalized_identifier,
-                    )
-                )
-            ).mappings().first()
+            row = conn.execute(select_existing).mappings().first()
             if row:
                 return self._row_to_session(row)
 
@@ -95,18 +100,31 @@ class PublicChatOperations:
             session_id = secrets.token_urlsafe(16)
             now = utc_now_iso()
 
-            conn.execute(
-                insert(public_chat_sessions).values(
-                    id=session_id,
-                    link_id=link_id,
-                    session_identifier=normalized_identifier,
-                    identifier_type=identifier_type,
-                    created_at=now,
-                    last_message_at=now,
-                    message_count=0,
-                    total_cost=0.0,
-                )
-            )
+            # F-RACE (#903): thread-scoping drops sender_id from the channel key,
+            # so two *different* users can now race select-then-insert on a
+            # brand-new thread. The UNIQUE(link_id, session_identifier) constraint
+            # makes the loser's INSERT raise; catch it, re-SELECT the winner's row
+            # and return that (the idempotency_service.claim() pattern).
+            # Dialect-safe: SQLite + PostgreSQL both surface IntegrityError.
+            try:
+                with conn.begin_nested():
+                    conn.execute(
+                        insert(public_chat_sessions).values(
+                            id=session_id,
+                            link_id=link_id,
+                            session_identifier=normalized_identifier,
+                            identifier_type=identifier_type,
+                            created_at=now,
+                            last_message_at=now,
+                            message_count=0,
+                            total_cost=0.0,
+                        )
+                    )
+            except IntegrityError:
+                row = conn.execute(select_existing).mappings().first()
+                if row:
+                    return self._row_to_session(row)
+                raise
 
             # Return the new session
             row = conn.execute(
@@ -144,7 +162,9 @@ class PublicChatOperations:
         session_id: str,
         role: str,
         content: str,
-        cost: Optional[float] = None
+        cost: Optional[float] = None,
+        sender_email: Optional[str] = None,
+        sender_label: Optional[str] = None,
     ) -> PublicChatMessage:
         """
         Add a message to a session and update session stats.
@@ -154,6 +174,12 @@ class PublicChatOperations:
             role: 'user' or 'assistant'
             content: Message content
             cost: Optional cost for assistant messages
+            sender_email: Verified email of the speaker (#903) — nullable; drives
+                sender-filtered per-user memory summarization. Assistant/DM/web
+                messages leave it null.
+            sender_label: Display label for attributed history replay (#903) —
+                e.g. ``"John Smith (@johndoe)"`` for a channel user, agent name
+                for the assistant. Null falls back to a role label.
 
         Returns:
             PublicChatMessage model
@@ -171,6 +197,8 @@ class PublicChatOperations:
                     content=content,
                     timestamp=now,
                     cost=cost,
+                    sender_email=sender_email,
+                    sender_label=sender_label,
                 )
             )
 
@@ -194,7 +222,8 @@ class PublicChatOperations:
     def get_session_messages(
         self,
         session_id: str,
-        limit: int = 20
+        limit: int = 20,
+        sender_email: Optional[str] = None,
     ) -> List[PublicChatMessage]:
         """
         Get messages for a session, ordered oldest-first for context building.
@@ -202,14 +231,20 @@ class PublicChatOperations:
         Args:
             session_id: The chat session ID
             limit: Maximum number of messages to return
+            sender_email: When set, only that speaker's messages (#903) — used by
+                the MEM-001 summarizer so a shared thread never feeds one user's
+                turns into another user's memory.
 
         Returns:
             List of messages, oldest first
         """
+        conditions = [public_chat_messages.c.session_id == session_id]
+        if sender_email is not None:
+            conditions.append(public_chat_messages.c.sender_email == sender_email)
         with get_engine().connect() as conn:
             rows = conn.execute(
                 select(public_chat_messages)
-                .where(public_chat_messages.c.session_id == session_id)
+                .where(and_(*conditions))
                 .order_by(public_chat_messages.c.timestamp.asc())
                 .limit(limit)
             ).mappings().all()
@@ -218,17 +253,27 @@ class PublicChatOperations:
     def get_recent_messages(
         self,
         session_id: str,
-        limit: int = 20
+        limit: int = 20,
+        sender_email: Optional[str] = None,
     ) -> List[PublicChatMessage]:
         """
         Get the most recent N messages, ordered for display (oldest first).
         Uses subquery to get the most recent, then orders ascending.
+
+        Args:
+            sender_email: When set, only that speaker's messages (#903) — the
+                MEM-001 summarizer passes the current user's email so a shared
+                channel thread never leaks another participant's turns into
+                their memory.
         """
+        conditions = [public_chat_messages.c.session_id == session_id]
+        if sender_email is not None:
+            conditions.append(public_chat_messages.c.sender_email == sender_email)
         with get_engine().connect() as conn:
             # Get the most recent N messages, then reverse for chronological order
             recent = (
                 select(public_chat_messages)
-                .where(public_chat_messages.c.session_id == session_id)
+                .where(and_(*conditions))
                 .order_by(public_chat_messages.c.timestamp.desc())
                 .limit(limit)
                 .subquery()
@@ -290,8 +335,17 @@ class PublicChatOperations:
             # Add conversation history
             parts.append("Previous conversation:")
             for msg in messages:
-                role_label = "User" if msg.role == "user" else "Assistant"
-                parts.append(f"{role_label}: {msg.content}")
+                # #903: attribute each turn by its stored sender_label so a
+                # multi-participant thread replays as `Alice:` / `Bob:` rather
+                # than a flat `User:`. Falls back to the role label for null
+                # senders (web/DM turns and pre-migration rows).
+                if msg.sender_label:
+                    speaker = msg.sender_label
+                elif msg.role == "user":
+                    speaker = "User"
+                else:
+                    speaker = "Assistant"
+                parts.append(f"{speaker}: {msg.content}")
             parts.append("")
 
         # Add current message

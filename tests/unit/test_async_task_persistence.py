@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -51,7 +52,11 @@ def _env(result=None):
     activity.complete_activity = AsyncMock()
 
     db = MagicMock()
-    db.get_chat_session.return_value = {"user_id": 7}
+    # #1457: db.get_chat_session returns a ChatSession (pydantic), NOT a dict —
+    # _finalize_self_task reads session.user_id by attribute. A SimpleNamespace
+    # faithfully mirrors that contract (attribute access, no .get); a dict here
+    # made the fixture pass against the buggy `session.get("user_id")` code.
+    db.get_chat_session.return_value = SimpleNamespace(user_id=7)
 
     persist = AsyncMock(return_value="cs1")
     signal = MagicMock()
@@ -128,7 +133,7 @@ def test_self_task_injects_result_into_session():
 def test_self_task_no_inject_when_session_not_owned():
     req = ParallelTaskRequest(message="hi", inject_result=True, chat_session_id="cs9")
     with _env() as m:
-        m["db"].get_chat_session.return_value = {"user_id": 999}  # different owner
+        m["db"].get_chat_session.return_value = SimpleNamespace(user_id=999)  # different owner
         _call(req, user_id=7, user_email="u@e.com",
               is_self_task=True, self_task_activity_id="st1")
     m["db"].add_chat_message.assert_not_called()

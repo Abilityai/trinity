@@ -3,13 +3,59 @@ Pydantic models for the Trinity backend API.
 """
 import re
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
 from utils.helpers import to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+
+
+# Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
+# inner hyphens); repo name word chars, dots, hyphens. Anchored so the value can
+# be safely embedded in GitHub API paths and git URLs (trinity-enterprise#93).
+_FORK_DESTINATION_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$"
+)
+
+
+class ForkToOwnRequest(BaseModel):
+    """Fork-to-own creation parameters (trinity-enterprise#93).
+
+    Copies the GitHub template into a repo the user owns before creating the
+    agent from it. The PAT is the USER's token — it creates the destination
+    repo, pushes the template copy, and becomes the agent's per-agent PAT
+    (#347). SecretStr keeps it out of reprs/logs; unwrap exactly once at the
+    crud boundary.
+    """
+    destination_repo: str = Field(
+        ..., description="Destination repo as owner/name in the user's account or org"
+    )
+    github_pat: SecretStr = Field(
+        ..., description="User's GitHub PAT — creates the repo and becomes the agent's git identity"
+    )
+    private: bool = Field(
+        True, description="Destination repo visibility (private by default)"
+    )
+
+    @field_validator("destination_repo")
+    @classmethod
+    def _validate_destination(cls, v: str) -> str:
+        v = v.strip()
+        if ".." in v or not _FORK_DESTINATION_RE.match(v):
+            raise ValueError(
+                "destination_repo must be 'owner/name' (GitHub owner and repo "
+                "name characters only)"
+            )
+        return v
+
+    @field_validator("github_pat")
+    @classmethod
+    def _validate_pat(cls, v: SecretStr) -> SecretStr:
+        if not v.get_secret_value().strip():
+            raise ValueError("github_pat must not be empty")
+        return v
 
 
 class AgentConfig(BaseModel):
@@ -34,6 +80,9 @@ class AgentConfig(BaseModel):
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
     # Security options
     full_capabilities: Optional[bool] = False  # True = Docker default caps (apt-get works), False = restricted (secure default)
+    # Fork-to-own creation (trinity-enterprise#93): copy the github: template
+    # into a user-owned repo first; the agent is created from that copy.
+    fork_to_own: Optional[ForkToOwnRequest] = None
 
 
 class AgentStatus(BaseModel):
@@ -668,6 +717,21 @@ class MaxParallelTasksCeilingUpdate(BaseModel):
 class AgentCapacityUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
     max_parallel_tasks: int
+
+
+class BrainOrbSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/brain-orb (trinity-enterprise#85).
+
+    Partial update: only non-None booleans are written. `clear` lists flag
+    names ("enabled" / "voice_enabled" / "write_enabled") whose stored
+    override should be deleted, reverting that flag to its env/default value
+    — without it the BRAIN_ORB_* env var is silently dead once a DB row
+    exists. A flag may not appear in both a boolean field and `clear` (400).
+    """
+    enabled: Optional[bool] = None
+    voice_enabled: Optional[bool] = None
+    write_enabled: Optional[bool] = None
+    clear: Optional[List[str]] = None
 
 
 # Max length for the public/channel custom-instructions fragment (#1205).
@@ -1983,11 +2047,21 @@ class ExecutionResponse(BaseModel):
 
 
 class WebhookStatusResponse(BaseModel):
-    """Webhook configuration for a schedule."""
+    """Webhook configuration for a schedule.
+
+    ent#77: `auth_enabled`/`has_secret` describe the optional HMAC signature
+    layer. `signing_secret` is populated **only** in the response to a
+    mint/rotate call — the plaintext secret is shown exactly once and never
+    returned by GET or persisted in the clear.
+    """
     schedule_id: str
     has_token: bool
     webhook_enabled: bool
     webhook_url: Optional[str] = None
+    auth_enabled: bool = False
+    has_secret: bool = False
+    signing_secret: Optional[str] = None
+    signature_header: Optional[str] = None  # header name to send the signature in
 
 
 # =============================================================================

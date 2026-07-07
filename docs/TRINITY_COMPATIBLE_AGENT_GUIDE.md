@@ -157,6 +157,7 @@ credentials.json
 .ssh/
 .trinity/
 .tmp/
+.trinity-clone-tmp/
 
 # Large generated content - DO NOT COMMIT
 content/

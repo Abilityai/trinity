@@ -73,14 +73,17 @@ class GitHubService:
         Initialize GitHub service with a Personal Access Token.
 
         Args:
-            pat: GitHub Personal Access Token
+            pat: GitHub Personal Access Token. Empty string is allowed for
+                read-only calls against public repos (no Authorization header
+                is sent — an empty Bearer would 401).
         """
         self.pat = pat
         self._headers = {
-            "Authorization": f"Bearer {pat}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": self.API_VERSION
         }
+        if pat:
+            self._headers["Authorization"] = f"Bearer {pat}"
 
     async def _request(
         self,
@@ -174,6 +177,47 @@ class GitHubService:
                 raise GitHubError(f"GitHub API error: {response.status_code}")
         except httpx.RequestError as e:
             raise GitHubError(f"Network error: {e}")
+
+    async def list_branches(self, repo: str, limit: int = 10) -> list:
+        """List up to ``limit`` branches of ``repo`` as [{name, sha}].
+
+        Empty list means the repository has no branches (a fresh repo with no
+        commits). Raises GitHubError on API failure so callers can't mistake
+        an outage for emptiness. (trinity-enterprise#93)
+        """
+        try:
+            response = await self._request(
+                "GET", f"/repos/{repo}/branches", params={"per_page": limit}
+            )
+        except httpx.RequestError as e:
+            raise GitHubError(f"Network error listing branches: {e}")
+        if response.status_code == 200:
+            return [
+                {"name": b.get("name"), "sha": (b.get("commit") or {}).get("sha")}
+                for b in response.json()
+            ]
+        if response.status_code == 404:
+            raise GitHubError(f"Repository '{repo}' not found")
+        raise GitHubError(
+            f"GitHub API error listing branches: {response.status_code}"
+        )
+
+    async def get_branch_sha(self, repo: str, branch: str) -> Optional[str]:
+        """Head SHA of ``repo``'s ``branch``, or None if the branch is absent.
+
+        Exact single-branch lookup (`GET /repos/{repo}/branches/{branch}`) —
+        immune to pagination, unlike list_branches. Raises GitHubError on API
+        failure. (trinity-enterprise#93)
+        """
+        try:
+            response = await self._request("GET", f"/repos/{repo}/branches/{branch}")
+        except httpx.RequestError as e:
+            raise GitHubError(f"Network error reading branch: {e}")
+        if response.status_code == 200:
+            return (response.json().get("commit") or {}).get("sha")
+        if response.status_code == 404:
+            return None
+        raise GitHubError(f"GitHub API error reading branch: {response.status_code}")
 
     async def create_repository(
         self,

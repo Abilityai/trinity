@@ -170,6 +170,45 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
     return {"username": username, "mode": payload.get("mode", "prod")}
 
 
+# Scope marker for the Client Portal session token (enterprise `client_portal`,
+# epic #78). A portal client is a *verified email*, NOT a `users` row — this
+# token carries only the email and is fenced OUT of every platform endpoint
+# (get_current_user / decode_token reject it, mirroring MFA_CHALLENGE_SCOPE). It
+# only authorizes the entitled portal endpoints, which resolve identity via
+# `decode_portal_session`. Edition-agnostic: OSS owns the mint/decode primitive
+# + the fence; the enterprise module decides *when* to mint one (after email-code
+# verification of a client whose email has a share). No new secret — same
+# SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
+PORTAL_SESSION_SCOPE = "portal_session"
+PORTAL_SESSION_EXPIRE_HOURS = 12
+
+
+def create_portal_session_token(email: str, mode: str = "prod") -> str:
+    """Mint a Client Portal session token for a verified email. Carries no
+    ``sub`` (no platform identity) — only the email + the portal scope."""
+    return create_access_token(
+        data={"scope": PORTAL_SESSION_SCOPE, "email": email.lower()},
+        expires_delta=timedelta(hours=PORTAL_SESSION_EXPIRE_HOURS),
+        mode=mode,
+    )
+
+
+def decode_portal_session(token: str) -> Optional[str]:
+    """Validate a portal session token. Returns the verified email if the token
+    is a non-expired, non-revoked portal-scoped token; ``None`` otherwise. Used
+    by the entitled portal endpoints to resolve the client identity."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    if is_token_revoked(payload.get("jti")):
+        return None
+    email = payload.get("email")
+    return email.lower() if email else None
+
+
 def decode_token(token: str) -> Optional[dict]:
     """
     Decode a JWT token without FastAPI dependency.
@@ -189,6 +228,11 @@ def decode_token(token: str) -> Optional[dict]:
 
         # #5 — a half-authenticated 2FA challenge token is not a session token.
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
+            return None
+
+        # #78 — a Client Portal session token is not a platform session. It only
+        # authorizes the entitled portal endpoints (via decode_portal_session).
+        if payload.get("scope") == PORTAL_SESSION_SCOPE:
             return None
 
         # #187 — a token revoked via logout is no longer valid (also for WS).
@@ -234,6 +278,13 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
         # authorizes /api/enterprise/2fa/login/*; the second factor must be
         # completed there to obtain a real access token.
         if payload.get("scope") == MFA_CHALLENGE_SCOPE:
+            raise credentials_exception
+
+        # #78 — a Client Portal session token is fenced OUT of every platform
+        # endpoint. It carries no `sub` (so the check below would reject it
+        # anyway), but reject explicitly so a portal token can never resolve to
+        # a platform principal even if the claim shape changes.
+        if payload.get("scope") == PORTAL_SESSION_SCOPE:
             raise credentials_exception
 
         # #187 — reject a token revoked via logout.
@@ -455,21 +506,22 @@ def get_authorized_agent(
     Returns the agent name if authorized.
 
     Raises:
-        HTTPException(404): If agent does not exist
-        HTTPException(403): If user cannot access the agent
+        HTTPException(403): If a connector key is scoped to a different agent
+        HTTPException(404): If the agent does not exist OR the user cannot access
+            it — a uniform 404 so a non-existent and an inaccessible agent are
+            indistinguishable (enumeration-safe, #186).
     """
-    # First check if agent exists
-    if not db.get_agent_owner(name):
+    # Connector scope first: fires before any existence lookup so a connector key
+    # gets a uniform 403 across all non-bound names, existent or not (#186).
+    _enforce_connector_scope(current_user, name, owner_op=False)
+    # Evaluate existence AND access before branching so the query count (hence
+    # timing) is identical for the non-existent and inaccessible cases (#186).
+    exists = db.get_agent_owner(name) is not None
+    allowed = db.can_user_access_agent(current_user.username, name)
+    if not (exists and allowed):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
-        )
-    _enforce_connector_scope(current_user, name, owner_op=False)
-    # Then check if user has access
-    if not db.can_user_access_agent(current_user.username, name):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to agent"
         )
     return name
 
@@ -486,21 +538,20 @@ def get_owned_agent(
     Returns the agent name if authorized.
 
     Raises:
-        HTTPException(404): If agent does not exist
-        HTTPException(403): If user is not owner/admin
+        HTTPException(403): If a connector key attempts an owner operation
+        HTTPException(404): If the agent does not exist OR the user is not
+            owner/admin — a uniform 404 so a non-existent and an unowned agent
+            are indistinguishable (enumeration-safe, #186).
     """
-    # First check if agent exists
-    if not db.get_agent_owner(name):
+    # Connector keys can never perform owner ops; fires before existence lookup.
+    _enforce_connector_scope(current_user, name, owner_op=True)
+    # Evaluate existence AND owner-access before branching (equal timing, #186).
+    exists = db.get_agent_owner(name) is not None
+    allowed = db.can_user_share_agent(current_user.username, name)
+    if not (exists and allowed):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
-        )
-    _enforce_connector_scope(current_user, name, owner_op=True)
-    # Then check if user has owner access
-    if not db.can_user_share_agent(current_user.username, name):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Owner access required"
         )
     return name
 
@@ -517,21 +568,18 @@ def get_authorized_agent_by_name(
     Returns the agent name if authorized.
 
     Raises:
-        HTTPException(404): If agent does not exist
-        HTTPException(403): If user cannot access the agent
+        HTTPException(403): If a connector key is scoped to a different agent
+        HTTPException(404): If the agent does not exist OR the user cannot access
+            it — a uniform 404 so a non-existent and an inaccessible agent are
+            indistinguishable (enumeration-safe, #186).
     """
-    # First check if agent exists
-    if not db.get_agent_owner(agent_name):
+    _enforce_connector_scope(current_user, agent_name, owner_op=False)
+    exists = db.get_agent_owner(agent_name) is not None
+    allowed = db.can_user_access_agent(current_user.username, agent_name)
+    if not (exists and allowed):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
-        )
-    _enforce_connector_scope(current_user, agent_name, owner_op=False)
-    # Then check if user has access
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to agent"
         )
     return agent_name
 
@@ -548,21 +596,18 @@ def get_owned_agent_by_name(
     Returns the agent name if authorized.
 
     Raises:
-        HTTPException(404): If agent does not exist
-        HTTPException(403): If user is not owner/admin
+        HTTPException(403): If a connector key attempts an owner operation
+        HTTPException(404): If the agent does not exist OR the user is not
+            owner/admin — a uniform 404 so a non-existent and an unowned agent
+            are indistinguishable (enumeration-safe, #186).
     """
-    # First check if agent exists
-    if not db.get_agent_owner(agent_name):
+    _enforce_connector_scope(current_user, agent_name, owner_op=True)
+    exists = db.get_agent_owner(agent_name) is not None
+    allowed = db.can_user_share_agent(current_user.username, agent_name)
+    if not (exists and allowed):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
-        )
-    _enforce_connector_scope(current_user, agent_name, owner_op=True)
-    # Then check if user has owner access
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Owner access required"
         )
     return agent_name
 

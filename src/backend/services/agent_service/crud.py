@@ -34,6 +34,7 @@ from services.settings_service import get_anthropic_api_key, get_github_pat, get
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
 from utils.helpers import sanitize_agent_name, utc_now_iso
+from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR, normalize_cpu, normalize_memory
@@ -95,6 +96,24 @@ def _safe_local_template_path(template_name: str, root: Path) -> Path:
             },
         )
     return candidate
+
+
+def _fork_destination_in_use_message(destination: str, bound_agent: str, username: str) -> str:
+    """409 detail for a destination repo already bound to an agent (#93).
+
+    Names the bound agent only when the caller can access it — a creator-role
+    caller must not be able to map repo→agent bindings fleet-wide (#186
+    enumeration discipline).
+    """
+    try:
+        can_see = db.can_user_access_agent(username, bound_agent)
+    except Exception:
+        can_see = False
+    who = f"agent '{bound_agent}'" if can_see else "another agent"
+    return (
+        f"Repository '{destination}' is already the workspace of {who}. "
+        f"Each agent needs its own repository."
+    )
 
 
 def _get_default_resource(key: str) -> str:
@@ -191,8 +210,22 @@ async def create_agent_internal(
     github_pat_for_agent = None
     git_instance_id = None
     git_working_branch = None
+    # trinity-enterprise#93: template repo the fork-to-own copy came from —
+    # baked as GIT_UPSTREAM_REPO so `git pull upstream <branch>` works.
+    fork_upstream_repo = None
     # Phase 9.11: Track shared folder config from template
     template_shared_folders = None
+
+    # trinity-enterprise#93: fork-to-own only makes sense for a github:
+    # template (there must be a source repo to copy). Reject early and loud.
+    if config.fork_to_own and not (config.template or "").startswith("github:"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "fork_to_own requires a 'github:owner/repo' template.",
+                "code": "FORK_REQUIRES_GITHUB_TEMPLATE",
+            },
+        )
 
     # Load template configuration
     if config.template:
@@ -238,9 +271,11 @@ async def create_agent_internal(
                 # Pre-defined GitHub template from config.py
                 github_repo = gh_template["github_repo"]
 
-                # Get system GitHub PAT from settings (SQLite) or env var
+                # Get system GitHub PAT from settings (SQLite) or env var.
+                # Fork-to-own (#93) doesn't need it — the user's PAT is the
+                # write identity and public templates clone unauthenticated.
                 github_pat = get_github_pat()
-                if not github_pat:
+                if not github_pat and not config.fork_to_own:
                     raise HTTPException(
                         status_code=500,
                         detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
@@ -264,7 +299,7 @@ async def create_agent_internal(
 
                 # Get system GitHub PAT from settings (SQLite) or env var
                 github_pat = get_github_pat()
-                if not github_pat:
+                if not github_pat and not config.fork_to_own:
                     raise HTTPException(
                         status_code=500,
                         detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
@@ -273,6 +308,72 @@ async def create_agent_internal(
                 github_repo_for_agent = repo_path
                 github_pat_for_agent = github_pat
                 logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
+
+            # trinity-enterprise#93: fork-to-own — copy the template into a
+            # repo the USER owns, then create the agent FROM the copy. Runs
+            # here, BEFORE the docker try-block, so the structured FORK_*
+            # errors reach the UI (the catch-all below flattens everything
+            # inside it to a generic 500).
+            fork_meta = (gh_template or {}).get("fork_to_own")
+            if fork_meta == "required" and not config.fork_to_own:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": (
+                            f"Template '{config.template}' requires fork-to-own "
+                            f"creation: provide fork_to_own.destination_repo and "
+                            f"fork_to_own.github_pat so the agent's repo is your "
+                            f"own, not the shared template."
+                        ),
+                        "code": "FORK_TO_OWN_REQUIRED",
+                    },
+                )
+            if config.fork_to_own:
+                if url_branch:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": (
+                                "fork_to_own copies the template's default branch; "
+                                "the github:owner/repo@branch form is not supported "
+                                "with it."
+                            ),
+                            "code": "FORK_BRANCH_UNSUPPORTED",
+                        },
+                    )
+                destination = config.fork_to_own.destination_repo
+                # Source-mode rows bypass the UNIQUE(repo, branch) index, so
+                # this is the guard against two agents auto-pushing the same
+                # destination main. (Re-checked after reservation below — this
+                # pre-check is check-then-act with the whole copy in between.)
+                bound_agents = db.get_git_config_agent_names_for_repo(destination)
+                if bound_agents:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": _fork_destination_in_use_message(
+                                destination, bound_agents[0], current_user.username
+                            ),
+                            "code": "FORK_DESTINATION_IN_USE",
+                        },
+                    )
+                # Unwrap the SecretStr exactly once; plain str flows inward
+                # (docker env, GitHubService header, push auth).
+                user_pat = config.fork_to_own.github_pat.get_secret_value()
+                fork_result = await fork_template_to_own_repo(
+                    template_repo=github_repo_for_agent,
+                    destination_repo=destination,
+                    user_pat=user_pat,
+                    read_pat=github_pat_for_agent or "",
+                    private=config.fork_to_own.private,
+                )
+                fork_upstream_repo = github_repo_for_agent
+                github_repo_for_agent = fork_result.destination_repo
+                github_pat_for_agent = user_pat
+                # Pinned semantics: the user's default branch IS the brain —
+                # origin main holds captures; auto-sync pushes there.
+                config.source_branch = fork_result.default_branch
+                config.source_mode = True
 
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
@@ -332,6 +433,35 @@ async def create_agent_internal(
                     source_mode=config.source_mode,
                 )
             )
+
+            # trinity-enterprise#93: the destination-binding pre-check above is
+            # check-then-act with the entire fork copy (minutes) in between,
+            # and source-mode rows bypass the partial UNIQUE index — so two
+            # concurrent creates to the same destination can both reach here.
+            # Re-check now that our own row is inserted; losers (everyone but
+            # the lexicographically-first agent name) roll back deterministically,
+            # leaving exactly one winner.
+            if config.fork_to_own:
+                bound_now = db.get_git_config_agent_names_for_repo(github_repo_for_agent)
+                if len(bound_now) > 1 and min(bound_now) != config.name:
+                    try:
+                        db.delete_git_config(config.name)
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "fork-to-own: failed to roll back git config for %s "
+                            "after destination race: %s", config.name, cleanup_exc,
+                        )
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": _fork_destination_in_use_message(
+                                github_repo_for_agent,
+                                min(bound_now),
+                                current_user.username,
+                            ),
+                            "code": "FORK_DESTINATION_IN_USE",
+                        },
+                    )
         elif config.template.startswith("local:"):
             # Local template - strip "local:" prefix. Look in curated catalog
             # first (/agent-configs/templates), then in deploy-local writable
@@ -612,11 +742,18 @@ async def create_agent_internal(
         if _git_base:
             env_vars['TRINITY_GIT_BASE_URL'] = _git_base
 
+        # trinity-enterprise#93: startup.sh adds a credential-less `upstream`
+        # remote so `git pull upstream <branch>` adopts template updates.
+        if fork_upstream_repo:
+            env_vars['GIT_UPSTREAM_REPO'] = fork_upstream_repo
+
         # #389 S1a: 15-min auto-sync heartbeat. Only legacy (working-branch)
         # agents get it — source-mode agents track main read-only, and
         # auto-pushing to main would clobber protected branches. Operators
         # can toggle per-agent via PUT /api/agents/{name}/git/auto-sync.
-        if not config.source_mode:
+        # Exception (#93): fork-to-own agents own their repo — auto-pushing
+        # captures to their own main is the point.
+        if not config.source_mode or fork_upstream_repo:
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -644,6 +781,18 @@ async def create_agent_internal(
 
     if docker_client:
         try:
+            # trinity-enterprise#93: persist the user's PAT as the per-agent
+            # PAT (#347) onto the agent_git_config row the reservation above
+            # just created. Inside this try so a failure hits the except
+            # below and rolls back the reserved row + MCP key. Fail-closed:
+            # a fork-to-own agent must never fall back to the platform PAT
+            # on recreate (get_github_pat_for_agent resolves per-agent first).
+            if config.fork_to_own and github_repo_for_agent:
+                if not db.set_agent_github_pat(config.name, github_pat_for_agent):
+                    raise RuntimeError(
+                        f"failed to persist per-agent GitHub PAT for {config.name}"
+                    )
+
             # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
             # This ensures files created by the agent survive container restarts
             agent_volume_name = f"agent-{config.name}-workspace"
@@ -902,8 +1051,9 @@ async def create_agent_internal(
 
             # #389 S1a: opt non-source-mode GitHub-template agents into the
             # auto-sync heartbeat by default. Source-mode agents stay opt-in
-            # (auto-pushing to main would clobber protected branches).
-            if github_repo_for_agent and not config.source_mode:
+            # (auto-pushing to main would clobber protected branches) —
+            # except fork-to-own agents (#93), which own their repo.
+            if github_repo_for_agent and (not config.source_mode or fork_upstream_repo):
                 try:
                     db.set_git_auto_sync_enabled(config.name, True)
                 except Exception as e:

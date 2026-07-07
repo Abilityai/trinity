@@ -39,6 +39,7 @@ from .s03_slot_ttl_floor import check as s03_check
 from .e01_terminal_state_closure import check as e01_check
 from .e02_no_phantom_reversal import check as e02_check
 from .e05_dispatched_rows_have_session import check as e05_check
+from .e06_no_overdue_next_run import check as e06_check
 from .l03_delete_cascades import check as l03_check
 from .b01_queue_status_coherence import check as b01_check
 from .b02_no_queued_without_slots_full import check as b02_check
@@ -54,6 +55,7 @@ INVARIANTS: Dict[str, Callable[[Snapshot], List[ViolationReport]]] = {
     "E-01": e01_check,
     "E-02": e02_check,
     "E-05": e05_check,
+    "E-06": e06_check,
     "L-03": l03_check,
     "B-01": b01_check,
     "B-02": b02_check,

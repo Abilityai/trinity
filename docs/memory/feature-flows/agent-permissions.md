@@ -180,7 +180,7 @@ The backend provides reusable FastAPI dependencies for access control. These are
 #### Dependency Pattern Benefits
 
 Using these dependencies instead of inline `db.can_user_access_agent()` calls provides:
-- **Consistent 403 messages**: "Access denied to agent" or "Owner access required"
+- **Enumeration-safe uniform 404 (#186)**: all four helpers return a single `404 "Agent not found"` for BOTH a non-existent AND an inaccessible/unowned agent (previously a 404-then-403 split that leaked existence). Existence and access are evaluated before branching so timing is equal; `_enforce_connector_scope` still runs first (connector keys → 403). See architecture Invariant #8.
 - **OpenAPI schema visibility**: Authorization requirements shown in API docs
 - **Automatic enforcement**: New endpoints automatically get proper authorization
 
@@ -458,6 +458,16 @@ async function checkAgentAccess(
 }
 ```
 
+> **Enumeration-safety (#186):** for user-scoped keys the denial branch returns a
+> single **uniform reason** — `"Agent '<name>' not found or not accessible"` — for
+> BOTH a non-existent target and an existing-but-inaccessible one, and it **no
+> longer interpolates the owner username** (the old `"…is owned by '<owner>' (not
+> shared)…"` string leaked an owner identity to any user-scoped caller). This
+> mirrors the backend dependency family's uniform-404 collapse (architecture
+> Invariant #8). Consumer tools adjusted for the backend 403→404 flip:
+> `reports.ts`/`messages.ts` treat the dep's 404 as not-authorized; `nevermined.ts`
+> reports `configured:false` for an inaccessible agent (enumeration-safe).
+
 ---
 
 ## Agent Container Layer
@@ -541,14 +551,18 @@ Events logged to audit service:
 
 | Error Case | HTTP Status | Message |
 |------------|-------------|---------|
-| Agent not found | 404 | "Agent not found" |
-| No access to source agent | 403 | "You don't have permission to access this agent" |
-| Not owner (modify) | 403 | "Only the owner can modify agent permissions" |
-| Target not accessible | 400 | "Agent '{name}' does not exist or is not accessible" |
+| Agent not found OR inaccessible (dep family, #186) | 404 | "Agent not found" — uniform for non-existent AND inaccessible/unowned |
+| Not owner (modify, inline access-first check) | 403 | "Only the owner can modify agent permissions" |
 | Self-permission | 400 | "Agent cannot be permitted to call itself" |
-| MCP permission denied | 200* | JSON with `{error: "Access denied", reason: "..."}` |
+| MCP access denied (user-scoped, #186) | 200* | JSON `{error, reason: "Agent '<name>' not found or not accessible"}` — uniform, no owner username |
+| MCP permission denied (agent-scoped) | 200* | JSON with `{error: "Access denied", reason: "…not permitted…"}` |
 
 *MCP tools return error in response body, not HTTP status
+
+> **Contract (#186):** an agent-access handler is *self-uniform* — never a 404
+> existence check followed by a 403 access check in the same function. The
+> dependency family returns uniform **404**; access-first inline handlers stay
+> uniform **403**. Do not reintroduce a 404-then-403 split.
 
 ---
 

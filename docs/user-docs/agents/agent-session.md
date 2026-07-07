@@ -1,6 +1,6 @@
 # Agent Session
 
-The Session tab in Agent Detail is a `--resume`-default chat surface that lives alongside the existing Chat tab. Each new message reattaches to the same Claude Code session, so the agent retains tool-result memory, mid-skill state, and reasoning state across turns — strictly more capable than Chat's stateless text-replay model.
+**Session mode** is the default surface of the unified **Chat** tab in Agent Detail (toggle at the top-right; the former separate Session tab merged into Chat). Each new message reattaches to the same Claude Code session, so the agent retains tool-result memory, mid-skill state, and reasoning state across turns — strictly more capable than classic chat's stateless text-replay model. Old `?tab=session` links open the Chat tab in session mode.
 
 > 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
 
@@ -20,19 +20,21 @@ Both buttons sit in the Session toolbar. They look similar; they aren't:
 | **Reset memory** | Kept | Cleared (next turn is cold) | Continues on the same session | You want a fresh line of thought but want to keep the conversation transcript with the agent |
 | **+ New Session** | New (empty) | New (cold) | New (zero) | You're starting a different conversation entirely — different topic, different cost bucket |
 
-## When to use Session vs Chat
+## When to use Session mode vs classic chat
 
-| Use Session for... | Use Chat for... |
+| Use Session mode for... | Use classic chat for... |
 |---|---|
 | Long, multi-turn reasoning or planning | One-shot questions |
 | Multi-step skills where mid-skill state matters | Voice conversations |
 | Cases where you want the agent to remember tool outputs across turns | Quick file-bearing questions where memory across turns isn't important |
 
-The two surfaces share nothing — separate tables, separate sessions, separate cost tracking. Switching between them does not transfer state.
+The two surfaces share nothing — separate tables, separate sessions, separate cost tracking. Flipping the toggle does not transfer state.
+
+Session mode is unavailable (the toggle hides and classic chat is used) when the platform `session_tab_enabled` flag is off or the agent runs a runtime without `--resume` support (Codex).
 
 ## How It Works
 
-1. Open an agent's detail page and click the **Session** tab.
+1. Open an agent's detail page and click the **Chat** tab; make sure **Session mode** is on (the default).
 2. Click **+ New Session** or pick an existing session from the dropdown.
 3. Type a message and press Enter. The agent processes the message; subsequent turns reattach to the same Claude Code session UUID.
 4. Watch the session subtitle for `X% last cache` — the size of the most recent assistant turn's cache as a fraction of the model window.
@@ -129,9 +131,9 @@ When to reset:
 
 | Limitation | Detail |
 |---|---|
-| **Voice mic not wired into Session** | Voice writes to the Chat tables, not the Session tables. The mic is hidden on the Session tab. Use the Chat tab for voice. |
+| **Voice mic not wired into Session mode** | Voice writes to the classic chat tables, not the Session tables. The mic is hidden in session mode. Switch Session mode off for voice. |
 | **Agent restore from backup may force fresh sessions** | The platform backup covers SQLite (session rows + messages) but not the Docker volumes that hold Claude Code's JSONL files. After a DR restore, every session's first turn will trigger a memory-loss fallback (one cold turn under a new UUID). The visible message log is preserved. |
-| **Long Session turns may surface phantom errors in browsers** | The turn endpoint is synchronous. If the browser tab is suspended mid-turn (laptop sleep, tab freeze), the user may see a phantom error toast even though the work succeeded server-side. Refresh the page after the agent's typical completion time — the assistant message will appear if it landed in the DB. |
+| **Long turns survive a severed browser connection** | The turn endpoint is synchronous; if the browser tab is suspended mid-turn (laptop sleep, tab freeze), the UI reconciles against server state when it wakes instead of showing a false "failed to send" — the assistant message appears once the turn lands. Very long turns may still take a moment to reconcile after the tab resumes. |
 | **Stdout pipe race recovery is best-effort** | When a child subprocess inherits Claude Code's stdout, the final result event line can occasionally be lost. The system soft-recovers (treats accumulated assistant text as success), but cost and duration columns will be NULL for these recovered turns. The reply is correct; the metrics are missing. |
 
 ## For Agents
@@ -152,6 +154,6 @@ All Session endpoints return 404 when the `session_tab_enabled` feature flag is 
 
 ## See Also
 
-- [Agent Chat](agent-chat.md) — the parallel chat surface
+- [Agent Chat](agent-chat.md) — the classic (stateless) surface of the same tab
 - [Agent Configuration](agent-configuration.md)
 - [Creating Agents](creating-agents.md)

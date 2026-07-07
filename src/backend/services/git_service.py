@@ -890,6 +890,7 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".ssh/",
     ".trinity/",
     ".tmp/",  # #1098 disk-backed scratch (TMPDIR); #1187 relocated CODEX_HOME
+    ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
     "content/",
     # Claude Code runtime — commit commands/skills/agents, exclude runtime data
@@ -945,12 +946,21 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     (bash can't hold NUL bytes), then a NUL-delimited pipe to xargs so paths
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
+
+    ``.trinity/brain-orb/`` and ``.trinity/setup.sh`` are exempt: Brain-Orb /
+    setup-convention templates COMMIT those files (trinity-enterprise#76), while
+    the fleet-wide ``.trinity/`` ignore appended above makes them look
+    ignored-but-tracked — without the pathspec exclusions the first push would
+    untrack them and push the deletion, so a later re-clone/recreate boots
+    hookless and never runs its startup setup (verified live: the e2e Push
+    swept setup.sh before the second exemption was added).
     """
+    exempt = '":!.trinity/brain-orb" ":!.trinity/setup.sh"'
     script = (
         f"cd {shlex.quote(git_dir)} && "
-        "ignored=$(git ls-files -ci --exclude-standard) && "
+        f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
         'if [ -n "$ignored" ]; then '
-        "git ls-files -ci -z --exclude-standard | "
+        f"git ls-files -ci -z --exclude-standard -- . {exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
         "fi"
     )

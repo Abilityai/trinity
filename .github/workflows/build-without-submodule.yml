@@ -135,6 +135,18 @@ jobs:
           fi
           echo "OK: enterprise_features=[] as expected"
 
+          # #1443 — /api/version must report the effective edition from the
+          # same entitlement registry. This is the only end-to-end check of
+          # the handler wiring (unit tests cover only the pure builder).
+          EDITION=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+            http://localhost:8000/api/version \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['edition'])")
+          if [ "$EDITION" != "oss" ]; then
+            echo "::error::Expected edition=oss in OSS-only build, got: $EDITION"
+            exit 1
+          fi
+          echo "OK: /api/version edition=oss as expected"
+
       - name: Assert SSO router not mounted
         run: |
           # No auth needed — the /api/enterprise/sso/* router is

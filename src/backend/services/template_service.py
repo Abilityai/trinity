@@ -155,6 +155,13 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # `.trinity/data-paths.yaml` + the per-agent .gitignore at creation.
         # Opt-in — defaults to an empty list when the template omits the key.
         "data_paths": metadata.get("data_paths", []),
+        # trinity-enterprise#93: fork-to-own declaration. 'required' makes
+        # creation demand a user-owned destination repo (crud enforces it —
+        # the copy lands there and origin points at it). Also drives the
+        # featured card treatment in CreateAgentModal, with `tagline` as the
+        # card subtitle.
+        "fork_to_own": metadata.get("fork_to_own"),
+        "tagline": metadata.get("tagline", ""),
     }
 
 

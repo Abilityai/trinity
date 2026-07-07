@@ -209,6 +209,12 @@ class Snapshot:
     # `sources_unavailable` and the R-01 check skips that agent rather
     # than firing.
     zombie_counts: Dict[str, int] = field(default_factory=dict)
+    # E-06 input: enabled, non-deleted schedules → {schedule_id, agent_name,
+    # next_run_at}. The check flags any whose next_run_at is more than the
+    # misfire grace behind the snapshot time (a stale projection the scheduler
+    # never advanced — the "Next: Nd ago" bug, #1472). Empty means the read was
+    # skipped (recorded in sources_unavailable).
+    enabled_schedules: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
 
@@ -420,6 +426,31 @@ def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
             (*TERMINAL_EXECUTION_STATUSES, cutoff),
         )
         return {row["id"]: row["status"] for row in cursor.fetchall()}
+
+
+def _collect_enabled_schedules() -> List[Dict[str, Any]]:
+    """Enabled, non-deleted schedules → {schedule_id, agent_name, next_run_at}
+    for E-06 (stale next_run_at detection, #1472). Mirrors the scheduler's own
+    read predicate (`enabled = 1 AND deleted_at IS NULL`)."""
+    from db.connection import get_db_connection
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, agent_name, next_run_at
+            FROM agent_schedules
+            WHERE enabled = 1 AND deleted_at IS NULL
+            """
+        )
+        return [
+            {
+                "schedule_id": row["id"],
+                "agent_name": row["agent_name"],
+                "next_run_at": row["next_run_at"],
+            }
+            for row in cursor.fetchall()
+        ]
 
 
 def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
@@ -658,6 +689,13 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: terminal executions read failed")
         snap.sources_unavailable.append(f"sqlite.terminal_executions: {exc}")
+
+    # SQLite: enabled schedules → next_run_at for the E-06 stale-projection check.
+    try:
+        snap.enabled_schedules = _collect_enabled_schedules()
+    except Exception as exc:
+        logger.exception("canary snapshot: enabled schedules read failed")
+        snap.sources_unavailable.append(f"sqlite.enabled_schedules: {exc}")
 
     # Redis: drain-tick heartbeat for B-02. Reuses the slot_service Redis
     # client (same one used by `_collect_redis_slot_state` above). On
