@@ -624,15 +624,23 @@ never bypassed.
 
 Capability-gated per-agent 3D knowledge-graph page for Cornelius-class agents.
 **Shipped: static render (Phase 1) + live scope control (Phase 2) + client-held
-Gemini Live voice tile + read-only KB search (Phase 3, #60).** The orb renders the
-agent-produced graph, supports button-driven **scope mount/unmount → agent
-re-export → live rebuild**, and a **client-held voice tile** (browser connects
-directly to Gemini Live via a short-lived, config-locked ephemeral token minted by
-Trinity — no audio proxying). Still deferred to later epic children: KB-write
-actions, transcript capture, and headless-skill injection. Mirrors the workspace
-page (gated per-agent route) and the agent-owned read-surface pattern (pipelines
-#919, reports #918): the agent owns generation + scope state (Invariant #8),
-Trinity reads/renders + brokers control. Default OFF — no impact on other agents.
+Gemini Live voice tile + read-only KB search (Phase 3, #60) + owner-gated KB
+writes: capture/link + voice-transcript capture + the write→refresh loop (Phase
+4a/4b, #61/#66/#67) + post-voice-session processing as a standard execution
+(#102).** The orb renders the agent-produced graph, supports button-driven
+**scope mount/unmount → agent re-export → live rebuild**, and a **client-held
+voice tile** (browser connects directly to Gemini Live via a short-lived,
+config-locked ephemeral token minted by Trinity — no audio proxying). Voice
+transcripts save through the owner-gated `action` broker; the configured
+post-session prompt (#73) is dispatched by `services/brain_orb_postprocess.py`
+via `execute_task(triggered_by="voice")` — a real, observable execution row
+(sweep-safe, cost-tracked, failures surface as FAILED), replacing the hook's
+detached `claude -p` (#102). Still deferred: `run_skill` headless-skill
+injection. Mirrors the workspace page (gated per-agent route) and the
+agent-owned read-surface pattern (pipelines #919, reports #918): the agent owns
+generation + scope state (Invariant #8), Trinity reads/renders + brokers
+control. Default OFF — no impact on other agents. Full flow:
+[brain-orb.md](feature-flows/brain-orb.md).
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
