@@ -201,13 +201,15 @@ services:
       - ./config/process-docs:/app/config/process-docs:ro  # Process documentation
       - agent-configs:/agent-configs
       - trinity-data:/data
-      - trinity-logs:/data/logs:ro  # Read-only access to Vector logs
+      - trinity-logs:/data/logs  # rw: log_archive_service must delete archived originals (#1478); Vector is the sole writer of new lines
       - trinity-archives:/data/archives  # Log archives storage
     depends_on:
       redis:
         condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
+      logs-init:
+        condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
     networks:
       - trinity-platform   # Redis, scheduler, vector, OTel
       - trinity-agent      # Frontend, mcp-server, agent containers
@@ -436,6 +438,21 @@ services:
       start_period: 10s
     mem_limit: 512m
     cpus: 1
+
+  # #1478: one-shot that makes the shared logs volume dir owned by UID 1000 so the
+  # backend (non-root) can unlink retention-archived originals. Vector writes new
+  # log files as root; deleting a file needs write on the *directory*, not the file,
+  # so chowning just the dir (fast, not -R) is enough. Runs as root (needs CAP_CHOWN,
+  # so no cap_drop); exits immediately; backend waits on completion.
+  logs-init:
+    image: alpine:3.20
+    container_name: trinity-logs-init
+    command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
+    volumes:
+      - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
 
   # Vector - centralized log aggregation from all containers
   vector:
