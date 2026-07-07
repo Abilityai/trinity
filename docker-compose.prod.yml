@@ -248,6 +248,8 @@ services:
       dockerfile: ../../docker/frontend/Dockerfile.prod
       args:
         - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+        - VITE_BUG_REPORTING_ENABLED=${VITE_BUG_REPORTING_ENABLED:-true}
+        - VITE_BUG_INTAKE_URL=${VITE_BUG_INTAKE_URL:-https://intake.abilityai.dev/v1/report-bug}
     image: trinity-frontend:prod
     container_name: trinity-frontend
     restart: unless-stopped

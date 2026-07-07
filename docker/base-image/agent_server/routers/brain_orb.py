@@ -171,16 +171,17 @@ async def post_brain_orb_action(request: Request):
     """Run an owner-gated KB-write action. Pipes the request body (a JSON `{action, ...}`)
     to `~/.trinity/brain-orb/action`, which performs the write and prints JSON. 404 when
     the agent ships no `action` hook. The backend proxy gates this at `OwnedAgentByName`
-    (owner/admin) and enum-restricts the verb (capture/link + capture_transcript/
-    process_transcript, #66; run_skill stays out). The hook forks its own detached
-    `claude -p` for post-session processing, so this call still returns promptly."""
+    (owner/admin) and enum-restricts the verb (capture/link + capture_transcript, #66;
+    run_skill stays out). Post-session processing is dispatched by the BACKEND as a
+    standard execution (#102) — the backend strips `capture_transcript`'s `process` flag
+    and never forwards `process_transcript`, so the hook only writes files here (a
+    hook-forked detached `claude -p` is unregistered and reaped by the orphan sweep)."""
     if not _hook_ready(_ACTION_HOOK):
         raise HTTPException(status_code=404, detail="KB writes not supported")
     body = await request.body()
     if len(body) > _MAX_ACTION_BODY:
         raise HTTPException(status_code=413, detail="Request too large")
-    # 60s: note write / link / transcript render are quick; the post-session claude -p
-    # is spawned DETACHED by the hook (returns immediately), so this never blocks on it.
+    # 60s: note write / link / transcript render are quick file ops.
     return await _run_hook(_ACTION_HOOK, stdin=body, timeout=60)
 
 

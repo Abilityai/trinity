@@ -16,10 +16,17 @@ RUN npm install
 COPY . .
 
 # Build arguments (injected at build time)
+# NOTE: every VITE_* var is statically inlined into the world-readable client
+# bundle by Vite at `npm run build` — never pass a secret here. Defaults mirror
+# the code source-of-truth in src/components/HelpChatWidget.vue (#1116/#1489).
 ARG VITE_API_URL=http://localhost:8000
+ARG VITE_BUG_REPORTING_ENABLED=true
+ARG VITE_BUG_INTAKE_URL=https://intake.abilityai.dev/v1/report-bug
 
 # Set environment variables for Vite build
 ENV VITE_API_URL=${VITE_API_URL}
+ENV VITE_BUG_REPORTING_ENABLED=${VITE_BUG_REPORTING_ENABLED}
+ENV VITE_BUG_INTAKE_URL=${VITE_BUG_INTAKE_URL}
 
 # Build the application
 RUN npm run build
