@@ -33,6 +33,7 @@ import asyncio
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -45,12 +46,30 @@ if str(_BASE_IMAGE) not in sys.path:
     sys.path.insert(0, str(_BASE_IMAGE))
 
 from agent_server.routers import brain_orb as asbo  # noqa: E402
-from agent_server.services import process_registry as pr_mod  # noqa: E402
 from agent_server.services.process_registry import (  # noqa: E402
     ProcessRegistry,
     TRANSIENT_PID_TTL_SECONDS,
 )
 from agent_server.utils import orphan_allowlist as oa  # noqa: E402
+
+# Production code resolves the registry via CALL-TIME lazy imports
+# (`from ..services.process_registry import get_process_registry` in
+# brain_orb / orphan_sweeper / gemini_runtime). Sibling test modules
+# (test_agent_server_auto_sync.py, test_git_status_dual_ahead_behind.py)
+# evict `agent_server*` from sys.modules at module level during collection,
+# so an attribute patch on the module object THIS file imported would be
+# invisible to the fresh module a later lazy import re-creates — the #1446
+# stub-leak class (this exact mode failed 7/27 of these tests in the full
+# CI suite while passing in isolation). Fix per that lesson: OWN the
+# sys.modules key for the test's duration via monkeypatch.setitem
+# (auto-restored, last-write-wins over any prior eviction/replacement).
+_PR_KEY = "agent_server.services.process_registry"
+
+
+def _own_registry_module(monkeypatch, get_process_registry):
+    mod = types.ModuleType(_PR_KEY)
+    mod.get_process_registry = get_process_registry
+    monkeypatch.setitem(sys.modules, _PR_KEY, mod)
 
 
 def _exec_entry(pid: int, *, poll_result=None, pgid: int | None = None) -> dict:
@@ -154,8 +173,8 @@ def test_periodic_sweeper_source_includes_transients(monkeypatch):
     from agent_server.services import orphan_sweeper as sweeper
 
     fresh = ProcessRegistry()
-    monkeypatch.setattr(pr_mod, "_process_registry", fresh)
     fresh.add_transient_pid(4242)
+    _own_registry_module(monkeypatch, lambda: fresh)
     assert 4242 in sweeper._active_execution_pids()
 
 
@@ -190,7 +209,7 @@ def hook_env(tmp_path, monkeypatch):
     """Tmp hook dir + recording registry stub behind the lazy import."""
     monkeypatch.setattr(asbo, "_HOME", tmp_path)  # subprocess cwd must exist
     stub = _RecordingRegistry()
-    monkeypatch.setattr(pr_mod, "get_process_registry", lambda: stub)
+    _own_registry_module(monkeypatch, lambda: stub)
     return tmp_path, stub
 
 
@@ -249,7 +268,7 @@ def test_run_hook_registration_failure_is_fail_open(tmp_path, monkeypatch):
     runs sweep-unprotected (pre-#1501 behavior)."""
     monkeypatch.setattr(asbo, "_HOME", tmp_path)
     stub = _RecordingRegistry(raise_on_add=True)
-    monkeypatch.setattr(pr_mod, "get_process_registry", lambda: stub)
+    _own_registry_module(monkeypatch, lambda: stub)
     hook = tmp_path / "hook"
     _write_hook(hook, '#!/bin/sh\necho \'{"ok": true}\'\n')
     result = asyncio.run(asbo._run_hook(hook, timeout=10))
@@ -378,9 +397,9 @@ def test_gemini_sweep_allowlist_pids_reads_registry(monkeypatch):
     from agent_server.services import gemini_runtime as gr
 
     fresh = ProcessRegistry()
-    monkeypatch.setattr(pr_mod, "_process_registry", fresh)
     fresh._processes = {"exec-a": _exec_entry(1001)}
     fresh.add_transient_pid(4242)
+    _own_registry_module(monkeypatch, lambda: fresh)
     pids = gr._sweep_allowlist_pids()
     assert {1001, 4242}.issubset(set(pids))
 
@@ -391,7 +410,7 @@ def test_gemini_sweep_allowlist_pids_fail_open(monkeypatch):
     def _boom():
         raise RuntimeError("registry unavailable")
 
-    monkeypatch.setattr(pr_mod, "get_process_registry", _boom)
+    _own_registry_module(monkeypatch, _boom)
     assert gr._sweep_allowlist_pids() == []
 
 
