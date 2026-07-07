@@ -753,6 +753,13 @@
       "added": "2026-05-13",
       "categories": ["backend", "unit", "monitoring", "circuit-breaker"],
       "description": "check_network_health() /health-probe exception classification: #474 BrokenPipe/ConnectionReset stay circuit-neutral, httpx Read/Write/RemoteProtocol errors record_failure, Timeout/ConnectError record_failure. #1463: a Timeout while the agent has an active execution slot (CapacityManager is_busy, stubbed) stays circuit-neutral with error='HTTP timeout (agent busy)'; idle Timeout still records_failure; slot-lookup error fails open to record_failure. httpx.AsyncClient + circuit + capacity_manager stubbed; no Docker/Redis."
+    },
+    {
+      "file": "unit/test_1501_hook_sweep_protection.py",
+      "feature": "#1501",
+      "added": "2026-07-07",
+      "categories": ["agent-server", "unit", "reliability", "brain-orb"],
+      "description": "Orphan sweep must not SIGKILL in-flight brain-orb hook runs (#1501): ProcessRegistry transient-pid API (add/remove, per-registration expiry deadline with bad-ttl fallback, lazy eviction, coexists with execution pids, exclude_execution_id never drops transients, invalid pids ignored, periodic-sweeper source includes transients); _run_hook registers-then-unregisters on every exit path (success, non-zero exit, timeout-kill, invalid JSON, cancellation kills+reaps the hook) with fail-open registration and ttl derived from the run's timeout; resolve_allowlist user cmdline-pattern matches protect the daemon's descendant tree (reparented leftovers still reaped, platform essentials stay bare-pid); gemini _sweep_allowlist_pids reads the registry fail-open + static guard that no blanket kill_cgroup_orphans() call remains."
     }
   ]
 }

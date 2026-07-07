@@ -38,6 +38,19 @@ RECENTLY_COMPLETED_TTL_SECONDS = 300  # 5 minutes
 # outlast the gap between a SIGINT send and the turn's graceful exit + finalize.
 TERMINATED_TTL_SECONDS = 300  # 5 minutes
 
+# Issue #1501: default protection window for a transient-pid registration
+# (see add_transient_pid) when the caller doesn't derive one from its own
+# subprocess budget. Kept deliberately LOW: a transient entry whose removal
+# was missed (agent-server crash between spawn and finally) shields that pid
+# — and, via kernel pid reuse, potentially an unrelated future process —
+# from the orphan sweep until the deadline lapses. The #817 "leaked
+# processes eventually die" guarantee therefore degrades by minutes,
+# never permanently. Callers with a known subprocess timeout should pass
+# ``ttl_seconds=timeout + headroom`` so the protection window can never be
+# shorter than the run it protects (a TTL below the subprocess budget would
+# silently reintroduce the #1501 mid-run kill for long hooks).
+TRANSIENT_PID_TTL_SECONDS = 300  # 5 minutes
+
 
 class ProcessRegistry:
     """
@@ -72,6 +85,14 @@ class ProcessRegistry:
         # turn as "cancelled". Lazy TTL eviction on read; cleared on register()
         # so a reused execution_id (#678 in-line retry) can't inherit the label.
         self._terminated: Dict[str, float] = {}
+        # Issue #1501: pid -> unix-timestamp EXPIRY DEADLINE for short-lived
+        # agent-server child subprocesses (brain-orb convention hooks) that
+        # must survive the orphan sweep for the duration of their run. Fed
+        # into active_execution_pids() (the #912 canonical sweep-allowlist
+        # source), so every sweep site inherits the protection. Entries are
+        # removed by the spawner's finally; the stored deadline is the
+        # lazy-evicted backstop against a missed removal.
+        self._transient_pids: Dict[int, float] = {}
 
     def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None):
         """
@@ -210,8 +231,9 @@ class ProcessRegistry:
                     logger.info(
                         f"[ProcessRegistry] Cgroup sweep killed {killed} "
                         f"orphan(s) after terminating {execution_id} "
-                        f"(preserved {len(preserve)} pid(s) for other "
-                        f"in-flight execution(s))"
+                        f"(preserved {len(preserve)} allowlisted pid(s): "
+                        f"other in-flight executions + transient "
+                        f"subprocesses)"
                     )
             except Exception:
                 logger.exception(
@@ -273,8 +295,50 @@ class ProcessRegistry:
                     })
             return result
 
+    def add_transient_pid(self, pid: int, *, ttl_seconds: Optional[float] = None):
+        """Issue #1501: shield a short-lived agent-server child subprocess
+        from the orphan sweep for the duration of its run.
+
+        The sweep's hard-protect walk goes from the sweeper UP to PID 1,
+        never down to the agent-server's other children — so a subprocess
+        the agent-server itself spawns (a brain-orb convention hook) is
+        indistinguishable from a genuine orphan and gets SIGKILLed by any
+        sweep that fires while it runs. Registering the pid here puts it
+        (and, via the allowlist's ppid walk, its descendants) on every
+        sweep site's allowlist. The spawner MUST pair this with
+        :meth:`remove_transient_pid` in a ``finally``; the TTL backstop
+        only bounds the damage of a missed removal, it is not the
+        removal mechanism.
+
+        Args:
+            pid: the spawned subprocess pid. Non-positive/None is ignored.
+            ttl_seconds: protection window. Callers with a known subprocess
+                timeout MUST derive this from it (``timeout + headroom``) —
+                a window shorter than the run would lazily evict mid-run
+                and reintroduce the #1501 kill. ``None`` / non-finite /
+                non-positive falls back to TRANSIENT_PID_TTL_SECONDS.
+        """
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        window = TRANSIENT_PID_TTL_SECONDS
+        if isinstance(ttl_seconds, (int, float)) and ttl_seconds > 0 and ttl_seconds != float("inf"):
+            window = float(ttl_seconds)
+        with self._lock:
+            self._transient_pids[pid] = time.time() + window
+        logger.debug(f"[ProcessRegistry] Registered transient pid {pid} (window={window:.0f}s)")
+
+    def remove_transient_pid(self, pid: int):
+        """Issue #1501: drop a transient pid from the sweep allowlist.
+
+        Idempotent — a double remove or a remove of an unknown/expired pid
+        is a no-op, so ``finally`` blocks can call it unconditionally.
+        """
+        with self._lock:
+            self._transient_pids.pop(pid, None)
+        logger.debug(f"[ProcessRegistry] Unregistered transient pid {pid}")
+
     def active_execution_pids(self, exclude_execution_id: Optional[str] = None) -> List[int]:
-        """Snapshot of pids + captured pgids for currently-running executions.
+        """Snapshot of the registry-vouched sweep-allowlist pids.
 
         Returned for the orphan-sweep allowlist. Issue #912: any caller of
         :func:`kill_cgroup_orphans` that runs while *other* executions are
@@ -285,11 +349,18 @@ class ProcessRegistry:
         (covers grandchildren spawned with ``setsid`` that escape the ppid
         chain). Duplicates are fine — the allowlist resolver de-dupes.
 
+        Issue #1501: despite the (kept-for-compat) name, the snapshot is
+        no longer *strictly* execution pids — it also carries live
+        transient pids (agent-server hook subprocesses registered via
+        :meth:`add_transient_pid`), which every sweep site must preserve
+        for exactly the same reason. Expired transient entries are lazily
+        evicted here.
+
         Args:
             exclude_execution_id: When set, the entry with that id is
                 omitted from the snapshot. Used by ``terminate()`` so the
                 cgroup sweep doesn't try to preserve a process we just
-                killed.
+                killed. Transient pids are never affected by this filter.
 
         Returns:
             A new list (snapshot under the registry lock) of ints. Empty
@@ -307,6 +378,15 @@ class ProcessRegistry:
                 pgid = (entry.get("metadata") or {}).get("pgid")
                 if isinstance(pgid, int) and pgid > 0:
                     result.append(pgid)
+            # Issue #1501: live transient pids ride along. Collect-then-delete
+            # eviction (never mutate while iterating), mirroring the other
+            # lazy-TTL maps in this class. Entries store their expiry
+            # deadline directly (per-registration window).
+            now = time.time()
+            expired = [pid for pid, deadline in self._transient_pids.items() if deadline < now]
+            for pid in expired:
+                del self._transient_pids[pid]
+            result.extend(self._transient_pids.keys())
         return result
 
     def list_recently_completed_ids(self) -> List[str]:
