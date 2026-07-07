@@ -127,6 +127,27 @@ def _drain_bounded(
             "leaked daemon threads (pid=%s). Issue #728.",
             _DRAIN_BUDGET_SECONDS, process.pid,
         )
+        # #1502: #728 unblocked the executor thread but LEFT THE PROCESS GROUP
+        # ALIVE. The leaked reader is blocked reading a pipe a grandchild still
+        # holds open — it spins/pegs a core until the container is restarted.
+        # SIGKILL the whole group so that pipe EOFs, letting the daemon reader
+        # return from readline() and exit, freeing the CPU. Best-effort: never
+        # let cleanup raise into the caller, and only meaningful when the pgid
+        # was captured at spawn (after wait() reaped the parent, a pid lookup
+        # can't reach grandchildren — see terminate_process_group docstring).
+        try:
+            _terminate_process_group(process, 0, pgid=pgid)
+            logger.warning(
+                "[Subprocess] #1502: SIGKILLed the process group (pgid=%s, pid=%s) "
+                "after the budget-exceeded drain so the leaked reader can EOF and "
+                "free the core.",
+                pgid, process.pid,
+            )
+        except Exception as e:  # pragma: no cover — cleanup must never crash the caller
+            logger.warning(
+                "[Subprocess] #1502: group kill after budget-exceed failed "
+                "(pgid=%s, pid=%s): %s", pgid, process.pid, e,
+            )
         return "budget_exceeded"
     # done is set → _target finished, so ``outcome`` is fully settled.
     if outcome == "errored":
