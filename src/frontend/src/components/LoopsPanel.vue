@@ -300,7 +300,7 @@
                     <td class="py-1.5 pr-4">
                       <span :class="runStatusClass(run.status)">{{ run.status }}</span>
                     </td>
-                    <td class="py-1.5 pr-4 text-gray-600 dark:text-gray-400">{{ formatCost(run.cost) }}</td>
+                    <td class="py-1.5 pr-4 text-gray-600 dark:text-gray-400">{{ run.cost != null ? formatCost(run.cost) : '—' }}</td>
                     <td class="py-1.5 pr-4 text-gray-600 dark:text-gray-400">{{ formatDuration(run.duration_ms) }}</td>
                     <td class="py-1.5 text-gray-600 dark:text-gray-400">
                       <span v-if="run.error" class="text-status-danger-600 dark:text-status-danger-400">{{ run.error }}</span>
@@ -330,6 +330,7 @@
 import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { useLoopsStore } from '../stores/loops'
 import { renderMarkdown } from '../utils/markdown'
+import { formatCost } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 
 const props = defineProps({
@@ -477,10 +478,6 @@ function formatSeconds(secs) {
   return `${h}h ${m}m`
 }
 
-function formatCost(cost) {
-  if (cost === null || cost === undefined) return '—'
-  return `$${cost.toFixed(4)}`
-}
 
 function formatDuration(ms) {
   if (ms === null || ms === undefined) return '—'

@@ -75,7 +75,7 @@
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Total Cost</p>
-        <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">${{ totalCost.toFixed(4) }}</p>
+        <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">{{ formatCostCompact(totalCost) }}</p>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Avg Duration</p>
@@ -237,7 +237,7 @@
               <div class="flex items-center space-x-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
                 <span v-if="task.model_used" class="font-mono bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">{{ task.model_used }}</span>
                 <span v-if="task.duration_ms" class="font-mono">{{ formatDuration(task.duration_ms) }}</span>
-                <span v-if="task.cost" class="font-mono">${{ task.cost.toFixed(4) }}</span>
+                <span v-if="task.cost" class="font-mono">{{ formatCost(task.cost) }}</span>
                 <div v-if="task.context_used && task.context_max" class="flex items-center space-x-1">
                   <div class="w-16 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                     <div
@@ -486,7 +486,7 @@
                       </div>
                       <div class="flex items-center space-x-3 font-mono">
                         <span>{{ entry.duration }}</span>
-                        <span class="text-action-primary-600 dark:text-action-primary-400">${{ entry.cost }}</span>
+                        <span class="text-action-primary-600 dark:text-action-primary-400">{{ entry.cost }}</span>
                       </div>
                     </div>
                   </div>
@@ -524,6 +524,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 
 // Template ref for highlighted task element
@@ -1055,7 +1056,7 @@ function parseExecutionLog(log) {
         type: 'result',
         numTurns: msg.num_turns || msg.numTurns || '-',
         duration: msg.duration_ms ? formatDuration(msg.duration_ms) : (msg.duration || '-'),
-        cost: msg.cost_usd?.toFixed(4) || msg.total_cost_usd?.toFixed(4) || '0.0000'
+        cost: formatCost(msg.cost_usd ?? msg.total_cost_usd ?? 0)
       })
       continue
     }
