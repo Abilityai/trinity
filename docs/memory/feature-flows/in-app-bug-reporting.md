@@ -63,10 +63,22 @@ feature requests `type-feature` (both + `source:in-app`) for human triage;
   already-scrubbed payload.
 - **Config knobs** (build-time): `VITE_BUG_INTAKE_URL` (default the stable
   domain — operators can repoint) and `VITE_BUG_REPORTING_ENABLED=false` to hide
-  the tab entirely.
+  the tab entirely. Vite statically inlines `import.meta.env.*` at `npm run
+  build`, so these are **build args, not runtime env** — the prod build path
+  plumbs them the same way as `VITE_API_URL`: `ARG`+`ENV` in
+  `docker/frontend/Dockerfile.prod` (before `RUN npm run build`) and
+  `${VAR:-default}` under the frontend `build.args` in `docker-compose.prod.yml`,
+  with the compose default == Dockerfile ARG default == the code default here so
+  an unset `.env` reproduces today's behavior. Disabling therefore requires a
+  frontend image rebuild. `.env.example` documents both (#1489, umbrella #1485).
+  Static regression guard: `tests/unit/test_1489_vite_bug_build_args.py`.
 - **CSP**: `https://intake.abilityai.dev` added to `connect-src` in **both**
   `vite.config.js` (dev) and `security-headers.conf` (prod nginx) — without this
-  the browser blocks the POST (the April 2026 `ask-trinity` CSP bug class).
+  the browser blocks the POST (the April 2026 `ask-trinity` CSP bug class). Both
+  copies hard-code the intake host, so a repointed `VITE_BUG_INTAKE_URL` to a
+  self-hosted host is CSP-blocked until that host is added here too —
+  parameterizing the CSP from the build arg is a deferred #1485 follow-up (the
+  **disable** switch works end-to-end without it).
 - Build info (`app_version`, `git_commit`) sourced via the existing
   `useBuildInfo()` composable (`GET /api/version`, Invariant #7).
 
