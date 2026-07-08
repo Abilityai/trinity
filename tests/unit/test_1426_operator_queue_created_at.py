@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 import uuid
 
 import pytest
@@ -25,15 +24,17 @@ pytest.importorskip("sqlalchemy")
 # Backend config raises without these; keep all DB writes in a temp file.
 os.environ.setdefault("REDIS_URL", "redis://u:p@localhost:6379")
 os.environ.setdefault("SECRET_KEY", "test-secret")
-os.environ["TRINITY_DB_PATH"] = os.path.join(
-    tempfile.gettempdir(), f"trinity_1426_{uuid.uuid4().hex}.db"
-)
+# NB: do NOT override TRINITY_DB_PATH here. The unit conftest pins a per-process
+# temp DB and `init_database()` (run once at first `database` import) creates the
+# full schema — incl. the operator_queue table — on it. Overriding the path after
+# that first import points get_engine() at an uninitialized file, so writes fail
+# with "no such table: operator_queue" (#1426 CI regression).
 
 _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend"))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from database import db  # noqa: E402  (import triggers schema creation on the temp DB)
+from database import db  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
