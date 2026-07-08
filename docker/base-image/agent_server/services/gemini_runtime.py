@@ -17,6 +17,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..model_context import resolve_context_window
 from ..state import agent_state
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
@@ -141,9 +142,13 @@ class GeminiRuntime(AgentRuntime):
         return "gemini-3-flash"
 
     def get_context_window(self, model: Optional[str] = None) -> int:
-        """Get context window for Gemini models."""
-        # Gemini 2.5 Pro has 1M token context
-        return 1000000
+        """Fallback context window for Gemini models (#1521).
+
+        Resolves via the shared catalog; falls back to the default Gemini model
+        id so a None model still resolves to Gemini's native 1M window. The
+        runtime-reported ``modelUsage.contextWindow`` remains the primary.
+        """
+        return resolve_context_window(model or self.get_default_model())
 
     def configure_mcp(self, mcp_servers: Dict) -> bool:
         """

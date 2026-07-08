@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from models import User
 from database import db
 from services.agent_auth import build_agent_auth_headers
+from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload, container_stats
 from utils.helpers import iso_cutoff
@@ -176,7 +177,7 @@ async def _fetch_single_agent_context(
         "activityState": "idle",
         "contextPercent": 0,
         "contextUsed": 0,
-        "contextMax": 200000,
+        "contextMax": DEFAULT_CONTEXT_WINDOW,
         "lastActivityTime": None,
     }
 
@@ -189,7 +190,7 @@ async def _fetch_single_agent_context(
             session_data = response.json()
             stats["contextPercent"] = session_data.get("context_percent", 0)
             stats["contextUsed"] = session_data.get("context_tokens", 0)
-            stats["contextMax"] = session_data.get("context_window", 200000)
+            stats["contextMax"] = session_data.get("context_window") or DEFAULT_CONTEXT_WINDOW
     except Exception as e:
         logger.debug(f"Error fetching context stats for {agent_name}: {e}")
 
@@ -241,7 +242,7 @@ async def get_agents_context_stats_logic(
         "activityState": "offline",
         "contextPercent": 0,
         "contextUsed": 0,
-        "contextMax": 200000,
+        "contextMax": DEFAULT_CONTEXT_WINDOW,
         "lastActivityTime": None
     } for a in stopped_agents]
 
@@ -278,7 +279,7 @@ async def get_agents_context_stats_logic(
                     "activityState": "idle",
                     "contextPercent": 0,
                     "contextUsed": 0,
-                    "contextMax": 200000,
+                    "contextMax": DEFAULT_CONTEXT_WINDOW,
                     "lastActivityTime": None
                 })
             else:

@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..model_context import resolve_context_window
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +106,15 @@ class AgentRuntime(ABC):
         """
         pass
 
-    @abstractmethod
     def get_context_window(self, model: Optional[str] = None) -> int:
         """
-        Get the context window size for a model.
+        Fallback context window size for a model (#1521).
+
+        Non-abstract by design: a new runtime inherits the shared model catalog
+        so it can't ship a silently-wrong 200K denominator by forgetting to
+        implement this. Runtimes with a fixed native window (Gemini, Codex)
+        override it to resolve against their own default model id. This is a
+        FALLBACK — the authoritative value is the runtime-reported window.
 
         Args:
             model: Optional model identifier (uses default if None)
@@ -116,7 +122,7 @@ class AgentRuntime(ABC):
         Returns:
             Context window size in tokens
         """
-        pass
+        return resolve_context_window(model)
 
     @abstractmethod
     async def execute_headless(

@@ -251,8 +251,8 @@ async def get_model():
         return {
             "model": agent_state.current_model,
             "runtime": runtime,
-            "available_models": ["sonnet", "opus", "haiku"],
-            "note": "Claude model aliases: sonnet (Sonnet 4.5), opus (Opus 4.5), haiku. Add [1m] suffix for 1M context."
+            "available_models": ["sonnet", "opus", "haiku", "fable"],
+            "note": "Claude model aliases (Anthropic API): sonnet (Sonnet 5), opus (Opus 4.8), haiku (Haiku 4.5), fable (Fable 5). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
         }
 
 
