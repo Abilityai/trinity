@@ -525,10 +525,16 @@ def crud_env():
     try:
         yield crud, ctx
     finally:
+        # patch.dict.stop() clears sys.modules and re-populates it from the
+        # pre-start snapshot, so it already UNDOES the in-context purge at
+        # _load_crud (lines above) and restores the real `services.agent_service.*`
+        # modules other test files bound at collection time. Do NOT manually delete
+        # them afterward: that leaves e.g. `services.agent_service.stats` absent, so
+        # a later file's module-level `from services.agent_service import stats`
+        # reference goes stale (a fresh re-import returns a different object) and its
+        # monkeypatch silently misses — the #73 stats-cache tests failed exactly this
+        # way under full-suite ordering. Let patch.dict own the restoration.
         ctx["patcher"].stop()
-        for key in list(sys.modules.keys()):
-            if key == "services.agent_service" or key.startswith("services.agent_service."):
-                del sys.modules[key]
 
 
 def _user():
