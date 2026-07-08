@@ -774,6 +774,13 @@
       "added": "2026-07-08",
       "categories": ["backend", "unit", "agent-server", "parity"],
       "description": "Byte-identity parity guard (Invariant #5) between src/backend/services/model_context.py and the vendored docker/base-image/agent_server/model_context.py, plus a canonical-behavior smoke of resolve_context_window."
+    },
+    {
+      "file": "unit/test_ent107_cornelius_seed.py",
+      "feature": "trinity-enterprise#107",
+      "added": "2026-07-07",
+      "categories": ["backend", "unit", "infrastructure", "brain-orb"],
+      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds local:cornelius create with request=None; real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend."
     }
   ]
 }

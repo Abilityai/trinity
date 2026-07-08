@@ -1,4 +1,6 @@
 name: test-gemini
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Test Gemini Agent
 description: Test agent using Google's Gemini CLI runtime for validation
 version: "1.0.0"

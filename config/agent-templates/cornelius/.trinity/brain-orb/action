@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Brain Orb action hook (#61/#66, trinity-enterprise#76). Owner-gated KB
+writes + voice-transcript capture + reindex, dispatched on the request's
+`action` field (JSON on stdin). The AGENT owns the write/exec semantics
+(Invariant #8); Trinity only brokers + gates (owner-only, enum-validated verbs,
+write-flag kill-switch) upstream.
+
+Verbs:
+  {"action":"list"}                        -> {"enabled": true, "skills": []}
+  {"action":"capture","body":...,title?}   -> writes a note into Brain/00-Inbox
+  {"action":"link","from":...,"to":...}    -> appends a real [[wikilink]] to the
+                                              source note (both must exist)
+  {"action":"capture_transcript","events":[...],session_id?,process?}
+        -> renders the voice conversation to a markdown transcript in the vault
+           inbox; if `process` and post-processing is configured+enabled, kicks
+           a detached post-session run too (#66/#73)
+  {"action":"process_transcript","path"|"transcript",...}
+        -> runs the configured post-session prompt over a saved transcript via
+           a detached `claude -p`. Paths are confined to the vault (review M4).
+  {"action":"refresh"}                     -> re-runs the exporter under the
+                                              persisted scope so new notes/links
+                                              appear on the orb (#66/#67)
+
+Writes land INSIDE the vault (Brain/00-Inbox) so they are git-synced with the
+rest of the knowledge base and the exporter sees them natively. run_skill
+(arbitrary exec) is intentionally absent. Contract version 1.
+"""
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import (
+    ROOT, VAULT, DATA_PATH, emit, graph_counts, read_active, read_stdin_json,
+    run_export,
+)
+
+INBOX = VAULT / "00-Inbox"
+VOICE_DIR = INBOX / "Voice Conversations"
+HOOK_DIR = Path(__file__).resolve().parent
+POSTPROCESS_CONFIG = HOOK_DIR / "voice-postprocess.json"
+POSTPROCESS_PROMPT = HOOK_DIR / "voice-postprocess.md"
+ALLOWED_SKILLS = []   # run_skill deferred; empty allow-list
+
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _slug(text):
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return (s or "note")[:48]
+
+
+def _rel(path):
+    try:
+        return str(Path(path).resolve().relative_to(ROOT))
+    except Exception:
+        return str(path)
+
+
+# ------------------------------------------------------------------ title index
+def _title_index():
+    """lower-title -> vault path, from H1 headings and file stems. Deterministic
+    (sorted walk, first occurrence wins) so link resolution never flaps."""
+    idx = {}
+    if not VAULT.is_dir():
+        return idx
+    for p in sorted(VAULT.rglob("*.md")):
+        stem = p.stem.strip().lower()
+        idx.setdefault(stem, p)
+        try:
+            with open(p, errors="ignore") as f:
+                head = f.read(2000)
+            m = re.search(r"^#\s+(.+)$", head, re.M)
+            if m:
+                idx.setdefault(m.group(1).strip().lower(), p)
+        except Exception:
+            pass
+    return idx
+
+
+# ------------------------------------------------------------------ capture / link
+def _capture(req):
+    body = (req.get("body") or "").strip()
+    if not body:
+        return {"ok": False, "error": "nothing to capture"}
+    title = (req.get("title") or body.splitlines()[0]).strip()[:80]
+    INBOX.mkdir(parents=True, exist_ok=True)
+    stamp = _now().strftime("%Y%m%d-%H%M%S")
+    path = INBOX / f"{stamp}-{_slug(title)}.md"
+    today = _now().strftime("%Y-%m-%d")
+    path.write_text(
+        f"---\ncreated: {today}\ncreated_by: brain-orb\ntype: capture\n"
+        f"status: inbox\n---\n\n# {title}\n\n{body}\n"
+    )
+    return {"ok": True, "title": title, "path": _rel(path)}
+
+
+def _link(req):
+    src = (req.get("from") or "").strip()
+    dst = (req.get("to") or "").strip()
+    if not src or not dst:
+        return {"ok": False, "error": "need both a source and a target note"}
+    idx = _title_index()
+    src_path = idx.get(src.lower())
+    dst_path = idx.get(dst.lower())
+    # Validate BOTH endpoints (review #71 class): a wikilink to a non-existent
+    # note can't render as a graph edge — fail loudly, never a dangling ref.
+    if src_path is None:
+        return {"ok": False, "error": f'source note "{src}" not found'}
+    if dst_path is None:
+        return {"ok": False, "error": f'target note "{dst}" not found — create it first'}
+    dst_title = dst_path.stem
+    try:
+        content = src_path.read_text(errors="ignore")
+    except Exception as e:
+        return {"ok": False, "error": f"cannot read source note: {e}"}
+    already = f"[[{dst_title}]]" in content or f"[[{dst}]]" in content
+    if not already:
+        with open(src_path, "a") as f:
+            if not content.endswith("\n"):
+                f.write("\n")
+            f.write(f"\n- [[{dst_title}]]\n")
+    return {"ok": True, "already": already, "from": src, "to": dst,
+            "source_path": _rel(src_path)}
+
+
+# ------------------------------------------------------------ transcript rendering
+def _hhmm(ts):
+    return ts[11:16] if ts and len(ts) >= 16 else ""
+
+
+def _has_dialogue(events):
+    return any(e.get("event") in ("user_turn", "model_turn") for e in events)
+
+
+def _render_transcript(events):
+    """(basename, markdown) for a voice conversation, or (None, None)."""
+    if not _has_dialogue(events):
+        return None, None
+    start = next((e["ts"] for e in events if e.get("ts")), _now().isoformat())
+    end = events[-1].get("ts", start)
+    n_user = sum(1 for e in events if e.get("event") == "user_turn")
+    n_model = sum(1 for e in events if e.get("event") == "model_turn")
+    n_tools = sum(1 for e in events if e.get("event") == "tool_call")
+
+    lines = []
+    for e in events:
+        ev, ts = e.get("event"), _hhmm(e.get("ts", ""))
+        text = (e.get("text") or "").strip()
+        if ev == "user_turn" and text:
+            lines.append(f"**[{ts}] You:** {text}")
+        elif ev == "model_turn" and text:
+            lines.append(f"**[{ts}] Agent:** {text}")
+        elif ev == "tool_call":
+            args = e.get("args") or {}
+            a = json.dumps(args) if args else ""
+            lines.append(f"  - *tool* `{e.get('tool')}`" + (f" {a}" if a else ""))
+
+    today = _now().strftime("%Y-%m-%d")
+    fm = (f"---\ncreated: {today}\nupdated: {today}\ncreated_by: brain-orb\n"
+          f"type: voice-transcript\nstatus: unprocessed\nstarted: {start[:19]}\n"
+          f"turns_user: {n_user}\nturns_agent: {n_model}\ntool_calls: {n_tools}\n---\n\n")
+    head = f"# Voice Conversation - {start[:10]} {_hhmm(start)}-{_hhmm(end)}\n\n"
+    note = "> Auto-saved voice transcript - raw material, awaiting processing.\n\n"
+    basename = f"Voice - {start[:10]} {start[11:13]}{start[14:16]}"
+    return basename, fm + head + note + "\n\n".join(lines) + "\n"
+
+
+def _capture_transcript(req):
+    events = req.get("events") or []
+    if not isinstance(events, list):
+        return {"ok": False, "error": "events must be a list"}
+    name, md = _render_transcript(events)
+    if not name:
+        return {"ok": True, "saved": False, "reason": "no dialogue in this session"}
+    VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    path = VOICE_DIR / f"{name}.md"
+    n = 2
+    while path.exists():                     # never clobber a prior save
+        path = VOICE_DIR / f"{name} ({n}).md"
+        n += 1
+    path.write_text(md)
+    out = {"ok": True, "saved": True, "path": _rel(path)}
+    if req.get("process"):
+        out["process"] = _spawn_postprocess(path)
+    return out
+
+
+# --------------------------------------------------------- post-session processing
+def _read_postprocess_config():
+    """{enabled, prompt} (#73). JSON config preferred; legacy .md is a
+    prompt-only fallback (enabled iff non-empty). Default: disabled."""
+    try:
+        c = json.loads(POSTPROCESS_CONFIG.read_text())
+        return {"enabled": bool(c.get("enabled")), "prompt": (c.get("prompt") or "").strip()}
+    except Exception:
+        pass
+    try:
+        if POSTPROCESS_PROMPT.is_file():
+            p = POSTPROCESS_PROMPT.read_text().strip()
+            return {"enabled": bool(p), "prompt": p}
+    except Exception:
+        pass
+    return {"enabled": False, "prompt": ""}
+
+
+def _spawn_postprocess(transcript_path):
+    """Run the configured post-session prompt over the transcript via a
+    DETACHED `claude -p` (the session-end call returns fast). Transcript is
+    piped on stdin — never on the command line (no shell, no injection)."""
+    cfg = _read_postprocess_config()
+    if not cfg["enabled"] or not cfg["prompt"]:
+        return {"ran": False, "reason": "post-processing disabled or no prompt configured"}
+    transcript_path = Path(transcript_path)
+    stem = transcript_path.stem
+    out_note = VOICE_DIR / f"{stem} - processed.md"
+    log = VOICE_DIR / f".{stem}.postprocess.log"
+    try:
+        tin = open(transcript_path, "r")
+        tout = open(out_note, "w")
+        terr = open(log, "w")
+        subprocess.Popen(
+            ["claude", "-p", cfg["prompt"], "--dangerously-skip-permissions"],
+            stdin=tin, stdout=tout, stderr=terr, cwd=str(ROOT),
+            start_new_session=True,
+        )
+    except Exception as e:
+        return {"ran": False, "error": str(e)}
+    return {"ran": True, "output": _rel(out_note)}
+
+
+def _process_transcript(req):
+    path = req.get("path")
+    if path:
+        p = Path(os.path.expanduser(str(path)))
+        if not p.is_absolute():
+            p = ROOT / p
+        # Confine to the vault (review M4): the verb exists to process saved
+        # transcripts, not to pipe arbitrary container files into claude -p.
+        try:
+            rp = p.resolve()
+            rp.relative_to(VAULT.resolve())
+        except Exception:
+            return {"ok": False, "error": "transcript path must be inside the vault (Brain/)"}
+        if not rp.is_file():
+            return {"ok": False, "error": "transcript not found"}
+    else:
+        text = (req.get("transcript") or "").strip()
+        if not text:
+            return {"ok": False, "error": "need a transcript path or text"}
+        VOICE_DIR.mkdir(parents=True, exist_ok=True)
+        rp = VOICE_DIR / f".adhoc-{_now().strftime('%Y%m%d-%H%M%S')}.md"
+        rp.write_text(text)
+    result = _spawn_postprocess(rp)
+    return {"ok": bool(result.get("ran")), **result}
+
+
+# --------------------------------------------------------------- reindex / re-export
+def _refresh(req):
+    """Re-run the real exporter under the persisted scope so newly captured
+    notes/links appear on the orb (#66/#67). Fail-loud: an exporter failure is
+    reported, never masked by a partial in-place patch."""
+    before_nodes, before_edges = graph_counts()
+    ok, err = run_export(read_active())
+    if not ok:
+        return {"ok": False, "error": err}
+    nodes, edges = graph_counts()
+    return {"ok": True, "nodes": nodes, "edges": edges,
+            "added_nodes": max(0, nodes - before_nodes),
+            "added_edges": max(0, edges - before_edges)}
+
+
+# ------------------------------------------------------------------------- dispatch
+def main():
+    req = read_stdin_json()
+    if req is None:
+        emit({"ok": False, "error": "invalid JSON"})
+        sys.exit(0)
+    action = req.get("action")
+    if action == "list":
+        emit({"enabled": True, "skills": ALLOWED_SKILLS})
+    elif action == "capture":
+        emit(_capture(req))
+    elif action == "link":
+        emit(_link(req))
+    elif action == "capture_transcript":
+        emit(_capture_transcript(req))
+    elif action == "process_transcript":
+        emit(_process_transcript(req))
+    elif action == "refresh":
+        emit(_refresh(req))
+    else:
+        emit({"ok": False, "error": f"unsupported action: {action}"})
+        sys.exit(1)
+
+
+main()

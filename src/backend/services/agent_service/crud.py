@@ -10,6 +10,7 @@ import docker
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from fastapi import HTTPException, Request
@@ -137,7 +138,7 @@ def get_platform_version() -> str:
 async def create_agent_internal(
     config: AgentConfig,
     current_user: User,
-    request: Request,
+    request: Optional[Request] = None,
     skip_name_sanitization: bool = False,
     ws_manager=None
 ) -> AgentStatus:
@@ -145,6 +146,10 @@ async def create_agent_internal(
     Internal function to create an agent.
 
     Used by both the API endpoint and system deployment.
+
+    `request` is optional: the HTTP request object is not dereferenced anywhere
+    in this function, so boot-time / background callers with no live request
+    (e.g. the Cornelius first-run seeder, ent#107) pass `request=None`.
 
     CRED-002: Credentials are no longer auto-injected during creation.
     They are added after creation via inject_credentials endpoint or

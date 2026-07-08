@@ -47,6 +47,24 @@ class LogArchiveService:
         # Ensure temp archive directory exists for compression staging
         TEMP_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
+        # #1478: retention archives then unlink()s the originals. If the logs
+        # volume is mounted read-only on this container the archive succeeds but
+        # every delete fails (Errno 30) and the volume grows unbounded. Surface
+        # that once at startup instead of only as silent per-file errors at
+        # cleanup_hour.
+        try:
+            if LOG_DIR.exists() and not os.access(LOG_DIR, os.W_OK):
+                logger.warning(
+                    "Log directory %s is NOT writable — retention will archive old "
+                    "logs but cannot delete the originals, so disk usage grows "
+                    "unbounded (Issue #1478). Mount the logs volume read-write on "
+                    "the backend container (docker-compose: 'trinity-logs:/data/logs', "
+                    "not ':ro').",
+                    LOG_DIR,
+                )
+        except OSError:
+            pass  # never block startup on a permission probe
+
         # Schedule nightly archival
         self.scheduler.add_job(
             self.archive_old_logs,

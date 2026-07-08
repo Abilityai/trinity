@@ -412,6 +412,9 @@ class DatabaseManager:
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
 
+    def count_non_system_agents(self) -> int:
+        return self._agent_ops.count_non_system_agents()
+
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 

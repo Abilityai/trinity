@@ -14,7 +14,7 @@ capabilities:
 commands:
   - name: report
     description: Create a professional report
-    usage: /report [topic] [format: brief|full|executive]
+    usage: "/report [topic] [format: brief|full|executive]"
   - name: proposal
     description: Draft a client proposal
     usage: /proposal [client] [engagement-type]

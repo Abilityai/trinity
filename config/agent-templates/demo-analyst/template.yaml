@@ -1,4 +1,6 @@
 name: demo-analyst
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Analysis Agent
 description: Synthesizes research findings and answers strategic questions
 tagline: Strategic insights from research

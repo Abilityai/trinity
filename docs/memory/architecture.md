@@ -203,6 +203,7 @@
 *Skills & System:*
 - `skill_service.py` - Skill CRUD and injection
 - `system_agent_service.py` - System agent lifecycle
+- `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (bundled `local:cornelius`, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107)
 - `system_service.py` - System manifest operations
 - `log_archive_service.py` / `archive_storage.py` - Log archival + storage backend
 - `session_cleanup_service.py` - Session JSONL reaper — see [Session Tab](#session-tab)
@@ -643,6 +644,15 @@ agent-owned read-surface pattern (pipelines #919, reports #918): the agent owns
 generation + scope state (Invariant #8), Trinity reads/renders + brokers
 control. Default OFF — no impact on other agents. Full flow:
 [brain-orb.md](feature-flows/brain-orb.md).
+
+**Default Cornelius (trinity-enterprise#107):** a **fresh install** auto-seeds a
+default "Cornelius" second-brain agent from the bundled `local:cornelius` template
+(`services/cornelius_agent_service.py`) and existence-guarded-enables the
+`brain_orb_enabled` flag, so the orb renders out-of-the-box. First-run-only (durable
+`cornelius_seeded` system-setting flag — deleting Cornelius does not re-provision)
+and skipped when any non-system agent already exists (established fleets are never
+surprised); Redis SETNX lock (`cornelius:provision`) guards the `--workers 2` race.
+Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md).
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/
