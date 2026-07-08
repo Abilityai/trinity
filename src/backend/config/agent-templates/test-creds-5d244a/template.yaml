@@ -1,6 +1,0 @@
-
-name: test-creds-5d244a
-display_name: Test Agent with Creds
-resources:
-  cpu: "1"
-  memory: "2g"

@@ -1,3 +1,47 @@
+// ===========================================================================
+// Cost formatting (#92) — the single, canonical way to render a USD cost.
+// Do NOT inline `toFixed` on cost values or add local `formatCost` helpers;
+// import these instead. Both return a string WITH the `$` (no separate prefix).
+// ===========================================================================
+const _usdWhole = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', maximumFractionDigits: 0,
+})
+const _usdCompact = new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1,
+})
+
+/**
+ * Default cost format: whole dollars with US comma separators (`$1,200`, `$12`).
+ * Sub-dollar amounts keep 2-decimal precision (`$0.04`) since per-execution costs
+ * are usually < $1 — a tiny positive that rounds to $0.00 shows `<$0.01`. `$0`
+ * for zero/blank/invalid.
+ * @param {number} value
+ * @returns {string}
+ */
+export const formatCost = (value) => {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n === 0) return '$0'
+  const abs = Math.abs(n)
+  if (abs < 1) {
+    if (abs < 0.005) return n > 0 ? '<$0.01' : '>-$0.01'
+    return `${n < 0 ? '-' : ''}$${abs.toFixed(2)}`
+  }
+  return _usdWhole.format(n)
+}
+
+/**
+ * Compact cost for tight surfaces (stat cards, table cells, node badges):
+ * `$1.2K`, `$3.4M` from ≥ $1,000; below that it matches {@link formatCost}.
+ * @param {number} value
+ * @returns {string}
+ */
+export const formatCostCompact = (value) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '$0'
+  if (Math.abs(n) >= 1000) return _usdCompact.format(n)
+  return formatCost(n)
+}
+
 /**
  * Composable for shared formatting functions
  * Used across agent-related components
@@ -235,6 +279,9 @@ export function useFormatters() {
     formatDuration,
     formatDate,
     formatSource,
-    getContextBarColor
+    getContextBarColor,
+    // Cost (#92)
+    formatCost,
+    formatCostCompact
   }
 }

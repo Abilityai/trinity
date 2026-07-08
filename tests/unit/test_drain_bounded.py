@@ -81,6 +81,56 @@ def test_drain_bounded_returns_within_budget_when_drain_hangs(monkeypatch):
     )
 
 
+def test_drain_bounded_kills_group_on_budget_exceeded(monkeypatch):
+    """#1502: a budget-exceeded drain must SIGKILL the process group so the
+    leaked reader can EOF and stop pegging a core — #728 only unblocked the
+    executor thread and left the group (and its CPU spin) alive."""
+
+    async def _hanging_drain(*args, **kwargs):
+        await asyncio.sleep(600)
+
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._drain_reader_threads",
+        _hanging_drain,
+    )
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS",
+        1,
+    )
+    kill = MagicMock()
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._terminate_process_group",
+        kill,
+    )
+
+    process = _make_fake_process()
+    outcome = _drain_bounded(process, MagicMock(spec=threading.Thread), grace=1, pgid=4242)
+
+    assert outcome == "budget_exceeded"
+    kill.assert_called_once()
+    # the captured pgid is forwarded so grandchildren (not just the reaped pid) die
+    _args, _kwargs = kill.call_args
+    assert _kwargs.get("pgid") == 4242 or 4242 in _args
+
+
+def test_drain_bounded_budget_exceed_kill_failure_is_swallowed(monkeypatch):
+    """A failing group-kill on budget-exceed must not raise into the caller."""
+
+    async def _hanging_drain(*args, **kwargs):
+        await asyncio.sleep(600)
+
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._drain_reader_threads", _hanging_drain)
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._DRAIN_BUDGET_SECONDS", 1)
+    monkeypatch.setattr(
+        "agent_server.services.subprocess_lifecycle._terminate_process_group",
+        MagicMock(side_effect=OSError("boom")))
+
+    outcome = _drain_bounded(_make_fake_process(), MagicMock(spec=threading.Thread), pgid=1)
+    assert outcome == "budget_exceeded"  # still returns cleanly
+
+
 def test_drain_bounded_completes_fast_when_drain_is_quick(monkeypatch):
     """When drain_reader_threads finishes quickly, _drain_bounded must not add
     significant latency (no extra sleeping)."""

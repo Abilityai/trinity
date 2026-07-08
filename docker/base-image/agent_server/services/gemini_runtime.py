@@ -25,6 +25,27 @@ from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
 
+
+def _sweep_allowlist_pids() -> list:
+    """#1501: registry-vouched pids for the post-turn cgroup sweeps below.
+
+    Gemini's sweeps previously ran with NO allowlist (bare
+    ``kill_cgroup_orphans()``), so a finishing Gemini turn could SIGKILL a
+    concurrent execution's subprocesses (the #912 bug class) or an in-flight
+    transient subprocess (a brain-orb hook). Fail-open: on any registry
+    error, sweep with an empty allowlist — pre-#1501 behavior. Lazy import
+    mirrors orphan_sweeper / subprocess_pgroup.
+    """
+    try:
+        from .process_registry import get_process_registry  # lazy
+        return get_process_registry().active_execution_pids()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[Gemini] failed to enumerate sweep allowlist — sweeping bare"
+        )
+        return []
+
+
 # Single shared executor for subprocess reading. Mirrors the pattern in
 # claude_code.py:63 — one long-lived worker thread instead of a fresh
 # ThreadPoolExecutor per call. Per-call executors rely on CPython's weakref
@@ -245,7 +266,7 @@ class GeminiRuntime(AgentRuntime):
                 # detachment, or env stripping. Best-effort — never
                 # fail the response on this path.
                 try:
-                    killed = kill_cgroup_orphans()
+                    killed = kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
                     if killed:
                         logger.info(
                             f"[Gemini] Cgroup sweep killed {killed} orphan(s) "
@@ -657,7 +678,7 @@ class GeminiRuntime(AgentRuntime):
                     # sweep so leaked descendants don't survive the failed
                     # task.
                     try:
-                        kill_cgroup_orphans()
+                        kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
                     except Exception:
                         logger.exception(
                             f"[Headless Task {session_id}] cgroup sweep "
@@ -672,7 +693,7 @@ class GeminiRuntime(AgentRuntime):
                 # that escaped via setsid, FD detachment, or env
                 # stripping. Best-effort.
                 try:
-                    killed = kill_cgroup_orphans()
+                    killed = kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
                     if killed:
                         logger.info(
                             f"[Headless Task {session_id}] Cgroup sweep "

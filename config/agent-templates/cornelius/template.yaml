@@ -1,0 +1,260 @@
+# Trinity-Compatible Agent Configuration
+# Cornelius - The Insight Harvester & Second Brain Partner
+
+# Required Fields
+name: cornelius
+display_name: "Cornelius"
+type: knowledge-base
+description: |
+  AI Insight Harvester and Second Brain Partner managing a personal Obsidian knowledge base.
+
+  Core capabilities:
+  - Problem-Solving & Advice: Ground advice in accumulated KB insights and personal frameworks
+  - Insight Harvesting: Detect and capture original thinking, personal frameworks, and distinctive viewpoints
+  - Knowledge Synthesis: Combine captured insights to create new content or discover patterns
+  - Deep Research: Autonomous pipeline for discovering, extracting, and integrating cutting-edge research
+  - Connection Discovery: Find non-obvious relationships between notes across domains
+  - Dialectic Analysis: Stress-test ideas with committed positions and structural contradiction analysis
+  - Content Generation: Create articles and perspectives grounded in knowledge base
+
+resources:
+  cpu: "2"
+  memory: "4g"
+
+# Optional Metadata
+version: "1.25.0"
+author: "Trinity"
+updated: "2026-03-12"
+tagline: "Your insight harvester, second brain partner, and KB-grounded advisor"
+
+use_cases:
+  - "Get KB-grounded advice on problems using your own frameworks"
+  - "Quick knowledge lookup with semantic search and graph neighborhood"
+  - "Extract unique insights from conversations and transcripts"
+  - "Discover hidden connections between notes in your knowledge base"
+  - "Generate articles and content from accumulated knowledge"
+  - "Run autonomous deep research pipelines (discover, extract, connect)"
+  - "Stress-test ideas with dialectic analysis (pro/con agents + synthesis)"
+  - "Graduate notes through Zettelkasten workflow"
+  - "Search and recall relevant knowledge using 3-layer semantic search"
+  - "Analyze and understand your knowledge base structure"
+
+capabilities:
+  - brain-orb
+  - semantic_search
+  - spreading_activation
+  - usage_based_learning
+  - insight_extraction
+  - connection_discovery
+  - knowledge_synthesis
+  - content_generation
+  - problem_solving
+  - dialectic_analysis
+  - deep_research
+  - current_affairs_analysis
+  - belief_system_management
+  - epub_processing
+  - diagram_generation
+  - image_generation
+
+# Credential Schema
+credentials:
+  mcp_servers:
+    aistudio:
+      env_vars:
+        - GEMINI_API_KEY
+    trinity:
+      env_vars:
+        - TRINITY_API_KEY
+  env_file:
+    - VAULT_BASE_PATH
+    - DOCUMENT_INSIGHTS_PATH
+    - TRINITY_REMOTE_AGENT
+
+# Sub-Agents
+sub_agents:
+  - name: vault-manager
+    description: "CRUD operations on Obsidian vault notes with knowledge graph integrity"
+  - name: connection-finder
+    description: "Discover hidden connections and relationships between permanent notes"
+  - name: auto-discovery
+    description: "Autonomous cross-domain connection hunter using analytical reasoning"
+  - name: insight-extractor
+    description: "Extract unique insights from personal content, preserving authentic voice"
+  - name: document-insight-extractor
+    description: "Extract insights from external research (papers, books, articles)"
+  - name: thinking-partner
+    description: "Brainstorming and ideation support through dialogue"
+  - name: diagram-generator
+    description: "Create Mermaid diagrams and visualizations"
+  - name: local-brain-search
+    description: "SYNAPSE-inspired vector search with spreading activation and usage-based learning"
+  - name: research-specialist
+    description: "Deep web research with Gemini AI, Google Search grounding, and Apollo.io"
+
+# Skills (Slash Commands)
+skills:
+  # Problem-Solving & Advice
+  - name: advise
+    description: "KB-grounded problem-solving with framework application and citations"
+  - name: dialectic
+    description: "Stress-test ideas with two committed positions and structural synthesis"
+
+  # Fast Knowledge Access
+  - name: quick-search
+    description: "Fast KB lookup (3 tool calls max) - search + graph + read"
+  - name: recall
+    description: "3-layer semantic search with spreading activation"
+  - name: search-vault
+    description: "Quick search combining semantic and keyword approaches"
+
+  # Connection & Discovery
+  - name: find-connections
+    description: "Discover hidden connections around a note or topic"
+  - name: auto-discovery
+    description: "Autonomous cross-domain connection hunting"
+  - name: integrate-recent-notes
+    description: "Find and connect notes created in the last 14 days"
+
+  # Research & Extraction
+  - name: deep-research
+    description: "Autonomous research pipeline - discover, extract, connect"
+  - name: extract-insights
+    description: "Extract unique insights from personal content"
+  - name: extract-document-insights
+    description: "Extract insights from external research documents"
+
+  # Content Creation
+  - name: get-perspective-on
+    description: "Extract unique perspective on a topic (used by a content agent)"
+  - name: create-article
+    description: "Generate article from KB insights with tone/structure guides"
+  - name: synthesize-insights
+    description: "Combine multiple insights into coherent narrative"
+
+  # Knowledge Management
+  - name: graduate-insights
+    description: "Review and graduate notes to permanent status using Zettelkasten"
+  - name: analyze-kb
+    description: "Analyze knowledge base structure and generate report"
+  - name: refresh-index
+    description: "Rebuild Local Brain Search FAISS index"
+  - name: update-changelog
+    description: "Update the master CHANGELOG.md"
+
+  # Utility
+  - name: talk
+    description: "Interactive conversational mode for brainstorming"
+  - name: nano-banana-image-generator
+    description: "Generate images using Gemini 2.5 Flash ($0.039/image)"
+  - name: epub-chapter-extractor
+    description: "Extract chapters from EPUB files to markdown"
+  - name: self-diagnostic
+    description: "Run agent health check on skills, tools, integrations"
+
+  # Git
+  - name: git-commit-push
+    description: "Stage, commit, and push changes with approval gate"
+
+# MCP Servers
+mcp_servers:
+  - name: mermaid-diagram
+    description: "Generate Mermaid diagrams (PNG/SVG) from markdown"
+  - name: aistudio
+    description: "Gemini AI for content generation and Google search grounding"
+  - name: ebook-mcp
+    description: "EPUB and PDF processing for ebook content extraction"
+  - name: playwright
+    description: "Browser automation for web scraping (local only)"
+  - name: trinity
+    description: "Remote agent orchestration and scheduling"
+
+# Git Configuration
+git:
+  push_enabled: true
+  commit_paths:
+    - memory/
+    - plans/
+    - Brain/
+    - outputs/
+  ignore_paths:
+    - .mcp.json
+    - .env
+    - .trinity/
+    - .claude/commands/trinity/
+    - resources/local-brain-search/data/
+
+# Planning Configuration
+planning:
+  enabled: true
+  max_active_plans: 5
+  default_task_timeout_minutes: 60
+  auto_checkpoint: true
+
+# Shared Folders (for inter-agent collaboration)
+shared_folders:
+  expose: true
+  consume: true
+
+# Custom Metrics
+metrics:
+  - name: notes_total
+    type: gauge
+    label: "Total Notes"
+    description: "Total number of notes in the knowledge base"
+    unit: "notes"
+  - name: permanent_notes
+    type: gauge
+    label: "Permanent Notes"
+    description: "Core atomic insights (02-Permanent + AI Extracted)"
+    unit: "notes"
+  - name: document_insights
+    type: gauge
+    label: "Document Insights"
+    description: "Research session extractions"
+    unit: "notes"
+  - name: insights_extracted
+    type: counter
+    label: "Insights Extracted"
+    description: "Number of insights extracted this session"
+    unit: "insights"
+  - name: connections_discovered
+    type: counter
+    label: "Connections Found"
+    description: "Number of connections discovered this session"
+    unit: "connections"
+  - name: search_queries
+    type: counter
+    label: "Search Queries"
+    description: "Number of semantic searches performed"
+    unit: "queries"
+  - name: advice_requests
+    type: counter
+    label: "Advice Requests"
+    description: "Number of /advise queries handled"
+    unit: "requests"
+  - name: index_status
+    type: status
+    label: "Index Status"
+    description: "Status of the local FAISS index"
+    values:
+      - value: "indexed"
+        color: "green"
+        label: "Indexed"
+      - value: "stale"
+        color: "yellow"
+        label: "Needs Reindex"
+      - value: "missing"
+        color: "red"
+        label: "Not Indexed"
+  - name: memory_learning
+    type: status
+    label: "Memory Learning"
+    description: "Status of usage-based learning system"
+    values:
+      - value: "active"
+        color: "green"
+        label: "Learning"
+      - value: "disabled"
+        color: "gray"
+        label: "Disabled"

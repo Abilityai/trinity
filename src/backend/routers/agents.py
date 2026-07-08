@@ -773,11 +773,22 @@ async def set_circuit_breaker_endpoint(
         target_id=agent_name,
         details={"enabled": body.enabled},
     )
-    return {
+    result = {
         "agent_name": agent_name,
         "enabled": body.enabled,
         "global_enabled": bool(DISPATCH_BREAKER_ENABLED),
     }
+    # #1491: the breaker is two-tier gated — turning the per-agent toggle on
+    # while the platform-wide DISPATCH_BREAKER_ENABLED flag is off saves the
+    # preference but does nothing. Surface a non-fatal advisory so the owner
+    # isn't caught by the "switch is on but nothing happens" trap. The write
+    # still succeeds; the stored preference applies once the global flag flips on.
+    if body.enabled and not DISPATCH_BREAKER_ENABLED:
+        result["warning"] = (
+            "Per-agent toggle saved, but the breaker stays inactive until the "
+            "platform-wide DISPATCH_BREAKER_ENABLED flag is enabled."
+        )
+    return result
 
 
 # ============================================================================

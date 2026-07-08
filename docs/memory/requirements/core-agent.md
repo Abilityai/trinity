@@ -353,3 +353,33 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
 **Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
 with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
+
+---
+
+## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
+
+- **Status**: ✅ Implemented (2026-07-07)
+- **Description**: A fresh Trinity install auto-seeds a default "Cornelius" second-brain agent with the
+  Brain Orb enabled, so a first-run operator lands on a working knowledge-graph agent out-of-the-box
+  (no manual create/clone). Provisioned by
+  `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
+- **Key Features**:
+  - **Bundled local template**: a new `config/agent-templates/cornelius/` LOCAL template
+    (`capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks, a pre-generated
+    `resources/agent-visualization/data.json` seed graph so the orb renders immediately, and a minimal
+    seed `Brain/` vault). Sourced from the public `github.com/Abilityai/cornelius`; provisioned via the
+    ordinary `create_agent_internal` from `local:cornelius` (no PAT / network / clone).
+  - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
+    deletes Cornelius is **not** re-provisioned.
+  - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),
+    so upgrades of established fleets aren't surprised by a new agent.
+  - **Existence-guarded flag enable**: turns on the `brain_orb_enabled` platform flag only when unset —
+    never clobbers an admin who set it OFF.
+  - **Triggers**: the setup-completion handler (`routers/setup.py`, fresh installs, FastAPI BackgroundTask)
+    + a `main.py` lifespan safety-net gated on `setup_completed && !cornelius_seeded` (upgrades). A Redis
+    SETNX lock (`cornelius:provision`, fail-open, mirrors the #1464 leader-lock) guards the `--workers 2` race.
+- **Known deviation (local bundle)**: the default Cornelius is a LOCAL bundle, not github-native, so it has
+  **no git origin** — it won't auto-`git pull` upstream template updates. Durable ownership is deferred to
+  fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
+  already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
+- **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`

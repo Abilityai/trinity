@@ -212,6 +212,23 @@ class AgentOperations(
         with get_engine().connect() as conn:
             return [row["agent_name"] for row in conn.execute(stmt).mappings()]
 
+    def count_non_system_agents(self) -> int:
+        """Count live (non-soft-deleted), non-system agents.
+
+        The Cornelius first-run seeder (ent#107) uses this as its
+        "genuinely-fresh install" signal: on an established fleet (any
+        non-system agent already present) the default-Cornelius seed is
+        skipped, so upgrading an existing install never spawns a surprise
+        container. The system agent (`is_system=1`) is always present and
+        must not count.
+        """
+        stmt = select(func.count()).select_from(agent_ownership).where(
+            agent_ownership.c.deleted_at.is_(None),
+            func.coalesce(agent_ownership.c.is_system, 0) == 0,
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 

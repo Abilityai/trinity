@@ -36,5 +36,5 @@ Agents do not need to handle OAuth flows directly. Trinity manages token acquisi
 
 ## See Also
 
-- [Managing Credentials](./managing-credentials.md)
-- [MCP Configuration](../mcp/mcp-configuration.md)
+- [Credential Management](./credential-management.md)
+- [MCP Server](../integrations/mcp-server.md)

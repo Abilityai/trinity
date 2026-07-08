@@ -45,4 +45,4 @@ Agents control their dashboard entirely by writing to `dashboard.yaml` in their 
 
 ## See Also
 
-- [Agent Detail Page](/docs/user-docs/core/agent-detail.md)
+- [Managing Agents](../agents/managing-agents.md)

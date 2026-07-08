@@ -1,4 +1,6 @@
 name: test-codex
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Test Codex Agent
 description: Test agent using OpenAI's Codex CLI runtime for validation (#1187)
 version: "1.0.0"

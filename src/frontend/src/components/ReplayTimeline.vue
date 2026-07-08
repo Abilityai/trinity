@@ -206,7 +206,7 @@
                   <span :class="getSuccessRateClass(row.executionStats.successRate)" class="font-medium">{{ Math.round(row.executionStats.successRate || 0) }}%</span>
                   <template v-if="row.executionStats.totalCost > 0">
                     <span class="text-gray-300 dark:text-gray-600">·</span>
-                    <span class="font-medium">${{ row.executionStats.totalCost.toFixed(2) }}</span>
+                    <span class="font-medium">{{ formatCostCompact(row.executionStats.totalCost) }}</span>
                   </template>
                 </template>
                 <template v-else>
@@ -385,6 +385,7 @@
 
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { formatCostCompact } from '../composables/useFormatters'
 import { useRouter } from 'vue-router'
 import { parseUTC, getTimestampMs, formatLocalTime } from '@/utils/timestamps'
 import AutonomyToggle from './AutonomyToggle.vue'

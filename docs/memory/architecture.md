@@ -203,6 +203,7 @@
 *Skills & System:*
 - `skill_service.py` - Skill CRUD and injection
 - `system_agent_service.py` - System agent lifecycle
+- `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (bundled `local:cornelius`, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107)
 - `system_service.py` - System manifest operations
 - `log_archive_service.py` / `archive_storage.py` - Log archival + storage backend
 - `session_cleanup_service.py` - Session JSONL reaper — see [Session Tab](#session-tab)
@@ -553,7 +554,7 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 | E-02 | A | critical | No phantom reversal: a row terminal in the previous cycle never reappears non-terminal (Redis state key `canary:e02:terminal_seen`) |
 | E-05 | B | major | Dispatched rows have session: no `running` row >60s with `claude_session_id IS NULL` (#106) |
 | E-06 | B | major | No overdue `next_run_at`: no enabled, non-deleted schedule whose `next_run_at` is older than `now − misfire_grace_time` — the "Next: Nd ago" stale-projection bug (#1472). Detection net for any residual after the fire-time-advance / add-retry root fixes; tz-aware UTC comparison |
-| B-01 | A | critical | Queue-status coherence: `db.get_queued_count` ≡ independently-collected `len(queued_exec_ids)` — regression guard against a future cache layer or status-filter drift |
+| B-01 | A | critical | Queue-status coherence: `db.get_queued_count` ≡ an independently-collected queued id-count — regression guard against a future cache layer or status-filter drift. Both sides now read through the SAME `get_engine()`/`DATABASE_URL` seam (#1450): Side B (`queued_ids_via_engine`, a `SELECT id`/literal `'queued'`) moved off the raw-sqlite `queued_exec_ids` set so it stays backend-consistent with the accessor on Postgres (not raw-sqlite vs engine, the #300/#1093 gap). The collector does one confirm-re-read so a concurrent enqueue/drain landing between the two reads self-heals instead of false-firing; a persistent drift survives it and fires. Independent code path preserved (COUNT/enum vs SELECT/literal) so it's not a tautology. On an engine-read failure B-01 skips (never compares an engine count to a raw-sqlite id-set). Running-side reads stay raw-sqlite (half-migrated collector; collector-wide migration is a follow-up) |
 | B-02 | B | critical | No queued without slots-full: queued > 0 ⇒ slots full OR a drain tick fired <60s ago (`canary:drain_tick_at` heartbeat) |
 | L-03 | A | crit/major | Delete cascades: no live row in any cross-cutting table (sharing, schedules, non-terminal executions, skills, tags, shared files, public links, pending operator queue/access requests, agent-scoped MCP keys, active chat sessions) referencing an `agent_name` absent from `agent_ownership`; no orphan `agent:slots:{name}` (critical for orphaned executions/slots, major otherwise; #129 class) |
 | R-01 | A | critical | No zombie Claude processes: per running agent container, `ps -eo stat,comm` shows zero `^Z.*claude` (anchored `^Z` — procps-ng emits STAT left-aligned; guards PR #407). Docker-exec source; per-container failures land in `sources_unavailable` so one unhealthy container doesn't kill the cycle |
@@ -641,6 +642,15 @@ agent-owned read-surface pattern (pipelines #919, reports #918): the agent owns
 generation + scope state (Invariant #8), Trinity reads/renders + brokers
 control. Default OFF — no impact on other agents. Full flow:
 [brain-orb.md](feature-flows/brain-orb.md).
+
+**Default Cornelius (trinity-enterprise#107):** a **fresh install** auto-seeds a
+default "Cornelius" second-brain agent from the bundled `local:cornelius` template
+(`services/cornelius_agent_service.py`) and existence-guarded-enables the
+`brain_orb_enabled` flag, so the orb renders out-of-the-box. First-run-only (durable
+`cornelius_seeded` system-setting flag — deleting Cornelius does not re-provision)
+and skipped when any non-system agent already exists (established fleets are never
+surprised); Redis SETNX lock (`cornelius:provision`) guards the `--workers 2` race.
+Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md).
 
 - **First-party assets** (`src/frontend/public/brain-orb/`): the orb's verbatim
   page is split into `index.html` + externalized `orb.js`, with `three`/`marked`/

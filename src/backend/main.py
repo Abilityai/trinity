@@ -117,6 +117,7 @@ from services.activity_service import activity_service
 
 # Import system agent service
 from services.system_agent_service import system_agent_service
+from services.cornelius_agent_service import cornelius_agent_service
 
 # Import log archive service
 from services.log_archive_service import log_archive_service
@@ -395,6 +396,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error deploying system agent: {e}")
             # Don't fail startup - system agent is important but not critical for platform operation
+
+        # Seed the default Cornelius agent on a fresh install (ent#107). This is the
+        # UPGRADE / safety-net path: a fresh install's FIRST seed happens from the
+        # setup-completion hook (routers/setup.py, right after the admin is created),
+        # but an already-set-up empty install upgraded to this version has no such
+        # hook to fire — so seed here on the first post-upgrade boot. Gated on
+        # setup_completed (the admin owner must exist) and fire-and-forget via
+        # create_task so a container create never blocks readiness. The service is
+        # idempotent, first-run-only, fresh-install-scoped, and Redis-locked across
+        # workers, so scheduling it in every worker is safe.
+        try:
+            if _db.get_setting_value('setup_completed', 'false') == 'true':
+                asyncio.create_task(cornelius_agent_service.ensure_seeded())
+        except Exception as e:
+            logger.error(f"Error scheduling Cornelius seed: {e}")
     else:
         logger.info("Docker not available - running in demo mode")
 

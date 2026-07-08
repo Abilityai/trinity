@@ -1,4 +1,6 @@
 name: trinity-system
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Trinity System Agent
 description: Platform operations manager responsible for agent health, lifecycle, resource governance, and schedule control. Auto-deployed, deletion-protected, with full access to all Trinity MCP tools.
 version: "1.1.0"

@@ -133,6 +133,20 @@ async def list_templates(current_user: User = Depends(get_current_user)):
     # 6. Return merged list
 ```
 
+**Catalog curation (#1513).** `get_local_templates()` excludes any template
+whose `template.yaml` sets `hidden: true` — the internal test/canary fixtures
+(`test-*`, `sleep-echo`) and demo/system agents (`demo-researcher`,
+`demo-analyst`, `trinity-system`). Hidden templates stay resolvable by id via
+`get_local_template()` and creatable by id (the create path resolves by
+directory name), so the canary/test harness is unaffected — only the
+user-facing list hides them. Both `_build_local_template` and `_build_template`
+now surface a coerced-int `priority` (`_coerce_priority`; a present-but-null or
+string value would otherwise `TypeError` the router sort), so the step-5 sort
+actually orders the real starters (`scout`/`sage`/`scribe`, `priority: 20`)
+ahead of the rest. `Templates.vue` renders a **Starter Templates** (local)
+section in addition to GitHub, so it shows the same curated set as
+`CreateAgentModal`.
+
 ### Template Response Schema
 ```json
 {
@@ -615,6 +629,7 @@ Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator c
 
 | Date | Changes |
 |------|---------|
+| 2026-07-07 | **Catalog curation (#1513)**: `get_local_templates()` now excludes `hidden: true` fixtures (test/canary/demo/system) from the user-facing list while keeping them creatable by id; `_build_local_template`/`_build_template` surface a coerced-int `priority` so the router sort actually orders real starters first; fixed `scribe/template.yaml` (unquoted `usage:` broke YAML parse → silently dropped from catalog); `Templates.vue` renders a Starter (local) section matching CreateAgentModal. See "Catalog curation" note above. |
 | 2026-07-06 | **Fork-to-own creation (trinity-enterprise#93)**: `fork_to_own: required` template flag → copy into user-owned repo (private by default) at creation; user PAT as per-agent git identity; upstream remote for template updates; featured create-modal cards. New section above. |
 | 2026-02-05 | **CRED-002**: Removed Redis credential_manager references. GitHub PAT now retrieved via `get_github_pat()` from SQLite settings or env var. Removed `initialize_github_pat()` documentation. Updated Security Considerations. |
 | 2026-01-23 | **Full verification**: Updated all line numbers for Templates.vue (16-24, 55-134, 137-216, 218-247, 262-267, 290-296, 299-302, 304-332), CreateAgentModal.vue (191-196, 198, 208-210, 219-230, 263-285), template_service.py (64-103, 106-118, 121-140, 143-225, 228-299, 309-358, 361-380), crud.py (96-144, 145-182), config.py (91-164), and startup.sh (6-125, 127-157, 164-222, 275-286). Added multi-runtime support and shared_folders template config. Updated credential file handling details. |

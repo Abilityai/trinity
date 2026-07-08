@@ -361,7 +361,8 @@ async def drain_reader_threads(
             if killed:
                 logger.info(
                     "[Subprocess] Cgroup sweep killed %d orphan(s) after drain "
-                    "(preserved %d pid(s) for other in-flight execution(s))",
+                    "(preserved %d allowlisted pid(s): other in-flight "
+                    "executions + transient subprocesses)",
                     killed, len(extra_pids),
                 )
         except Exception:  # noqa: BLE001

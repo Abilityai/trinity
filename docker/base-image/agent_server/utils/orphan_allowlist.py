@@ -40,6 +40,12 @@ The allowlist composes three sources:
    from ``~/.trinity/persistent-processes.allow``. One pattern per
    line; lines starting with ``#`` are comments. Pattern matching uses
    :func:`fnmatch.fnmatchcase` against the full argv joined by spaces.
+   A match protects the matched pid **and its descendant tree**
+   (#1501) — a daemon's worker children are part of the daemon, and
+   protecting only the bare pid made the escape hatch ineffective for
+   anything that forks. Self-healing is preserved: when the daemon
+   exits, its leftovers reparent to PID 1, fall out of the descendant
+   walk, and are reaped on the next sweep.
 
    This is the escape hatch for templates that legitimately run
    long-lived daemons via ``SessionStart`` hooks (e.g. the
@@ -383,7 +389,13 @@ def resolve_allowlist(
                 continue
             for pattern in patterns:
                 if fnmatch.fnmatchcase(cmdline, pattern):
-                    allowlist.add(pid)
+                    # #1501: protect the matched daemon's descendant tree,
+                    # not just the bare pid — its worker children (which may
+                    # carry a different cmdline) are part of the daemon.
+                    # NOTE: applies to USER patterns only;
+                    # _platform_essential_pids stays bare-pid (known leaf
+                    # processes; widening it would shield orphans).
+                    allowlist.update(descendants_of(pid))
                     break
 
     return allowlist
