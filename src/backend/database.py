@@ -920,6 +920,9 @@ class DatabaseManager:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -933,6 +936,9 @@ class DatabaseManager:
             fan_out_id=fan_out_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
+            source_channel=source_channel,
+            source_channel_chat_id=source_channel_chat_id,
+            source_channel_thread=source_channel_thread,
         )
 
     def create_schedule_execution(
