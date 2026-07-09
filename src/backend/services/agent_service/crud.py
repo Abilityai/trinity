@@ -784,6 +784,12 @@ async def create_agent_internal(
     # - inject_credentials endpoint (Quick Inject)
     # - .credentials.enc import on agent startup
 
+    # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
+    # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
+    # behavior is unchanged. See services/agent_service/pull_mode.py.
+    from services.agent_service.pull_mode import pull_mode_env_vars
+    env_vars.update(pull_mode_env_vars(config.name))
+
     if docker_client:
         try:
             # trinity-enterprise#93: persist the user's PAT as the per-agent
