@@ -573,6 +573,13 @@ class ChannelMessageRouter:
         if has_readable_files and "Read" not in public_allowed_tools:
             public_allowed_tools = public_allowed_tools + ["Read"]
 
+        # ent#117: channel turns run headless with a restricted `--allowedTools`, which
+        # otherwise blocks every MCP tool. When the voice capability is advertised, also
+        # allow the one MCP tool the agent needs to act on it (`mcp__trinity__send_voice_reply`).
+        _VOICE_REPLY_TOOL = "mcp__trinity__send_voice_reply"
+        if voice_capability_prompt and _VOICE_REPLY_TOOL not in public_allowed_tools:
+            public_allowed_tools = public_allowed_tools + [_VOICE_REPLY_TOOL]
+
         try:
             task_execution_service = get_task_execution_service()
 
