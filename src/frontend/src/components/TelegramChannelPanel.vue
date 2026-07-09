@@ -159,8 +159,8 @@
         No group chats yet. Add the bot to a Telegram group to see it here.
       </div>
 
-      <!-- Voice replies (epic #24 / #25) — shared agent-level TTS control -->
-      <VoiceRepliesControl :agent-name="agentName" class="mt-5" />
+      <!-- Voice replies (ent#117) — per-channel flag; agent-level config in Settings -->
+      <VoiceChannelToggle :agent-name="agentName" channel="telegram" class="mt-5" />
     </div>
 
     <!-- Disconnected State — Token Input -->
@@ -209,7 +209,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import api from '../api'
-import VoiceRepliesControl from './VoiceRepliesControl.vue'
+import VoiceChannelToggle from './VoiceChannelToggle.vue'
 
 const props = defineProps({
   agentName: {

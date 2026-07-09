@@ -673,6 +673,9 @@ class DatabaseManager:
     def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
         return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
 
+    def set_tts_channel_flags(self, agent_name: str, channels: dict):
+        return self._agent_ops.set_tts_channel_flags(agent_name, channels)
+
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
@@ -1866,6 +1869,9 @@ class DatabaseManager:
 
     def get_slack_workspace_bot_token(self, team_id):
         return self._slack_channel_ops.get_workspace_bot_token(team_id)
+
+    def get_slack_bot_token_for_channel(self, slack_channel_id):
+        return self._slack_channel_ops.get_bot_token_for_channel(slack_channel_id)
 
     def get_all_slack_workspaces(self):
         return self._slack_channel_ops.get_all_workspaces()

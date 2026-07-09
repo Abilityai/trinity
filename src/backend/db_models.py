@@ -239,6 +239,11 @@ class ScheduleExecution(BaseModel):
     # Reader-race auto-retry (#678): how many times this execution was retried in-line
     # by the backend HTTPError handler. 0 = never retried; 1 = retried once (cap).
     retry_count: int = 0
+    # Channel delivery target (ent#117): populated for channel-triggered executions so
+    # the send_voice_reply MCP tool can reconstruct where to deliver. NULL otherwise.
+    source_channel: Optional[str] = None            # telegram | slack | whatsapp
+    source_channel_chat_id: Optional[str] = None    # channel/chat/conversation id
+    source_channel_thread: Optional[str] = None      # thread id (nullable within a channel)
 
 
 # =========================================================================

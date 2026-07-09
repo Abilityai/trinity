@@ -244,6 +244,10 @@ class ScheduleOperations:
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
             # Reader-race auto-retry (#678)
             retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
+            # Channel delivery target (ent#117)
+            source_channel=row["source_channel"] if "source_channel" in row_keys else None,
+            source_channel_chat_id=row["source_channel_chat_id"] if "source_channel_chat_id" in row_keys else None,
+            source_channel_thread=row["source_channel_thread"] if "source_channel_thread" in row_keys else None,
         )
 
     @staticmethod
@@ -1031,6 +1035,9 @@ class ScheduleOperations:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -1070,6 +1077,9 @@ class ScheduleOperations:
                     fan_out_id=fan_out_id,
                     loop_id=loop_id,
                     subscription_id=subscription_id,
+                    source_channel=source_channel,
+                    source_channel_chat_id=source_channel_chat_id,
+                    source_channel_thread=source_channel_thread,
                 )
             )
 
@@ -1090,6 +1100,9 @@ class ScheduleOperations:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=subscription_id,
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_thread=source_channel_thread,
             )
 
     def create_schedule_execution(

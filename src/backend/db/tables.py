@@ -103,6 +103,9 @@ agent_ownership = Table(
     Column("mcp_exposed", Integer),
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
+    Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
+    Column("tts_voice_slack_enabled", Integer),      # ent#117: per-channel voice-allowed flag
+    Column("tts_voice_whatsapp_enabled", Integer),   # ent#117: per-channel voice-allowed flag
     Column("deleted_at", Text),
 )
 
@@ -228,6 +231,9 @@ schedule_executions = Table(
     Column("fan_out_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
+    Column("source_channel", Text),           # ent#117: originating channel for voice-reply delivery
+    Column("source_channel_chat_id", Text),   # ent#117: channel destination (chat/channel id)
+    Column("source_channel_thread", Text),    # ent#117: channel thread id (nullable)
 )
 
 agent_loops = Table(

@@ -25,6 +25,7 @@ from database import db
 from services.docker_service import get_agent_container
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
+    build_voice_capability_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
@@ -85,6 +86,13 @@ def _get_channel_timeout() -> int:
 def _get_channel_allowed_tools() -> List[str]:
     raw = settings_service.get_setting("channel_allowed_tools", _DEFAULT_CHANNEL_ALLOWED_TOOLS)
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _join_caller_prompts(*parts: Optional[str]) -> Optional[str]:
+    """Join non-empty caller-prompt fragments with blank lines. Returns None when
+    all are empty (so ``execute_task(system_prompt=None)`` stays the default)."""
+    kept = [p for p in parts if p and p.strip()]
+    return "\n\n".join(kept) if kept else None
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +553,11 @@ class ChannelMessageRouter:
                     f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
                 )
 
+        # ent#117: advertise the send_voice_reply capability only when voice is
+        # enabled for this agent AND allowed on this channel (channel-aware, FR-5),
+        # folded into the channel caller prompt below.
+        voice_capability_prompt = build_voice_capability_prompt(agent_name, channel)
+
         # Security: restrict tools for public channel users
         # No file access (Read exposes .env/credentials), no Bash, no Write/Edit
         # Configurable via settings_service (default: WebSearch, WebFetch)
@@ -572,11 +585,19 @@ class ChannelMessageRouter:
                 allowed_tools=public_allowed_tools,
                 # #894: per-agent public-channel model override (None → platform default).
                 model=db.get_public_channel_model(agent_name),
-                # #1205: public/channel custom instructions + MEM-001 memory.
-                system_prompt=build_public_channel_caller_prompt(
-                    agent_name, memory_system_prompt
+                # #1205: public/channel custom instructions + MEM-001 memory,
+                # plus the ent#117 voice capability when enabled for this channel.
+                system_prompt=_join_caller_prompts(
+                    build_public_channel_caller_prompt(agent_name, memory_system_prompt),
+                    voice_capability_prompt,
                 ),
                 images=image_data or None,
+                # ent#117: persist the channel delivery target so the
+                # send_voice_reply MCP tool can reconstruct where to deliver a
+                # voice note from the execution_id alone.
+                source_channel=channel,
+                source_channel_chat_id=str(message.channel_id) if message.channel_id is not None else None,
+                source_channel_thread=str(message.thread_id) if message.thread_id is not None else None,
             )
 
             if result.status in ("failed", "cancelled"):

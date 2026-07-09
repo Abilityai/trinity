@@ -734,6 +734,20 @@ class BrainOrbSettingsUpdate(BaseModel):
     clear: Optional[List[str]] = None
 
 
+class ElevenLabsSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/elevenlabs (trinity-enterprise#117).
+
+    Partial update. ``api_key`` sets the ElevenLabs key (stored AES-256-GCM
+    encrypted; never echoed back). ``default_voice_id`` sets the platform default
+    voice the agent-level config falls back to. ``clear`` lists which to remove:
+    "api_key" (revert to env/unavailable) and/or "default_voice_id". A field may
+    not be both set and cleared (400).
+    """
+    api_key: Optional[str] = None
+    default_voice_id: Optional[str] = None
+    clear: Optional[List[str]] = None
+
+
 # Max length for the public/channel custom-instructions fragment (#1205).
 PUBLIC_CHANNEL_PROMPT_MAX_LEN = 4000
 
@@ -825,14 +839,18 @@ class McpExposedUpdate(BaseModel):
 
 
 class VoiceRepliesUpdate(BaseModel):
-    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25).
+    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25; v2 ent#117).
 
-    Shared agent-level outbound-voice config: when ``enabled``, channel adapters
-    speak the agent's reply via the shared TTS service using ``voice_id``
-    (an ElevenLabs voice id). ``voice_id`` is required when enabling.
+    Partial update. Agent-level fields (from the Settings surface): ``enabled`` +
+    ``voice_id`` — when both are present they set the agent-level capability
+    (voice id is an ElevenLabs voice id; may be omitted to fall back to the platform
+    default). ``channels`` (from the channel panels) is a partial map of
+    ``{telegram|slack|whatsapp: bool}`` per-channel voice-allowed flags. At least
+    one of ``enabled`` / ``channels`` should be provided.
     """
-    enabled: bool
+    enabled: Optional[bool] = None
     voice_id: Optional[str] = None
+    channels: Optional[Dict[str, bool]] = None
 
     @field_validator("voice_id")
     @classmethod
@@ -841,6 +859,28 @@ class VoiceRepliesUpdate(BaseModel):
             return None
         v = v.strip()
         return v or None
+
+    @field_validator("channels")
+    @classmethod
+    def _validate_channels(cls, v: Optional[Dict[str, bool]]) -> Optional[Dict[str, bool]]:
+        if v is None:
+            return None
+        allowed = {"telegram", "slack", "whatsapp"}
+        unknown = set(v) - allowed
+        if unknown:
+            raise ValueError(f"unknown channel(s): {', '.join(sorted(unknown))}")
+        return v
+
+
+class VoiceReplyRequest(BaseModel):
+    """Body for POST /api/agents/{name}/voice-reply (send_voice_reply MCP tool, ent#117).
+
+    ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
+    ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
+    """
+    text: str = Field(min_length=1, max_length=4096)
+    execution_id: str = Field(min_length=1)
+    dedup_label: str = ""
 
 
 class PublicChannelModelUpdate(BaseModel):

@@ -11,10 +11,13 @@ from routers.settings. Now all settings retrieval logic lives here, and
 routers.settings re-exports these functions for backward compatibility.
 """
 import json
+import logging
 import os
 import time
 from typing import List, Optional
 from database import db
+
+logger = logging.getLogger(__name__)
 
 # Platform default model (#831)
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
@@ -136,6 +139,64 @@ class SettingsService:
         if key:
             return key
         return os.getenv('GOOGLE_API_KEY', '')
+
+    # =========================================================================
+    # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
+    # =========================================================================
+    #
+    # The key is stored AES-256-GCM encrypted (Invariant #12) under
+    # ``elevenlabs_api_key_encrypted`` — unlike the plaintext anthropic/github/google
+    # keys above — because it is a delivery secret with no env-only precedent to honor.
+    # Resolution precedence: stored (encrypted) setting → ``ELEVENLABS_API_KEY`` env →
+    # unavailable. Uncached (one SQLite read per call) for --workers 2 consistency, and
+    # fail-open (any decrypt/read error falls back to env) so a bad row never 500s the
+    # voice path or the feature-flags endpoint.
+
+    _ELEVENLABS_KEY_SETTING = 'elevenlabs_api_key_encrypted'
+    _DEFAULT_VOICE_SETTING = 'tts_default_voice_id'
+
+    def get_elevenlabs_api_key(self) -> str:
+        """Resolve the ElevenLabs API key: decrypted stored setting → env → ''."""
+        envelope = self.get_setting(self._ELEVENLABS_KEY_SETTING)
+        if envelope:
+            try:
+                from services.credential_encryption import CredentialEncryptionService
+                decrypted = CredentialEncryptionService().decrypt(envelope)
+                key = (decrypted.get('elevenlabs_api_key') or '').strip()
+                if key:
+                    return key
+            except Exception as e:
+                logger.error(f"Failed to decrypt ElevenLabs API key setting: {e}")
+        return os.getenv('ELEVENLABS_API_KEY', '')
+
+    def elevenlabs_key_source(self) -> str:
+        """Report where the key resolves from, for the admin panel: override|env|none."""
+        if self.get_setting(self._ELEVENLABS_KEY_SETTING):
+            return 'override'
+        if os.getenv('ELEVENLABS_API_KEY', '').strip():
+            return 'env'
+        return 'none'
+
+    def set_elevenlabs_api_key(self, key: str) -> None:
+        """Encrypt + persist the ElevenLabs API key (AES-256-GCM envelope)."""
+        from services.credential_encryption import CredentialEncryptionService
+        envelope = CredentialEncryptionService().encrypt({'elevenlabs_api_key': key.strip()})
+        db.set_setting(self._ELEVENLABS_KEY_SETTING, envelope)
+
+    def clear_elevenlabs_api_key(self) -> bool:
+        """Remove the stored key (reverts to env/unavailable)."""
+        return db.delete_setting(self._ELEVENLABS_KEY_SETTING)
+
+    def get_default_voice_id(self) -> Optional[str]:
+        """Platform default ElevenLabs voice id (plaintext setting; NULL when unset)."""
+        value = self.get_setting(self._DEFAULT_VOICE_SETTING)
+        return (value or '').strip() or None
+
+    def set_default_voice_id(self, voice_id: str) -> None:
+        db.set_setting(self._DEFAULT_VOICE_SETTING, voice_id.strip())
+
+    def clear_default_voice_id(self) -> bool:
+        return db.delete_setting(self._DEFAULT_VOICE_SETTING)
 
     # =========================================================================
     # Slack Integration Settings (SLACK-001)
