@@ -113,6 +113,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -332,6 +333,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -666,6 +668,32 @@ class DatabaseManager:
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
+
+    # =========================================================================
+    # Per-agent MCP connector (ent#46; OSS-core since #118)
+    # =========================================================================
+    def get_connector_config(self, agent_name: str):
+        return self._connector_ops.get_config(agent_name)
+
+    def upsert_connector_config(self, agent_name, enabled=None, exposed_playbooks=None, *, clear_playbooks=False):
+        return self._connector_ops.upsert_config(
+            agent_name, enabled=enabled, exposed_playbooks=exposed_playbooks, clear_playbooks=clear_playbooks
+        )
+
+    def delete_connector_config(self, agent_name: str):
+        return self._connector_ops.delete_config(agent_name)
+
+    def mint_connector_key(self, agent_name, user_id):
+        return self._connector_ops.mint_key(agent_name, user_id)
+
+    def get_connector_key_prefix(self, agent_name):
+        return self._connector_ops.get_key_prefix(agent_name)
+
+    def revoke_connector_key(self, agent_name):
+        return self._connector_ops.revoke_key(agent_name)
+
+    def regenerate_connector_key(self, agent_name, user_id):
+        return self._connector_ops.regenerate_key(agent_name, user_id)
 
     def get_tts_config(self, agent_name: str):
         return self._agent_ops.get_tts_config(agent_name)
