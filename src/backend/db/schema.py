@@ -243,6 +243,10 @@ TABLES = {
             fan_out_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
+            claim_token TEXT,
+            lease_expires_at TEXT,
+            claimed_by_worker TEXT,
+            redelivery_count INTEGER DEFAULT 0,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

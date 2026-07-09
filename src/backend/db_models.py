@@ -239,6 +239,10 @@ class ScheduleExecution(BaseModel):
     # Reader-race auto-retry (#678): how many times this execution was retried in-line
     # by the backend HTTPError handler. 0 = never retried; 1 = retried once (cap).
     retry_count: int = 0
+    # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402): how many times a
+    # pull-claimed task's expired lease was re-queued (preserving execution_id).
+    # DISTINCT from retry_count. At MAX_REDELIVERY the row is poison-parked.
+    redelivery_count: int = 0
 
 
 # =========================================================================

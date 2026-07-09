@@ -228,6 +228,13 @@ schedule_executions = Table(
     Column("fan_out_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
+    Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns
+    Column("lease_expires_at", Text),  # ISO-8601 UTC; unused until pull phases
+    Column("claimed_by_worker", Text),
+    # #1081 Phase 3 (#429/#1402) — lease-reaper re-delivery counter. DISTINCT from
+    # retry_count (#678 reader-race). Incremented on each lease-expired re-queue;
+    # at MAX_REDELIVERY the row is poison-parked to the operator queue.
+    Column("redelivery_count", Integer),
 )
 
 agent_loops = Table(

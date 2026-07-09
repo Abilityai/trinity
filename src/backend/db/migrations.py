@@ -2723,6 +2723,61 @@ def _migrate_agent_reports_table(cursor, conn):
     print("Created agent_reports table (#918)")
 
 
+def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
+    """#1081 Phase 0 — dark pull/work-stealing coordination columns.
+
+    Adds three nullable, currently-unread columns to ``schedule_executions``:
+    - ``claim_token`` (TEXT): opaque token a worker will stamp when it claims a
+      queued execution (pull mode).
+    - ``lease_expires_at`` (TEXT): ISO-8601 UTC lease deadline, matching the
+      ``utc_now_iso()`` convention used elsewhere in this schema.
+    - ``claimed_by_worker`` (TEXT): identity of the claiming worker.
+
+    "Dark" = the columns exist but nothing reads or writes them yet. This is
+    pure schema groundwork for the pull-coordination phases (umbrella #1081);
+    no endpoint, service, or runtime behavior changes here. Mirrored by the
+    Alembic revision 0015_schedule_executions_pull_claim_lease for PostgreSQL.
+    """
+    new_columns = [
+        ("claim_token", "TEXT"),
+        ("lease_expires_at", "TEXT"),
+        ("claimed_by_worker", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col_name,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to schedule_executions for pull coordination (#1081)...",
+        )
+    conn.commit()
+
+
+def _migrate_schedule_executions_redelivery_count(cursor, conn):
+    """#1081 Phase 3 (#429 / #1402) — lease-reaper re-delivery counter.
+
+    Adds ``redelivery_count`` (INTEGER, default 0) to ``schedule_executions``.
+    A pull-claimed task whose worker dies leaves a ``running`` row with a past
+    ``lease_expires_at``; the single lease-reaper re-queues the SAME row
+    (preserving ``execution_id``) and bumps this counter. At
+    ``MAX_REDELIVERY`` (default 3) the row is poison-parked to the operator
+    queue instead of re-queued.
+
+    DISTINCT from ``retry_count`` (#678 reader-race in-line retry) — that column
+    is untouched. Mirrored by the Alembic revision
+    ``0016_schedule_executions_redelivery_count`` for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "redelivery_count",
+        "ALTER TABLE schedule_executions ADD COLUMN redelivery_count INTEGER DEFAULT 0",
+        log_msg="Adding redelivery_count column to schedule_executions for the lease reaper (#429/#1402)...",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2809,4 +2864,6 @@ MIGRATIONS = [
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
+    ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
+    ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
 ]
