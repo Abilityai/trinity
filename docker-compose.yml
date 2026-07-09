@@ -179,6 +179,12 @@ services:
       # (observability). The actual routing gate is the mcp-server's read of the
       # SAME env key; keep both in sync via this single .env var.
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #1081 pull/work-stealing pilot allowlist — the SINGLE switch that opts an
+      # agent into pull mode. Backend-only, process-env (needs a backend restart),
+      # default empty = pull fully dark. Forwarded here (G1) because the backend
+      # service uses an explicit environment list (not env_file), so a bare .env
+      # entry otherwise never reached the container.
+      - PULL_MODE_PILOT_AGENTS=${PULL_MODE_PILOT_AGENTS:-}
       # Correlated-failure / thundering-herd controls (#1085) — re-delivery
       # governor. Backend-only; all fail-open and inert until the master flag is
       # on. Wired here so the .env levers actually reach the container.
