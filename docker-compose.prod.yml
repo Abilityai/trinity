@@ -116,6 +116,13 @@ services:
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
+      # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
+      # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
+      # Prod compose launches standalone (no env_file merge), so these must be
+      # wired here or the .env levers never reach the container (#1056 class).
+      - PULL_MODE_PILOT_AGENTS=${PULL_MODE_PILOT_AGENTS:-}
+      - MAX_REDELIVERY=${MAX_REDELIVERY:-3}
       # Correlated-failure / thundering-herd controls (#1085) — re-delivery
       # governor. Backend-only; all fail-open and inert until the master flag is
       # on. Prod compose launches standalone (no env_file merge), so the .env
