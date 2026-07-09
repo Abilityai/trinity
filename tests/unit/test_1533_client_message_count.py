@@ -464,7 +464,7 @@ class TestRouterWiring:
     def test_access_denied_message_is_not_counted(self):
         """Hook sits after the gate: a stranger cannot create unbounded rows."""
         router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message()
-        adapter.resolve_verified_email = AsyncMock(return_value="a@b.com")
+        adapter.resolve_verified_email = AsyncMock(return_value="alice@example.com")
         restrictive = {"require_email": False, "open_access": False, "group_auth_mode": "none"}
         with _env(restrictive) as (db, service):
             db.email_has_agent_access.return_value = False
