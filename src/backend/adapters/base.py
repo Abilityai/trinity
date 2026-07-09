@@ -257,6 +257,31 @@ class ChannelAdapter(ABC):
         """
         pass
 
+    async def record_inbound_activity(
+        self,
+        message: NormalizedMessage,
+        agent_name: str,
+    ) -> None:
+        """
+        Record that an external client sent this agent a message (#1533).
+
+        Feeds the Sharing-tab client roster (``services/client_roster_service``),
+        which reports a per-client ``message_count`` and ``last_active``. The
+        router calls this once per *delivered* direct message, after the access
+        gate and never for group messages — so it counts conversation turns, not
+        gate-rejected attempts.
+
+        ``agent_name`` is passed explicitly rather than read from
+        ``message.metadata``: the router resolves it, but does not write it back
+        onto the message.
+
+        Default: no-op — channels with no per-client roster source (Slack, VoIP)
+        need nothing here. Override in concrete adapters. Must be best-effort:
+        the router swallows and logs any exception, and the message is still
+        processed.
+        """
+        return None
+
     # =========================================================================
     # Group Authentication (group_auth_mode support)
     # =========================================================================
