@@ -654,3 +654,87 @@ class TestPullModeInjection:
         import services.agent_service.pull_mode as pm
 
         assert not hasattr(pm, "_internal_secret")
+
+
+# ===========================================================================
+# C1 regression — concurrent claim MUST be exactly-once (Postgres, multi-thread)
+# ===========================================================================
+
+
+class TestClaimConcurrencyC1:
+    """C1 (#1081): ``claim_next_queued`` hands each queued row to EXACTLY ONE
+    worker under real concurrency.
+
+    **Postgres-only, multi-thread.** SQLite serialises writers and lacks
+    ``FOR UPDATE SKIP LOCKED``, so the race cannot be constructed there — the
+    test skips on SQLite (and whenever ``TEST_POSTGRES_URL`` is unset). This is
+    the committed replacement for the scratch multi-process harness that first
+    surfaced C1 (``docs/testing/PULL_MIGRATION_TESTING.md`` §5); the previous
+    suite proved only sequential no-double-claim, which passes with OR without
+    the fix (the inner subquery's ``status='queued'`` filter already no-ops a
+    *sequential* second claim).
+
+    Regression guard: with BOTH C1 guards removed — the ``FOR UPDATE SKIP
+    LOCKED`` on the claim subquery AND the outer ``status='queued'`` re-check —
+    the uncorrelated scalar subquery compiles to an InitPlan evaluated once, so
+    under READ COMMITTED every one of the N concurrent updaters resolves the SAME
+    head id and (its EvalPlanQual re-check passing on the bare outer ``id=X``)
+    re-applies to it. All N workers then claim the same head row (double-RUN),
+    the bijection assertion below sees one id N times, and the test FAILS. See
+    ``docs/memory/learnings.md`` (2026-07-09).
+    """
+
+    def test_concurrent_claim_is_exactly_once(self, schedule_ops, enqueue, db_backend):
+        if db_backend != "postgres":
+            pytest.skip(
+                "C1 race is Postgres-only (SQLite serialises writers; no FOR "
+                "UPDATE SKIP LOCKED). Set TEST_POSTGRES_URL to run."
+            )
+
+        import threading
+
+        N = 8            # concurrent workers == queued rows ⇒ a correct claim is a bijection
+        ITERATIONS = 5   # repeat so a lucky single round can't green a regression
+
+        for it in range(ITERATIONS):
+            # Fresh queue of exactly N rows; the PG pool (size 10 + overflow 20)
+            # serves all N claims concurrently, so they genuinely contend.
+            _hrun("DELETE FROM schedule_executions WHERE agent_name = :a", a="alpha")
+            seeded = {enqueue("alpha", message=f"it{it}-r{r}") for r in range(N)}
+            assert len(seeded) == N
+            assert schedule_ops.get_queued_count("alpha") == N
+
+            barrier = threading.Barrier(N)
+            results: list = [None] * N
+            errors: list = [None] * N
+
+            def _worker(i: int) -> None:
+                try:
+                    barrier.wait(timeout=30)  # release all N claims together
+                    row = schedule_ops.claim_next_queued(
+                        "alpha", worker_id=f"alpha#w{i}", lease_seconds=900
+                    )
+                    results[i] = row["id"] if row else None
+                except Exception as e:  # noqa: BLE001 — re-asserted on the main thread
+                    errors[i] = e
+
+            threads = [threading.Thread(target=_worker, args=(i,)) for i in range(N)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60)
+
+            assert not any(errors), f"iteration {it}: claim raised {errors}"
+            claimed = [r for r in results if r is not None]
+
+            # Core C1 assertion: no queued row was handed to two workers.
+            assert len(claimed) == len(set(claimed)), (
+                f"iteration {it}: a queued row was DOUBLE-CLAIMED — {len(claimed)} "
+                f"claims, {len(set(claimed))} distinct (results={results})"
+            )
+            # N workers, N rows ⇒ a correct claim is a perfect N-way partition.
+            assert set(claimed) == seeded, (
+                f"iteration {it}: expected an exact partition of the queue; got "
+                f"{sorted(claimed)} vs seeded {sorted(seeded)}"
+            )
+            assert schedule_ops.get_queued_count("alpha") == 0

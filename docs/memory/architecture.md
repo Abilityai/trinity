@@ -1223,6 +1223,10 @@ CREATE TABLE schedule_executions (
     retry_count INTEGER DEFAULT 0,               -- #678: in-line auto-retry count (reader-race recovery)
     fan_out_id TEXT,                             -- FANOUT-001: parent fan-out operation ID
     loop_id TEXT,                                -- #740: parent agent_loops.id
+    claim_token TEXT,                            -- #1081 Phase 0 (dark): pull-worker lease CAS token (NULL on push/#1083 rows)
+    lease_expires_at TEXT,                       -- #1081 Phase 0 (dark): ISO-Z lease deadline; non-NULL ⇒ owned by the lease-reaper
+    claimed_by_worker TEXT,                      -- #1081 Phase 0 (dark): opaque pull-worker identity that holds the lease
+    redelivery_count INTEGER DEFAULT 0,          -- #1081 Phase 3 (#429/#1402): lease-reaper re-delivery count (distinct from retry_count)
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
