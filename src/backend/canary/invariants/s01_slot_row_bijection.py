@@ -8,6 +8,12 @@ and agent_name=A.
 Drain sentinels (members starting with `drain-`) are filtered out — see
 services/backlog_service.py for why they exist.
 
+Pull-CLAIMED rows (`lease_expires_at IS NOT NULL`, #1081 Phase 3) are excluded
+from the SQL side of the bijection: they are `running` but never enter the slot
+ZSET (a claim is a pure SQL UPDATE, no ZADD), so counting them would be a
+guaranteed false `in_sql_only`. Same `lease_expires_at IS NULL` exclusion the
+cleanup sweeps in db/schedules.py apply. NON-leased (push) rows are unaffected.
+
 Tier A, severity major. A bijection violation indicates either leaked Redis
 slots (capacity is wrong) or phantom SQL running rows (cleanup service is
 failing) — real slot-ZSET/SQL drift worth catching while the push-model ZSET
@@ -59,7 +65,18 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         # Filter drain sentinels: they hold a slot for a few seconds during
         # backlog drain and are intentionally not present in SQL.
         slot_ids = {sid for sid in agent.slot_ids if not sid.startswith(DRAIN_PREFIX)}
-        running_ids = agent.running_exec_ids
+        # #1081 Phase 3: a pull-CLAIMED row (lease_expires_at IS NOT NULL) is
+        # `status='running'` but is owned exclusively by the lease-reaper and
+        # NEVER enters the slot ZSET (a claim is a pure SQL UPDATE, no ZADD).
+        # Exclude leased rows from the SQL side of the bijection so a
+        # legitimately-unslotted pull row is not flagged `in_sql_only`. Mirrors
+        # the `lease_expires_at IS NULL` exclusion the cleanup sweeps in
+        # db/schedules.py already apply. NON-leased (push) rows are unaffected.
+        running_ids = {
+            eid
+            for eid in agent.running_exec_ids
+            if agent.running_lease_expires_at.get(eid) is None
+        }
 
         if slot_ids == running_ids:
             continue
