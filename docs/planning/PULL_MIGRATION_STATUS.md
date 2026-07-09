@@ -3,7 +3,7 @@
 **Branch:** `feature/target-arch-pull-migration` (based on `origin/dev @ 0d3e58b7`)
 **Umbrella:** #1081 (Epic #1045) · **Target design:** `docs/planning/TARGET_ARCHITECTURE.md` (v2 / Direction B, merged #1404)
 **Wire contract:** `docs/planning/MESSAGE_ENVELOPE_SCHEMA.md` (#945) · **Taxonomy:** `docs/planning/ACTOR_MODEL_POSTCARD.md`
-**Testing + findings:** `docs/testing/PULL_MIGRATION_TESTING.md`
+**Testing + findings:** `docs/testing/PULL_MIGRATION_TESTING.md` · **Rollback:** `docs/planning/PULL_MIGRATION_ROLLBACK.md`
 
 > Consolidates the former `ORCHESTRATOR_SESSION_CONTEXT.md`, `PULL_MIGRATION_SESSION_HANDOFF_2026-07-07.md`,
 > and `PRD.json` into one status doc. The work was built by an orchestration session that fanned out
@@ -171,3 +171,4 @@ Full walkthrough, gaps, and the two ops fixes surfaced (G1 compose-forwarding, G
 - `docs/planning/MESSAGE_ENVELOPE_SCHEMA.md` — the wire contract (#945).
 - `docs/planning/ACTOR_MODEL_POSTCARD.md` — the pinned status/error_code taxonomy.
 - `docs/testing/PULL_MIGRATION_TESTING.md` — tiered QA plan, confirmed defects, and the live-pilot record.
+- `docs/planning/PULL_MIGRATION_ROLLBACK.md` — rollback runbook (flag off-switch, code/DB tiers, detection signals).
