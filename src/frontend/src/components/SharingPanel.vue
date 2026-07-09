@@ -202,9 +202,8 @@
           <VoipChannelPanel :agent-name="agentName" />
         </ChannelConfigRow>
 
-        <!-- MCP connector (ent#46) — gated on the mcp_connector entitlement -->
+        <!-- MCP connector (ent#46) — OSS-core since #118 (un-gated) -->
         <ChannelDisclosure
-          v-if="enterpriseStore.isEntitled('mcp_connector')"
           title="MCP connector"
           subtitle="Add this agent to an AI client; playbooks become tools"
           icon="🔌"
@@ -288,7 +287,6 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
 import { useSessionsStore } from '../stores/sessions'
-import { useEnterpriseStore } from '../stores/enterprise'
 import ChannelDisclosure from './ChannelDisclosure.vue'
 import ChannelConfigRow from './ChannelConfigRow.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
@@ -318,10 +316,6 @@ const { showNotification } = useNotification()
 const sessionsStore = useSessionsStore()
 const agentsStore = useAgentsStore()
 sessionsStore.loadFeatureFlags()
-
-// MCP connector visibility (ent#46) — gated on the `mcp_connector` entitlement.
-const enterpriseStore = useEnterpriseStore()
-enterpriseStore.loadFeatureFlags()
 
 const loadAgent = () => {
   emit('agent-updated')

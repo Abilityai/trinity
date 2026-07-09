@@ -87,6 +87,7 @@
 - `auth.py` - Admin login (username OR registered email + password, #82), email auth, token validation
 - `users.py` - User management, roles (ROLE-001); `PUT /me/email` self-service sign-in email (#82 transition)
 - `mcp_keys.py` - MCP API key management
+- `connector.py` - Per-agent MCP connector: config + scoped-key mint/regenerate/revoke + exposed-playbook allow-list (`/api/agents/{name}/connector*`). OSS-core (ent#46 → #118); see [mcp-connector.md](feature-flows/mcp-connector.md)
 - `setup.py` - First-time setup wizard; **required** admin email (sign-in identity) + opt-in hosted intake (trinity-enterprise#38, #82). Setup token removed — no token, no Redis dependency for setup; the unauthenticated first-run window is an operator responsibility (deploy behind a tunnel/VPN until setup completes) (trinity-enterprise#49)
 
 *Scheduling & Execution:*

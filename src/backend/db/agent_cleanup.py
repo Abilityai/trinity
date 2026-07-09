@@ -159,6 +159,11 @@ AGENT_REFS: List[AgentRef] = [
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
 
+    # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
+    # connector KEY is an mcp_api_keys row (scope='connector') already covered
+    # by the mcp_api_keys refs below; this is the config row.
+    AgentRef("enterprise_connectors",        "agent_name",        Policy.CASCADE),
+
     # --- Channel adapters (encrypted bot tokens — security-relevant) -------
     AgentRef("slack_channel_agents",         "agent_name",        Policy.CASCADE),
     AgentRef("slack_active_threads",         "agent_name",        Policy.CASCADE),

@@ -184,6 +184,7 @@
 | MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 62 MCP tools for agent orchestration |
 | MCP Git Tools | [mcp-git-tools.md](feature-flows/mcp-git-tools.md) | Deterministic git tools over MCP + request-id audit correlation (#905) |
 | MCP Agent Exposure | [mcp-agent-exposure.md](feature-flows/mcp-agent-exposure.md) | Per-agent opt-in dedicated `chat_with_<slug>` MCP tool, dynamically poll-reconciled (#846) |
+| MCP Connector | [mcp-connector.md](feature-flows/mcp-connector.md) | Per-agent MCP connector — expose playbooks as tools to an external AI client via a scoped key; OSS-core (ent#46 → #118) |
 | Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 | Write User Memory | [write-user-memory.md](feature-flows/write-user-memory.md) | Per-user memory write MCP tool (MEM-001, #888) |
