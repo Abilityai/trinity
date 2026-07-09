@@ -15,7 +15,7 @@ import logging
 import secrets
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete, and_
+from sqlalchemy import select, insert, update, delete, and_, func
 
 from .engine import get_engine, make_insert
 from .tables import (
@@ -213,48 +213,55 @@ class TelegramChannelOperations:
     # Chat Link Operations
     # =========================================================================
 
-    def get_or_create_chat_link(
+    def record_inbound(
         self,
         binding_id: int,
         telegram_user_id: str,
         telegram_username: Optional[str] = None,
-    ) -> dict:
-        """Get or create a chat link for a Telegram user."""
-        select_stmt = select(
-            telegram_chat_links.c.id,
-            telegram_chat_links.c.binding_id,
-            telegram_chat_links.c.telegram_user_id,
-            telegram_chat_links.c.telegram_username,
-            telegram_chat_links.c.session_id,
-            telegram_chat_links.c.message_count,
-            telegram_chat_links.c.created_at,
-            telegram_chat_links.c.last_active,
-        ).where(
-            and_(
-                telegram_chat_links.c.binding_id == binding_id,
-                telegram_chat_links.c.telegram_user_id == telegram_user_id,
-            )
+    ) -> None:
+        """Record one inbound client message: upsert the chat link, bump the counter (#1533).
+
+        Counting semantics: one increment per *delivered* DM conversation turn.
+        The router calls this only after the access gate and never for group
+        messages, so rate-limited, agent-unavailable and access-denied/pending
+        messages are not counted, and bot commands (``/login``, ``/whoami``) are
+        consumed by the transport before they reach the router. A turn whose
+        agent execution later fails is still counted — the client did message.
+
+        Groups are excluded deliberately: a chat link is keyed by
+        ``(binding_id, telegram_user_id)``, i.e. a DM concept. Counting group
+        traffic would create a roster row per group member, listing people who
+        never DM'd the agent.
+
+        One atomic ``INSERT … ON CONFLICT DO UPDATE``: the row is created on the
+        client's first message — so a client who never ran ``/login`` still
+        appears in the Sharing-tab roster — and is incremented in place after
+        that. ``last_active`` rides along (this is its only live writer), and
+        the username is refreshed when known, since a ``/login``-first row is
+        created without one.
+        """
+        now = utc_now_iso()
+        ins = make_insert(telegram_chat_links).values(
+            binding_id=binding_id,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+            message_count=1,
+            created_at=now,
+            last_active=now,
+        )
+        stmt = ins.on_conflict_do_update(
+            index_elements=["binding_id", "telegram_user_id"],
+            set_={
+                "message_count": telegram_chat_links.c.message_count + 1,
+                "last_active": now,
+                "telegram_username": func.coalesce(
+                    ins.excluded.telegram_username,
+                    telegram_chat_links.c.telegram_username,
+                ),
+            },
         )
         with get_engine().begin() as conn:
-            row = conn.execute(select_stmt).mappings().first()
-
-            if row:
-                return self._row_to_chat_link(row)
-
-            now = utc_now_iso()
-            conn.execute(
-                insert(telegram_chat_links).values(
-                    binding_id=binding_id,
-                    telegram_user_id=telegram_user_id,
-                    telegram_username=telegram_username,
-                    message_count=0,
-                    created_at=now,
-                    last_active=now,
-                )
-            )
-
-            row = conn.execute(select_stmt).mappings().first()
-            return self._row_to_chat_link(row)
+            conn.execute(stmt)
 
     def get_chat_link(self, binding_id: int, telegram_user_id: str) -> Optional[dict]:
         """Look up a chat link without creating it."""
@@ -433,20 +440,6 @@ class TelegramChannelOperations:
             "verified_email": row["verified_email"],
             "verified_at": row["verified_at"],
         }
-
-    def increment_message_count(self, chat_link_id: int) -> None:
-        """Increment message count and update last_active."""
-        now = utc_now_iso()
-        stmt = (
-            update(telegram_chat_links)
-            .where(telegram_chat_links.c.id == chat_link_id)
-            .values(
-                message_count=telegram_chat_links.c.message_count + 1,
-                last_active=now,
-            )
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
 
     # =========================================================================
     # Group Config Operations (TGRAM-GROUP)
@@ -718,14 +711,3 @@ class TelegramChannelOperations:
             "updated_at": row["updated_at"],
         }
 
-    def _row_to_chat_link(self, row) -> dict:
-        return {
-            "id": row["id"],
-            "binding_id": row["binding_id"],
-            "telegram_user_id": row["telegram_user_id"],
-            "telegram_username": row["telegram_username"],
-            "session_id": row["session_id"],
-            "message_count": row["message_count"],
-            "created_at": row["created_at"],
-            "last_active": row["last_active"],
-        }

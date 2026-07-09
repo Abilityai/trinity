@@ -1940,11 +1940,8 @@ class DatabaseManager:
     def delete_telegram_binding(self, agent_name):
         return self._telegram_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_telegram_chat_link(self, binding_id, telegram_user_id, telegram_username=None):
-        return self._telegram_channel_ops.get_or_create_chat_link(binding_id, telegram_user_id, telegram_username)
-
-    def increment_telegram_message_count(self, chat_link_id):
-        return self._telegram_channel_ops.increment_message_count(chat_link_id)
+    def record_telegram_inbound(self, binding_id, telegram_user_id, telegram_username=None):
+        return self._telegram_channel_ops.record_inbound(binding_id, telegram_user_id, telegram_username)
 
     def list_telegram_clients_for_agent(self, agent_name):
         return self._telegram_channel_ops.list_clients_for_agent(agent_name)
@@ -2022,8 +2019,8 @@ class DatabaseManager:
     def delete_whatsapp_binding(self, agent_name):
         return self._whatsapp_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_whatsapp_chat_link(self, binding_id, wa_user_phone, wa_user_name=None):
-        return self._whatsapp_channel_ops.get_or_create_chat_link(
+    def record_whatsapp_inbound(self, binding_id, wa_user_phone, wa_user_name=None):
+        return self._whatsapp_channel_ops.record_inbound(
             binding_id, wa_user_phone, wa_user_name
         )
 
@@ -2038,9 +2035,6 @@ class DatabaseManager:
 
     def get_whatsapp_chat_link_by_verified_email(self, binding_id, email):
         return self._whatsapp_channel_ops.get_chat_link_by_verified_email(binding_id, email)
-
-    def increment_whatsapp_message_count(self, chat_link_id):
-        return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
     def list_whatsapp_clients_for_agent(self, agent_name):
         return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
