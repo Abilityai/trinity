@@ -260,6 +260,8 @@ _EXPECTED_UPDATE_SITES = {
     # --- status writers: MUST carry a status precondition (CAS projection) ---
     "update_execution_to_queued",          # #1082: AND status == RUNNING
     "release_claim_to_queued",
+    "requeue_expired_lease",               # #1081 Phase 3: AND status == RUNNING + lease-past
+    "park_expired_lease",                  # #1081 Phase 3: AND status == RUNNING + lease-past
     "cancel_queued_execution",
     "cancel_queued_for_agent",
     "fail_queued_for_agent",

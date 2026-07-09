@@ -79,7 +79,7 @@ from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
-from routers.internal import router as internal_router
+from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
@@ -934,6 +934,7 @@ app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)

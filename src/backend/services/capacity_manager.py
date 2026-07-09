@@ -439,7 +439,32 @@ class CapacityManager:
         clamped = {
             name: clamp_to_ceiling(cap) for name, cap in agent_capacities.items()
         }
-        return await self._slots.get_all_slot_states(clamped)
+        states = await self._slots.get_all_slot_states(clamped)
+
+        # #1081 Phase 3 — physical-occupancy meter (SHADOW, not admission).
+        # A pull-pilot's capacity claim is a pure SQL UPDATE (no ZSET ZADD), so
+        # the ZCARD-derived `active` above reads 0 for it. Add the disjoint
+        # physical term — its count of `running` leased rows — so the meter/
+        # dashboard reflect real occupancy. ZSET-occupancy (push) and lease-
+        # occupancy (pull) never overlap, so summing can't double-count.
+        # Gated on the EXISTING pilot allowlist; empty allowlist (the default)
+        # short-circuits to the unchanged ZSET-only path — inert, zero added
+        # cost/delta. Metering ONLY: acquire/release are not touched.
+        from services.agent_service.pull_mode import _pilot_allowlist
+
+        pilots = _pilot_allowlist() & set(clamped)
+        if pilots:
+            from database import db
+
+            leased = db.count_active_leased_by_agent(list(pilots))
+            for name in pilots:
+                st = states.get(name)
+                if st is None:
+                    continue
+                # `max` stays the clamped ceiling; only `active` gains the
+                # physical term (BulkSlotState shape {max, active} unchanged).
+                st["active"] = st["active"] + leased.get(name, 0)
+        return states
 
     async def get_slot_state(self, agent_name: str, max_concurrent: int):
         """Detailed slot view for the per-agent capacity endpoint.
@@ -453,9 +478,29 @@ class CapacityManager:
         the effective admit limit.
         """
         from services.settings_service import clamp_to_ceiling
-        return await self._slots.get_slot_state(
+        state = await self._slots.get_slot_state(
             agent_name, clamp_to_ceiling(max_concurrent)
         )
+
+        # #1081 Phase 3 — physical-occupancy meter (SHADOW, not admission).
+        # For a pull-pilot the ZSET is empty (capacity is a pure SQL UPDATE), so
+        # add its disjoint physical term (count of `running` leased rows) into
+        # active_slots and re-floor available_slots. `is_pull_pilot_agent`
+        # short-circuits per-agent, so a non-pilot pays nothing and its output
+        # is byte-for-byte identical whether the allowlist is set or not.
+        # Metering ONLY: acquire/release are not touched.
+        from services.agent_service.pull_mode import is_pull_pilot_agent
+
+        if is_pull_pilot_agent(agent_name):
+            from database import db
+
+            leased = db.count_active_leased(agent_name)
+            if leased:
+                state.active_slots += leased
+                state.available_slots = max(
+                    0, state.max_parallel_tasks - state.active_slots
+                )
+        return state
 
     # ------------------------------------------------------------------
     # Cleanup / emergency

@@ -22,6 +22,7 @@ from models import (
     ActivityType,
     InternalAuditRequest,
     InternalTaskExecutionRequest,
+    PullTaskResultRequest,
     ShareFileRequest,
     ShareFileResponse,
     TaskExecutionStatus,
@@ -30,7 +31,7 @@ from models import (
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services import idempotency_service
+from services import heartbeat_service, idempotency_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,25 @@ def _get_internal_secret() -> str:
     return os.getenv("INTERNAL_API_SECRET") or SECRET_KEY
 
 
+def _internal_secret_valid(request: Request) -> bool:
+    """True iff a valid ``X-Internal-Secret`` header is present (the trusted
+    backend / scheduler path). Constant-time compare; missing/empty ⇒ False."""
+    secret = _get_internal_secret()
+    provided = request.headers.get("X-Internal-Secret", "")
+    return bool(provided) and hmac.compare_digest(provided, secret)
+
+
 async def verify_internal_secret(request: Request):
     """
     Dependency to verify internal API shared secret (C-003).
 
-    Checks the X-Internal-Secret header against the configured secret.
+    Checks the X-Internal-Secret header against the configured secret. This is
+    the blanket gate for every backend-only internal endpoint. The two pull
+    seams (``pull_router`` below) deliberately do NOT use it — they additionally
+    accept the calling agent's OWN scoped MCP key, so the master secret never has
+    to reach an agent container.
     """
-    secret = _get_internal_secret()
-    provided = request.headers.get("X-Internal-Secret", "")
-    if not provided or not hmac.compare_digest(provided, secret):
+    if not _internal_secret_valid(request):
         logger.warning(f"Internal API request rejected: invalid or missing X-Internal-Secret from {request.client.host}")
         raise HTTPException(
             status_code=403,
@@ -63,11 +74,164 @@ router = APIRouter(
     dependencies=[Depends(verify_internal_secret)],
 )
 
+# Pull / work-stealing seams (#1081 Phase 2) live on their OWN router with NO
+# blanket internal-secret dependency, so each can accept EITHER the internal
+# secret (trusted backend) OR the calling agent's own agent-scoped MCP key. The
+# master internal secret is therefore never required by — and never injected
+# into — a pilot agent (least-privilege, #307/#1159). A compromised pilot can
+# only ever claim/report for ITSELF, never reach the other /api/internal/*
+# endpoints (which stay strictly internal-secret gated on ``router`` above).
+pull_router = APIRouter(prefix="/api/internal", tags=["internal"])
+
+_PULL_AUTH_DENIED = (
+    "Pull seam requires a valid X-Internal-Secret or the agent's own agent-scoped MCP key"
+)
+
+
+def _validated_agent_key(request: Request) -> Optional[Dict]:
+    """Validate a ``Bearer`` MCP key WITHOUT amplifying usage (the pull poll is
+    high-frequency, like the heartbeat — #307). Returns the validation dict, or
+    None when there is no Bearer token / the key is invalid."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    return db.validate_mcp_api_key(auth_header[7:], track_usage=False)
+
+
+def _pull_authorized(request: Request, agent_name: str) -> bool:
+    """Dual-auth predicate for a pull seam bound to ``agent_name``: the trusted
+    backend (valid internal secret) OR the agent's OWN agent-scoped MCP key,
+    reusing ``heartbeat_service.authorize_heartbeat`` (the same "an agent may act
+    only on itself" rule that gates the heartbeat + #1083 callback). A
+    user/system/mismatched key ⇒ False (caller raises 403)."""
+    if _internal_secret_valid(request):
+        return True
+    # #1081 B1: the agent-key (worker) path is additionally gated on the pilot
+    # allowlist — the single on/off switch is a CONSUMER backstop, not only a
+    # producer-injection gate. A de-piloted agent whose worker is still running
+    # (stale baked env / in-flight poll before recreate) is refused here even
+    # with a valid scoped key, so rollback takes effect on backend restart rather
+    # than only after a container recreate. The trusted-backend (internal-secret)
+    # path is unchanged.
+    from services.agent_service.pull_mode import is_pull_pilot_agent
+    if not is_pull_pilot_agent(agent_name):
+        return False
+    return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
+
 
 @router.get("/health")
 async def internal_health():
     """Internal health check for agent containers."""
     return {"status": "ok"}
+
+
+# =============================================================================
+# Pull / work-stealing coordination (#1081 Phase 2)
+# =============================================================================
+#
+# Two internal seams for the pull coordination model
+# (MESSAGE_ENVELOPE_SCHEMA.md §3), on ``pull_router`` with DUAL auth (see
+# ``_pull_authorized``): a valid X-Internal-Secret OR the calling agent's own
+# agent-scoped MCP key. This keeps the master internal secret out of agent
+# containers (#307/#1159) — a compromised pilot can only ever claim/report for
+# ITSELF. All policy lives in services/pull_coordination_service.py; the atomic
+# claim + CAS terminal write live in db/schedules.py (Invariant #1).
+
+
+@pull_router.get("/next-task")
+async def internal_next_task(request: Request, agent_name: str, worker_id: str):
+    """Atomically claim the oldest queued task for a worker (§3.1).
+
+    Auth (dual): a valid ``X-Internal-Secret`` (trusted backend) OR the agent's
+    own agent-scoped MCP key bound to ``agent_name`` — an agent may only claim
+    its OWN queue. A user/system/mismatched scoped key → 403.
+
+    Query params: ``agent_name`` + ``worker_id``. On success returns the §3.1
+    claim response (envelope frame + lease metadata). When the queue is empty it
+    returns the §3.2 empty-claim control response (200 ``{"envelope": null}`` —
+    the doc leaves 204-vs-empty-200 an implementation choice; empty-200 is
+    chosen so a drained poll and a real claim are one unambiguous 200 shape).
+    """
+    if not _pull_authorized(request, agent_name):
+        raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
+
+    from services import pull_coordination_service
+
+    claim = pull_coordination_service.claim_next_task(agent_name, worker_id)
+    if claim is None:
+        # §3.2 — no work available.
+        return {"envelope": None}
+    return claim
+
+
+@pull_router.post("/tasks/{execution_id}/result")
+async def internal_task_result(
+    request: Request,
+    execution_id: str,
+    payload: PullTaskResultRequest,
+    idempotency_key: Optional[str] = Header(None),
+):
+    """CAS-apply a worker's terminal result (§3.3 → §3.4).
+
+    Auth (dual): a valid ``X-Internal-Secret`` (trusted backend) OR the agent's
+    own agent-scoped MCP key that OWNS the target execution (its bound
+    ``agent_name`` must equal the execution's) — an agent may only report results
+    for its OWN executions. This ownership gate is IN ADDITION to the
+    ``claim_token`` CAS below (which independently blocks a stale/wrong-token
+    write). A user/system/mismatched scoped key → 403; unknown execution → 404.
+
+    The result payload (``reply`` §2.4) + the ``claim_token`` from the §3.1 claim
+    response. The terminal write is a single atomic compare-and-set carrying BOTH
+    the status precondition (#1082 status-as-projection) and the ``claim_token``
+    match, so a stale / duplicate / wrong-token POST can never clobber a terminal
+    row. ``Idempotency-Key`` is accepted for trigger-boundary consistency
+    (Invariant #18) but dedup is the CAS itself — we do not double-implement a
+    second dedup layer.
+
+    Responses (§3.4): 200 ``{applied: true}`` · 200 ``{replayed: true}`` (an
+    authoritative terminal already exists — never double-applied) · 404 (unknown
+    execution) · 409 (row not claimable under this token).
+    """
+    # Dual-auth. The trusted-backend path (internal secret) skips the ownership
+    # check; the agent path requires the scoped key to OWN this execution.
+    if not _internal_secret_valid(request):
+        key = _validated_agent_key(request)
+        if not (key and key.get("scope") == "agent"):
+            raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
+        execution = db.get_execution(execution_id)
+        if execution is None:
+            # 404 (not 403) — mirror the #1083 callback: don't leak the existence
+            # of another agent's execution id.
+            raise HTTPException(status_code=404, detail="Execution not found")
+        if not heartbeat_service.authorize_heartbeat(key, execution.agent_name):
+            raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
+
+    from services import pull_coordination_service
+
+    outcome = pull_coordination_service.apply_task_result(
+        execution_id,
+        payload.claim_token,
+        status=payload.status,
+        content=payload.content,
+        error_code=payload.error_code,
+        cost=payload.cost,
+        tokens=payload.tokens,
+        session_id=payload.session_id,
+        execution_log=payload.execution_log,
+        metadata=payload.metadata,
+    )
+
+    if outcome.kind == "applied":
+        return {"applied": True, "status": outcome.status}
+    if outcome.kind == "replayed":
+        return {"replayed": True, "status": outcome.status}
+    if outcome.kind == "not_found":
+        raise HTTPException(status_code=404, detail="Execution not found")
+    # conflict — row left `claimed`/RUNNING under a different (or no) token.
+    raise HTTPException(
+        status_code=409,
+        detail="Execution not claimable under this claim_token (stale or wrong worker)",
+    )
 
 
 # ---------------------------------------------------------------------------
