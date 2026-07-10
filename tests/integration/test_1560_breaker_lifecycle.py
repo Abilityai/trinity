@@ -89,6 +89,38 @@ _CIRCUIT = agent_client._CIRCUIT_HASH_PREFIX
 _PROBE = agent_client._CIRCUIT_PROBE_LOCK_SUFFIX
 
 
+# `clear_agent_breakers` resolves its dependencies through call-time lazy imports,
+# so exercising the real code against real Redis means binding these names in
+# `sys.modules` — monkeypatch cannot reach an import that happens inside the
+# function under test. Without the restore fixture below, replacing the `services`
+# package would leak a bare stub into every later test in the session: exactly the
+# cross-file pollution class of #762. This is the sanctioned escape hatch
+# (precedent: tests/unit/test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    "agent_client_1560",
+    "dispatch_breaker_1560",
+    "agent_runtime_state_1560",
+    "heartbeat_service_1560",
+    "services",
+    "services.heartbeat_service",
+    "services.agent_client",
+    "services.dispatch_breaker",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
     """Override the parent conftest's autouse fixture.

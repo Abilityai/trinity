@@ -37,10 +37,15 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 
 def _load(mod_name: str, rel_path: str):
     """Load a backend module by file path, bypassing ``services/__init__.py``
-    (which imports the Docker SDK transitively)."""
+    (which imports the Docker SDK transitively).
+
+    Deliberately NOT registered in ``sys.modules``: the target is a stdlib-only
+    leaf with no ``@dataclass`` needing ``sys.modules[cls.__module__]`` to resolve
+    its annotations, so registering it would only risk cross-file pollution
+    (#762) for no benefit.
+    """
     spec = importlib.util.spec_from_file_location(mod_name, str(_BACKEND / rel_path))
     module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
 

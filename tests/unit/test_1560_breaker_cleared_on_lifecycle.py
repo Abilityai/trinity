@@ -50,10 +50,15 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 
 
 def _load(mod_name: str, rel_path: str):
-    """Load the module by path, bypassing ``services/__init__.py`` (Docker SDK)."""
+    """Load the module by path, bypassing ``services/__init__.py`` (Docker SDK).
+
+    Deliberately NOT registered in ``sys.modules`` — the target is a stdlib-only
+    leaf with no ``@dataclass`` annotation resolution to satisfy, so registering it
+    would only risk cross-file pollution (#762). The per-test stubs below go
+    through ``monkeypatch.setitem``, which restores itself.
+    """
     spec = importlib.util.spec_from_file_location(mod_name, str(_BACKEND / rel_path))
     module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
 
