@@ -178,7 +178,9 @@ async def internal_task_result(
     ``agent_name`` must equal the execution's) — an agent may only report results
     for its OWN executions. This ownership gate is IN ADDITION to the
     ``claim_token`` CAS below (which independently blocks a stale/wrong-token
-    write). A user/system/mismatched scoped key → 403; unknown execution → 404.
+    write). A user/system/non-agent key → 403; an unknown OR not-owned execution
+    → a **uniform 404** (self-uniform enumeration-safety, Invariant #186 — a
+    404/403 split would leak the existence of another agent's execution id).
 
     The result payload (``reply`` §2.4) + the ``claim_token`` from the §3.1 claim
     response. The terminal write is a single atomic compare-and-set carrying BOTH
@@ -199,12 +201,14 @@ async def internal_task_result(
         if not (key and key.get("scope") == "agent"):
             raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
         execution = db.get_execution(execution_id)
-        if execution is None:
-            # 404 (not 403) — mirror the #1083 callback: don't leak the existence
-            # of another agent's execution id.
+        if execution is None or not heartbeat_service.authorize_heartbeat(
+            key, execution.agent_name
+        ):
+            # Uniform 404 for BOTH a missing AND a not-owned execution — never a
+            # 404/403 split, which would leak the existence of another agent's
+            # execution id (self-uniform enumeration-safety, Invariant #186).
+            # Mirrors the #1083 callback (routers/agents.py::agent_execution_result).
             raise HTTPException(status_code=404, detail="Execution not found")
-        if not heartbeat_service.authorize_heartbeat(key, execution.agent_name):
-            raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
 
     from services import pull_coordination_service
 

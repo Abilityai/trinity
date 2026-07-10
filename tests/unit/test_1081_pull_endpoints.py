@@ -478,17 +478,33 @@ class TestHttpAuth:
             )
         assert r.status_code == 403
 
-    def test_result_key_for_other_agents_execution_403(self, client):
-        # beta's key trying to report on alpha's execution.
+    def test_result_not_owned_and_unknown_execution_both_404_uniform(self, client):
+        """#186 self-uniform enumeration-safety: a not-owned execution and an
+        unknown execution_id must be INDISTINGUISHABLE (both 404, same body), so
+        the pull result seam can't be used as a cross-tenant existence oracle
+        (403 for exists-but-not-yours vs 404 for missing). Mirrors the #1083
+        callback (agents.py::agent_execution_result)."""
+        # (a) beta's key reporting on alpha's EXISTING execution -> 404 (not 403).
         with patch("routers.internal.db.validate_mcp_api_key", return_value=_key("agent", "beta")), \
              patch("routers.internal.db.get_execution",
                    return_value=SimpleNamespace(agent_name="alpha", status="running")):
-            r = client.post(
+            not_owned = client.post(
                 "/api/internal/tasks/exec-1/result",
                 json={"claim_token": "tok", "status": "success"},
                 headers={"Authorization": "Bearer trinity_mcp_beta"},
             )
-        assert r.status_code == 403
+        # (b) beta's key reporting on a NON-EXISTENT execution -> 404.
+        with patch("routers.internal.db.validate_mcp_api_key", return_value=_key("agent", "beta")), \
+             patch("routers.internal.db.get_execution", return_value=None):
+            unknown = client.post(
+                "/api/internal/tasks/exec-missing/result",
+                json={"claim_token": "tok", "status": "success"},
+                headers={"Authorization": "Bearer trinity_mcp_beta"},
+            )
+        assert not_owned.status_code == 404, "not-owned execution must be 404, not 403 (enumeration leak)"
+        assert unknown.status_code == 404
+        # Uniform: identical status AND body — no oracle distinguishing existence.
+        assert not_owned.json() == unknown.json()
 
     # --- Proof 3: non-agent-scoped key (user / system) -> 403 ------------
     def test_next_task_user_scoped_key_403(self, client):
