@@ -17,6 +17,7 @@ from database import db
 from services.docker_service import (
     docker_client,
     get_agent_container,
+    get_next_available_port,
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
@@ -27,6 +28,7 @@ from services.settings_service import get_anthropic_api_key, get_github_pat, get
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
 from services.agent_auth import derive_agent_token
+from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
 from .read_only import inject_read_only_hooks, remove_read_only_hooks
 
@@ -252,7 +254,15 @@ async def start_agent_internal(agent_name: str) -> dict:
     """
     container = get_agent_container(agent_name)
     if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        # #1559: no container, but a live (non-soft-deleted) agent_ownership row
+        # means this is a recovered agent whose container was removed at
+        # soft-delete. Rebuild it from persisted config + the surviving workspace
+        # volume instead of dead-ending on 404 (the soft-delete recovery gap).
+        # A genuinely nonexistent agent (no ownership row) still 404s.
+        owner = db.get_agent_owner(agent_name)
+        if not owner:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        container = await recreate_missing_container(agent_name)
 
     # Check if container needs recreation for shared folders, API key, resource limits, or capabilities
     await container_reload(container)
@@ -499,6 +509,43 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
             if vol_name:
                 volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
 
+    return await _provision_folders_and_run_agent_container(
+        agent_name,
+        image=image,
+        env_vars=env_vars,
+        labels=labels,
+        base_volumes=volumes,
+        ssh_port=ssh_port,
+        cpu=cpu,
+        memory=memory,
+        full_capabilities=full_capabilities,
+    )
+
+
+async def _provision_folders_and_run_agent_container(
+    agent_name: str,
+    *,
+    image: str,
+    env_vars: dict,
+    labels: dict,
+    base_volumes: dict,
+    ssh_port: int,
+    cpu,
+    memory,
+    full_capabilities: bool,
+):
+    """Shared tail for every container (re)build: add DB-driven shared/public
+    folder mounts onto ``base_volumes`` then run the container with the full
+    security posture (cap-drop ALL, AppArmor, noexec tmpfs, resource limits).
+
+    Extracted so `recreate_container_with_updated_config` (spec from the old
+    container) and `recreate_missing_container` (spec from persisted DB state
+    after a soft-delete recovery, #1559) share one canonical run path — the
+    security envelope can never drift between them (AC: "goes through the
+    supported creation path, not a hand-rolled docker run").
+    """
+    volumes = dict(base_volumes)
+
     # Add shared folder mounts based on current config
     shared_config = db.get_shared_folder_config(agent_name)
     if shared_config:
@@ -605,3 +652,197 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")
     return new_container
+
+
+async def _read_template_yaml_from_volume(agent_name: str) -> dict:
+    """Read the agent's `template.yaml` off its persisted workspace volume
+    without a running container (#1559).
+
+    After a soft-delete the container (and its `trinity.agent-type` /
+    `trinity.agent-runtime` labels) is gone, but the workspace volume — which
+    carries the committed `template.yaml` — survives. A throwaway, network-less
+    base-image container `cat`s the file. Tolerant: any failure (missing file,
+    unparseable) returns `{}` so the caller falls back to safe defaults.
+    """
+    volume_name = f"agent-{agent_name}-workspace"
+    try:
+        out = await containers_run(
+            "trinity-agent-base:latest",
+            command=["cat", "/home/developer/template.yaml"],
+            volumes={volume_name: {"bind": "/home/developer", "mode": "ro"}},
+            remove=True,
+            network_disabled=True,
+        )
+        text = out.decode("utf-8") if isinstance(out, (bytes, bytearray)) else str(out)
+        import yaml as _yaml
+        data = _yaml.safe_load(text)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:  # noqa: BLE001 — best-effort; defaults cover the gap
+        logger.warning(
+            "Could not read template.yaml from volume for %s: %s", agent_name, e
+        )
+        return {}
+
+
+async def recreate_missing_container(agent_name: str):
+    """Rebuild a container for an existing agent that has **no** container —
+    the soft-delete recovery gap (#1559).
+
+    Soft delete removes the container but keeps the `agent-<name>-workspace`
+    volume and every relational row. Recovery clears `deleted_at` but nothing
+    could bring the agent back online: `start` 404'd (no container) and
+    `recreate_container_with_updated_config` needs an `old_container` to copy
+    config from. This reconstructs the container spec from persisted state
+    (`agent_ownership` + `agent_git_config` + the volume's `template.yaml`),
+    reuses the existing volume (never recreated — no data loss), and runs it
+    through the same `_provision_folders_and_run_agent_container` tail as a
+    normal recreate, so the full security posture (cap-drop, no-new-privileges
+    via AppArmor+cap model, noexec tmpfs, derived TRINITY_AGENT_AUTH_TOKEN) is
+    identical. startup.sh sees `.git` already on the volume and skips the clone.
+
+    Caller must confirm a live `agent_ownership` row exists first — this does
+    NOT create ownership/child rows, only the container.
+    """
+    image = "trinity-agent-base:latest"
+    validate_base_image(image)
+
+    tmpl = await _read_template_yaml_from_volume(agent_name)
+    agent_type = tmpl.get("type") or "business-assistant"
+    runtime_cfg = tmpl.get("runtime", {})
+    if isinstance(runtime_cfg, dict):
+        runtime = (runtime_cfg.get("type") or "claude-code").lower()
+        runtime_model = runtime_cfg.get("model") or ""
+    elif isinstance(runtime_cfg, str):
+        runtime = runtime_cfg.lower()
+        runtime_model = ""
+    else:
+        runtime = "claude-code"
+        runtime_model = ""
+    template_name = tmpl.get("_template") or ""  # display-only; label field
+
+    # --- Resource limits: per-agent DB override → system defaults ---
+    system_defaults = get_agent_default_resources()
+    db_limits = db.get_resource_limits(agent_name) or {}
+    cpu = normalize_cpu(db_limits.get("cpu") or system_defaults["cpu"], system_defaults["cpu"])
+    memory = normalize_memory(db_limits.get("memory") or system_defaults["memory"], system_defaults["memory"])
+    full_capabilities = get_agent_full_capabilities()
+    ssh_port = get_next_available_port()
+
+    # --- Base env (mirrors crud.create_agent_internal's baked set) ---
+    env_vars = {
+        "AGENT_NAME": agent_name,
+        "AGENT_TYPE": agent_type,
+        "CREDENTIALS_FILE": "/config/credentials.json",
+        "ENABLE_SSH": "true",
+        "ENABLE_AGENT_UI": "true",
+        "AGENT_SERVER_PORT": "8000",
+        "AGENT_RUNTIME": runtime,
+        "AGENT_RUNTIME_MODEL": runtime_model,
+        "TMPDIR": AGENT_DEFAULT_TMPDIR,
+    }
+
+    # OpenTelemetry (default on) — same wiring as create.
+    if os.getenv("OTEL_ENABLED", "1") == "1":
+        env_vars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
+        env_vars["OTEL_METRICS_EXPORTER"] = os.getenv("OTEL_METRICS_EXPORTER", "otlp")
+        env_vars["OTEL_LOGS_EXPORTER"] = os.getenv("OTEL_LOGS_EXPORTER", "otlp")
+        env_vars["OTEL_EXPORTER_OTLP_PROTOCOL"] = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+        env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = os.getenv("OTEL_COLLECTOR_ENDPOINT", "http://trinity-otel-collector:4317")
+        env_vars["OTEL_METRIC_EXPORT_INTERVAL"] = os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "60000")
+
+    # Mint a fresh agent-scoped MCP key (the old key's plaintext is unrecoverable
+    # — only the hash is stored). Same wiring as create: enables collab +
+    # heartbeat. Owner resolved from the ownership row.
+    owner = db.get_agent_owner(agent_name) or {}
+    owner_username = owner.get("owner_username") or owner.get("username")
+    try:
+        if owner_username:
+            agent_mcp_key = db.create_agent_mcp_api_key(
+                agent_name, owner_username, description="recovery-recreate"
+            )
+            if agent_mcp_key:
+                env_vars["TRINITY_MCP_URL"] = os.getenv("TRINITY_MCP_URL", "http://mcp-server:8080/mcp")
+                env_vars["TRINITY_MCP_API_KEY"] = agent_mcp_key.api_key
+                env_vars["TRINITY_BACKEND_URL"] = os.getenv("TRINITY_BACKEND_URL", "http://backend:8000")
+    except Exception as e:  # noqa: BLE001 — non-fatal; agent still boots
+        logger.warning("Could not mint MCP key on recovery recreate for %s: %s", agent_name, e)
+
+    # Auth env (subscription token / platform key), GitHub PAT, guardrails,
+    # stall-limit, per-agent auth token — reuse the exact create/recreate rules.
+    _apply_persisted_auth_env(agent_name, env_vars, runtime)
+
+    labels = {
+        "trinity.platform": "agent",
+        "trinity.agent-name": agent_name,
+        "trinity.agent-type": agent_type,
+        "trinity.ssh-port": str(ssh_port),
+        "trinity.cpu": cpu,
+        "trinity.memory": memory,
+        "trinity.created": utc_now_iso(),
+        "trinity.template": template_name,
+        "trinity.agent-runtime": runtime,
+        "trinity.full-capabilities": str(full_capabilities).lower(),
+    }
+
+    base_volumes = {f"agent-{agent_name}-workspace": {"bind": "/home/developer", "mode": "rw"}}
+
+    logger.info("Rebuilding missing container for recovered agent %s (#1559)", agent_name)
+    return await _provision_folders_and_run_agent_container(
+        agent_name,
+        image=image,
+        env_vars=env_vars,
+        labels=labels,
+        base_volumes=base_volumes,
+        ssh_port=ssh_port,
+        cpu=cpu,
+        memory=memory,
+        full_capabilities=full_capabilities,
+    )
+
+
+def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> None:
+    """Set auth-related env from persisted DB state, mirroring the refresh block
+    in `recreate_container_with_updated_config` (subscription token vs platform
+    key, per-agent GitHub PAT, guardrails, stall-limit, derived agent token)."""
+    if not is_claude_runtime(runtime):
+        env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        env_vars.pop("ANTHROPIC_API_KEY", None)
+    else:
+        subscription_id = db.get_agent_subscription_id(agent_name)
+        if subscription_id:
+            token = db.get_subscription_token(subscription_id)
+            if token:
+                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            env_vars.pop("ANTHROPIC_API_KEY", None)
+        elif db.get_use_platform_api_key(agent_name):
+            env_vars["ANTHROPIC_API_KEY"] = get_anthropic_api_key()
+            env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        else:
+            env_vars.pop("ANTHROPIC_API_KEY", None)
+            env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+
+    # Per-agent GitHub PAT (opt-in), plus GITHUB_REPO / GIT_SYNC from git config.
+    git_config = db.get_git_config(agent_name)
+    if git_config:
+        from routers.git import get_github_pat_for_agent
+        pat = get_github_pat_for_agent(agent_name)
+        repo = git_config.get("github_repo") if isinstance(git_config, dict) else getattr(git_config, "github_repo", None)
+        if pat and repo:
+            env_vars["GITHUB_REPO"] = repo
+            env_vars["GITHUB_PAT"] = pat
+            env_vars["GIT_SYNC_ENABLED"] = "true"
+            _git_base = os.getenv("TRINITY_GIT_BASE_URL")
+            if _git_base:
+                env_vars["TRINITY_GIT_BASE_URL"] = _git_base
+
+    guardrails_override = db.get_guardrails_config(agent_name)
+    if guardrails_override:
+        import json as _json
+        env_vars["AGENT_GUARDRAILS"] = _json.dumps(guardrails_override)
+
+    _stall_limit = (os.getenv("AGENT_TOOL_STALL_LIMIT_S") or "").strip()
+    if _stall_limit:
+        env_vars["AGENT_TOOL_STALL_LIMIT_S"] = _stall_limit
+
+    # #1159: per-agent in-container auth token (fail-closed: raises if secret unset).
+    env_vars["TRINITY_AGENT_AUTH_TOKEN"] = derive_agent_token(agent_name)
