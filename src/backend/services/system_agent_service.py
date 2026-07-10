@@ -21,6 +21,7 @@ from services.docker_service import (
     get_next_available_port,
 )
 from services.docker_utils import container_reload, container_start, containers_run
+from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key
 from services.agent_service.lifecycle import FULL_CAPABILITIES, AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
@@ -231,6 +232,13 @@ class SystemAgentService:
             'trinity.template': SYSTEM_AGENT_TEMPLATE,
             'trinity.is-system': 'true',  # Mark as system agent
         }
+
+        # #1560: `SYSTEM_AGENT_NAME` is a fixed, permanently-recycled name — if the
+        # container was removed, this recreates it under exactly the same name and
+        # would otherwise inherit the previous incarnation's breaker verdict. Same
+        # clear the regular create path does in agent_service/crud.py, before the
+        # container exists.
+        clear_agent_breakers(SYSTEM_AGENT_NAME)
 
         # Create the container with security settings
         # System agent uses FULL_CAPABILITIES for package installation, etc.
