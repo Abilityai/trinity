@@ -28,6 +28,36 @@ _STARTUP_SH = _PROJECT_ROOT / "docker" / "base-image" / "startup.sh"
 _CRUD_PY = _PROJECT_ROOT / "src" / "backend" / "services" / "agent_service" / "crud.py"
 
 
+# Modules the reload helpers below swap in sys.modules — restored after each test
+# so a fresh import doesn't leak. `_reload_github_service()` deletes + reimports
+# services.github_service (to rebind import-time class attrs like API_BASE) without
+# restoring, leaking a NEW module and a NEW `OwnerType` enum; later files (e.g.
+# test_fork_to_own) then compare their import-time `OwnerType` against the reloaded
+# one by identity and silently skip owner-guard logic ("DID NOT RAISE HTTPException"
+# under full-suite ordering). `_STUBBED_MODULE_NAMES` + `_restore_sys_modules` is
+# the pattern tests/lint_sys_modules.py recognises (#762; precedent:
+# test_telegram_webhook_backfill.py). (`_load_git_service` deletes
+# services.git_service* inside a patch.dict context, which self-restores.)
+_STUBBED_MODULE_NAMES = [
+    "services.github_service",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules for the reload helpers before each test and restore
+    after, so the reloaded services.github_service stays file-local."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # ---------------------------------------------------------------------------
 # git_service._git_remote_url — Python helper
 # ---------------------------------------------------------------------------

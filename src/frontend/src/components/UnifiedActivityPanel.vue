@@ -31,7 +31,7 @@
             <span v-if="activity.totals?.calls > 0">
               {{ activity.totals.calls }} call{{ activity.totals.calls !== 1 ? 's' : '' }}
             </span>
-            <span v-if="sessionCost > 0">${{ sessionCost.toFixed(4) }}</span>
+            <span v-if="sessionCost > 0">{{ formatCost(sessionCost) }}</span>
             <span v-if="elapsedTime">{{ elapsedTime }}</span>
           </div>
 
@@ -209,6 +209,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { parseUTC } from '@/utils/timestamps'
+import { formatCost } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
 
 const props = defineProps({

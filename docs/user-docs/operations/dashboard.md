@@ -1,12 +1,24 @@
 # Dashboard
 
-The main Dashboard at `/` provides a real-time agent network graph and timeline view for monitoring all agents and their activities.
+The main Dashboard at `/` monitors all agents and their activities in real time. Switch between three view modes with the toggle in the top-right — **Grid**, **Graph**, and **Timeline**. Timeline is the default; your choice persists per browser in `localStorage['trinity-dashboard-view']`.
 
 > 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
 
 ## How It Works
 
-### Graph View (default)
+### Grid View
+
+![Trinity Dashboard — Grid view showing the fleet as a canvas of agent tiles with activity sparklines, success rates, cost, and inline Run/Auto toggles](../images/dashboard-grid-view.png)
+
+A magnetic tile canvas — the fleet as a grid of agent cards rather than a graph or a timeline. Each agent is a five-zone tile showing its avatar, runtime badge, and inline **Running** and **Autonomy** toggles, plus live status chips (git sync health, pending operator-queue items).
+
+1. Drag a tile to move it; drop it onto another tile to **swap** positions. The layout snaps to an unbounded lattice and is saved per user.
+2. **Tidy** re-packs the tiles into a compact arrangement without losing your ordering.
+3. **Reset** restores the default auto-generated layout.
+4. Pan by dragging the background; zoom with the scroll wheel or pinch. Tiles are keyboard-navigable.
+5. Tile metrics hydrate lazily as they scroll into view, so large fleets stay responsive.
+
+### Graph View
 
 ![Trinity Dashboard — Graph view showing 13 agents as a live network](../images/dashboard-graph-view.png)
 
@@ -19,12 +31,11 @@ The main Dashboard at `/` provides a real-time agent network graph and timeline 
 7. Capacity meter shows parallel execution slot usage.
 8. Tag clouds group agents visually — click a cloud to filter to that group.
 
-### Timeline View
+### Timeline View (default)
 
 ![Trinity Dashboard — Timeline view showing live executions across oracle and market agents](../images/dashboard-timeline-live.png)
 
-1. Toggle between Graph and Timeline via the mode switch in the top-right.
-2. Timeline shows execution boxes per agent, arranged chronologically.
+1. Timeline shows execution boxes per agent, arranged chronologically.
 3. Color-coded by trigger type: Manual (green), MCP (pink), Scheduled (purple), Agent-Triggered (cyan), Paid (yellow), Public (teal).
 4. Each row shows the agent's success rate, total cost, and parallel slot count.
 5. Live streaming: running executions show progress in real-time with a "Live" indicator.

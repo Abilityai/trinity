@@ -17,6 +17,7 @@ from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskReq
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.agent_auth import agent_httpx_client
+from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
@@ -767,7 +768,7 @@ async def _run_chat_and_finalize(
                 status=TaskExecutionStatus.SUCCESS,
                 response=sanitized_response,
                 context_used=context_used if context_used > 0 else None,
-                context_max=session_data.get("context_window") or 200000,
+                context_max=session_data.get("context_window") or DEFAULT_CONTEXT_WINDOW,
                 cost=metadata.get("cost_usd"),
                 tool_calls=tool_calls_json,  # Simplified format for activity tracking
                 execution_log=execution_log_json,  # Raw Claude Code format for UI
@@ -881,7 +882,7 @@ async def _run_chat_and_finalize(
             salvage_cost = partial_metadata.get("cost_usd") if partial_metadata else None
             salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
             salvage_context_max = (
-                (partial_metadata.get("context_window") or 200000)
+                (partial_metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW)
                 if partial_metadata
                 else None
             )

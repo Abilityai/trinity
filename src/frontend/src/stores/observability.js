@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
+import { formatCost } from '../composables/useFormatters'
 
 export const useObservabilityStore = defineStore('observability', {
   state: () => ({
@@ -50,7 +51,7 @@ export const useObservabilityStore = defineStore('observability', {
      * Format total cost as currency
      */
     formattedTotalCost() {
-      return `$${this.totals.total_cost.toFixed(4)}`
+      return formatCost(this.totals.total_cost)
     },
 
     /**
@@ -91,7 +92,7 @@ export const useObservabilityStore = defineStore('observability', {
         .map(([model, cost]) => ({
           model: this.formatModelName(model),
           cost: cost,
-          formattedCost: `$${cost.toFixed(4)}`
+          formattedCost: formatCost(cost)
         }))
         .sort((a, b) => b.cost - a.cost)
     },

@@ -1,4 +1,6 @@
 name: Test Subprocess-Leak Hook
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Test Leak Hook
 description: Engineered subprocess-leak harness for Issue #817 regression repro. Spawns a setsid CPU burner from a UserPromptSubmit hook so the burner escapes Claude's pgid and survives terminate_process_group. Intended ONLY for local automated tests — do NOT deploy in production.
 version: "1.0.0"

@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..model_context import CODEX_CONTEXT_WINDOW, resolve_context_window
 from ..state import agent_state
 from ..utils.credential_sanitizer import (
     sanitize_dict,
@@ -74,7 +75,7 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="codex-subproc")
 
 # GPT-5 context window (input). Cosmetic — drives the context gauge only.
-CODEX_CONTEXT_WINDOW = 272000
+# Single-sourced from the shared model catalog (#1521); imported above.
 
 # Codex / GPT-5 pricing per 1K tokens (USD). Codex reports no cost; we derive
 # it from token counts. ``cached`` is the discounted rate for cached input
@@ -644,7 +645,12 @@ class CodexRuntime(AgentRuntime):
         return "gpt-5.1-codex"
 
     def get_context_window(self, model: Optional[str] = None) -> int:
-        return CODEX_CONTEXT_WINDOW
+        """Fallback context window for Codex/GPT-5 models (#1521).
+
+        Resolves via the shared catalog; falls back to the default Codex model id
+        so a None model still resolves to Codex's 272K window.
+        """
+        return resolve_context_window(model or self.get_default_model())
 
     def configure_mcp(self, mcp_servers: Dict) -> bool:
         """Delegate to the shared Codex MCP configuration in trinity_mcp.py."""

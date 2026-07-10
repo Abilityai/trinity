@@ -62,7 +62,15 @@ def _hook_ready(path: Path) -> bool:
 async def _run_hook(path: Path, *, stdin: bytes = b"", timeout: float):
     """Run an agent convention hook (shebang-selected interpreter) and parse its
     JSON stdout. Hardened: timeout-kill, output cap, JSON-parse + non-zero-exit
-    guards. Never trusts the hook beyond returning structured JSON."""
+    guards. Never trusts the hook beyond returning structured JSON.
+
+    Sweep-safe (#1501): the hook pid is registered as a transient allowlist
+    entry for the duration of the run — a hook is a live agent-server child,
+    but the orphan sweep's hard-protect walk only goes UP the parent chain,
+    so without registration any 30s periodic sweep firing mid-run SIGKILLs
+    the hook (exit -9 → 502; the 180s refresh/scope hooks straddled a sweep
+    boundary essentially every run). Descendants (the hook's own git/python
+    children) are covered by the allowlist's ppid walk."""
     try:
         proc = await asyncio.create_subprocess_exec(
             str(path),
@@ -74,12 +82,50 @@ async def _run_hook(path: Path, *, stdin: bytes = b"", timeout: float):
     except OSError as e:
         logger.warning("brain-orb hook %s not executable: %s", path.name, e)
         raise HTTPException(status_code=502, detail="Scope hook not executable")
+    # Fail-open registration: a registry error must never break the hook call —
+    # worst case is the pre-#1501 sweep exposure. Lazy import mirrors the other
+    # low-level registry consumers (orphan_sweeper, subprocess_pgroup).
+    registry = None
     try:
-        out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise HTTPException(status_code=504, detail="Scope hook timed out")
+        from ..services.process_registry import get_process_registry  # lazy
+        registry = get_process_registry()
+        # Protection window derived from THIS run's budget (+headroom for the
+        # kill/collect tail) — a fixed TTL below a future hook's timeout would
+        # lazily evict mid-run and silently reintroduce the #1501 kill.
+        registry.add_transient_pid(proc.pid, ttl_seconds=timeout + 60)
+    except Exception:
+        logger.warning(
+            "brain-orb hook %s: transient-pid registration failed — hook runs "
+            "unprotected from the orphan sweep", path.name, exc_info=True,
+        )
+        registry = None
+    try:
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise HTTPException(status_code=504, detail="Scope hook timed out")
+        except asyncio.CancelledError:
+            # #1501: client disconnected mid-hook. Kill deterministically —
+            # the finally below drops the pid off the allowlist, so leaving
+            # the hook alive would just hand it to the next sweep's SIGKILL
+            # at a random point mid-write. Reap with a tight bound (mirrors
+            # the timeout path) so the subprocess transport closes promptly;
+            # suppressed because a second cancellation may land mid-wait —
+            # the original CancelledError is re-raised either way.
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except BaseException:  # noqa: BLE001 — bounded best-effort reap
+                pass
+            raise
+    finally:
+        if registry is not None:
+            try:
+                registry.remove_transient_pid(proc.pid)
+            except Exception:  # noqa: BLE001 — removal is best-effort; TTL backstops
+                pass
     if proc.returncode != 0:
         logger.warning(
             "brain-orb hook %s exit %s: %s",
@@ -171,16 +217,17 @@ async def post_brain_orb_action(request: Request):
     """Run an owner-gated KB-write action. Pipes the request body (a JSON `{action, ...}`)
     to `~/.trinity/brain-orb/action`, which performs the write and prints JSON. 404 when
     the agent ships no `action` hook. The backend proxy gates this at `OwnedAgentByName`
-    (owner/admin) and enum-restricts the verb (capture/link + capture_transcript/
-    process_transcript, #66; run_skill stays out). The hook forks its own detached
-    `claude -p` for post-session processing, so this call still returns promptly."""
+    (owner/admin) and enum-restricts the verb (capture/link + capture_transcript, #66;
+    run_skill stays out). Post-session processing is dispatched by the BACKEND as a
+    standard execution (#102) — the backend strips `capture_transcript`'s `process` flag
+    and never forwards `process_transcript`, so the hook only writes files here (a
+    hook-forked detached `claude -p` is unregistered and reaped by the orphan sweep)."""
     if not _hook_ready(_ACTION_HOOK):
         raise HTTPException(status_code=404, detail="KB writes not supported")
     body = await request.body()
     if len(body) > _MAX_ACTION_BODY:
         raise HTTPException(status_code=413, detail="Request too large")
-    # 60s: note write / link / transcript render are quick; the post-session claude -p
-    # is spawned DETACHED by the hook (returns immediately), so this never blocks on it.
+    # 60s: note write / link / transcript render are quick file ops.
     return await _run_hook(_ACTION_HOOK, stdin=body, timeout=60)
 
 

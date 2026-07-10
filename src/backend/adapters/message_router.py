@@ -427,6 +427,20 @@ class ChannelMessageRouter:
         if not allowed:
             return
 
+        # 5c. Record the client on the Sharing-tab roster (#1533). Deliberately
+        # placed *after* the access gate: firing it earlier would let any
+        # unauthenticated stranger who messages the bot create unbounded
+        # chat-link rows. Groups are skipped — a chat link is a DM concept, so
+        # counting group traffic would list members who never DM'd the agent.
+        # Best-effort: a counter write must never block message processing.
+        if not is_group:
+            try:
+                await adapter.record_inbound_activity(message, agent_name)
+            except Exception as e:
+                logger.warning(
+                    f"[ROUTER:{channel}] record_inbound_activity failed for {agent_name}: {e}"
+                )
+
         # 6. Get/create session
         logger.debug(f"[ROUTER:{channel}] Step 6 - creating session")
         session_identifier = adapter.get_session_identifier(message)

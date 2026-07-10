@@ -103,7 +103,7 @@
       </span>
       <span v-if="hasTasks" class="t-stats">
         <b>{{ stats.taskCount }}</b> tasks <span class="dim">·</span>
-        <b>${{ (stats.totalCost || 0).toFixed(2) }}</b> <span class="dim">·</span>
+        <b>{{ formatCostCompact(stats.totalCost || 0) }}</b> <span class="dim">·</span>
         {{ lastExecutionDisplay }}
       </span>
       <span v-else class="t-stats empty">No tasks (24h)</span>
@@ -147,6 +147,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { formatCostCompact } from '../composables/useFormatters'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import RunningStateToggle from './RunningStateToggle.vue'

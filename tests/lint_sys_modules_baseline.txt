@@ -35,6 +35,7 @@
 8 tests/unit/test_file_sharing_mixin.py
 8 tests/unit/test_fleet_status_resilience.py
 2 tests/unit/test_fleet_sync_audit.py
+3 tests/unit/test_fork_to_own.py
 2 tests/unit/test_git_status_dual_ahead_behind.py
 1 tests/unit/test_github_init_gitignore.py
 1 tests/unit/test_github_init_push.py

@@ -1,4 +1,6 @@
 name: Test Counter Agent
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
 display_name: Test Counter
 description: Counter agent for testing state persistence across messages
 version: "1.0.0"

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "mermaid-diagram": {
+      "command": "npx",
+      "args": ["-y", "@peng-shawn/mermaid-mcp-server"]
+    },
+    "aistudio": {
+      "command": "npx",
+      "args": ["-y", "aistudio-mcp-server"],
+      "env": {
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+      }
+    },
+    "ebook-mcp": {
+      "command": "${UV_PATH:-uv}",
+      "args": [
+        "--directory",
+        "${EBOOK_MCP_PATH:-/opt/mcp/ebook-mcp}",
+        "run",
+        "ebook-mcp"
+      ]
+    }
+  }
+}

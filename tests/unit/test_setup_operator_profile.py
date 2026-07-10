@@ -94,34 +94,53 @@ def _run(data, bg):
     return asyncio.run(_get_setup().set_admin_password(data, None, bg))
 
 
+def _task_funcs(bg):
+    """The callables scheduled as background tasks (order-independent). Lets a
+    test assert WHICH task ran rather than a brittle count — since setup now
+    always schedules the Cornelius seed (ent#107) alongside the consent-gated
+    operator intake."""
+    return [t.func for t in bg.tasks]
+
+
 def test_email_registered_and_intake_scheduled(patched):
     bg = BackgroundTasks()
     res = _run(_req(email="Me@Acme.com", company="Acme", consent_updates=True), bg)
 
+    setup = _get_setup()
     assert res["email_registered"] is True
     assert patched.users["admin"]["email"] == "me@acme.com"  # normalized
     assert patched.settings["setup_completed"] == "true"
-    assert len(bg.tasks) == 1  # intake scheduled (runs after response)
+    funcs = _task_funcs(bg)
+    assert setup.submit_operator_intake in funcs  # intake scheduled (consent)
+    # ent#107: Cornelius seed is always scheduled after setup completes.
+    assert setup.cornelius_agent_service.ensure_seeded in funcs
 
 
 def test_email_only_completes_setup_cleanly(patched):
-    """Email but no company/consent — completes, binds email, no intake."""
+    """Email but no company/consent — completes, binds email, no intake (but the
+    Cornelius seed is still scheduled)."""
     bg = BackgroundTasks()
     res = _run(_req(email="solo@acme.com"), bg)
 
+    setup = _get_setup()
     assert res["email_registered"] is True
     assert patched.users["admin"]["email"] == "solo@acme.com"
     assert patched.settings["setup_completed"] == "true"
-    assert len(bg.tasks) == 0
+    funcs = _task_funcs(bg)
+    assert setup.submit_operator_intake not in funcs  # no consent → no intake
+    assert setup.cornelius_agent_service.ensure_seeded in funcs  # ent#107
 
 
 def test_email_without_consent_registers_but_no_intake(patched):
     bg = BackgroundTasks()
     res = _run(_req(email="me@acme.com", consent_updates=False), bg)
 
+    setup = _get_setup()
     assert res["email_registered"] is True
     assert patched.users["admin"]["email"] == "me@acme.com"
-    assert len(bg.tasks) == 0
+    funcs = _task_funcs(bg)
+    assert setup.submit_operator_intake not in funcs  # no consent → no intake
+    assert setup.cornelius_agent_service.ensure_seeded in funcs  # ent#107
 
 
 def test_invalid_email_rejected_before_any_write(patched):

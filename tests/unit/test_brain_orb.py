@@ -607,21 +607,114 @@ def test_action_unsupported_verb_rejected_400(client):
     agent_req.assert_not_called()
 
 
-def test_action_transcript_verbs_forwarded(client):
-    """#66 — capture_transcript + process_transcript are accepted and forwarded to
-    the agent hook (owner-gated, audited)."""
-    for verb, payload in (
-        ("capture_transcript", {"action": "capture_transcript", "session_id": "s1",
-                                 "events": [{"event": "user_turn", "text": "hi"}]}),
-        ("process_transcript", {"action": "process_transcript", "path": "~/x.md"}),
+def test_action_capture_transcript_forwarded_without_process(client):
+    """#66/#102 — capture_transcript is forwarded to the agent hook, but the `process`
+    trigger is STRIPPED first: the platform dispatches the post-session run itself, and
+    an older hook seeing `process` would also fork its invisible detached claude."""
+    agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true,"saved":true,"path":"Brain/00-Inbox/Voice Conversations/v.md"}'))
+    dispatch = AsyncMock(return_value={"dispatched": True, "execution_id": "e1"})
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", dispatch
+    ), patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "capture_transcript", "session_id": "s1",
+                                           "process": True,
+                                           "events": [{"event": "user_turn", "text": "hi"}]})
+    assert r.status_code == 200
+    forwarded = json.loads(agent_req.await_args.kwargs["content"])
+    assert "process" not in forwarded
+    assert forwarded["action"] == "capture_transcript"
+
+
+def test_action_capture_transcript_dispatches_postprocess(client):
+    """#102 — a saved transcript with process:true dispatches the configured prompt as a
+    standard execution; the response and audit both carry the dispatch outcome."""
+    agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true,"saved":true,"path":"Brain/x.md"}'))
+    dispatch = AsyncMock(return_value={"dispatched": True, "execution_id": "exec-42"})
+    audit = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", dispatch
+    ), patch.object(bo.platform_audit_service, "log", audit):
+        r = client.post(_ACTION_URL, json={"action": "capture_transcript", "process": True,
+                                           "events": [{"event": "user_turn", "text": "hi"}]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["postprocess"] == {"dispatched": True, "execution_id": "exec-42"}
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args.kwargs["transcript_path"] == "Brain/x.md"
+    details = audit.await_args.kwargs["details"]
+    assert details["postprocess_dispatched"] is True
+    assert details["postprocess_execution_id"] == "exec-42"
+
+
+def test_action_capture_transcript_not_saved_skips_dispatch(client):
+    """#102 — no-dialogue sessions save nothing; the postprocess is skipped with a
+    visible reason, never silently."""
+    agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true,"saved":false,"reason":"no dialogue in this session"}'))
+    dispatch = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", dispatch
+    ), patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "capture_transcript", "process": True,
+                                           "events": [{"event": "session_start"}]})
+    assert r.status_code == 200
+    assert r.json()["postprocess"] == {"dispatched": False, "reason": "no dialogue in this session"}
+    dispatch.assert_not_called()
+
+
+def test_action_capture_transcript_without_process_no_dispatch(client):
+    """No process flag → pure transcript save, byte pass-through, no dispatch."""
+    payload = b'{"ok":true,"saved":true,"path":"Brain/x.md"}'
+    agent_req = AsyncMock(return_value=_resp(200, payload))
+    dispatch = AsyncMock()
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", dispatch
+    ), patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "capture_transcript",
+                                           "events": [{"event": "user_turn", "text": "hi"}]})
+    assert r.status_code == 200
+    assert r.content == payload            # untouched pass-through
+    dispatch.assert_not_called()
+
+
+def test_action_process_transcript_dispatches_not_forwarded(client):
+    """#102 — process_transcript never reaches the hook (whose detached fork was
+    sweep-reaped); it dispatches through the observable execution path."""
+    agent_req = AsyncMock()
+    dispatch = AsyncMock(return_value={"dispatched": True, "execution_id": "e9"})
+    with patch.object(bo, "_agent_request", agent_req), patch.object(
+        bo, "_require_running_agent", AsyncMock()
+    ), patch.object(bo.brain_orb_postprocess, "dispatch_postprocess", dispatch), patch.object(
+        bo.platform_audit_service, "log", AsyncMock()
     ):
-        agent_req = AsyncMock(return_value=_resp(200, b'{"ok":true}'))
-        with patch.object(bo, "_agent_request", agent_req), patch.object(
-            bo.platform_audit_service, "log", AsyncMock()
-        ):
-            r = client.post(_ACTION_URL, json=payload)
-        assert r.status_code == 200, verb
-        agent_req.assert_awaited_once()
+        r = client.post(_ACTION_URL, json={"action": "process_transcript", "path": "Brain/x.md"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "dispatched": True, "execution_id": "e9"}
+    agent_req.assert_not_called()
+    dispatch.assert_awaited_once()
+
+
+def test_action_process_transcript_needs_path_or_text_400(client):
+    with patch.object(bo, "_require_running_agent", AsyncMock()), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", AsyncMock()
+    ) as dispatch:
+        r = client.post(_ACTION_URL, json={"action": "process_transcript"})
+    assert r.status_code == 400
+    dispatch.assert_not_called()
+
+
+def test_action_process_transcript_disabled_reports_reason(client):
+    """A disabled/unconfigured postprocess is a visible state (ok:false + reason), never
+    indistinguishable from a failure (#102 acceptance)."""
+    dispatch = AsyncMock(return_value={"dispatched": False,
+                                       "reason": "post-processing disabled or no prompt configured"})
+    with patch.object(bo, "_require_running_agent", AsyncMock()), patch.object(
+        bo.brain_orb_postprocess, "dispatch_postprocess", dispatch
+    ), patch.object(bo.platform_audit_service, "log", AsyncMock()):
+        r = client.post(_ACTION_URL, json={"action": "process_transcript", "transcript": "hi there"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "disabled" in body["reason"]
 
 
 _REFRESH_URL = f"/api/agents/{_AGENT}/brain-orb/refresh"

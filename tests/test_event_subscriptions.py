@@ -334,7 +334,12 @@ class TestCreateSubscription:
     def test_create_subscription_nonexistent_source(
         self, api_client: TrinityApiClient, created_agent
     ):
-        """Create subscription with nonexistent source agent returns 400."""
+        """Create subscription with nonexistent source agent returns 403.
+
+        #186 enumeration-safety: "source not found" (was 400) is collapsed into
+        the "not permitted" 403 so the body's source_agent can't be used as an
+        existence oracle (commit 34ddf71a). Mirrors the [403, 404] sibling tests.
+        """
         response = api_client.post(
             f"/api/agents/{created_agent['name']}/event-subscriptions",
             json={
@@ -343,7 +348,7 @@ class TestCreateSubscription:
                 "target_message": "Test",
             },
         )
-        assert_status(response, 400)
+        assert_status(response, 403)
 
     def test_create_subscription_missing_fields(
         self, api_client: TrinityApiClient, created_agent

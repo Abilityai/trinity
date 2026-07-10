@@ -4,7 +4,7 @@
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.7.0](whats-new/v0.7.0.md))
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.8.0](whats-new/v0.8.0.md))
 
 ## Watch
 

@@ -41,8 +41,10 @@
       </template>
       <template v-else>
         <p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
-          When on, each finished voice conversation is run through this prompt (headless) and the
-          result is saved back as a note — so a session becomes durable, processed memory.
+          When on, each finished voice conversation is run through this prompt as a regular agent
+          task and the result is saved back as a note — so a session becomes durable, processed
+          memory. Each run shows up under the agent's Executions (triggered by <code>voice</code>),
+          so you can see it succeed or fail.
         </p>
 
         <label class="flex items-center gap-2 cursor-pointer select-none mb-3">

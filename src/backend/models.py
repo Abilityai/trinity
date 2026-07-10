@@ -824,6 +824,60 @@ class McpExposedUpdate(BaseModel):
     enabled: bool
 
 
+# ---------------------------------------------------------------------------
+# Per-agent MCP connector (ent#46; OSS-core since #118)
+# ---------------------------------------------------------------------------
+
+class ConnectorConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/connector.
+
+    ``exposed_playbooks=None`` leaves the allow-list unchanged; an explicit list
+    sets it; ``expose_all_playbooks=True`` resets it to "all user_invocable".
+    """
+    enabled: Optional[bool] = None
+    exposed_playbooks: Optional[List[str]] = None
+    expose_all_playbooks: Optional[bool] = None
+
+
+class ConnectorClientSnippet(BaseModel):
+    """A copy-paste-ready connector config for one AI client."""
+    client: str
+    label: str
+    format: str            # 'shell' | 'json'
+    content: str           # the literal block to copy (key pre-embedded)
+    note: Optional[str] = None
+
+
+class ConnectorPlaybook(BaseModel):
+    """A playbook exposed by the connector as an MCP tool."""
+    name: str
+    description: Optional[str] = None
+    argument_hint: Optional[str] = None
+    automation: Optional[str] = None
+
+
+class ConnectorStatus(BaseModel):
+    """Response for GET .../connector (owner view)."""
+    agent_name: str
+    enabled: bool = False
+    exposed_playbooks: Optional[List[str]] = None
+    has_key: bool = False
+    key_prefix: Optional[str] = None
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ConnectorKeySecret(BaseModel):
+    """Response when minting/regenerating the key — secret returned once."""
+    agent_name: str
+    api_key: str
+    key_prefix: str
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+
+
 class VoiceRepliesUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25).
 

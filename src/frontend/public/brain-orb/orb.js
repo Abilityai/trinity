@@ -1072,7 +1072,9 @@ searchInput.addEventListener('keydown',e=>{
 let VOICE_PROXY='';   // brokered base (set from the embed init in loadData) — '' standalone
 let detachedNote=null;                        // a note opened from the vault but not in the graph
 // robust title match against the loaded nodes (handles .md, partials, word-order, sub/superstrings)
-function normTitle(s){ return (s||'').toLowerCase().replace(/\.md$/,'').replace(/[_]+/g,' ').replace(/\s+/g,' ').trim(); }
+// #103: hyphens normalize to spaces too — exporters may title inbox nodes by file
+// stem ("20260706-140610-my-note"), which must match a search for "my note".
+function normTitle(s){ return (s||'').toLowerCase().replace(/\.md$/,'').replace(/[-_]+/g,' ').replace(/\s+/g,' ').trim(); }
 function searchNodeIds(raw, limit){
   const q=normTitle(raw); if(!q) return [];
   const words=q.split(' ').filter(w=>w.length>2);
@@ -1178,9 +1180,23 @@ const ORB_TOOLS={
   async navigate_to_note({title}){
     let ids=searchNodeIds(title,1);
     // #71 — a just-created note may not be folded in yet (writes refresh on a debounce).
-    // If we miss AND an integration is pending, flush it now and retry before falling
-    // back to the vault — so "create X, now show me X" lands on the real graph node.
-    if(!ids.length && _refreshPending){ await refreshGraph('navigate-miss'); ids=searchNodeIds(title,1); }
+    // If we miss AND an integration is pending or running, flush/join it and retry before
+    // falling back to the vault — so "create X, now show me X" lands on the real node.
+    // #103 — but NEVER dead-air past the voice tile's 8s tool timeout: a real-vault
+    // reindex can take minutes. Wait a bounded ~6s; if it's still integrating, answer
+    // honestly and let the pending-focus auto-select land it when the rebuild completes.
+    if(!ids.length && (_refreshPending || refreshBusy)){
+      if(!_pendingFocus) _setPendingFocus({title});   // ensure auto-select on completion
+      const run=(refreshBusy && _refreshRun) ? _refreshRun : refreshGraph('navigate-miss');
+      const out=await Promise.race([
+        Promise.resolve(run).catch(()=>null),
+        new Promise(res=>setTimeout(()=>res('__timeout'),6000)),
+      ]);
+      if(out==='__timeout')
+        return {opened:false, integrating:true,
+                note:'that note is still being folded into the graph — it will be highlighted automatically once integration finishes'};
+      ids=searchNodeIds(title,1);
+    }
     if(ids.length){ const i=ids[0]; focusNode(i);
       return {opened:true, in_view:true, title:NODES[i].title, layer:LAYER_NAME[NODES[i].layer],
               preview:(NODES[i].content||'').replace(/\s+/g,' ').trim().slice(0,300)}; }
@@ -1239,10 +1255,14 @@ const ORB_TOOLS={
     const text=(body||title||'').trim();
     if(!text) return {error:'nothing to capture'};
     const r=await postAction('capture',{title:title||'', body:text});
-    if(r&&r.ok){ _pendingFocusTitle=r.title||text.slice(0,60);   // #72 — auto-select once integrated
+    if(r&&r.ok){
+      // #103 — creation outcome is confirmed on screen, never ambiguous.
+      toast('voice · captured "'+String(r.title||text.split('\n')[0]).slice(0,40)+'" — integrating…');
+      _setPendingFocus(r, text.split('\n')[0].slice(0,60));   // #72 — auto-select once integrated
       scheduleRefresh();   // #67 — fold it into the real graph (debounced across a burst)
       return {ok:true, title:r.title, recorded_to:r.path,
               note:'recorded and being integrated into the graph — it will appear and be selected shortly'}; }
+    toast('voice · capture FAILED: '+((r&&r.error)||'unknown error'));   // #103 — a failed write is loud
     return {error:(r&&r.error)||'capture failed'};
   },
   // #61 Phase 4a — voice-triggered link (owner sessions only; the write tools are in the
@@ -1296,13 +1316,26 @@ addEventListener('message', e=>{
 // #66 — the voice tile relays its finished conversation (it never holds the JWT);
 // we POST it to the owner-gated broker as capture_transcript, with the session id as
 // the Idempotency-Key so a double session-end saves exactly ONE transcript. process:true
-// lets the agent run its configured post-session prompt (voice-postprocess.md) if present.
+// asks the platform to run the configured post-session prompt as a real execution.
+// #102 — every outcome is surfaced: saved / post-processing started / skipped (+why) /
+// failed. A session end must never be silently indistinguishable from a failure.
 addEventListener('message', e=>{
   if(e.origin!==window.location.origin) return;   // same-origin voice iframe only
   const m=e.data; if(!m || m.type!=='orb-capture-transcript') return;
-  if(!ACTIONS.enabled) return;   // only an owner with the write surface saves transcripts
+  const hasDialogue=(m.events||[]).some(ev=>ev&&(ev.event==='user_turn'||ev.event==='model_turn'));
+  if(!hasDialogue){ toast('voice session ended — no dialogue to save'); return; }
+  if(!ACTIONS.enabled){ toast('voice transcript NOT saved — agent offline or KB writes unavailable'); return; }
   postAction('capture_transcript', {session_id:m.session_id, events:m.events||[], process:true}, m.session_id)
-    .then(r=>{ if(r&&r.ok&&r.saved){ toast('voice transcript saved'); } });
+    .then(r=>{
+      if(r&&r.ok&&r.saved){
+        const pp=r.postprocess;
+        if(pp&&pp.dispatched) toast('voice transcript saved · post-processing started (see Executions)');
+        else if(pp&&pp.reason) toast('voice transcript saved · post-processing skipped: '+pp.reason);
+        else toast('voice transcript saved');
+      }
+      else if(r&&r.ok) toast('voice transcript not saved: '+(r.reason||'nothing to save'));
+      else toast('voice transcript NOT saved: '+((r&&r.error)||'unknown error'));
+    });
 });
 // #60 Phase 3 — the voice tile (a nested iframe) never holds the platform JWT.
 // It asks US to mint a short-lived Gemini ephemeral token via the JWT-gated broker,
@@ -1452,10 +1485,71 @@ async function setScope(tokens){
 // then refetch /data and rebuild IN PLACE (same machinery as setScope). #68: a visible
 // "integrating…" state + a result toast so the user can confirm the write landed.
 let refreshBusy=false, _refreshTimer=null, _refreshPending=false;   // #67/#71 shared refresh state
-let _pendingFocusTitle=null;   // #72 — a just-created note to auto-select once the refresh folds it in
+let _refreshRun=null, _refreshQueued=false;   // #103 — in-flight promise (join, don't drop) + one queued follow-up
+// #72/#103 — a just-created note to auto-select once the refresh folds it in. Multiple
+// keys: exporters may title the node by H1 OR by file stem, so we try both.
+let _pendingFocus=null;   // {keys:[...], tries:0}
+function _setPendingFocus(r, fallback){
+  const keys=[];
+  if(r&&r.title) keys.push(String(r.title));
+  const p=(r&&r.path)?String(r.path):'';
+  const m=p.match(/([^\/]+)\.md$/); if(m) keys.push(m[1]);   // file stem (#103 — real exporters title inbox nodes by stem)
+  if(fallback) keys.push(fallback);
+  if(keys.length) _pendingFocus={keys, tries:0};
+}
+function _findPending(){ if(!_pendingFocus) return -1;
+  for(const k of _pendingFocus.keys){ const ids=searchNodeIds(k,1); if(ids.length) return ids[0]; }
+  return -1; }
+function _pendingInData(data){   // cheap presence probe — no teardown/rebuild just to look
+  if(!_pendingFocus) return false;
+  const nodes=(data&&data.nodes)||[];
+  return _pendingFocus.keys.some(k=>{ const nk=normTitle(k); if(!nk) return false;
+    return nodes.some(n=>{ const t=normTitle(n&&n.title); return t===nk||t.includes(nk)||(t.length>4&&nk.includes(t)); }); });
+}
+// #103 — the exporter may fold a fresh write in asynchronously (or report net-zero
+// counts), so after a refresh that didn't surface the note, poll /data briefly instead
+// of declaring "up to date" and silently dropping it. Rebuilds only when it appears.
+function _pollPendingFocus(){
+  if(!_pendingFocus) return;
+  if(_pendingFocus.tries>=3){
+    toast('note saved — not on the graph yet (integrate & refresh again in a moment)');
+    _pendingFocus=null; return;
+  }
+  _pendingFocus.tries++;
+  setTimeout(async()=>{
+    if(!_pendingFocus) return;
+    if(refreshBusy||scopeBusy){ _pollPendingFocus(); return; }   // a rebuild is happening anyway
+    try{
+      const data=await (await fetch(VOICE_PROXY+'/data',{headers:ORB_HEADERS})).json();
+      if(_pendingInData(data)){
+        applyData(data);
+        const pi=_findPending();
+        if(pi>=0){ focusNode(pi); toast('note integrated · selected'); }
+        _pendingFocus=null;
+      } else _pollPendingFocus();
+    }catch(_){ _pollPendingFocus(); }
+  },2500);
+}
 async function refreshGraph(reason){
   if(!VOICE_PROXY || !SCOPE_ENABLED) return {error:'no backend'};
-  if(refreshBusy || scopeBusy) return {error:'busy'};
+  if(scopeBusy) return {error:'busy'};
+  if(refreshBusy && _refreshRun){
+    // #103 — a refresh is already integrating: join it instead of dropping this call,
+    // and queue ONE follow-up so a write that landed mid-export still gets folded in.
+    _refreshQueued=true;
+    return _refreshRun;
+  }
+  const run=_refreshOnce(reason);
+  _refreshRun=run;
+  let res;
+  try{ res=await run; }
+  finally{
+    _refreshRun=null;
+    if(_refreshQueued){ _refreshQueued=false; scheduleRefresh(); }
+  }
+  return res;
+}
+async function _refreshOnce(reason){
   _refreshPending=false; clearTimeout(_refreshTimer);   // consume any pending debounced refresh
   // #72 — snapshot the selection BY ID before the rebuild (teardownGraph wipes
   // lastInspectedIdx/hover and node indices change), so we can re-select it after.
@@ -1466,7 +1560,8 @@ async function refreshGraph(reason){
   try{ setState('ingesting'); }catch(_){ }
   try{
     const r=await fetch(VOICE_PROXY+'/refresh',{method:'POST',headers:{...ORB_HEADERS}});
-    const res=await r.json();
+    let res=null; try{ res=await r.json(); }catch(_){ }
+    if(!r.ok){ res={error:(res&&(res.detail||res.error))||('refresh failed ('+r.status+')')}; }
     if(res&&res.ok){
       const an=res.added_nodes||0, ae=res.added_edges||0;
       if(an||ae){   // #72 — rebuild ONLY when the graph actually changed (a no-op refresh keeps the selection)
@@ -1475,8 +1570,8 @@ async function refreshGraph(reason){
         // #72 — after a write, auto-SELECT the just-created note (no need to ask again);
         // otherwise restore the pre-refresh selection so a mid-task refresh doesn't deselect.
         let focused=false;
-        if(_pendingFocusTitle){ const nids=searchNodeIds(_pendingFocusTitle,1);
-          if(nids.length){ focusNode(nids[0]); focused=true; } }
+        const pi=_findPending();
+        if(pi>=0){ focusNode(pi); _pendingFocus=null; focused=true; }
         if(!focused){
           if(selId!=null){ const ni=idIndex.get(selId); if(ni!=null) focusNode(ni); }
           else if(selGroup && selGroup.length){ const idx=selGroup.map(id=>idIndex.get(id)).filter(v=>v!=null);
@@ -1484,8 +1579,14 @@ async function refreshGraph(reason){
         }
         toast('graph updated · +'+an+' notes, +'+ae+' links');
       } else { toast('graph up to date'); }   // nothing new → no rebuild, selection intact
-      _pendingFocusTitle=null;   // consumed
-    } else { toast('refresh failed'+(res&&res.error?': '+res.error:'')); }
+      // #103 — a just-written note still missing (async exporter / net-zero counts /
+      // stem-titled node): don't drop it — try once on the current graph, then poll.
+      if(_pendingFocus){
+        const pi2=_findPending();
+        if(pi2>=0){ focusNode(pi2); _pendingFocus=null; }
+        else _pollPendingFocus();
+      }
+    } else { toast('refresh failed'+(res&&res.error?': '+res.error:'')); }   // keep _pendingFocus — the next refresh can still land it
     return res;
   }catch(e){ toast('refresh failed ('+(e.message||e)+')'); return {error:String(e&&e.message||e)}; }
   finally{ refreshBusy=false; if(ld) ld.style.display='none'; try{ setState('idle'); }catch(_){ } }
@@ -1534,7 +1635,11 @@ async function postAction(type,args,idemKey){
     const r=await fetch(VOICE_PROXY+'/action',{method:'POST',
       headers:{'Content-Type':'application/json','Idempotency-Key':idemKey||_idemKey(),...ORB_HEADERS},
       body:JSON.stringify({action:type, ...(args||{})})});
-    return await r.json();
+    let d=null; try{ d=await r.json(); }catch(_){ }
+    // #103 — surface broker errors: FastAPI errors carry `detail` (503 "Agent is not
+    // running", 404 flag off), which callers checking `r.error` used to render as '?'.
+    if(!r.ok) return {error:(d&&(d.detail||d.error))||('request failed ('+r.status+')')};
+    return d||{error:'empty response'};
   }catch(e){ return {error:String(e&&e.message||e)}; }
 }
 function setActStatus(msg,run){ const el=$('actStatus'); if(!el) return; el.textContent=msg||''; el.classList.toggle('run',!!run); }
@@ -1568,7 +1673,7 @@ async function doCapture(){
     toast('captured → '+(r.title||'inbox').slice(0,40));
     // #67 — fold it into the actual graph so it appears as a real, connectable node.
     // #72 — auto-select the new note once integrated (no separate "select it" step).
-    _pendingFocusTitle = r.title || body.split('\n')[0].slice(0,60);
+    _setPendingFocus(r, body.split('\n')[0].slice(0,60));
     refreshGraph('capture'); }
   else setActStatus('capture failed: '+((r&&r.error)||'?'));
 }

@@ -113,6 +113,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -332,6 +333,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -411,6 +413,9 @@ class DatabaseManager:
 
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
+
+    def count_non_system_agents(self) -> int:
+        return self._agent_ops.count_non_system_agents()
 
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
@@ -663,6 +668,32 @@ class DatabaseManager:
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
+
+    # =========================================================================
+    # Per-agent MCP connector (ent#46; OSS-core since #118)
+    # =========================================================================
+    def get_connector_config(self, agent_name: str):
+        return self._connector_ops.get_config(agent_name)
+
+    def upsert_connector_config(self, agent_name, enabled=None, exposed_playbooks=None, *, clear_playbooks=False):
+        return self._connector_ops.upsert_config(
+            agent_name, enabled=enabled, exposed_playbooks=exposed_playbooks, clear_playbooks=clear_playbooks
+        )
+
+    def delete_connector_config(self, agent_name: str):
+        return self._connector_ops.delete_config(agent_name)
+
+    def mint_connector_key(self, agent_name, user_id):
+        return self._connector_ops.mint_key(agent_name, user_id)
+
+    def get_connector_key_prefix(self, agent_name):
+        return self._connector_ops.get_key_prefix(agent_name)
+
+    def revoke_connector_key(self, agent_name):
+        return self._connector_ops.revoke_key(agent_name)
+
+    def regenerate_connector_key(self, agent_name, user_id):
+        return self._connector_ops.regenerate_key(agent_name, user_id)
 
     def get_tts_config(self, agent_name: str):
         return self._agent_ops.get_tts_config(agent_name)
@@ -1937,11 +1968,8 @@ class DatabaseManager:
     def delete_telegram_binding(self, agent_name):
         return self._telegram_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_telegram_chat_link(self, binding_id, telegram_user_id, telegram_username=None):
-        return self._telegram_channel_ops.get_or_create_chat_link(binding_id, telegram_user_id, telegram_username)
-
-    def increment_telegram_message_count(self, chat_link_id):
-        return self._telegram_channel_ops.increment_message_count(chat_link_id)
+    def record_telegram_inbound(self, binding_id, telegram_user_id, telegram_username=None):
+        return self._telegram_channel_ops.record_inbound(binding_id, telegram_user_id, telegram_username)
 
     def list_telegram_clients_for_agent(self, agent_name):
         return self._telegram_channel_ops.list_clients_for_agent(agent_name)
@@ -2019,8 +2047,8 @@ class DatabaseManager:
     def delete_whatsapp_binding(self, agent_name):
         return self._whatsapp_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_whatsapp_chat_link(self, binding_id, wa_user_phone, wa_user_name=None):
-        return self._whatsapp_channel_ops.get_or_create_chat_link(
+    def record_whatsapp_inbound(self, binding_id, wa_user_phone, wa_user_name=None):
+        return self._whatsapp_channel_ops.record_inbound(
             binding_id, wa_user_phone, wa_user_name
         )
 
@@ -2035,9 +2063,6 @@ class DatabaseManager:
 
     def get_whatsapp_chat_link_by_verified_email(self, binding_id, email):
         return self._whatsapp_channel_ops.get_chat_link_by_verified_email(binding_id, email)
-
-    def increment_whatsapp_message_count(self, chat_link_id):
-        return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
     def list_whatsapp_clients_for_agent(self, agent_name):
         return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)

@@ -6,6 +6,7 @@ Workshops, demos, and deep-dives on building and running autonomous agents with 
 
 ## Start Here — Platform Overview
 
+- [Trinity v0.8.0 — Release Tour](https://youtu.be/wxCC6QGtLMA) — *Jul 2026* · voice replies across channels, Brain Orb, Grid dashboard, enterprise identity
 - [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) — *May 2026* · full UI walkthrough, end to end
 - [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) — *May 2026* · live fleet tour: delegation, memory, observability
 - [The Sovereign AI Setup That Changed Everything](https://youtu.be/2QH-jeVn2ak) — *Feb 2026*

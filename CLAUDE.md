@@ -6,13 +6,9 @@ This file provides guidance to Claude Code when working with this repository.
 
 > **AI agent orienting in this repo?** [AGENTS.md](AGENTS.md) is the authoritative agent entry point — a task router with key facts, exact commands, and a "done when" check per task. This file is the **contributor working agreement** (Rules of Engagement, SDLC, architectural invariants), auto-loaded by Claude Code when you work on the codebase. Read it when your task is "contribute code"; start at `AGENTS.md` for deploy / operate / evaluate.
 
----
+> **Core team**: internal working-agreement context (current product focus, tracker routing, remote agent, methodology skill map) auto-loads via the import below from the private `.claude` submodule. On OSS clones without the submodule the import is silently skipped — everything an external contributor needs is in this file.
 
-## Current Product Focus
-
-**Primary theme**: Reliability (`theme-reliability`) · **Secondary theme**: UI/UX (`theme-ui-ux`)
-
-When picking tickets, prefer items carrying the focus `theme-*` label. Theme focus is a **tiebreaker filter**, not a sort key — among equivalent-priority work, `theme-reliability` is picked first, then `theme-ui-ux`, then everything else. Items in other themes are not deprioritized — they're picked once focus-theme work at that priority is exhausted.
+@.claude/TEAM_CONTEXT.md
 
 ---
 
@@ -68,12 +64,6 @@ Each agent runs as an isolated Docker container with standardized interfaces for
 
 ---
 
-## Remote Agent
-
-This repository has a remote counterpart running on Trinity (`trinity` agent) for autonomous development. Use `/trinity:sync` to synchronize local changes with the remote instance. The remote agent can run scheduled tasks, process backlog issues, and operate autonomously when needed.
-
----
-
 ## Development Skills (`.claude` submodule)
 
 Skills, agents, and methodology guides live in the `.claude/` directory, which is a **git submodule** pointing to [abilityai/trinity-dev](https://github.com/Abilityai/trinity-dev) (private, core-team only). This is where `/sprint`, `/cso`, `/autoplan`, `/implement`, `/review`, `/validate-pr`, etc. come from.
@@ -115,11 +105,9 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 - **In Dev**: PR squash-merged to `dev` — `status-in-dev` label, awaiting the next release cut (dev → main)
 - **Done**: Release PR merged to `main`, issue auto-closed via `Closes #N`
 
-**Two trackers (open-core).** Issues route by type: `type-bug`/`type-refactor`/`type-docs` → public `abilityai/trinity`; `type-feature`/`type-epic` → private `abilityai/trinity-enterprise`. Tracker ≠ code repo — core code still lands as a public-repo PR. Query/picking skills union both trackers.
+**Two trackers (open-core).** The public tracker (`abilityai/trinity`) carries bugs, refactors, and docs; feature/epic planning lives in a private tracker. Tracker ≠ code repo — core code always lands as a public-repo PR. (Core team: routing rules are in the imported team context and `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing.)
 
 **Enterprise-tracker features are entitlement-gated by default.** Treat every feature filed in `abilityai/trinity-enterprise` as a gated enterprise module (private logic behind `requires_entitlement(...)`, gated Vue behind `enterprise_features`) **unless the user explicitly decides it should be OSS-core.** Do NOT infer "generic OSS" just because it reuses OSS tables/endpoints — "can build in OSS" ≠ "should"; monetization is the user's call. If OSS-core is chosen, the OSS side keeps only the edition-agnostic *enforcement* primitive; the feature stays in the private submodule. Confirm the gating shape before building.
-
-**Full details**: `.claude/DEVELOPMENT_WORKFLOW.md` (→ Repository Routing)
 
 ---
 
@@ -137,7 +125,7 @@ All work follows a 4-stage lifecycle tracked via **GitHub Issues** (labels + ope
 - No creating documentation files unless explicitly requested
 
 ### 3. Follow the Roadmap
-- Check **GitHub Issues** for current priorities (`/roadmap` or `gh issue list`) — labels are the single source of truth. `/roadmap` unions both trackers (public bugs + private features/epics); a raw `gh issue list` sees only one repo — pass `--repo abilityai/trinity-enterprise` for feature/epic work
+- Check **GitHub Issues** for current priorities (`gh issue list`) — labels are the single source of truth
 - Work P0 issues first, then P1 (`type-bug` before `type-feature`, then newest issue number first), then P2/P3
 - Assign yourself and update `status-*` labels as you progress (see SDLC above)
 - Close issues when complete
@@ -157,15 +145,13 @@ Documentation requirements scale with change type (change history is tracked via
 - Use placeholder values in example configs (e.g., `your-domain.com`, `your-api-key`)
 - Review diffs before committing for accidental sensitive data
 
-### 6. Development Skills
-Follow methodology guides in `.claude/skills/`:
+### 6. Development Methodology
+Non-negotiables regardless of tooling (core team: methodology guides in the `.claude` submodule's `skills/`; external contributors: the public `dev-methodology` plugin — see Development Skills above):
 
-| Skill | Key Rule |
-|-------|----------|
-| `verification` | No "done" claims without evidence (run command, show output) |
-| `systematic-debugging` | Find root cause BEFORE attempting fixes |
-| `tdd` | Write failing test first, then minimal code to pass |
-| `code-review` | Verify feedback technically before implementing |
+- **Verification**: no "done" claims without evidence (run the command, show the output)
+- **Systematic debugging**: find the root cause BEFORE attempting fixes
+- **TDD**: write the failing test first, then minimal code to pass
+- **Code review**: verify feedback technically before implementing
 
 ### 7. Architectural Invariants
 Before adding endpoints, services, DB tables, or frontend views, review the Architectural Invariants section in @docs/memory/architecture.md. Violations of these patterns will break the system. Run `/validate-architecture` weekly to catch drift. For decisions about new capabilities or significant design choices, also consult `docs/planning/TARGET_ARCHITECTURE.md` — prefer changes that move toward the target, reject changes that move away from it.
@@ -192,7 +178,7 @@ Also update the table DDL in `src/backend/db/schema.py` / `db/tables.py` so fres
 | `docs/planning/TARGET_ARCHITECTURE.md` | **Target system design + active orchestration direction** — pull / work-stealing coordination (Epic #1045, umbrella #1081). **v2 (2026-07-01):** side-effect handling reframed to **retry-with-prior-trace recovery** + **deterministic tool-side gates on capability-confined irreversible rails** (Direction B); pull default-on now gates per-effect not per-agent (#1401 recovery trace + injection, #1402 async operator-queue human-gate). v1 archived at `docs/archive/plans/TARGET_ARCHITECTURE_v1_2026-06-06.md`. Use when evaluating tradeoffs and prioritizing work; consult before touching `task_execution_service`, `capacity_manager`, `slot_service`, `backlog_service`, `dispatch_breaker`, or `cleanup_service`. |
 | `docs/memory/feature-flows.md` | Index of vertical slice docs |
 | `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` | **Archived (historical)** — completed Sprint A–D′ execution-reliability plan (all shipped). Superseded 2026-06-05 by the pull-coordination direction in `TARGET_ARCHITECTURE.md`. Read for background on the slot/backlog/cleanup machinery. |
-| GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. **Two trackers:** bugs/refactor/docs in public `abilityai/trinity`, features/epics in private `abilityai/trinity-enterprise` (see `.claude/DEVELOPMENT_WORKFLOW.md` → Repository Routing). |
+| GitHub Issues | Prioritized task queue — labels are authoritative: priority (P0-P3), type, `theme-*`, `complexity-*`; status via `status-*` labels + open/closed; epics are `type-epic` issues with native sub-issues. No project board. (Tracker routing: see SDLC above.) |
 
 ---
 
@@ -238,10 +224,7 @@ project_trinity/
 ├── config/
 │   ├── agent-templates/  # Pre-configured templates
 │   └── vector.yaml       # Vector log aggregation config
-├── .claude/
-│   ├── memory/           # Persistent project memory
-│   ├── commands/         # Slash commands
-│   └── agents/           # Sub-agents
+├── .claude/              # Dev methodology (private submodule — skills, agents, workflow docs)
 └── docs/                 # Additional documentation
 ```
 
@@ -376,11 +359,11 @@ The **[abilities](https://github.com/abilityai/abilities)** repo is the canonica
 
 ## See Also
 
-- **SDLC & Development Workflow**: `.claude/DEVELOPMENT_WORKFLOW.md` ← Start here for dev process
+- **SDLC & Development Workflow**: `.claude/DEVELOPMENT_WORKFLOW.md` ← Start here for dev process (core team; external contributors: `dev-methodology` plugin, see Development Skills above)
 - **Orchestration Reliability Plan (archived)**: `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` ← Sprint A–D′ historical record; superseded by `docs/planning/TARGET_ARCHITECTURE.md` (pull coordination) as the active execution-stack direction
 - **Full Architecture**: @docs/memory/architecture.md
 - **All Requirements**: `docs/memory/requirements.md` (index) → per-area files in `docs/memory/requirements/`
-- **Current Roadmap**: https://github.com/abilityai/trinity/issues (public bugs) + private `abilityai/trinity-enterprise` (features/epics) — use `/roadmap` to see both
+- **Current Roadmap**: https://github.com/abilityai/trinity/issues
 - **Recent Changes**: `git log --oneline --since="2 weeks ago"`
 - **Agent Guide**: `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
 - **Agent Network Demo**: `docs/AGENT_NETWORK_DEMO.md`

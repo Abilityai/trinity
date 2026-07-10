@@ -10,7 +10,7 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 
 - **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. Private repos require a GitHub PAT.
 - **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards on the Templates page (`/templates`).
-- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory.
+- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** section on the Templates page. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
 - **From Scratch** -- Creates a minimal agent with a default `CLAUDE.md`.
 
 **Template structure** follows a standard layout:
@@ -75,6 +75,17 @@ Authorization: Bearer <token>
 create_agent(name="my-agent", template="github:Org/repo@branch")
 ```
 
+### Fork-to-Own Templates
+
+Some templates are meant to be *owned* by the person deploying them, not run directly from the shared upstream repo. A template opts into this by declaring `fork_to_own: required` in its `template.yaml`. When you create an agent from such a template, Trinity copies the template into **your own** GitHub repository before building the container:
+
+1. Trinity creates a destination repo under your account (**private by default**) using your GitHub PAT.
+2. The template's default branch — with full history — is pushed into it. Your new agent's `origin` is this repo, so everything the agent commits stays in a repo you control.
+3. Your PAT is saved as the agent's per-agent token, so restarts and recreations never fall back to a shared platform token.
+4. A read-only `upstream` remote points back at the original template, so pulling in later template updates is a single `git pull upstream <branch>`.
+
+**Prerequisite:** configure a GitHub PAT with repo-creation scope before creating the agent (see [GitHub PAT Setup](../integrations/github-pat-setup.md)). If the destination repo name is already taken, Trinity reuses it when it's empty or already holds the template's exact tip; if it's bound to another live agent or contains unrelated data, creation fails with a conflict so nothing is overwritten.
+
 ## For Agents
 
 Agents created from templates inherit:
@@ -94,6 +105,6 @@ The agent's container is labeled so it can be discovered and managed by the plat
 
 ## See Also
 
-- [Credential Injection](../credentials/injecting-credentials.md) -- How credentials are supplied to agents
-- [Agent Templates](../getting-started/templates.md) -- Browsing and managing templates
-- [Scheduling](../automation/schedules.md) -- Running agents on a schedule
+- [Credential Management](../credentials/credential-management.md) -- How credentials are supplied to agents
+- [GitHub PAT Setup](../integrations/github-pat-setup.md) -- Required for private templates and fork-to-own
+- [Scheduling](../automation/scheduling.md) -- Running agents on a schedule

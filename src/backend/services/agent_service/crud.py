@@ -10,6 +10,7 @@ import docker
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from fastapi import HTTPException, Request
@@ -25,6 +26,7 @@ from services.docker_service import (
 from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
+from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     get_github_template,
     generate_credential_files,
@@ -137,7 +139,7 @@ def get_platform_version() -> str:
 async def create_agent_internal(
     config: AgentConfig,
     current_user: User,
-    request: Request,
+    request: Optional[Request] = None,
     skip_name_sanitization: bool = False,
     ws_manager=None
 ) -> AgentStatus:
@@ -145,6 +147,10 @@ async def create_agent_internal(
     Internal function to create an agent.
 
     Used by both the API endpoint and system deployment.
+
+    `request` is optional: the HTTP request object is not dereferenced anywhere
+    in this function, so boot-time / background callers with no live request
+    (e.g. the Cornelius first-run seeder, ent#107) pass `request=None`.
 
     CRED-002: Credentials are no longer auto-injected during creation.
     They are added after creation via inject_credentials endpoint or
@@ -182,6 +188,14 @@ async def create_agent_internal(
         or db.is_agent_name_reserved(config.name)
     ):
         raise HTTPException(status_code=409, detail="Agent already exists")
+
+    # #1560: reaching here means the name is free — but `is_agent_name_reserved`
+    # only stops matching once the retention purge hard-deletes the row, and the
+    # breakers are keyed by name with no TTL. Clear any predecessor's verdict
+    # BEFORE the container exists, so nothing races the agent's first heartbeat.
+    # Breakers only: no slots exist for a name nothing is running under yet, and
+    # the full sweep is reserved for teardown paths.
+    clear_agent_breakers(config.name)
 
     # Agent quota enforcement: per-role limits (QUOTA-001)
     max_agents = get_agent_quota_for_role(current_user.role)

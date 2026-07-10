@@ -341,14 +341,14 @@
       <!-- Today's cost -->
       <div class="flex items-center space-x-1">
         <span class="text-gray-400 dark:text-gray-500">Today</span>
-        <span class="font-mono text-gray-700 dark:text-gray-300">${{ formatCost(tokenStats.cost_24h) }}</span>
+        <span class="font-mono text-gray-700 dark:text-gray-300">{{ formatCost(tokenStats.cost_24h) }}</span>
       </div>
       <!-- Trend vs 7d average -->
       <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
         <span
           :class="trendClass"
           class="flex items-center space-x-0.5 font-mono"
-          :title="`7d avg: $${formatCost(tokenStats.avg_daily_cost)}/day`"
+          :title="`7d avg: ${formatCost(tokenStats.avg_daily_cost)}/day`"
         >
           <!-- Arrow icon -->
           <svg v-if="tokenStats.trend_cost_pct > 5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -366,7 +366,7 @@
       <!-- Lifetime cost -->
       <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
         <span>Lifetime</span>
-        <span class="font-mono text-gray-600 dark:text-gray-400">${{ formatCost(tokenStats.lifetime_cost) }}</span>
+        <span class="font-mono text-gray-600 dark:text-gray-400">{{ formatCost(tokenStats.lifetime_cost) }}</span>
         <span class="text-gray-300 dark:text-gray-600">·</span>
         <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
       </div>
@@ -666,7 +666,7 @@ function saveName() {
   nameError.value = ''
 }
 
-const { formatBytes, formatUptime, formatRelativeTime } = useFormatters()
+const { formatBytes, formatUptime, formatRelativeTime, formatCost } = useFormatters()
 
 // Token stats helpers (issue #250)
 const tokenCostSparkline = computed(() => {
@@ -680,11 +680,6 @@ const tokenCostSparklineMax = computed(() => {
   return Math.max(...vals, 0.0001)
 })
 
-function formatCost(val) {
-  if (!val || val === 0) return '0.00'
-  if (val < 0.01) return val.toFixed(4)
-  return val.toFixed(2)
-}
 
 function formatTrendPct(pct) {
   if (!pct) return '—'

@@ -72,15 +72,16 @@
   function flushTranscript() {
     if (_flushed) return;
     _flushed = true;
+    if (!_sessionId) return;   // never connected — nothing to report
     _flushTurns();
     _logEvent({ event: 'session_end' });
-    var hasDialogue = _events.some(function (e) { return e.event === 'user_turn' || e.event === 'model_turn'; });
-    if (hasDialogue) {
-      try {
-        // Origin-pinned: the transcript is sensitive; both frames are same-origin.
-        window.parent.postMessage({ type: 'orb-capture-transcript', session_id: _sessionId, events: _events }, window.location.origin);
-      } catch (e) { console.warn('[brain-orb voice] transcript relay failed:', e.message); }
-    }
+    // #102 — ALWAYS relay, even with no dialogue: the parent orb decides what to do
+    // and surfaces the outcome (saved / no dialogue / failed), so a session end is
+    // never silently indistinguishable from a broken transcript pipeline.
+    try {
+      // Origin-pinned: the transcript is sensitive; both frames are same-origin.
+      window.parent.postMessage({ type: 'orb-capture-transcript', session_id: _sessionId, events: _events }, window.location.origin);
+    } catch (e) { console.warn('[brain-orb voice] transcript relay failed:', e.message); }
   }
 
   // ── parent bridge (the orb page holds the JWT + runs the visual tools) ───────
