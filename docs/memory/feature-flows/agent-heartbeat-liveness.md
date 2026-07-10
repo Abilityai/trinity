@@ -70,8 +70,8 @@ to SQLite ~12×/min/agent.
 | **Agent container** (5s loop) | `POST /api/agents/{name}/heartbeat` | Push liveness payload |
 | **Backend watch loop** (5s, staggered +10s) | internal `process_watch_tick()` | Detect stale agents, fire alerts |
 | **Monitoring page / MCP `get_fleet_health`** | `GET /api/monitoring/status` | Reads back `heartbeat_*` annotations |
-| **Agent delete** | `clear_heartbeat()` | Tear down Redis keys |
-| **Agent rename** | `clear_heartbeat(old_name)` | Avoid orphaning the no-TTL `seen` key |
+| **Agent delete** | `clear_agent_runtime_state()` → `clear_heartbeat()` | Tear down Redis keys (#1560: swept with both breakers + slots) |
+| **Agent rename** | `clear_agent_runtime_state(old_name)` and `(new_name)` | Avoid orphaning the no-TTL `seen` key |
 
 ---
 
@@ -265,8 +265,9 @@ alert failure must never kill the watch loop.
 
 | Site | Line | Reason |
 |------|------|--------|
-| Agent delete (`routers/agents.py:478`) | best-effort `clear_heartbeat()` | The no-TTL `seen` key would leak past delete |
-| Agent rename (`routers/agent_rename.py:139`) | best-effort `clear_heartbeat(old_name)` | `seen` is keyed by name — a rename would orphan the old name's key forever; the renamed container re-sets `seen` under the new name on its next beat |
+| Agent delete (`routers/agents.py`) | best-effort `clear_agent_runtime_state()` | The no-TTL `seen` key would leak past delete. Since #1560 the heartbeat clear is one member of a single per-agent Redis sweep (heartbeat + both breakers + slots) owned by `services/agent_runtime_state.py` — the delete path no longer calls `clear_heartbeat` directly |
+| Agent rename (`routers/agent_rename.py`) | best-effort `clear_agent_runtime_state(old_name)` **and** `(new_name)` | `seen` is keyed by name — a rename would orphan the old name's key forever; the renamed container re-sets `seen` under the new name on its next beat. The new name is swept too, in case a purged predecessor left state behind (#1560) |
+| Agent start / recreate (`agent_service/lifecycle.py`) | best-effort `clear_agent_breakers()` | A recreated container would otherwise inherit the previous incarnation's heartbeat markers and breaker verdict (#1560). Slots are *not* swept here — the container is live |
 
 ---
 
