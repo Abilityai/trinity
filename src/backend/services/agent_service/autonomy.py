@@ -99,22 +99,17 @@ async def set_autonomy_status_logic(
             db.set_schedule_enabled(schedule_id, enabled)
             updated_count += 1
 
-    # #631 — disabling autonomy must also stop circuit-breaker probing for
-    # this agent. Otherwise background services (monitoring, sync-health,
-    # operator-queue) keep poking a known-down agent on a 30s cadence even
-    # though the user explicitly turned off scheduled work. Re-enabling
-    # autonomy resets the circuit so a fresh real failure decides state.
-    try:
-        from services.agent_client import force_circuit_dormant, reset_circuit
-        if enabled:
-            reset_circuit(agent_name)
-        else:
-            force_circuit_dormant(agent_name, reason="autonomy_disabled")
-    except Exception as exc:
-        # Best-effort: never let a Redis blip block the autonomy toggle.
-        logger.warning(
-            f"Autonomy circuit-state hook failed for {agent_name}: {exc}"
-        )
+    # #1557 — autonomy governs PROACTIVE work ONLY (the schedules disabled above);
+    # it deliberately does NOT touch the circuit breaker. The old #631 AC#5 hook
+    # forced the *transport* breaker dormant on autonomy-off, conflating
+    # "administratively paused" with "transport unhealthy": the execute_task gate
+    # consults the transport breaker for every trigger, so a healthy paused agent
+    # fast-failed all inbound chat (manual/Telegram/Slack/public) with
+    # "circuit breaker open — agent is unhealthy". #631's flood protection does not
+    # depend on this hook — the breaker's own failure-driven backoff/dormant path
+    # (fed by the pollers' real probes), plus the #1464 leader lock and #1121
+    # monitoring-default-off, already throttle a genuinely down agent. Do NOT re-add
+    # a breaker write here; pause the agent's proactive work via its schedules.
 
     logger.info(
         f"Autonomy {'enabled' if enabled else 'disabled'} for agent {agent_name} "

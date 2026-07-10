@@ -36,7 +36,10 @@
 > breaker (#631) always, and the dispatch breaker only on the
 > `slot_already_held and not dispatch_gate_checked` drain path via a non-probe
 > state read (`DispatchBreaker(...).to_dict()["state"] == "open"`), so it never
-> double-consumes a half-open probe an upstream `acquire()` gate already admitted;
+> double-consumes a half-open probe an upstream `acquire()` gate already admitted
+> — its fast-fail reason is built by `_circuit_breaker_error(transport_open,
+> dispatch_open)` (#1557), which names the breaker that fired (transport →
+> *unreachable*, dispatch → *auth-dead*) instead of a blanket "agent is unhealthy";
 > (3) outcome recording at the terminals — `_record_dispatch_terminal(agent, enabled, None)`
 > at the success terminal (resets the consecutive-failure counter) and the same
 > with `error_code=AUTH` at the HTTP-error terminal, **gated on `error_code == AUTH`**

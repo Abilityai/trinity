@@ -781,6 +781,20 @@
       "added": "2026-07-07",
       "categories": ["backend", "unit", "infrastructure", "brain-orb"],
       "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds local:cornelius create with request=None; real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend."
+    },
+    {
+      "file": "unit/test_1557_autonomy_breaker_decoupled.py",
+      "feature": "#1557",
+      "added": "2026-07-10",
+      "categories": ["backend", "unit", "circuit-breaker", "autonomy"],
+      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
+    },
+    {
+      "file": "integration/test_1557_autonomy_inbound.py",
+      "feature": "#1557",
+      "added": "2026-07-10",
+      "categories": ["backend", "integration", "circuit-breaker", "autonomy", "real-redis"],
+      "description": "Opt-in live-agent leg (TRINITY_AUTONOMY_TEST_AGENT): disabling autonomy on a running healthy agent leaves the transport circuit not-dormant (allow_request True) and an inbound POST /task returns 200 instead of fast-failing 'circuit breaker open'. Restores autonomy in finally. Needs real Redis + API."
     }
   ]
 }
