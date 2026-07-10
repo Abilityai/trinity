@@ -3101,10 +3101,30 @@ class ScheduleOperations:
             return result.rowcount > 0
 
     def list_git_enabled_agents(self) -> List[AgentGitConfig]:
-        """List all agents with git sync enabled."""
+        """List all agents with git sync enabled.
+
+        Joins `agent_ownership` and excludes soft-deleted agents (#1561).
+        `agent_git_config` rows survive soft delete by design, so without this
+        filter the 60s `SyncHealthService` poller (and `GET /api/fleet/sync-audit`)
+        keeps hitting removed containers forever — each `httpx.ConnectError`
+        poisons the transport circuit breaker and eventually drives it to
+        DORMANT + a bogus `circuit_breaker_dormant` alert for an agent that no
+        longer exists. Mirrors the #834 hardening on `list_all_enabled_schedules()`.
+        """
         stmt = (
             select(agent_git_config)
-            .where(agent_git_config.c.sync_enabled == 1)
+            .select_from(
+                agent_git_config.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_git_config.c.sync_enabled == 1,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            )
             .order_by(agent_git_config.c.agent_name)
         )
         with get_engine().connect() as conn:
