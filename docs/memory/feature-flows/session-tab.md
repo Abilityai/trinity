@@ -28,7 +28,7 @@ As a Trinity user running long, multi-turn reasoning tasks against an agent, I w
 | Component | File | Purpose |
 |---|---|---|
 | `SessionPanel.vue` | `src/frontend/src/components/SessionPanel.vue` | Main surface — header (session selector + model picker + Reset memory + "+ New Session"), `ChatMessages` for the bubble list, `ChatInput` for input. Reuses chat sub-components for visual parity. |
-| `AgentDetail.vue` | `src/frontend/src/views/AgentDetail.vue` | Tab insertion (between Chat and Dashboard/Schedules), gated on `sessionsStore.sessionTabEnabled`. The `isFullscreenTab` computed extends Chat's full-viewport flex layout to the Session tab. |
+| `AgentDetail.vue` | `src/frontend/src/views/AgentDetail.vue` | Session surface lives inside the unified Chat tab (#1112), gated on `sessionsStore.sessionTabEnabled`. The full-viewport flex layout is driven by `FULLSCREEN_TABS` (`chat` + `tasks` since #1500) via the `isFullscreenTab` computed. |
 
 ### State Management
 

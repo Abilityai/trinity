@@ -57,7 +57,7 @@
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50">
           <div class="text-xs text-gray-500 dark:text-gray-400">Cost</div>
           <div class="text-sm font-semibold text-gray-900 dark:text-white">
-            ${{ data.cost.total.toFixed(4) }}
+            {{ formatCostCompact(data.cost.total) }}
           </div>
         </div>
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50">
@@ -121,7 +121,7 @@
             v-for="bucket in data.timeline"
             :key="bucket.date"
             class="flex-1 flex flex-col items-stretch group relative min-w-[2px]"
-            :title="`${bucket.date} • ${bucket.success} ok / ${bucket.failed} fail • $${bucket.cost.toFixed(4)}`"
+            :title="`${bucket.date} • ${bucket.success} ok / ${bucket.failed} fail • ${formatCost(bucket.cost)}`"
           >
             <!-- Tooltip -->
             <div
@@ -132,7 +132,7 @@
                 <span class="text-status-success-400">{{ bucket.success }}</span>
                 /
                 <span class="text-status-danger-400">{{ bucket.failed }}</span>
-                · ${{ bucket.cost.toFixed(4) }}
+                · {{ formatCost(bucket.cost) }}
               </div>
             </div>
 
@@ -171,6 +171,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import api from '../api'
 import { useFormatters } from '../composables/useFormatters'
 

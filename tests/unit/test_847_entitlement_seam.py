@@ -236,9 +236,15 @@ def test_main_py_uses_conditional_enterprise_import():
 # -----------------------------------------------------------------------------
 
 
-def test_submodule_registers_audit_not_sso():
-    """#941: the enterprise submodule swaps the SSO PoC for `audit`
-    registration. SSO returns later with a real implementation.
+def test_submodule_registers_audit_and_sso():
+    """The enterprise submodule registers `audit` (UI-gating only, via a direct
+    `register_module("audit")`) and — since SSO-OIDC (#32) landed via #1303 — a
+    real SSO implementation, wired the same way as the other real modules
+    (`from .sso import register as register_sso` + `register_sso(app)`, which
+    self-registers the `sso` feature_id inside `.sso.register`).
+
+    This replaces the earlier `not_sso` pin from the #910/#941 era, when only
+    the removed SSO PoC stub existed and the `.sso` package was asserted absent.
 
     Static check on `src/backend/enterprise/backend/__init__.py`. The
     submodule may not be checked out in every CI job (OSS-only build),
@@ -255,10 +261,13 @@ def test_submodule_registers_audit_not_sso():
         "enterprise submodule must call register_module(\"audit\") so the "
         "/enterprise/audit dashboard route is entitled in licensed deploys"
     )
-    assert 'register_module("sso")' not in src, (
-        "SSO PoC stub registration was removed in #910/#941 scope expansion; "
-        "the call must not return without a real implementation"
+    # SSO-OIDC (#32) landed in the submodule via #1303. It self-registers the
+    # `sso` feature_id inside `.sso.register` (mirroring the other real modules),
+    # so `register_module("sso")` is NOT called here in __init__.py — the pin is
+    # on the import + registration call instead.
+    assert "from .sso import register as register_sso" in src, (
+        "SSO-OIDC (#32) is implemented — __init__.py must import the .sso package"
     )
-    assert "from .sso" not in src, (
-        "SSO submodule import was removed; the .sso package is deleted"
+    assert "register_sso(app)" in src, (
+        "SSO-OIDC must be registered on the enterprise app via register_sso(app)"
     )

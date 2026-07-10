@@ -94,8 +94,9 @@
               <BrainPanel :name="agent.name" :running="agent.status === 'running'" />
             </div>
 
-            <!-- Tasks Tab Content -->
-            <div v-if="activeTab === 'tasks'" class="p-6">
+            <!-- Tasks Tab Content (#1500: fullscreen flex-fill like Chat; padding
+                 lives on TasksPanel's scroll root so content scrolls under it) -->
+            <div v-if="activeTab === 'tasks'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
               <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
             </div>
 
@@ -369,10 +370,14 @@ function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return DEEP_LINK_TABS.includes(resolved) ? resolved : null
 }
-// Tabs that need a full-viewport flex layout (input pinned to bottom).
-// #1112: single unified Chat tab (both session and legacy modes render
-// ChatMessages, which depends on flex-1 grow).
-const isFullscreenTab = computed(() => activeTab.value === 'chat')
+// Tabs that flex-fill the viewport (page enters h-screen fullscreen layout).
+// #1112: Chat (both session and legacy modes render ChatMessages, which depends
+// on flex-1 grow). #1500: Tasks (list fills instead of a fixed max-h-96 cap).
+// A tab joining this list must render a wrapper that is `flex-1 min-h-0 flex
+// flex-col overflow-hidden` and a panel whose root fills it with its own
+// `flex-1 min-h-0 overflow-y-auto` scroll region (see TasksPanel).
+const FULLSCREEN_TABS = ['chat', 'tasks']
+const isFullscreenTab = computed(() => FULLSCREEN_TABS.includes(activeTab.value))
 const showResourceModal = ref(false)
 const showAvatarModal = ref(false)
 const avatarIdentityPrompt = ref('')

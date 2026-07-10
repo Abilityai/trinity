@@ -31,6 +31,7 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..model_context import resolve_context_window
 from ..state import agent_state
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_subprocess_line, sanitize_text
 from ._runtime_config import _DEFAULT_MAX_TURNS_TASK, _load_guardrails
@@ -484,6 +485,12 @@ def _setup_headless_command(
         images=images,
         prompt=prompt,
         claude_session_uuid=claude_session_uuid,
+        # #1521: seed the fallback context window from the model catalog. The
+        # stream parser overwrites it from the runtime's modelUsage.contextWindow
+        # when present; this catalog value is the fallback for the salvage /
+        # empty-result paths (headless never otherwise sets context_window, so it
+        # would default to a flat 200K).
+        metadata=ExecutionMetadata(context_window=resolve_context_window(model)),
     )
 
 

@@ -97,6 +97,17 @@ class TestForkToOwnRequestModel:
 
 
 def _load_fork_module():
+    # Importing the agent_service package runs its __init__, which eagerly pulls
+    # in helpers.py -> `from services.docker_service import list_all_agents_fast`.
+    # Under full-suite ordering another test can leave a bare `services.docker_service`
+    # stub in sys.modules that only exposes `list_all_agents` (not `_fast`); after a
+    # crud_env teardown deletes the cached submodules, the fresh package re-import then
+    # fails with ImportError. Backfill the attribute defensively so this fixture never
+    # depends on cross-file stub completeness. (`list_all_agents_fast` is a real symbol
+    # in services.docker_service; this only guards against a leaked stub.)
+    ds = sys.modules.get("services.docker_service")
+    if ds is not None and not hasattr(ds, "list_all_agents_fast"):
+        ds.list_all_agents_fast = lambda *a, **kw: []
     import services.agent_service.fork_to_own as f2o
     return f2o
 
@@ -514,10 +525,16 @@ def crud_env():
     try:
         yield crud, ctx
     finally:
+        # patch.dict.stop() clears sys.modules and re-populates it from the
+        # pre-start snapshot, so it already UNDOES the in-context purge at
+        # _load_crud (lines above) and restores the real `services.agent_service.*`
+        # modules other test files bound at collection time. Do NOT manually delete
+        # them afterward: that leaves e.g. `services.agent_service.stats` absent, so
+        # a later file's module-level `from services.agent_service import stats`
+        # reference goes stale (a fresh re-import returns a different object) and its
+        # monkeypatch silently misses — the #73 stats-cache tests failed exactly this
+        # way under full-suite ordering. Let patch.dict own the restoration.
         ctx["patcher"].stop()
-        for key in list(sys.modules.keys()):
-            if key == "services.agent_service" or key.startswith("services.agent_service."):
-                del sys.modules[key]
 
 
 def _user():

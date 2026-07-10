@@ -56,21 +56,26 @@ A reusable combobox component that provides preset model options with free-text 
 
 ### Preset Models
 
-Current-generation models use undated aliases (resolve to the latest snapshot); legacy models use full snapshot-dated IDs. **Synced 2026-06-06 (#1080)** against the [Anthropic models overview](https://platform.claude.com/docs/en/about-claude/models/overview):
+Current-generation models use undated aliases (resolve to the latest snapshot); legacy models use full snapshot-dated IDs. **Synced 2026-07-08 (#1521)** against the [Anthropic models overview](https://platform.claude.com/docs/en/about-claude/models/overview):
 
 ```javascript
 const PRESET_MODELS = [
+  // Claude 5 family (latest generation, native 1M context)
+  { value: 'claude-fable-5', label: 'Claude Fable 5', note: 'Most capable — longest tasks (latest)' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5', note: 'Fast + smart, 1M context (latest)' },
   // Current generation
-  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable (latest)' },
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable Opus' },
   { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Current' },
   { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Current' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart (current)' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest (current)' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest' },
   // Legacy (still active)
   { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Legacy' },
   { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Legacy' },
 ]
 ```
+
+**Context-window denominator (#1521).** The `% context used` gauge is model-specific, not a flat 200K. The runtime-reported `modelUsage.contextWindow` is the primary value; the fallback is `services/model_context.py::resolve_context_window` (`[1m]`→1M, Gemini→1M, Codex→272K, bare Claude→200K *safe floor*, unknown→200K + warning), vendored byte-identically into the agent server (Invariant #5). See the Agent Runtimes → Context-window catalog note in `architecture.md`.
 
 > **Removed models retire safely (#1080).** `claude-opus-4-20250514` and `claude-sonnet-4-20250514` retire **2026-06-15** and are removed from the presets. Removing a model from the picker only removes the *suggestion* — the field is free-text, so a schedule/session pinned to a removed ID stays valid as free-text until Anthropic retires it on the API. After that the next execution fails with a clear error in `schedule_executions.error` (surfaced in the execution history), not silently. To recover, re-point the schedule's Model field (or the session/task model) to a current model. No default resolves to a removed model — the platform default (`claude-sonnet-4-6`), agent-base default (`claude-sonnet-4-6`), and the summarization model (`claude-haiku-4-5-20251001`) are all current.
 
@@ -473,8 +478,10 @@ ALTER TABLE schedule_executions ADD COLUMN model_used TEXT;
 
 | Model ID | Label | Notes |
 |-----------|-------|-------|
-| `claude-opus-4-8` | Claude Opus 4.8 | Most capable (latest), 1M context |
-| `claude-opus-4-7` | Claude Opus 4.7 | Current |
+| `claude-fable-5` | Claude Fable 5 | Claude 5 family — most capable, longest tasks (latest), 1M context |
+| `claude-sonnet-5` | Claude Sonnet 5 | Claude 5 family — fast + smart (latest), 1M context |
+| `claude-opus-4-8` | Claude Opus 4.8 | Most capable Opus, 1M context |
+| `claude-opus-4-7` | Claude Opus 4.7 | Current, 1M context |
 | `claude-opus-4-6` | Claude Opus 4.6 | Current |
 | `claude-sonnet-4-6` | Claude Sonnet 4.6 | Fast + smart (current) |
 | `claude-haiku-4-5-20251001` | Claude Haiku 4.5 | Fastest, cheapest (current) |

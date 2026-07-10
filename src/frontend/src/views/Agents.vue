@@ -566,7 +566,7 @@
                     <span class="font-medium text-gray-700 dark:text-gray-300">{{ getExecutionStats(agent.name).taskCount }} tasks</span>
                     <template v-if="getExecutionStats(agent.name).totalCost > 0">
                       <span class="text-gray-300 dark:text-gray-600">·</span>
-                      <span class="font-medium text-gray-700 dark:text-gray-300">${{ getExecutionStats(agent.name).totalCost.toFixed(2) }}</span>
+                      <span class="font-medium text-gray-700 dark:text-gray-300">{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
                     </template>
                   </template>
                   <span v-else class="text-gray-400 dark:text-gray-500">--</span>
@@ -700,6 +700,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { formatCostCompact } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
 import { useNetworkStore } from '../stores/network'
 import NavBar from '../components/NavBar.vue'

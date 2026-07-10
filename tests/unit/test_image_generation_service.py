@@ -598,6 +598,73 @@ class TestCallGeminiText:
         call_kwargs = mock_http.post.call_args[1]
         assert call_kwargs["headers"]["x-goog-api-key"] == "my-secret-key"
 
+    @pytest.mark.asyncio
+    async def test_disables_thinking_and_has_output_headroom(self):
+        """Regression guard (#1130 follow-up): the refinement call must disable
+        thinking AND leave generous output headroom, or a thinking model truncates
+        the refined prompt (finishReason=MAX_TOKENS) and drops the AVATAR fixed
+        technical block — the sole source of avatar color-scheme + consistency."""
+        mod = _load_service(api_key="test-key")
+        service = mod.ImageGenerationService()
+
+        mock_http = AsyncMock()
+        mock_http.post.return_value = _make_mock_response(200, FAKE_TEXT_RESPONSE)
+        mock_http.is_closed = False
+        service._client = mock_http
+
+        await service._call_gemini_text("system", "user message")
+
+        gen_config = mock_http.post.call_args[1]["json"]["generationConfig"]
+        # Thinking disabled so reasoning tokens can't eat the output budget.
+        assert gen_config["thinkingConfig"]["thinkingBudget"] == 0
+        # A tight cap (the old 512) is what let thinking squeeze out the block.
+        assert gen_config["maxOutputTokens"] >= 2048
+
+    @pytest.mark.asyncio
+    async def test_retries_without_thinking_config_on_400(self):
+        """A thinking-mandatory model (e.g. gemini-2.5-pro) rejects thinkingBudget=0
+        with HTTP 400. The call must retry once WITHOUT thinkingConfig rather than
+        raise — else refine_prompt's silent fallback would revert to the broken
+        behavior (raw prompt, no technical block)."""
+        mod = _load_service(api_key="test-key")
+        service = mod.ImageGenerationService()
+
+        mock_http = AsyncMock()
+        mock_http.post.side_effect = [
+            _make_mock_response(400, {"error": {"message": "Budget 0 is invalid."}}),
+            _make_mock_response(200, FAKE_TEXT_RESPONSE),
+        ]
+        mock_http.is_closed = False
+        service._client = mock_http
+
+        result = await service._call_gemini_text("system", "user message")
+
+        assert mock_http.post.call_count == 2
+        # Retry drops thinkingConfig but keeps the output headroom.
+        retry_config = mock_http.post.call_args_list[1][1]["json"]["generationConfig"]
+        assert "thinkingConfig" not in retry_config
+        assert retry_config["maxOutputTokens"] >= 2048
+        assert result  # succeeds via the retry, does not raise
+
+    @pytest.mark.asyncio
+    async def test_persistent_400_still_raises(self):
+        """If the retry (thinking off) also 400s, the error propagates — a genuine
+        bad request must not be swallowed."""
+        mod = _load_service(api_key="test-key")
+        service = mod.ImageGenerationService()
+
+        mock_http = AsyncMock()
+        mock_http.post.side_effect = [
+            _make_mock_response(400, {"error": {"message": "Bad request"}}),
+            _make_mock_response(400, {"error": {"message": "Bad request"}}),
+        ]
+        mock_http.is_closed = False
+        service._client = mock_http
+
+        with pytest.raises(RuntimeError, match="400"):
+            await service._call_gemini_text("system", "user message")
+        assert mock_http.post.call_count == 2
+
 
 # =============================================================================
 # _call_gemini_image Tests

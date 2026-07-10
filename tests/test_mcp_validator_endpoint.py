@@ -212,7 +212,7 @@ class TestMcpTemplateStillBlocked:
         # Path-layer rejection happens BEFORE agent contact, so no 503 skip
         assert_status(response, 400)
         body = response.json()
-        assert "Disallowed file path" in body.get("detail", "")
+        assert "Disallowed credential file path" in body.get("detail", "")
         assert ".mcp.json.template" in body.get("detail", "")
 
 

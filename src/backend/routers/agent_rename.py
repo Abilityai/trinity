@@ -138,15 +138,21 @@ async def rename_agent_endpoint(
                 detail="Failed to update database. Agent name may already be taken."
             )
 
-        # RELIABILITY-004 / #307: the heartbeat `seen` marker has no TTL and is
-        # keyed by agent name, so a rename would orphan the old name's key
-        # forever. Clear the old name's heartbeat keys; the renamed container
-        # re-sets `seen` under the new name on its next beat. Best-effort.
+        # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
+        # by name, so a rename orphans all of them under the old name — the
+        # heartbeat `seen` marker (no TTL), both circuit breakers, and the slot
+        # ZSET. The new name is swept too: it may have been used by an agent that
+        # the retention purge has since removed, whose breaker verdict would
+        # otherwise be inherited here. The container is stopped for the whole
+        # rename, so neither sweep can race an in-flight execution's slot. The
+        # renamed container re-establishes its own state on next beat/dispatch.
+        # Best-effort.
         try:
-            from services import heartbeat_service
-            heartbeat_service.clear_heartbeat(agent_name)
+            from services.agent_runtime_state import clear_agent_runtime_state
+            await clear_agent_runtime_state(agent_name)
+            await clear_agent_runtime_state(sanitized_name)
         except Exception as e:
-            logger.warning(f"Failed to clear heartbeat keys for old name {agent_name}: {e}")
+            logger.warning(f"Failed to clear Redis runtime state on rename {agent_name} -> {sanitized_name}: {e}")
 
         # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
         try:

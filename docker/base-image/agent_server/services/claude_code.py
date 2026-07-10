@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
+from ..model_context import resolve_context_window
 from ..state import agent_state
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_subprocess_line, sanitize_text
 from ._runtime_config import (
@@ -103,11 +104,13 @@ class ClaudeCodeRuntime(AgentRuntime):
         return "claude-sonnet-4-6"
 
     def get_context_window(self, model: Optional[str] = None) -> int:
-        """Get context window for Claude models."""
-        # Check for 1M context models
-        if model and "[1m]" in model.lower():
-            return 1000000
-        return 200000  # Standard 200K context
+        """Fallback context window for Claude models (#1521).
+
+        Resolves via the shared catalog: ``[1m]`` → 1M, else the 200K safe floor.
+        This is a FALLBACK — the authoritative window is the runtime-reported
+        ``modelUsage.contextWindow`` captured in ``stream_parser``.
+        """
+        return resolve_context_window(model)
 
     def configure_mcp(self, mcp_servers: Dict) -> bool:
         """
@@ -268,6 +271,13 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
         # share the same state without locking.
         parse_fail_state: Dict[str, object] = {"count": 0, "first_sample": None}
         metadata = ExecutionMetadata()
+        # #1521: seed the fallback context window from the model catalog BEFORE
+        # the stream runs. The stream parser overwrites this from the runtime's
+        # modelUsage.contextWindow (the primary) when present; when it isn't
+        # (salvage / partial-metadata paths), this catalog value is the real
+        # denominator — NOT the flat 200K Pydantic default (get_context_window
+        # is never called for Claude, so this seed is the only fallback hook).
+        metadata.context_window = resolve_context_window(model or agent_state.current_model)
         tool_start_times: Dict[str, datetime] = {}
         response_parts: List[str] = []
         # Use provided execution_id if available (enables termination tracking from backend)

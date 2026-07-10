@@ -291,7 +291,7 @@ class ChatSession(BaseModel):
     message_count: int = 0
     total_cost: float = 0.0
     total_context_used: int = 0
-    total_context_max: int = 200000
+    total_context_max: int = 200000  # #1521: == model_context.DEFAULT_CONTEXT_WINDOW (safe floor). Leaf model — not imported to avoid a services↔db_models cycle; only the no-metadata default.
     status: str = "active"  # "active" or "closed"
     subscription_id: Optional[str] = None  # SUB-004: subscription active when session started
 
@@ -332,7 +332,7 @@ class AgentSession(BaseModel):
     message_count: int = 0
     total_cost: float = 0.0
     total_context_used: int = 0
-    total_context_max: int = 200000
+    total_context_max: int = 200000  # #1521: == model_context.DEFAULT_CONTEXT_WINDOW (safe floor). Leaf model — not imported to avoid a services↔db_models cycle; only the no-metadata default.
     status: str = "active"  # "active" | "archived" | "reset"
     subscription_id: Optional[str] = None
     cached_claude_session_id: Optional[str] = None

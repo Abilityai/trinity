@@ -158,7 +158,8 @@ async def run_orphan_sweep_loop(
                 if killed:
                     logger.info(
                         "[OrphanSweeper] periodic sweep killed %d orphan(s) "
-                        "(preserved %d in-flight execution pid(s))",
+                        "(preserved %d allowlisted pid(s): in-flight "
+                        "executions + transient subprocesses)",
                         killed, len(extra_pids),
                     )
             except Exception:  # noqa: BLE001

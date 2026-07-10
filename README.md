@@ -23,6 +23,14 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/wxCC6QGtLMA">
+    <img src="https://img.youtube.com/vi/wxCC6QGtLMA/maxresdefault.jpg" alt="Trinity v0.8.0 release tour — video" width="640" />
+  </a>
+  <br/>
+  <em>🎬 New — <a href="https://youtu.be/wxCC6QGtLMA">watch the v0.8.0 release tour</a>: agents that speak, the Brain Orb, and the Grid dashboard.</em>
+</p>
+
 ---
 
 ## Run agents like infrastructure
@@ -66,7 +74,7 @@ Each agent runs in its own isolated Docker container with real-time observabilit
 
 <!--
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/assets/screenshots/graph-view-fleet.png"></video>
+  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/assets/screenshots/grid-view-fleet.png"></video>
 </div>
 -->
 
@@ -223,18 +231,14 @@ If you're an agent working with this repository, **[AGENTS.md](AGENTS.md)** is y
 
 <table>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/graph-view-fleet.png"><img src="docs/assets/screenshots/graph-view-fleet.png" alt="Graph view — fleet topology with live status"/></a><br/><sub><b>Graph view</b> — fleet topology, live status, cost & success rates per agent.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/timeline-fleet-activity.png"><img src="docs/assets/screenshots/timeline-fleet-activity.png" alt="Timeline — fleet execution activity"/></a><br/><sub><b>Timeline</b> — execution history color-coded by trigger type.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/grid-view-fleet.png"><img src="docs/assets/screenshots/grid-view-fleet.png" alt="Grid view — the fleet as a canvas of agent tiles"/></a><br/><sub><b>Grid view</b> — the whole fleet as tiles: live status, activity sparklines, cost & success per agent, inline Run/Auto toggles.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/operations-executions.png"><img src="docs/assets/screenshots/operations-executions.png" alt="Operations — fleet-wide execution history"/></a><br/><sub><b>Operations</b> — every task run across the fleet, with success rate, cost, and per-agent/trigger filters.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/agent-dashboard-detail.png"><img src="docs/assets/screenshots/agent-dashboard-detail.png" alt="Agent dashboard detail"/></a><br/><sub><b>Agent dashboard</b> — custom widgets, historical tracking, sparklines.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/agent-terminal.png"><img src="docs/assets/screenshots/agent-terminal.png" alt="Agent terminal via ephemeral SSH"/></a><br/><sub><b>Live terminal</b> — ephemeral SSH into any agent container.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/agent-overview-detail.png"><img src="docs/assets/screenshots/agent-overview-detail.png" alt="Agent Overview — trends, health, and activity"/></a><br/><sub><b>Agent overview</b> — per-agent activity trends, success rate, duration, and health at a glance.</sub></td>
+    <td width="50%"><a href="docs/assets/screenshots/brain-orb.png"><img src="docs/assets/screenshots/brain-orb.png" alt="Brain Orb — an agent's self-rendering knowledge graph"/></a><br/><sub><b>Brain Orb</b> — a knowledge-base agent renders its own mind as a live 3D graph of notes, edges & activity.</sub></td>
   </tr>
 </table>
-
-<!-- TODO (asset): capture the two shots called out in the update brief — a **schedules** view and the
-     **Operating Room / operator-queue** view — at web-legible resolution and swap them in above
-     (replacing agent-dashboard / agent-terminal, or extending the grid to 6). -->
 
 ## You've built the agents. Trinity is where they run.
 
@@ -258,6 +262,7 @@ The full feature set is below and in the [documentation](#documentation).
 
 ### Fleet Observability
 
+- **Grid View** — The whole fleet as a canvas of agent tiles: live status, activity sparklines, cost & success rate per agent, with inline run/autonomy toggles
 - **Graph View** — Visual topology of your agent fleet with live status, success rates, cost tracking, and resource usage per agent
 - **Timeline View** — Gantt-style execution timeline with trigger-based color coding (manual, scheduled, MCP, agent-triggered, public, paid)
 - **Host Telemetry** — Real-time CPU, memory, and disk monitoring in the dashboard header
@@ -267,8 +272,10 @@ The full feature set is below and in the [documentation](#documentation).
 ### Agent Runtime
 
 - **Isolated Docker Containers** — Each agent runs in its own container with dedicated resources
-- **Multi-Runtime Support** — Choose between Claude Code (Anthropic) or Gemini CLI (Google) per agent
+- **Multi-Runtime Support** — Choose between Claude Code (Anthropic), OpenAI Codex, or Gemini CLI (Google) per agent
 - **Model Selection** — Choose which Claude model (Opus, Sonnet, Haiku) per task or schedule
+- **Agent Overview** — Per-agent Overview tab with activity trends, success rate, duration, and health over a 7/14/30-day window
+- **Compatibility Report** — Advisory validation of a running agent's workspace against ~100 best-practice checks, with one-click fixes for common issues
 - **Agent Dashboard** — Custom dashboards defined via `dashboard.yaml` with 11 widget types, historical tracking, and sparkline visualization
 - **Playbooks** — Browse and invoke agent skills (`.claude/skills/`) directly from the UI
 - **Dynamic Thinking Status** — Real-time status labels reflecting agent activity (Reading file, Searching code, etc.)
@@ -284,12 +291,15 @@ The full feature set is below and in the [documentation](#documentation).
 
 - **Agent-to-Agent Communication** — Hierarchical delegation with fine-grained permission controls
 - **Parallel Task Execution** — Stateless parallel tasks for orchestrator-worker patterns
+- **Sequential Agent Loops** — Bounded autonomous task loops with stop conditions (max runs, cost and time budgets, no-progress detection)
 - **Shared Folders** — File-based state sharing between agents via Docker volumes
 - **System Manifest Deployment** — Deploy multi-agent systems from a single YAML configuration
 - **Scheduling** — Cron-based automation with dedicated scheduler service and Redis distributed locks
-- **MCP Integration** — 74 tools for external agent orchestration via Model Context Protocol
+- **Webhook Triggers** — Public trigger URLs for schedules, with optional HMAC-SHA256 signature authentication and rate limiting
+- **MCP Integration** — 90+ tools for external agent orchestration via Model Context Protocol
 - **Trinity Connect** — WebSocket event streaming for local Claude Code integration
 - **Channel Adapters** — Pluggable external messaging: Slack (Socket Mode + webhooks, per-channel agent binding), Telegram (DMs, groups, voice transcription, file uploads), and WhatsApp via Twilio (DMs, media, `/login` flow)
+- **Voice** — Spoken voice replies (text-to-speech) on Slack, Telegram, and WhatsApp, plus opt-in outbound phone calls over Twilio telephony
 - **Unified Access Control** — Verified-email allow-list governs access across web, Slack, and Telegram with per-agent `require_email` / `open_access` policies (#311)
 - **Proactive Messaging** — Agents initiate user conversations via `send_message` / `send_group_message` MCP tools (#321, #349)
 
@@ -305,7 +315,8 @@ The full feature set is below and in the [documentation](#documentation).
 - **Live Execution Streaming** — Real-time streaming of execution logs to the web UI
 - **Execution Termination** — Stop running executions gracefully via SIGINT/SIGKILL
 - **Continue as Chat** — Resume failed or completed executions as interactive chat with full context
-- **Agent Notifications** — Agents send structured notifications to platform with Events page UI
+- **Agent Notifications** — Agents send structured notifications to the platform, surfaced on the Operations page
+- **Operator Queue (Human-in-the-Loop)** — Agents escalate approvals and questions to an operator queue on the Operations page; answer, approve, or deny from the UI or via MCP
 - **File Manager** — Browse, preview, and download agent workspace files via web UI
 - **Ephemeral SSH Access** — Generate time-limited SSH credentials for direct agent terminal access
 - **Public Agent Links** — Shareable links for unauthenticated agent access with session persistence and Slack integration
@@ -344,7 +355,7 @@ trinity/
 ├── src/
 │   ├── backend/          # FastAPI backend API
 │   ├── frontend/         # Vue.js 3 + Tailwind CSS web UI
-│   ├── mcp-server/       # Trinity MCP server (74 tools)
+│   ├── mcp-server/       # Trinity MCP server (90+ tools)
 │   ├── cli/              # Trinity CLI (pip install trinity-cli)
 │   └── scheduler/        # Dedicated scheduler service (Redis locks)
 ├── docker/
@@ -566,6 +577,13 @@ Trinity includes an MCP server for external orchestration of agents:
 - **Payments** (4 tools) — Configure Nevermined x402 payments, toggle, view payment history
 - **Notifications** (1 tool) — Send structured notifications from agents to platform
 - **Events** (4 tools) — Emit events, subscribe to agent events, list/delete subscriptions
+- **Git** (6 tools) — Status, sync, log, pull, sync-state, and recovery reset
+- **Operator Queue** (3 tools) — Read and respond to human-in-the-loop approval items
+- **Loops** (3 tools) — Run, monitor, and stop bounded sequential task loops
+- **Reports** (1 tool) — Publish structured agent reports to the dashboard
+- **Memory** (1 tool) — Write per-user memory for channel sessions
+- **Pipelines** (2 tools) — Introspect agent-defined long-running pipelines
+- **VoIP** (1 tool) — Place an opt-in outbound phone call
 
 ## Trinity Connect
 

@@ -1,6 +1,0 @@
-
-name: test-deploy-475eee
-display_name: Test Deploy Agent
-resources:
-  cpu: "1"
-  memory: "2g"

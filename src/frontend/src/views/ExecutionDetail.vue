@@ -133,7 +133,7 @@
             </div>
             <div class="min-w-0 flex-1">
               <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Cost</p>
-              <p class="text-lg font-semibold text-gray-900 dark:text-white">${{ (execution.cost || 0).toFixed(4) }}</p>
+              <p class="text-lg font-semibold text-gray-900 dark:text-white">{{ formatCost(execution.cost || 0) }}</p>
             </div>
           </div>
         </div>
@@ -387,7 +387,7 @@
                   </div>
                   <div class="flex items-center space-x-3 font-mono">
                     <span>{{ entry.duration }}</span>
-                    <span class="text-action-primary-600 dark:text-action-primary-400">${{ entry.cost }}</span>
+                    <span class="text-action-primary-600 dark:text-action-primary-400">{{ entry.cost }}</span>
                   </div>
                 </div>
               </div>
@@ -404,6 +404,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { renderMarkdown } from '../utils/markdown'
+import { formatCost } from '../composables/useFormatters'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
@@ -859,7 +860,7 @@ function parseExecutionLog(log) {
         type: 'result',
         numTurns: msg.num_turns || msg.numTurns || '-',
         duration: msg.duration_ms ? formatDuration(msg.duration_ms) : (msg.duration || '-'),
-        cost: msg.cost_usd?.toFixed(4) || msg.total_cost_usd?.toFixed(4) || '0.0000'
+        cost: formatCost(msg.cost_usd ?? msg.total_cost_usd ?? 0)
       })
       continue
     }

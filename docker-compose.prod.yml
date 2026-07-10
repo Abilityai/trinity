@@ -197,12 +197,19 @@ services:
       # Read-only access to Vector's logs so log_archive_service.py (reads
       # /data/logs) can run in prod. Mirrors docker-compose.yml; without it the
       # forwarded LOG_* knobs are inert (LOG_DIR not found) — the #1039 class.
-      - trinity-logs:/data/logs:ro
+      # #1478: MUST be read-WRITE — log_archive_service archives then unlink()s
+      # the originals. A ':ro' mount lets archiving succeed but every delete fail
+      # (Errno 30), so the volume grows unbounded (~900MB/day on a busy instance).
+      # Vector is still the sole writer of new log lines; the backend only reads
+      # + deletes archived originals.
+      - trinity-logs:/data/logs
     depends_on:
       redis:
         condition: service_healthy
       vector:
         condition: service_healthy  # Ensure Vector is ready before backend starts agents
+      logs-init:
+        condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
     networks:
       - trinity-platform   # Redis, scheduler, vector, OTel
       - trinity-agent      # Frontend, mcp-server, agent containers, cloudflared
@@ -407,6 +414,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # #1478: one-shot that makes the shared logs volume dir owned by UID 1000 so the
+  # backend (non-root) can unlink retention-archived originals. Vector writes new
+  # log files as root; deleting a file needs write on the *directory*, not the file,
+  # so chowning just the dir (fast, not -R) is enough. Runs as root (needs CAP_CHOWN,
+  # so no cap_drop); exits immediately; backend waits on completion.
+  logs-init:
+    image: alpine:3.20
+    container_name: trinity-logs-init
+    command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
+    volumes:
+      - trinity-logs:/data/logs
+    restart: "no"
+    networks:
+      - trinity-platform
 
   # Vector - centralized log aggregation from all containers
   vector:

@@ -603,6 +603,14 @@ class _CanaryTempDB:
             ).first()
         return int(row[0]) if row else 0
 
+    def get_setting_value(self, key: str, default=None):
+        # No settings table in the B-01 temp DB; mirror the real facade's
+        # empty-store return so callers that leak onto this stub via the
+        # module-level `from database import db` reference (settings_service.
+        # get_setting <- task_execution_service.get_platform_default_model)
+        # get a clean fallback instead of an AttributeError.
+        return default
+
 
 def _reload_canary_with_temp_db(fake_redis, monkeypatch):
     """Evict + reimport the canary modules and install the controlled `database`

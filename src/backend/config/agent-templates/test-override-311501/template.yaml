@@ -1,6 +1,0 @@
-
-name: original-name
-display_name: Test Agent
-resources:
-  cpu: "1"
-  memory: "2g"

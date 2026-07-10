@@ -23,3 +23,13 @@ if [ -f "$DOTENV" ]; then
         [ -n "$val" ] && [ -z "$current" ] && export "$v=$val"
     done
 fi
+
+# test_cli_*.py imports trinity_cli. The editable CLI install is kept OUT of
+# tests/requirements-test.txt because an `-e ./src/cli` line there breaks
+# GitHub's dependency-graph updater (it resolves the path relative to tests/,
+# not the repo root) and reds the "Dependency Graph" check on every release.
+# Install it on demand here so the run-*.sh wrappers stay self-contained. The
+# import guard makes this a no-op once installed; editable installs reflect
+# src/cli edits live, so there's no reinstall churn.
+python -c "import trinity_cli" 2>/dev/null \
+    || pip install -q -e "$(dirname "$0")/../src/cli"

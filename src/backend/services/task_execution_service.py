@@ -32,6 +32,7 @@ from database import db
 from services.agent_auth import agent_httpx_client
 from models import ActivityState, ActivityType, TaskExecutionStatus, activity_state_for_terminal
 from services.activity_service import activity_service
+from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.agent_call_limiter import (
     BackendAgentCallBudgetExhausted,
     acquire_agent_call_slot,
@@ -1703,7 +1704,7 @@ class TaskExecutionService:
                     status=TaskExecutionStatus.SUCCESS,
                     response=sanitized_resp,
                     context_used=context_used if context_used > 0 else None,
-                    context_max=metadata.get("context_window") or 200000,
+                    context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
                     cost=total_cost,
                     tool_calls=tool_calls_json,
                     execution_log=execution_log_json,
@@ -1763,7 +1764,7 @@ class TaskExecutionService:
                 response=sanitized_resp or "",
                 cost=total_cost,
                 context_used=context_used if context_used > 0 else None,
-                context_max=metadata.get("context_window") or 200000,
+                context_max=metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW,
                 session_id=claude_session_id,
                 execution_log=execution_log_json,
                 raw_response=envelope.raw_response,
@@ -1776,7 +1777,7 @@ class TaskExecutionService:
         salvage_cost_raw = partial_metadata.get("cost_usd") if partial_metadata else None
         salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
         salvage_context_max = (
-            (partial_metadata.get("context_window") or 200000) if partial_metadata else None
+            (partial_metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW) if partial_metadata else None
         )
         if envelope.previous_attempt_cost > 0:
             base = salvage_cost_raw if isinstance(salvage_cost_raw, (int, float)) else 0.0

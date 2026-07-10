@@ -215,50 +215,51 @@ class WhatsAppChannelOperations:
     # Chat Link Operations
     # =========================================================================
 
-    def get_or_create_chat_link(
+    def record_inbound(
         self,
         binding_id: int,
         wa_user_phone: str,
         wa_user_name: Optional[str] = None,
-    ) -> dict:
-        """Get or create a chat link for a WhatsApp user (by phone number)."""
-        select_stmt = select(
-            whatsapp_chat_links.c.id,
-            whatsapp_chat_links.c.binding_id,
-            whatsapp_chat_links.c.wa_user_phone,
-            whatsapp_chat_links.c.wa_user_name,
-            whatsapp_chat_links.c.session_id,
-            whatsapp_chat_links.c.verified_email,
-            whatsapp_chat_links.c.verified_at,
-            whatsapp_chat_links.c.message_count,
-            whatsapp_chat_links.c.last_active,
-            whatsapp_chat_links.c.created_at,
-        ).where(
-            and_(
-                whatsapp_chat_links.c.binding_id == binding_id,
-                whatsapp_chat_links.c.wa_user_phone == wa_user_phone,
-            )
+    ) -> None:
+        """Record one inbound client message: upsert the chat link, bump the counter (#1533).
+
+        Counting semantics: one increment per *delivered* DM conversation turn.
+        The router calls this only after the access gate, so rate-limited,
+        agent-unavailable and access-denied/pending messages are not counted,
+        and bot commands (``/login``, ``/whoami``) are consumed by the transport
+        before they reach the router. A turn whose agent execution later fails is
+        still counted — the client did message. WhatsApp has no group chats, so
+        the router's group skip never applies here.
+
+        One atomic ``INSERT … ON CONFLICT DO UPDATE``: the row is created on the
+        client's first message — so a client who never ran ``/login`` still
+        appears in the Sharing-tab roster — and is incremented in place after
+        that. ``last_active`` rides along (this is its only live writer), and the
+        profile name is refreshed when known, since a ``/login``-first row is
+        created without one.
+        """
+        now = utc_now_iso()
+        ins = make_insert(whatsapp_chat_links).values(
+            binding_id=binding_id,
+            wa_user_phone=wa_user_phone,
+            wa_user_name=wa_user_name,
+            message_count=1,
+            created_at=now,
+            last_active=now,
+        )
+        stmt = ins.on_conflict_do_update(
+            index_elements=["binding_id", "wa_user_phone"],
+            set_={
+                "message_count": whatsapp_chat_links.c.message_count + 1,
+                "last_active": now,
+                "wa_user_name": func.coalesce(
+                    ins.excluded.wa_user_name,
+                    whatsapp_chat_links.c.wa_user_name,
+                ),
+            },
         )
         with get_engine().begin() as conn:
-            row = conn.execute(select_stmt).mappings().first()
-
-            if row:
-                return self._row_to_chat_link(row)
-
-            now = utc_now_iso()
-            conn.execute(
-                make_insert(whatsapp_chat_links).values(
-                    binding_id=binding_id,
-                    wa_user_phone=wa_user_phone,
-                    wa_user_name=wa_user_name,
-                    message_count=0,
-                    created_at=now,
-                    last_active=now,
-                )
-            )
-
-            row = conn.execute(select_stmt).mappings().first()
-            return self._row_to_chat_link(row)
+            conn.execute(stmt)
 
     def get_verified_email(self, binding_id: int, wa_user_phone: str) -> Optional[str]:
         """Return verified email for this phone, or None (#311 Phase 2)."""
@@ -307,19 +308,6 @@ class WhatsAppChannelOperations:
                 "last_active": row["last_active"],
             })
         return clients
-
-    def increment_message_count(self, chat_link_id: int) -> None:
-        now = utc_now_iso()
-        stmt = (
-            update(whatsapp_chat_links)
-            .where(whatsapp_chat_links.c.id == chat_link_id)
-            .values(
-                message_count=whatsapp_chat_links.c.message_count + 1,
-                last_active=now,
-            )
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
 
     def set_verified_email(
         self, binding_id: int, wa_user_phone: str, email: str

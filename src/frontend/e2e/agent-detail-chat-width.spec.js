@@ -57,8 +57,10 @@ test.describe('Agent Detail chat-tab width parity (#954)', () => {
     await page.setViewportSize({ width: 1600, height: 1000 })
     await page.goto(`/agents/${TEST_AGENT}`)
 
-    // Overview (default landing tab) baseline.
-    await expect(page.locator('nav.-mb-px')).toBeVisible({ timeout: 15000 })
+    // Overview (default landing tab) baseline. .first(): the visible tab row
+    // precedes OverflowTabs' aria-hidden measuring mirror, also a nav.-mb-px
+    // (#1114 broke the bare locator with a strict-mode violation).
+    await expect(page.locator('nav.-mb-px').first()).toBeVisible({ timeout: 15000 })
     await page.waitForTimeout(300)
     const overview = await cardBox(page)
     expect(overview).not.toBeNull()

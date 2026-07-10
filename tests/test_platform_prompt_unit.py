@@ -307,7 +307,7 @@ def test_builder_returns_empty_string_on_internal_error(monkeypatch):
 
 
 def test_compose_includes_platform_context_and_caller(monkeypatch):
-    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda: "PLATFORM")
+    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **_kwargs: "PLATFORM")
     ctx = ExecutionContext(agent_name="oracle", triggered_by="chat")
     out = compose_system_prompt(execution_context=ctx, caller_prompt="CALLER MEMORY")
     assert out.startswith("PLATFORM")
@@ -318,14 +318,14 @@ def test_compose_includes_platform_context_and_caller(monkeypatch):
 
 
 def test_compose_without_execution_context(monkeypatch):
-    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda: "PLATFORM")
+    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **_kwargs: "PLATFORM")
     out = compose_system_prompt(execution_context=None, caller_prompt="CALLER")
     assert "## Execution Context" not in out
     assert "PLATFORM" in out and "CALLER" in out
 
 
 def test_compose_respects_disabled_flag(monkeypatch):
-    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda: "PLATFORM")
+    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **_kwargs: "PLATFORM")
     ctx = ExecutionContext(agent_name="oracle", triggered_by="chat")
     out = compose_system_prompt(
         execution_context=ctx,
@@ -336,7 +336,7 @@ def test_compose_respects_disabled_flag(monkeypatch):
 
 
 def test_compose_auto_fills_collaborators(monkeypatch):
-    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda: "PLATFORM")
+    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **_kwargs: "PLATFORM")
     monkeypatch.setattr(pps, "_resolve_collaborators", lambda name: ["buddy-1"])
     ctx = ExecutionContext(agent_name="oracle", triggered_by="chat")
     out = compose_system_prompt(execution_context=ctx)
@@ -344,7 +344,7 @@ def test_compose_auto_fills_collaborators(monkeypatch):
 
 
 def test_compose_builder_failure_falls_back_to_platform(monkeypatch):
-    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda: "PLATFORM")
+    monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **_kwargs: "PLATFORM")
     monkeypatch.setattr(pps, "build_execution_context", lambda ctx: "")
     ctx = ExecutionContext(agent_name="oracle", triggered_by="chat")
     out = compose_system_prompt(execution_context=ctx, caller_prompt="CALLER")

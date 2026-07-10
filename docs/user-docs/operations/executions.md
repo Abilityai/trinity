@@ -33,6 +33,8 @@ View, monitor, and manage task executions across all agents. Executions are crea
 
 ### Executions Tab (Operations Page)
 
+![Operations page — Executions tab listing task runs across the fleet with Total, Success rate, Failed, and Cost stat cards and per-agent/status/trigger filters](../images/operations-executions.png)
+
 The fleet execution list lives on the **Executions** tab of the [Operations page](operating-room.md) (`/operations?tab=executions`). The legacy `/executions` route redirects there.
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.

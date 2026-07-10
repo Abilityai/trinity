@@ -155,7 +155,7 @@
         <span :class="successRateColorClass" class="font-medium">{{ executionStats.successRate }}%</span>
         <template v-if="executionStats.totalCost > 0">
           <span class="text-gray-300 dark:text-gray-600">·</span>
-          <span class="font-medium text-gray-700 dark:text-gray-300">${{ executionStats.totalCost.toFixed(2) }}</span>
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ formatCostCompact(executionStats.totalCost) }}</span>
         </template>
         <template v-if="lastExecutionDisplay">
           <span class="text-gray-300 dark:text-gray-600">·</span>
@@ -231,6 +231,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { formatCostCompact } from '../composables/useFormatters'
 import { useRouter } from 'vue-router'
 import { Handle, Position } from '@vue-flow/core'
 import AgentAvatar from './AgentAvatar.vue'

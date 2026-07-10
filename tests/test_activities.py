@@ -441,11 +441,12 @@ class TestTimelineForDashboard:
         assert_status(response, 200)
         activities = response.json().get("activities", [])
 
-        # Valid trigger types for Dashboard color coding.
-        # #1260: include "loop" (#740/#1150) and "voip" (#1056) — real trigger
-        # values added after this test was written.
-        valid_triggers = {"schedule", "agent", "manual", "user", "mcp", "public",
-                          "fan_out", "loop", "voip", None}
+        # Valid trigger types for Dashboard color coding. Derive from the canonical
+        # source of truth (db/schedules._TRIGGER_BUCKETS — the Dashboard bucket map)
+        # rather than a hand-maintained literal set, so this test doesn't drift every
+        # time a trigger/channel value is added (webhook, telegram/slack/whatsapp, etc.).
+        from db.schedules import _TRIGGER_BUCKETS
+        valid_triggers = set(_TRIGGER_BUCKETS) | {None}
 
         for activity in activities:
             triggered_by = activity.get("triggered_by")

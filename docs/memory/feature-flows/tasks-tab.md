@@ -31,13 +31,31 @@ As an agent operator, I want to view all agent executions (including chats) from
 
 ### Components
 
-**AgentDetail.vue:884-885** - Tab content rendering:
+**AgentDetail.vue:97-100** - Tab content rendering (#1500 — fullscreen flex-fill):
 ```vue
-<!-- Tasks Tab Content -->
-<div v-if="activeTab === 'tasks'" class="p-6">
-  <TasksPanel v-if="agent" :agent-name="agent.name" :agent-status="agent.status" />
+<!-- Tasks Tab Content (#1500: fullscreen flex-fill like Chat; padding
+     lives on TasksPanel's scroll root so content scrolls under it) -->
+<div v-if="activeTab === 'tasks'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
+  <TasksPanel :agent-name="agent.name" :agent-status="agent.status" ... />
 </div>
 ```
+
+**Fullscreen fill layout (#1500)**: `tasks` is a member of `FULLSCREEN_TABS`
+(`AgentDetail.vue`, alongside `chat`), so the page enters the `h-screen
+overflow-hidden` fullscreen layout and the tab card flex-fills the viewport.
+Inside it, `TasksPanel.vue`'s root (`p-6 flex-1 flex flex-col gap-6
+overflow-y-auto`) is both the fill column and the **short-viewport fallback
+scroller** — the load-bearing piece: without it, fixed chrome (header + stats +
+composer) plus the list's min-height would hard-clip the composer, since the
+page itself cannot scroll in fullscreen mode. The task-history card is `flex-1
+min-h-96 flex flex-col` — the old `max-h-96` list **cap** is retained as the
+new **floor** (never fewer visible rows than the pre-#1500 layout at any
+viewport height); the list inside is the `flex-1 min-h-0 overflow-y-auto`
+scroll region, and loading/empty states center vertically in the filled card.
+Anchors `data-testid="task-history-card"` / `"task-list"` exist for e2e.
+Regression spec: `src/frontend/e2e/agent-detail-tasks-fill-height.spec.js`
+(floor ≥ old cap, growth-with-viewport, page-scroll containment, #954-class
+width parity, short-viewport composer reachability).
 
 **TasksPanel.vue** - Main tasks component with the following sections:
 - **Header (lines 4-61)**: Title, trigger type filter dropdown, queue status indicator, refresh button
@@ -46,7 +64,7 @@ As an agent operator, I want to view all agent executions (including chats) from
   - **Model Selector (line 90, MODEL-001)**: `ModelSelector` component, persisted per-agent in localStorage
   - **Timeout Selector (lines 93-104)**: Dropdown for `timeout_seconds` (5min/15min/30min/1hr/2hr), persisted per-agent in localStorage (default: 15min/900s)
   - **Keyboard shortcuts**: Enter to submit, Shift+Enter for newline, Cmd/Ctrl+Enter also works
-- **Task History (lines 136-369)**: Scrollable list of all tasks with expand/collapse
+- **Task History**: Scrollable list of all tasks with expand/collapse — fills remaining viewport height (`flex-1 min-h-96`, #1500; formerly capped at `max-h-96`)
   - Row highlight: `highlightExecutionId` prop causes ring highlight and auto-scroll
   - **Action Buttons per Task** (lines 264-365):
     - Open Execution Detail (lines 265-287): External link / Live button for running tasks

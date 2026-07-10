@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Brain Orb read-only KB search hook (#60, trinity-enterprise#76).
+
+POST surface: reads {query, limit?} on stdin, searches the REAL vault
+scope-aware and read-only, prints {results:[{id,title,content}], backend,
+contract_version}. Reachable by shared (non-owner) users via the backend's
+AuthorizedAgent /tool route, so nothing from the request ever touches a path:
+the query is a match string only, and the scope comes from the persisted state
+file — never from the request (review M2).
+
+Backend ladder: try the local-brain-search daemon (semantic FAISS search via
+run_search.sh --json; setup.sh starts the daemon when the venv exists) with a
+short budget, then fall back to a stdlib keyword scan over Brain/**/*.md. A
+fresh container with no venv gets working keyword search on boot; an agent
+that bootstraps its search stack upgrades to semantic transparently.
+"""
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import (
+    ROOT, VAULT, emit, in_read_scope, read_active, read_stdin_json,
+    resolved_scope,
+)
+
+RUN_SEARCH = ROOT / "resources" / "local-brain-search" / "run_search.sh"
+FAISS_TIMEOUT = 20          # < the agent-server's 30s kill
+CONTENT_CAP = 2000
+MAX_LIMIT = 25
+
+
+def _norm_result(r):
+    """Normalize a search-stack result row to the orb's {id,title,content}."""
+    if not isinstance(r, dict):
+        return None
+    nid = r.get("note_id") or r.get("id") or r.get("path") or ""
+    title = r.get("title") or (Path(str(nid)).stem if nid else "")
+    content = r.get("content") or r.get("preview") or r.get("text") or ""
+    if not title:
+        return None
+    return {"id": str(nid), "title": str(title), "content": str(content)[:CONTENT_CAP]}
+
+
+def try_semantic(query, limit, scope_set):
+    """Semantic search via the LBS stack; None on any failure (→ keyword)."""
+    if not RUN_SEARCH.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["bash", str(RUN_SEARCH), query, "--json", "--limit", str(limit),
+             "--no-track"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=FAISS_TIMEOUT,
+        )
+        if proc.returncode != 0:
+            return None
+        import json
+        out = proc.stdout
+        payload = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        rows = [_norm_result(r) for r in payload.get("results", [])]
+        rows = [r for r in rows if r and in_read_scope(r["id"], scope_set)]
+        return rows or None    # empty semantic result → let keyword try too
+    except Exception:
+        return None
+
+
+def _note_title(path, fallback):
+    try:
+        with open(path, errors="ignore") as f:
+            head = f.read(2000)
+        m = re.search(r"^#\s+(.+)$", head, re.M)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return fallback
+
+
+def keyword_scan(query, limit, scope_set):
+    """Stdlib substring scan over the in-scope vault. Title hits rank first."""
+    q = query.lower()
+    title_hits, body_hits = [], []
+    if not VAULT.is_dir():
+        return []
+    for p in sorted(VAULT.rglob("*.md")):
+        nid = p.relative_to(VAULT).as_posix()
+        if not in_read_scope(nid, scope_set):
+            continue
+        title = _note_title(p, p.stem)
+        try:
+            body = p.read_text(errors="ignore")
+        except Exception:
+            continue
+        rec = {"id": nid, "title": title,
+               "content": body[:CONTENT_CAP]}
+        if q in title.lower():
+            title_hits.append(rec)
+        elif q in body.lower():
+            body_hits.append(rec)
+        if len(title_hits) >= limit:
+            break
+    return (title_hits + body_hits)[:limit]
+
+
+def main():
+    req = read_stdin_json()
+    if req is None:
+        emit({"results": [], "error": "invalid JSON"})
+        return
+    query = str(req.get("query") or "").strip()
+    try:
+        limit = max(1, min(MAX_LIMIT, int(req.get("limit") or 5)))
+    except (TypeError, ValueError):
+        limit = 5
+    if not query:
+        emit({"results": []})
+        return
+
+    scope_set = resolved_scope(read_active())
+    rows = try_semantic(query, limit, scope_set)
+    backend = "semantic"
+    if rows is None:
+        rows = keyword_scan(query, limit, scope_set)
+        backend = "keyword"
+    emit({"results": rows[:limit], "backend": backend})
+
+
+main()

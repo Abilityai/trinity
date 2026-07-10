@@ -54,6 +54,12 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
 **Email login (passwordless):** Enter your email address, receive a 6-digit verification code, and submit it to log in. This requires email service configuration. The admin manages allowed email addresses under Settings > Email Whitelist.
 
+### Your Default Agent
+
+On a **fresh install**, Trinity auto-seeds a ready-to-use **Cornelius** second-brain agent so you land on a working agent without cloning or configuring a template first. Cornelius ships with the **Brain Orb** enabled — a self-rendering 3D knowledge graph on its **Brain** tab (see [Dynamic Dashboards → the Brain Orb](../advanced/dynamic-dashboards.md#related-the-brain-orb)).
+
+This runs **once, only on a truly fresh install**: it is skipped when the instance already has agents, and deleting Cornelius does **not** re-create it. Installs without Docker (demo mode) skip it entirely.
+
 ### Key URLs
 
 | Service | URL |
