@@ -756,6 +756,37 @@ def test_load_api_key_none_when_absent_everywhere(tmp_path, monkeypatch):
     assert codex_runtime._load_openai_api_key() is None
 
 
+def test_chatgpt_subscription_auth_shape(tmp_path):
+    (tmp_path / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": None,
+                "tokens": {"access_token": "access", "refresh_token": "refresh"},
+            }
+        )
+    )
+    assert codex_runtime._has_chatgpt_subscription_auth(str(tmp_path)) is True
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {},
+        {"auth_mode": "api_key", "tokens": {}},
+        {"auth_mode": "chatgpt", "tokens": {"access_token": "access"}},
+        {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": "metered",
+            "tokens": {"access_token": "access", "refresh_token": "refresh"},
+        },
+    ],
+)
+def test_chatgpt_subscription_auth_rejects_incomplete_or_metered_shapes(tmp_path, auth):
+    (tmp_path / "auth.json").write_text(json.dumps(auth))
+    assert codex_runtime._has_chatgpt_subscription_auth(str(tmp_path)) is False
+
+
 # ---------------------------------------------------------------------------
 # Trivial-but-load-bearing getters + is_available probe.
 # ---------------------------------------------------------------------------
@@ -1178,8 +1209,8 @@ async def test_execute_codex_body_nonzero_exit_classifies_failure(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_execute_codex_body_missing_key_is_503(tmp_path, monkeypatch):
-    """No API key resolvable → 503 before any subprocess is spawned."""
+async def test_execute_codex_body_missing_auth_is_503(tmp_path, monkeypatch):
+    """No API key or subscription auth → 503 before a subprocess is spawned."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: None)
     rt = CodexRuntime()

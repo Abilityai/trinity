@@ -191,6 +191,27 @@ def _load_openai_api_key() -> Optional[str]:
     return None
 
 
+def _has_chatgpt_subscription_auth(codex_home: str) -> bool:
+    """Return True when Codex has a usable ChatGPT subscription credential.
+
+    Codex CLI owns token refresh. The runtime only validates the credential
+    shape here so subscription-backed agents are not forced onto a metered API
+    key merely because ``OPENAI_API_KEY`` is absent.
+    """
+    try:
+        auth = json.loads((Path(codex_home) / "auth.json").read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return False
+    tokens = auth.get("tokens")
+    return (
+        auth.get("auth_mode") == "chatgpt"
+        and not auth.get("OPENAI_API_KEY")
+        and isinstance(tokens, dict)
+        and bool(tokens.get("access_token"))
+        and bool(tokens.get("refresh_token"))
+    )
+
+
 def _codex_home() -> str:
     """Non-workspace home for Codex state + the ``-o`` result file.
 
@@ -717,17 +738,17 @@ class CodexRuntime(AgentRuntime):
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
 
+        codex_home = _ensure_codex_home()
         api_key = _load_openai_api_key()
-        if not api_key:
+        if not api_key and not _has_chatgpt_subscription_auth(codex_home):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "OpenAI API key not configured in agent container. Inject "
-                    "OPENAI_API_KEY via credentials."
+                    "Codex authentication is not configured in the agent container. "
+                    "Install ChatGPT subscription auth.json or inject OPENAI_API_KEY."
                 ),
             )
 
-        codex_home = _ensure_codex_home()
         result_file = os.path.join(codex_home, f"{_safe_result_token(execution_id)}-last.txt")
         sandbox_mode = _resolve_sandbox_mode()
         _surface_unmapped_guardrails(allowed_tools)
@@ -746,12 +767,13 @@ class CodexRuntime(AgentRuntime):
             **os.environ,
             EXECUTION_TAG_NAME: execution_id,
             "CODEX_HOME": codex_home,
-            # Inject under both names — the ecosystem standard is OPENAI_API_KEY;
-            # some Codex builds also read CODEX_API_KEY. Defensive (verified in
-            # /verify-local).
-            "OPENAI_API_KEY": api_key,
-            "CODEX_API_KEY": api_key,
         }
+        if api_key:
+            # Inject under both names — the ecosystem standard is OPENAI_API_KEY;
+            # some Codex builds also read CODEX_API_KEY. Subscription auth reads
+            # auth.json from CODEX_HOME and deliberately sets neither variable.
+            env["OPENAI_API_KEY"] = api_key
+            env["CODEX_API_KEY"] = api_key
 
         metadata = ExecutionMetadata()
         metadata.context_window = self.get_context_window(model)
