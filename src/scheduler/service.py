@@ -32,6 +32,7 @@ from .locking import get_lock_manager, LockManager
 # unchanged. Source of truth: src/backend/services/failure_classifier.py,
 # mirrored byte-identically at src/scheduler/failure_classifier.py.
 from .failure_classifier import is_auth_failure as _is_auth_failure
+from .utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,10 @@ class SchedulerService:
             # next_run_at; the old code stripped tzinfo WITHOUT converting, so a
             # Europe/Kiev (+03) schedule was mis-compared by the offset (a real
             # missed window looked future, or vice-versa). Convert to UTC instead.
+            # #1474: the DB mapper (parse_scheduler_ts) now returns **naive UTC**
+            # — the instant is already correct (convert-then-strip), so the
+            # `tzinfo is None` branch below just re-stamps UTC. Both branches stay
+            # correct; keep them for datetimes sourced outside the mapper.
             expected = schedule.next_run_at
             if expected.tzinfo is not None:
                 expected = expected.astimezone(pytz.utc)
@@ -478,6 +483,8 @@ class SchedulerService:
             # Compare tz-aware in UTC: a non-UTC schedule stores an aware
             # next_run_at, so stripping tzinfo would mis-compare by the offset
             # (the same class as the _get_missed_schedules bug fixed in #1472).
+            # #1474: the DB mapper now returns naive-UTC (instant preserved), so
+            # this hits the `else` re-stamp branch — still correct.
             s = stored if stored.tzinfo is not None else stored.replace(tzinfo=pytz.utc)
             if s > datetime.now(pytz.utc):
                 return  # projection already future — nothing to repair
@@ -1699,7 +1706,7 @@ class SchedulerService:
                 UPDATE schedule_executions
                 SET business_status = ?, validated_at = ?
                 WHERE id = ?
-            """, (business_status, datetime.utcnow().isoformat(), execution_id))
+            """, (business_status, to_utc_iso(datetime.utcnow()), execution_id))
             conn.commit()
 
     # =========================================================================

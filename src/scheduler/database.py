@@ -16,6 +16,7 @@ from typing import Optional, List
 
 from .config import config
 from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution
+from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 logger = logging.getLogger(__name__)
 
@@ -163,10 +164,10 @@ class SchedulerDatabase:
             timezone=row["timezone"],
             description=row["description"],
             owner_id=row["owner_id"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            last_run_at=datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None,
-            next_run_at=datetime.fromisoformat(row["next_run_at"]) if row["next_run_at"] else None,
+            created_at=parse_scheduler_ts(row["created_at"]),
+            updated_at=parse_scheduler_ts(row["updated_at"]),
+            last_run_at=parse_scheduler_ts(row["last_run_at"]) if row["last_run_at"] else None,
+            next_run_at=parse_scheduler_ts(row["next_run_at"]) if row["next_run_at"] else None,
             # #913: NULL ⇒ inherit from agent's execution_timeout_seconds. The
             # backend's TaskExecutionService applies that fallback when it
             # sees None. Substituting 900 here was what made
@@ -192,8 +193,8 @@ class SchedulerDatabase:
             schedule_id=row["schedule_id"],
             agent_name=row["agent_name"],
             status=row["status"],
-            started_at=datetime.fromisoformat(row["started_at"]),
-            completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            started_at=parse_scheduler_ts(row["started_at"]),
+            completed_at=parse_scheduler_ts(row["completed_at"]) if row["completed_at"] else None,
             duration_ms=row["duration_ms"],
             message=row["message"],
             response=row["response"],
@@ -213,11 +214,11 @@ class SchedulerDatabase:
             # Retry tracking (RETRY-001)
             attempt_number=row["attempt_number"] if "attempt_number" in row_keys and row["attempt_number"] else 1,
             retry_of_execution_id=row["retry_of_execution_id"] if "retry_of_execution_id" in row_keys else None,
-            retry_scheduled_at=datetime.fromisoformat(row["retry_scheduled_at"])
+            retry_scheduled_at=parse_scheduler_ts(row["retry_scheduled_at"])
                 if "retry_scheduled_at" in row_keys and row["retry_scheduled_at"] else None,
             # Validation tracking (VALIDATE-001)
             business_status=row["business_status"] if "business_status" in row_keys else None,
-            validated_at=datetime.fromisoformat(row["validated_at"])
+            validated_at=parse_scheduler_ts(row["validated_at"])
                 if "validated_at" in row_keys and row["validated_at"] else None,
             validation_execution_id=row["validation_execution_id"] if "validation_execution_id" in row_keys else None,
             validates_execution_id=row["validates_execution_id"] if "validates_execution_id" in row_keys else None
@@ -348,10 +349,10 @@ class SchedulerDatabase:
 
             if last_run_at:
                 updates.append("last_run_at = ?")
-                params.append(last_run_at.isoformat())
+                params.append(to_utc_iso(last_run_at))
             if next_run_at:
                 updates.append("next_run_at = ?")
-                params.append(next_run_at.isoformat())
+                params.append(to_utc_iso(next_run_at))
 
             params.append(schedule_id)
             cursor.execute(f"""
@@ -386,7 +387,7 @@ class SchedulerDatabase:
             retry_of_execution_id: Original execution ID for retries (RETRY-001)
         """
         execution_id = self._generate_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -414,7 +415,7 @@ class SchedulerDatabase:
                 schedule_id=schedule_id,
                 agent_name=agent_name,
                 status=ExecutionStatus.RUNNING,
-                started_at=datetime.fromisoformat(now),
+                started_at=parse_scheduler_ts(now),
                 message=message,
                 triggered_by=triggered_by,
                 attempt_number=attempt_number,
@@ -447,7 +448,7 @@ class SchedulerDatabase:
             ScheduleExecution with status='skipped', or None on failure
         """
         execution_id = self._generate_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -475,8 +476,8 @@ class SchedulerDatabase:
                 schedule_id=schedule_id,
                 agent_name=agent_name,
                 status=ExecutionStatus.SKIPPED,
-                started_at=datetime.fromisoformat(now),
-                completed_at=datetime.fromisoformat(now),
+                started_at=parse_scheduler_ts(now),
+                completed_at=parse_scheduler_ts(now),
                 duration_ms=0,
                 message=message,
                 triggered_by=triggered_by,
@@ -510,7 +511,7 @@ class SchedulerDatabase:
             if not row:
                 return False
 
-            started_at = datetime.fromisoformat(row["started_at"])
+            started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
@@ -522,7 +523,7 @@ class SchedulerDatabase:
                 WHERE id = ?
             """, (
                 status,
-                completed_at.isoformat(),
+                to_utc_iso(completed_at),
                 duration_ms,
                 response,
                 error,
@@ -585,7 +586,7 @@ class SchedulerDatabase:
                 WHERE id = ?
             """, (
                 ExecutionStatus.PENDING_RETRY,
-                retry_scheduled_at.isoformat(),
+                to_utc_iso(retry_scheduled_at),
                 original_execution_id
             ))
             conn.commit()
@@ -711,10 +712,10 @@ class SchedulerDatabase:
             enabled=bool(row["enabled"]),
             timezone=row["timezone"],
             description=row["description"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-            last_run_at=datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None,
-            next_run_at=datetime.fromisoformat(row["next_run_at"]) if row["next_run_at"] else None
+            created_at=parse_scheduler_ts(row["created_at"]),
+            updated_at=parse_scheduler_ts(row["updated_at"]),
+            last_run_at=parse_scheduler_ts(row["last_run_at"]) if row["last_run_at"] else None,
+            next_run_at=parse_scheduler_ts(row["next_run_at"]) if row["next_run_at"] else None
         )
 
     @staticmethod
@@ -727,8 +728,8 @@ class SchedulerDatabase:
             process_name=row["process_name"],
             execution_id=row["execution_id"],
             status=row["status"],
-            started_at=datetime.fromisoformat(row["started_at"]),
-            completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            started_at=parse_scheduler_ts(row["started_at"]),
+            completed_at=parse_scheduler_ts(row["completed_at"]) if row["completed_at"] else None,
             duration_ms=row["duration_ms"],
             triggered_by=row["triggered_by"],
             error=row["error"]
@@ -795,7 +796,7 @@ class SchedulerDatabase:
     ) -> Optional[ProcessSchedule]:
         """Create a new process schedule."""
         schedule_id = self._generate_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -828,8 +829,8 @@ class SchedulerDatabase:
                     enabled=enabled,
                     timezone=timezone,
                     description=description,
-                    created_at=datetime.fromisoformat(now),
-                    updated_at=datetime.fromisoformat(now)
+                    created_at=parse_scheduler_ts(now),
+                    updated_at=parse_scheduler_ts(now)
                 )
             except _INTEGRITY_ERRORS:
                 logger.warning(f"Process schedule already exists: {process_id}/{trigger_id}")
@@ -856,10 +857,10 @@ class SchedulerDatabase:
 
             if last_run_at:
                 updates.append("last_run_at = ?")
-                params.append(last_run_at.isoformat())
+                params.append(to_utc_iso(last_run_at))
             if next_run_at:
                 updates.append("next_run_at = ?")
-                params.append(next_run_at.isoformat())
+                params.append(to_utc_iso(next_run_at))
 
             params.append(schedule_id)
             cursor.execute(f"""
@@ -893,7 +894,7 @@ class SchedulerDatabase:
     ) -> Optional[ProcessScheduleExecution]:
         """Create a new process schedule execution record."""
         execution_id = self._generate_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -919,7 +920,7 @@ class SchedulerDatabase:
                 process_name=process_name,
                 execution_id=None,
                 status=ExecutionStatus.RUNNING,
-                started_at=datetime.fromisoformat(now),
+                started_at=parse_scheduler_ts(now),
                 triggered_by=triggered_by
             )
 
@@ -949,7 +950,7 @@ class SchedulerDatabase:
             ProcessScheduleExecution with status='skipped', or None on failure
         """
         execution_id = self._generate_id()
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -979,8 +980,8 @@ class SchedulerDatabase:
                 process_name=process_name,
                 execution_id=None,
                 status=ExecutionStatus.SKIPPED,
-                started_at=datetime.fromisoformat(now),
-                completed_at=datetime.fromisoformat(now),
+                started_at=parse_scheduler_ts(now),
+                completed_at=parse_scheduler_ts(now),
                 duration_ms=0,
                 triggered_by=triggered_by,
                 error=skip_reason
@@ -1006,7 +1007,7 @@ class SchedulerDatabase:
             if not row:
                 return False
 
-            started_at = datetime.fromisoformat(row["started_at"])
+            started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
@@ -1016,7 +1017,7 @@ class SchedulerDatabase:
                 WHERE id = ?
             """, (
                 status,
-                completed_at.isoformat(),
+                to_utc_iso(completed_at),
                 duration_ms,
                 process_execution_id,
                 error,
