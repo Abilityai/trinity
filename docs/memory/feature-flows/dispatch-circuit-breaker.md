@@ -109,6 +109,10 @@ upstream `acquire()` gate already admitted, so router-only agents still self-hea
   (migration `agent_ownership_circuit_breaker`, mixin getters/setters in
   `db/agent_settings/resources.py`).
 - **Config**: `DISPATCH_BREAKER_ENABLED` env (default `false`) — global master switch.
+  Forwarded to the backend container through **both** compose files and documented in
+  `.env.example` (#1487/#1485); before that fix the var was read by `config.py` but
+  never reached the container, so the owner-facing toggle silently no-op'd (the
+  #1039/#1067 packaging-gap class).
 - **Operator API**: `GET/PUT /api/agents/{name}/circuit-breaker` (state / owner-gated toggle);
   `POST /api/agents/{name}/circuit-breaker/reset` resets BOTH breakers (admin).
 - **Health**: `circuit_breaker` block on `GET /api/monitoring/agents/{name}`.
