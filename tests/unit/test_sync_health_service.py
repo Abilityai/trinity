@@ -221,3 +221,48 @@ class TestBehindWorkingRedFlag:
         from database import db
         row = db.get_sync_state("alpha")
         assert row["behind_working"] == 2
+
+
+class TestSoftDeletedExcluded:
+    """#1561: a soft-deleted agent must never be polled — otherwise the 60s
+    loop hits its removed container forever and each httpx.ConnectError
+    poisons the transport circuit breaker (→ DORMANT + a bogus alert)."""
+
+    @staticmethod
+    def _soft_delete(name: str):
+        _hrun(
+            "UPDATE agent_ownership SET deleted_at = '2026-01-01T11:42:52Z' "
+            "WHERE agent_name = :n",
+            n=name,
+        )
+
+    def test_accessor_excludes_soft_deleted(self, tmp_db, seed_agent):
+        seed_agent("live")
+        seed_agent("dead")
+        self._soft_delete("dead")
+        from database import db
+        names = {c.agent_name for c in db.list_git_enabled_agents()}
+        assert "live" in names
+        assert "dead" not in names, "soft-deleted agent must not be listed"
+
+    @pytest.mark.asyncio
+    async def test_poll_cycle_issues_no_http_to_soft_deleted(
+        self, service, seed_agent
+    ):
+        seed_agent("live")
+        seed_agent("dead")
+        self._soft_delete("dead")
+
+        fake = _status_payload(status="success")
+        spy = AsyncMock(return_value=fake)
+        with patch.object(service, "_fetch_git_status", spy):
+            await service._poll_cycle()
+
+        # Exactly one fetch — the live agent — never the soft-deleted one.
+        polled = {call.args[0] for call in spy.call_args_list}
+        assert polled == {"live"}, f"expected only 'live' polled, got {polled}"
+
+        from database import db
+        # No sync_state row and no operator-queue entry for the dead agent.
+        assert db.get_sync_state("dead") is None
+        assert db.list_operator_queue_items(agent_name="dead") == []
