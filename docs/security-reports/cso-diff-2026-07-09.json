@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "date": "2026-07-09",
+  "mode": "daily",
+  "scope": "--diff (PR #1550, feature/target-arch-pull-migration vs dev@13a29857)",
+  "phases_run": [0, 1, 2, 4, 5, 6, 7, 9, 12, 13, 14],
+  "subject": "Pull / work-stealing coordination Phases 0-3 (dark) — PR #1550",
+  "attack_surface": {
+    "new_internal_endpoints": [
+      "GET /api/internal/next-task (dual-auth: internal secret OR agent scoped key + pilot-allowlist gate)",
+      "POST /api/internal/tasks/{execution_id}/result (dual-auth: internal secret OR agent scoped key owning the execution)"
+    ],
+    "new_backend_services": ["pull_coordination_service", "lease_reaper_service", "capacity shadow meter"],
+    "new_agent_code": ["docker/base-image/agent_server/services/pull_worker.py"],
+    "new_config_flags": ["PULL_MODE_PILOT_AGENTS (default empty)", "MAX_REDELIVERY (default 3)"],
+    "network_topology_change": "none (worker reaches backend HTTP API only, same as heartbeat/#1083)"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "verifier": "CONFIRMED (independent fresh-context refutation subagent)",
+      "category": "Broken Access Control (A01) / enumeration-safety Invariant #186",
+      "phase": 6,
+      "file": "src/backend/routers/internal.py",
+      "line": "205-207",
+      "title": "Cross-tenant execution-existence enumeration oracle on the pull result seam",
+      "description": "POST /api/internal/tasks/{execution_id}/result returns 404 for a non-existent execution but 403 for an execution that exists but belongs to a different agent. This 404-then-403 differential in one handler violates Trinity's self-uniform enumeration-safety invariant (#186, regression-tested by test_186_enumeration_uniformity.py) and deviates from the #1083 callback (src/backend/routers/agents.py:1045) it claims to mirror, which folds both cases into a uniform 404.",
+      "exploit_scenario": "An attacker holding any valid agent-scoped MCP key (a compromised pilot agent, or an exfiltrated TRINITY_MCP_API_KEY) POSTs to /api/internal/tasks/<id>/result with their key. 403 => <id> is a real execution owned by some other agent; 404 => it does not exist. Reachable against ALL executions (get_execution reads the whole schedule_executions table, populated by schedules/webhooks/chat/loops) and even with pull-mode fully OFF (the result endpoint's auth is inline, NOT gated on the is_pull_pilot_agent allowlist that /next-task uses; the router is mounted unconditionally at main.py:937).",
+      "impact": "LOW. Cross-tenant existence confirmation for execution_ids the attacker already possesses via a side channel. NOT brute-forceable: execution_ids are 128-bit secrets.token_urlsafe(16), so the id space cannot be enumerated. Invariant #186 was written for low-entropy agent names; for 128-bit ids the practical disclosure is minimal — hence LOW, not the usual MEDIUM for an enumeration oracle.",
+      "recommendation": "Merge the two checks into a uniform 404, mirroring agents.py:1045:\n    execution = db.get_execution(execution_id)\n    if execution is None or not heartbeat_service.authorize_heartbeat(key, execution.agent_name):\n        raise HTTPException(status_code=404, detail=\"Execution not found\")\nOne-line fix; makes the handler self-uniform and consistent with the mirrored #1083 endpoint."
+    }
+  ],
+  "positive_notes": [
+    "SECURITY IMPROVEMENT: the pull seams use the agent's OWN scoped MCP key (dual-auth) instead of injecting the master INTERNAL_API_SECRET into pilot containers (the prior design). A compromised pilot can only claim/report for itself, never reach the other /api/internal/* endpoints (least privilege, #307/#1159).",
+    "claim_token is secrets.token_urlsafe(32) = 256-bit; the result CAS gates on token match + status precondition + ownership, so a stale/wrong-token/cross-agent result cannot clobber a terminal.",
+    "Worker-uploaded result content is passed through sanitize_response / sanitize_execution_log before persistence (no credential leakage into stored results)."
+  ],
+  "clean_phases": {
+    "P2_secrets": "No secret values or personal paths in the committed diff; planning docs genericized (no pay-widget path / API key).",
+    "P4_cicd": "No .github/workflows changes in the diff.",
+    "P5_infra": "New compose vars (PULL_MODE_PILOT_AGENTS / MAX_REDELIVERY) are non-secret with placeholder/default values; no new Redis/network exposure; agent network reach unchanged.",
+    "P7_ai": "No user input into system prompts introduced; result content sanitized; no master secret injected into agents.",
+    "P9_A02_crypto": "claim_token = 256-bit token_urlsafe; no weak crypto.",
+    "P9_A03_injection": "All new pull SQL uses SQLAlchemy Core bound params; the one raw text() sweep binds :status + literal IS NULL. No string-interpolated SQL. worker_id is stored as a bound value (no SQLi; log-injection excluded)."
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 1, "info_positive": 3},
+  "trend": "New finding (no prior report covers the pull endpoints). Prior cso-diff reports audited other branches."
+}
