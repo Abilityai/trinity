@@ -125,7 +125,7 @@ repositories/
 # Allow documentation screenshots
 !docs/screenshots/*.png
 !docs/user-docs/images/**/*.png
-!docs/assets/screenshots/*.png
+!docs/assets/screenshots/**/*.png
 
 # Frontend build output
 src/frontend/dist/

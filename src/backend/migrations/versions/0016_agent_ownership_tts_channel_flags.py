@@ -12,14 +12,14 @@ Fresh PG builds already get the columns via ``0001_baseline``; ``ADD COLUMN IF
 NOT EXISTS`` keeps this a no-op there.
 
 Revision ID: 0015_agent_ownership_tts_channel_flags
-Revises: 0014_agent_schedules_webhook_auth
+Revises: 0015_enterprise_connectors
 Create Date: 2026-07-09
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0015_agent_ownership_tts_channel_flags"
-down_revision = "0014_agent_schedules_webhook_auth"
+revision = "0016_agent_ownership_tts_channel_flags"
+down_revision = "0015_enterprise_connectors"
 branch_labels = None
 depends_on = None
 

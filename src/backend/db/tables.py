@@ -137,6 +137,21 @@ mcp_api_keys = Table(
     Column("scope", Text),
 )
 
+# Per-agent MCP connector config (ent#46; OSS-core since #118). One row per agent:
+# `enabled` + `exposed_playbooks` (JSON array of playbook names; NULL = all
+# user_invocable). The scoped connector KEY is a row in `mcp_api_keys`
+# (scope='connector'), not here. Name kept from the enterprise era so existing
+# installs adopt their data with zero migration.
+enterprise_connectors = Table(
+    "enterprise_connectors",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("enabled", Integer),
+    Column("exposed_playbooks", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
 email_whitelist = Table(
     "email_whitelist",
     metadata,

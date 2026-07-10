@@ -23,6 +23,14 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/wxCC6QGtLMA">
+    <img src="https://img.youtube.com/vi/wxCC6QGtLMA/maxresdefault.jpg" alt="Trinity v0.8.0 release tour — video" width="640" />
+  </a>
+  <br/>
+  <em>🎬 New — <a href="https://youtu.be/wxCC6QGtLMA">watch the v0.8.0 release tour</a>: agents that speak, the Brain Orb, and the Grid dashboard.</em>
+</p>
+
 ---
 
 ## Run agents like infrastructure

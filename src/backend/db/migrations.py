@@ -2762,6 +2762,28 @@ def _migrate_schedule_executions_source_channel(cursor, conn):
             col,
             f"ALTER TABLE schedule_executions ADD COLUMN {col} TEXT",
         )
+
+
+def _migrate_enterprise_connectors_table(cursor, conn):
+    """Create enterprise_connectors table (per-agent MCP connector, ent#46 → OSS #118).
+
+    Config row per agent: enabled + exposed-playbook allow-list. Schema is also in
+    db/schema.py for fresh installs; this handles existing installs. Idempotent —
+    ``CREATE TABLE IF NOT EXISTS`` on the SAME name the enterprise module used, so an
+    existing enterprise install adopts its data unchanged (zero data migration, no
+    duplicate-table drift, #118). Mirrored by Alembic 0015_enterprise_connectors for PG.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enterprise_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -2851,6 +2873,7 @@ MIGRATIONS = [
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
+    ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
     ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
     ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
 ]

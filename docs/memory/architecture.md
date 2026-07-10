@@ -87,6 +87,7 @@
 - `auth.py` - Admin login (username OR registered email + password, #82), email auth, token validation
 - `users.py` - User management, roles (ROLE-001); `PUT /me/email` self-service sign-in email (#82 transition)
 - `mcp_keys.py` - MCP API key management
+- `connector.py` - Per-agent MCP connector: config + scoped-key mint/regenerate/revoke + exposed-playbook allow-list (`/api/agents/{name}/connector*`). OSS-core (ent#46 → #118); see [mcp-connector.md](feature-flows/mcp-connector.md)
 - `setup.py` - First-time setup wizard; **required** admin email (sign-in identity) + opt-in hosted intake (trinity-enterprise#38, #82). Setup token removed — no token, no Redis dependency for setup; the unauthenticated first-run window is an operator responsibility (deploy behind a tunnel/VPN until setup completes) (trinity-enterprise#49)
 
 *Scheduling & Execution:*
@@ -212,7 +213,7 @@
 
 **Channel Adapters (`adapters/`)** — pluggable external messaging (SLACK-002, Invariant #9):
 
-- `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models
+- `base.py` - `ChannelAdapter` ABC, `NormalizedMessage`, `ChannelResponse` models. Default-no-op `record_inbound_activity(message, agent_name)` hook (#1533) — the router calls it once per *delivered* DM at step 5c (after the access gate, skipped for groups, best-effort) so Telegram/WhatsApp can upsert their chat link and bump the `message_count`/`last_active` the Sharing-tab roster reads; Slack/VoIP inherit the no-op
 - `message_router.py` - `ChannelMessageRouter`: rate limiting, agent resolution, execution pipeline; injects MEM-001 per-user memory into `execute_task(system_prompt=…)` gated on `verified_email and not is_group` (#895), and MEM-001 summarization is **sender-filtered** — `get_recent_public_chat_messages(session_id, sender_email=user_email)` so a thread-scoped multi-participant session never feeds one user's turns into another's durable memory (#903); calls the adapter's async `enrich_message` hook then prepends a `[Channel: #x]\n[From: …]` identity prefix for the **current** turn (#350) while **history** is attributed per stored `sender_label` (persisted with each channel user turn, #903 — replayed as `Alice:`/`Bob:` in `build_public_chat_context`); passes the agent's public avatar URL as `agent_avatar_url` so channels with a per-message bot icon render it (Slack `icon_url`, best-effort — #292)
 - `slack_adapter.py` - DMs, @mentions, thread replies, agent identity via `chat:write.customize`; `enrich_message` resolves sender display name + channel name via `users.info`/`conversations.info` so the agent sees who/where (best-effort, #350); outbound voice replies are per-message (ent#117) via the `send_voice_reply` tool → `voice_reply_service` (Slack path = inline MP3 through `slack_service.upload_file`); the adapter no longer speaks replies unconditionally
 - `transports/slack_socket.py` - Socket Mode: N concurrent WebSockets per `SLACK_SOCKET_CONNECTION_COUNT` (default 2, range 1–10), per-client watchdog, envelope-ID dedup ring (#244)
