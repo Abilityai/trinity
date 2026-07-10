@@ -35,6 +35,7 @@ from redis_breaker_util import (
     reset_breaker_redis_client,
 )
 from services.agent_auth import merge_auth_headers
+from services.model_context import DEFAULT_CONTEXT_WINDOW
 
 logger = logging.getLogger(__name__)
 
@@ -1020,7 +1021,7 @@ class AgentClient:
 
         # Context usage from metadata
         context_used = metadata.get("input_tokens", 0)
-        context_max = metadata.get("context_window", 200000)
+        context_max = metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW
         context_percent = round(context_used / max(context_max, 1) * 100, 1)
 
         # Cost
@@ -1086,7 +1087,7 @@ class AgentClient:
         # NOTE: cache_creation_tokens and cache_read_tokens are SUBSETS of input_tokens
         # for billing purposes, NOT additional tokens. Do NOT sum them.
         context_used = session_data.get("context_tokens") or metadata.get("input_tokens", 0)
-        context_max = session_data.get("context_window") or metadata.get("context_window", 200000)
+        context_max = session_data.get("context_window") or metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW
         context_percent = round(context_used / max(context_max, 1) * 100, 1)
 
         # Cost
@@ -1140,7 +1141,7 @@ class AgentClient:
             if response.status_code == 200:
                 session = response.json()
                 context_tokens = session.get("context_tokens", 0)
-                context_window = session.get("context_window", 200000)
+                context_window = session.get("context_window") or DEFAULT_CONTEXT_WINDOW
                 return AgentSessionInfo(
                     context_tokens=context_tokens,
                     context_window=context_window,

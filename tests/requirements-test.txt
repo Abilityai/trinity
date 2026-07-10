@@ -50,9 +50,10 @@ bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
-# CLI package — required for test_cli_admin_login.py and test_cli_profiles.py.
-# Editable so changes to src/cli/ are picked up without reinstall. pip resolves
-# this path against the current working directory (not the requirements file),
-# so `pip install -r tests/requirements-test.txt` must be invoked from the repo
-# root — which is what every CI workflow does.
--e ./src/cli
+# NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
+# An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
+# updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,
+# which doesn't exist), erroring the repo's "Dependency Graph" check on every
+# release. The local run-*.sh wrappers install the editable CLI via
+# tests/setup-env.sh instead; unit/ (the #660 one-liner contract) never imports
+# trinity_cli, so CI — which only runs unit/ — is unaffected.

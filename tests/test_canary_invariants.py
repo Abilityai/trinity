@@ -82,6 +82,41 @@ if "models" not in sys.modules:
     sys.modules["models"] = _models_mod
 
 
+# Modules this file stubs into sys.modules at *import time* (the three blocks
+# above run at collection, before any fixture, so monkeypatch can't reach
+# them). Without restoration they LEAK into the pytest session — the exact
+# mechanism behind the #1446 B-01 flake (a foreign `database` MagicMock leaked
+# by a sibling file). The autouse `_restore_sys_modules` fixture below snapshots
+# and restores them around every test so a canary run can't pollute a later
+# file that re-imports the real modules. This pair also lints the whole file
+# clean under tests/lint_sys_modules.py (the sanctioned escape hatch, precedent:
+# tests/unit/test_telegram_webhook_backfill.py) — so the deliberate reimport
+# `del`s in `reload_canary`/`reload_canary_split` are covered too.
+_STUBBED_MODULE_NAMES = [
+    "utils.helpers",
+    "croniter",
+    "models",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot the import-time-stubbed modules before each test, restore after.
+
+    Keeps this file's stubs from leaking into other test files in the same
+    pytest session (#762 / #1446 discipline).
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # ---------------------------------------------------------------------------
 # Tiny in-memory Redis substitute — covers only the surface canary uses.
 # ---------------------------------------------------------------------------
@@ -247,18 +282,9 @@ class FakeRedis:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def canary_db(monkeypatch):
-    """Temp SQLite with the tables canary touches; patch db.connection."""
-    db_file = tempfile.NamedTemporaryFile(suffix="_canary_test.db", delete=False)
-    db_file.close()
-    db_path = db_file.name
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.executescript(
-        """
+# Schema for the tables the canary collector touches. One source of truth so
+# `canary_db` (single file) and `canary_db_split` (raw ≠ engine, #1450) can't drift.
+_CANARY_SCHEMA_SQL = """
         CREATE TABLE canary_violations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invariant_id TEXT NOT NULL,
@@ -302,15 +328,6 @@ def canary_db(monkeypatch):
             shared_with_email TEXT NOT NULL,
             shared_by_id TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE TABLE agent_schedules (
-            id TEXT PRIMARY KEY,
-            agent_name TEXT NOT NULL,
-            name TEXT NOT NULL DEFAULT '',
-            cron_expression TEXT NOT NULL DEFAULT '',
-            message TEXT NOT NULL DEFAULT '',
-            enabled INTEGER DEFAULT 1,
-            owner_id INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE chat_sessions (
             id TEXT PRIMARY KEY,
@@ -374,9 +391,21 @@ def canary_db(monkeypatch):
             created_at TEXT NOT NULL DEFAULT ''
         );
         """
-    )
+
+
+def _create_canary_db_file():
+    """Create a temp SQLite file carrying `_CANARY_SCHEMA_SQL`; return its path."""
+    db_file = tempfile.NamedTemporaryFile(suffix="_canary_test.db", delete=False)
+    db_file.close()
+    conn = sqlite3.connect(db_file.name)
+    conn.executescript(_CANARY_SCHEMA_SQL)
     conn.commit()
     conn.close()
+    return db_file.name
+
+
+def _make_db_connection_module(db_path):
+    """A fake `db.connection` module whose `get_db_connection()` opens db_path."""
 
     class _ConnCtx:
         def __enter__(self):
@@ -393,9 +422,24 @@ def canary_db(monkeypatch):
             finally:
                 self._conn.close()
 
-    fake_db_connection = types.ModuleType("db.connection")
-    fake_db_connection.get_db_connection = lambda: _ConnCtx()
-    monkeypatch.setitem(sys.modules, "db.connection", fake_db_connection)
+    mod = types.ModuleType("db.connection")
+    mod.get_db_connection = lambda: _ConnCtx()
+    return mod
+
+
+@pytest.fixture
+def canary_db(monkeypatch):
+    """Temp SQLite with the tables canary touches; patch db.connection.
+
+    The raw-sqlite `db.connection` stub and the `get_engine()`/DATABASE_URL seam
+    point at the SAME temp file, so B-01's two sides read identical rows.
+    `canary_db_split` decouples them to model a Postgres-style diverged backend.
+    """
+    db_path = _create_canary_db_file()
+
+    monkeypatch.setitem(
+        sys.modules, "db.connection", _make_db_connection_module(db_path)
+    )
 
     # Route the SQLAlchemy engine seam (#300) at the SAME temp file. Converted
     # db modules (e.g. CanaryOperations) use get_engine(), whose cache is keyed
@@ -409,6 +453,39 @@ def canary_db(monkeypatch):
 
     engine_mod.dispose_engines()
     os.unlink(db_path)
+
+
+@pytest.fixture
+def canary_db_split(monkeypatch):
+    """#1450: decouple the raw-sqlite reader from the engine backend.
+
+    Models a Postgres-style diverged backend on one machine WITHOUT a live PG:
+
+    - `db.connection` (raw sqlite3 — known-agents + running/queued id-lists)
+      → the RAW file.
+    - `get_engine()`/DATABASE_URL (`db.get_queued_count` Side A +
+      `_collect_queued_ids_via_engine` Side B) → the ENGINE file.
+
+    Both carry the full schema. Yields `(raw_path, engine_path)`. On the
+    single-file `canary_db` these are one file and the split is invisible (as on
+    SQLite prod); here they are two databases — exactly the split B-01 must now
+    tolerate by sourcing both its sides from the engine.
+    """
+    raw_path = _create_canary_db_file()
+    engine_path = _create_canary_db_file()
+
+    monkeypatch.setitem(
+        sys.modules, "db.connection", _make_db_connection_module(raw_path)
+    )
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{engine_path}")
+    import db.engine as engine_mod
+    engine_mod.dispose_engines()
+
+    yield raw_path, engine_path
+
+    engine_mod.dispose_engines()
+    os.unlink(raw_path)
+    os.unlink(engine_path)
 
 
 @pytest.fixture
@@ -490,61 +567,66 @@ def fake_docker(monkeypatch):
     return client
 
 
-@pytest.fixture
-def reload_canary(canary_db, fake_redis, fake_docker, monkeypatch):
-    """Force reimport of canary modules so they bind to the patched modules.
+class _CanaryTempDB:
+    """Minimal `database.db` stand-in for B-01.
 
-    Also installs a *controlled* `database` stub whose `db.get_queued_count`
-    reads the SAME temp SQLite the raw snapshot side reads — via the
-    production `get_engine()` seam (DATABASE_URL is pinned to the temp file by
-    `canary_db`). This is what makes B-01 (queue-status coherence) both
-    deterministic and leak-immune (#1446):
+    `get_queued_count` counts `schedule_executions` queued rows over the temp
+    `DATABASE_URL` using the same `get_engine()` factory the real
+    `ScheduleOperations.get_queued_count` uses — so B-01 Side A (the accessor)
+    and Side B (`_collect_queued_ids_via_engine`) read the same rows in the same
+    backend. Kept SQL-string-based (not the SQLAlchemy Core select the real
+    accessor uses) so it stays an independent code path — B-01 stays a genuine
+    coherence check, not a tautology.
+    """
 
-    - The snapshot's `_collect_queued_count_via_service` does
-      `from database import db; int(db.get_queued_count(name))` at *call* time,
-      so it resolves whatever `sys.modules["database"]` holds. Under full-suite
-      load another module leaks a bare `sys.modules.setdefault("database",
-      MagicMock())` (e.g. tests/test_watchdog_unit.py) that never gets torn
-      down; `int(MagicMock().get_queued_count("a1")) == 1`, so B-01 saw
-      `service_count=1` against a temp DB with 0 queued rows and false-fired.
-    - `monkeypatch.setitem` here *overrides* any such leaked entry for the test's
-      duration (auto-restored LIFO at teardown), and delegates to the temp DB
-      through the exact production count path — not a hand-fed constant — so
-      B-01 is genuinely exercised, not turned into a tautology.
+    def get_queued_count(self, agent_name: str) -> int:
+        from sqlalchemy import text as _text
+        from db.engine import get_engine
 
-    We deliberately do NOT evict-and-reimport the real `database` module:
-    `database.py` imports `DB_PATH` (absent on the `canary_db` fake) and its
-    `__init__` runs `init_database()`/migrations (heavy, module-identity churn).
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                _text(
+                    "SELECT COUNT(*) AS c FROM schedule_executions "
+                    "WHERE agent_name = :n AND status = 'queued'"
+                ),
+                {"n": agent_name},
+            ).first()
+        return int(row[0]) if row else 0
+
+    def get_setting_value(self, key: str, default=None):
+        # No settings table in the B-01 temp DB; mirror the real facade's
+        # empty-store return so callers that leak onto this stub via the
+        # module-level `from database import db` reference (settings_service.
+        # get_setting <- task_execution_service.get_platform_default_model)
+        # get a clean fallback instead of an AttributeError.
+        return default
+
+
+def _reload_canary_with_temp_db(fake_redis, monkeypatch):
+    """Evict + reimport the canary modules and install the controlled `database`
+    stub. Shared by `reload_canary` (single file) and `reload_canary_split`
+    (raw ≠ engine). The `del sys.modules[...]` reimport is lint-clean under the
+    file's `_STUBBED_MODULE_NAMES`/`_restore_sys_modules` escape hatch.
+
+    Why a controlled `database` stub at all — the snapshot's
+    `_collect_queued_count_via_service` does `from database import db;
+    int(db.get_queued_count(name))` at *call* time, resolving whatever
+    `sys.modules["database"]` holds. Under full-suite load another module leaks a
+    bare `sys.modules.setdefault("database", MagicMock())` (e.g.
+    tests/test_watchdog_unit.py) that never tears down;
+    `int(MagicMock().get_queued_count("a1")) == 1`, so B-01 saw `service_count=1`
+    against a 0-queued temp DB and false-fired (#1446). `monkeypatch.setitem`
+    overrides that leak for the test's duration and delegates to the temp DB via
+    the exact production count path — genuine, not a tautology. We deliberately
+    do NOT evict-and-reimport the real `database` module (its `__init__` runs
+    `init_database()`/migrations — heavy, module-identity churn).
     """
     for mod in list(sys.modules):
         if mod.startswith("canary") or mod == "db.canary":
             del sys.modules[mod]
 
-    class _TempDB:
-        """Minimal `database.db` stand-in for B-01.
-
-        `get_queued_count` counts `schedule_executions` queued rows over the
-        temp `DATABASE_URL` using the same `get_engine()` factory the real
-        `ScheduleOperations.get_queued_count` uses — so both B-01 sides read
-        the same rows in the same backend.
-        """
-
-        def get_queued_count(self, agent_name: str) -> int:
-            from sqlalchemy import text as _text
-            from db.engine import get_engine
-
-            with get_engine().connect() as conn:
-                row = conn.execute(
-                    _text(
-                        "SELECT COUNT(*) AS c FROM schedule_executions "
-                        "WHERE agent_name = :n AND status = 'queued'"
-                    ),
-                    {"n": agent_name},
-                ).first()
-            return int(row[0]) if row else 0
-
     database_stub = types.ModuleType("database")
-    database_stub.db = _TempDB()
+    database_stub.db = _CanaryTempDB()
     monkeypatch.setitem(sys.modules, "database", database_stub)
 
     import canary as canary_pkg  # noqa: F401
@@ -556,6 +638,21 @@ def reload_canary(canary_db, fake_redis, fake_docker, monkeypatch):
         "redis": fake_redis,
         "database_stub": database_stub,
     }
+
+
+@pytest.fixture
+def reload_canary(canary_db, fake_redis, fake_docker, monkeypatch):
+    """Force reimport of canary modules bound to the patched modules, over the
+    single-file `canary_db` (raw and engine reads hit the same temp DB)."""
+    return _reload_canary_with_temp_db(fake_redis, monkeypatch)
+
+
+@pytest.fixture
+def reload_canary_split(canary_db_split, fake_redis, fake_docker, monkeypatch):
+    """Like `reload_canary` but over the split (raw ≠ engine) backend (#1450) —
+    `db.connection` reads the RAW file, `get_engine()`/DATABASE_URL the ENGINE
+    file. Proves B-01 sources both its sides from the engine."""
+    return _reload_canary_with_temp_db(fake_redis, monkeypatch)
 
 
 @pytest.fixture
@@ -597,6 +694,25 @@ def cleanup_after_test():
 # ---------------------------------------------------------------------------
 # Helpers — populate fixtures
 # ---------------------------------------------------------------------------
+
+
+class _Sequence:
+    """Callable returning successive values on each call (ignoring the arg).
+
+    Used by the #1450 confirm-re-read tests to script what
+    `_collect_queued_ids_via_engine` / `_collect_queued_count_via_service`
+    return across the two reads of one B-01 cycle. `.calls` counts invocations
+    so a test can assert the confirm-re-read actually happened.
+    """
+
+    def __init__(self, values):
+        self._values = list(values)
+        self.calls = 0
+
+    def __call__(self, agent_name):
+        value = self._values[min(self.calls, len(self._values) - 1)]
+        self.calls += 1
+        return value
 
 
 def _conn(path):
@@ -1159,7 +1275,7 @@ class TestRunner:
 
         assert set(results.keys()) == {
             "S-01", "S-02", "S-03",
-            "E-01", "E-02", "E-05",
+            "E-01", "E-02", "E-05", "E-06",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1177,6 +1293,8 @@ class TestRunner:
         # snapshot id-list count == 0, so the check is genuinely green — not
         # skipped, and immune to a leaked foreign `database` stub (#1446).
         assert results["B-01"] == []
+        # E-06 (stale next_run_at) is green with no schedules present.
+        assert results["E-06"] == []
         # B-02 / R-01 are green on a clean platform.
         assert results["B-02"] == []
         assert results["R-01"] == []
@@ -1402,8 +1520,16 @@ class TestInvariantE05:
 
 class TestInvariantB01:
     @staticmethod
-    def _snap(*, queued_ids, service_count):
+    def _snap(*, queued_ids, service_count, engine_ids="__same__"):
+        """Build a one-agent snapshot for B-01.
+
+        `queued_ids` populates the B-02/E-02 raw set (`queued_exec_ids`) for
+        realism; B-01's Side B is `queued_ids_via_engine` (#1450), which
+        defaults to the same set unless a test overrides `engine_ids` to
+        decouple the two backends (e.g. to assert the engine-None skip).
+        """
         from canary.snapshot import Snapshot, AgentSnapshot
+        engine = set(queued_ids) if engine_ids == "__same__" else engine_ids
         return Snapshot(
             snapshot_time="2026-05-18T12:00:00Z",
             agents=[
@@ -1414,6 +1540,9 @@ class TestInvariantB01:
                     execution_timeout_seconds=900,
                     queued_exec_ids=set(queued_ids),
                     queued_count_via_service=service_count,
+                    queued_ids_via_engine=(
+                        None if engine is None else set(engine)
+                    ),
                 )
             ],
         )
@@ -1438,6 +1567,8 @@ class TestInvariantB01:
         assert v.severity == "critical"
         assert v.observed_state["service_count"] == 1
         assert v.observed_state["snapshot_count"] == 3
+        # B-01 now reports the engine-side ids (Side B), not the raw set.
+        assert v.observed_state["snapshot_queued_ids"] == ["q1", "q2", "q3"]
 
     def test_fires_when_service_overcounts(self):
         snap = self._snap(queued_ids={"q1"}, service_count=5)
@@ -1450,6 +1581,14 @@ class TestInvariantB01:
     def test_skips_when_service_count_none(self):
         """Snapshot built without the `database` facade reachable."""
         snap = self._snap(queued_ids={"q1"}, service_count=None)
+        from canary.invariants import b01_queue_status_coherence as b01
+        assert b01.check(snap) == []
+
+    def test_skips_when_engine_ids_none(self):
+        """#1450: engine-side read failed (`queued_ids_via_engine is None`) →
+        B-01 skips rather than comparing the accessor count to a raw-sqlite
+        set on a diverged backend."""
+        snap = self._snap(queued_ids={"q1", "q2"}, service_count=2, engine_ids=None)
         from canary.invariants import b01_queue_status_coherence as b01
         assert b01.check(snap) == []
 
@@ -1540,6 +1679,123 @@ class TestInvariantB01EndToEnd:
         assert v.observed_state["agent_name"] == "a1"
         assert v.observed_state["service_count"] == 0
         assert v.observed_state["snapshot_count"] == 2
+
+    # -- #1450 regression net -------------------------------------------------
+
+    def test_b01_backend_consistency_on_diverged_backend(
+        self, canary_db_split, reload_canary_split
+    ):
+        """#1450 gap (b): a Postgres-style diverged backend WITHOUT a live PG.
+
+        `canary_db_split` points the raw-sqlite reader at an EMPTY (of queued
+        rows) file and the `get_engine()`/DATABASE_URL seam at a DIFFERENT file
+        holding N queued rows. Before the fix, B-01 Side B read the raw file → 0
+        while Side A (accessor, engine) read N → spurious `critical`. After the
+        fix both sides read the engine → N == N → green.
+        """
+        raw_path, engine_path = canary_db_split
+        # Agent lives in the RAW file (that's what _collect_known_agents reads).
+        _add_agent(raw_path, "a1")
+        # N queued rows live ONLY in the ENGINE file (the accessor + Side B read
+        # this backend). The raw file has zero queued rows for a1.
+        for i in range(3):
+            _add_execution(engine_path, f"q{i}", "a1", "queued")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        agent = next(a for a in snap.agents if a.name == "a1")
+
+        # Side B now reads the engine file → sees all 3; the raw set is empty,
+        # proving the two sides genuinely read different backends.
+        assert agent.queued_ids_via_engine == {"q0", "q1", "q2"}
+        assert agent.queued_exec_ids == set()
+        assert agent.queued_count_via_service == 3
+
+        results = reload_canary_split["canary"].run_invariants(snap)
+        assert results["B-01"] == [], (
+            "B-01 must not false-fire when the raw-sqlite reader and the engine "
+            "backend diverge — both sides now go through get_engine() (#1450)"
+        )
+
+    def test_b01_tolerates_transient_race(
+        self, canary_db, reload_canary, monkeypatch
+    ):
+        """#1450 gap (a): a concurrent enqueue/drain between the two reads is a
+        transient mismatch the single confirm-re-read absorbs.
+
+        First read pair (count 3 vs 2 ids) triggers the confirm; the confirm
+        pair agrees (3 vs 3) → B-01 green, and both readers were called twice.
+        """
+        import canary.snapshot as snap_mod
+
+        _add_agent(canary_db, "a1")
+
+        ids_seq = _Sequence([{"q1", "q2"}, {"q1", "q2", "q3"}])
+        count_seq = _Sequence([3, 3])
+        # setattr on the REIMPORTED module (collect_snapshot resolves these names
+        # in its own module globals at call time) — never a raw sys.modules poke.
+        monkeypatch.setattr(snap_mod, "_collect_queued_ids_via_engine", ids_seq)
+        monkeypatch.setattr(snap_mod, "_collect_queued_count_via_service", count_seq)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        results = reload_canary["canary"].run_invariants(snap)
+
+        assert results["B-01"] == []  # transient race absorbed by the confirm
+        assert ids_seq.calls == 2  # confirm-re-read happened
+        assert count_seq.calls == 2
+
+    def test_b01_confirm_does_not_mask_persistent_drift(
+        self, canary_db, reload_canary, monkeypatch
+    ):
+        """Companion to the race test — the confirm-re-read must NOT hide a real
+        regression. A persistent drift (count 0 vs 2 ids on BOTH reads) survives
+        the confirm and still fires exactly once (AC #3 intact)."""
+        import canary.snapshot as snap_mod
+
+        _add_agent(canary_db, "a1")
+        ids_seq = _Sequence([{"q1", "q2"}, {"q1", "q2"}])
+        count_seq = _Sequence([0, 0])
+        monkeypatch.setattr(snap_mod, "_collect_queued_ids_via_engine", ids_seq)
+        monkeypatch.setattr(snap_mod, "_collect_queued_count_via_service", count_seq)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        results = reload_canary["canary"].run_invariants(snap)
+        assert len(results["B-01"]) == 1
+        assert results["B-01"][0].observed_state["service_count"] == 0
+        assert results["B-01"][0].observed_state["snapshot_count"] == 2
+        # Confirm was attempted (both readers called twice), yet still fired.
+        assert ids_seq.calls == 2
+        assert count_seq.calls == 2
+
+    def test_b01_skips_on_engine_read_failure(
+        self, canary_db, reload_canary, monkeypatch
+    ):
+        """The blocker's net: an engine-side read failure degrades B-01 to a
+        SKIP (never a raw-vs-engine false-fire). `queued_ids_via_engine` is
+        `None`, B-01 returns [], and the failure is recorded in
+        `sources_unavailable`."""
+        import canary.snapshot as snap_mod
+
+        _add_agent(canary_db, "a1")
+        _add_execution(canary_db, "q1", "a1", "queued")
+        _add_execution(canary_db, "q2", "a1", "queued")
+
+        def _boom(agent_name):
+            raise RuntimeError("engine down")
+
+        monkeypatch.setattr(snap_mod, "_collect_queued_ids_via_engine", _boom)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        agent = next(a for a in snap.agents if a.name == "a1")
+        assert agent.queued_ids_via_engine is None
+        # The accessor still returned 2 — but B-01 must NOT compare 2 against the
+        # raw set; it skips because the engine set is None.
+        assert agent.queued_count_via_service == 2
+        assert any(
+            s.startswith("engine.queued_ids[a1]") for s in snap.sources_unavailable
+        )
+
+        results = reload_canary["canary"].run_invariants(snap)
+        assert results["B-01"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Brain Orb scope-mutate hook (#58 Phase 2, trinity-enterprise#76).
+
+POST surface: reads {tokens} (authoritative full set — what orb.js setScope
+sends; {mount}/{unmount} accepted as sugar) on stdin, persists the new active
+set, re-runs the exporter over the newly-scoped vault, and prints
+{ok, active, nodes, edges, contract_version}. The orb then refetches /data and
+rebuilds. Owner-gated upstream at the backend proxy.
+
+Fail-loud rules (review M2/H2): unknown tokens are an error, never a silent
+narrowing; an empty mount set is refused (a blank canvas by accident is a bug
+report, not a feature); an exporter failure leaves the previous data.json
+untouched and reports the error.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import (
+    discover_scopes, emit, graph_counts, read_active, read_stdin_json,
+    run_export, write_active,
+)
+
+
+def main():
+    req = read_stdin_json()
+    if req is None:
+        emit({"ok": False, "error": "invalid JSON"})
+        return
+
+    known = {e["token"] for e in discover_scopes()}
+    if isinstance(req.get("tokens"), list):
+        wanted = [str(t) for t in req["tokens"]]
+    else:
+        wanted = list(read_active())
+        for t in req.get("mount") or []:
+            if str(t) not in wanted:
+                wanted.append(str(t))
+        for t in req.get("unmount") or []:
+            if str(t) in wanted:
+                wanted.remove(str(t))
+
+    unknown = [t for t in wanted if t not in known]
+    if unknown:
+        emit({"ok": False, "error": f"unknown scope token(s): {', '.join(unknown[:5])}"})
+        return
+    if not wanted:
+        emit({"ok": False, "error": "at least one scope must remain mounted"})
+        return
+
+    prev = read_active()
+    write_active(wanted)
+    ok, err = run_export(wanted)
+    if not ok:
+        write_active(prev)   # roll the state back; data.json was left untouched
+        emit({"ok": False, "error": err, "active": prev})
+        return
+
+    nodes, edges = graph_counts()
+    emit({"ok": True, "active": wanted, "nodes": nodes, "edges": edges})
+
+
+main()

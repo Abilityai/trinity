@@ -671,7 +671,9 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
                 return response.json()
             return None
     except Exception as e:
-        print(f"Error getting git status for {agent_name}: {e}")
+        # #1561: structured logging, not a bare print() — otherwise these
+        # failures have no level/timestamp and are invisible to log-based alerting.
+        logger.warning("Error getting git status for %s: %s", agent_name, e)
         return None
 
 
@@ -946,12 +948,21 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     (bash can't hold NUL bytes), then a NUL-delimited pipe to xargs so paths
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
+
+    ``.trinity/brain-orb/`` and ``.trinity/setup.sh`` are exempt: Brain-Orb /
+    setup-convention templates COMMIT those files (trinity-enterprise#76), while
+    the fleet-wide ``.trinity/`` ignore appended above makes them look
+    ignored-but-tracked — without the pathspec exclusions the first push would
+    untrack them and push the deletion, so a later re-clone/recreate boots
+    hookless and never runs its startup setup (verified live: the e2e Push
+    swept setup.sh before the second exemption was added).
     """
+    exempt = '":!.trinity/brain-orb" ":!.trinity/setup.sh"'
     script = (
         f"cd {shlex.quote(git_dir)} && "
-        "ignored=$(git ls-files -ci --exclude-standard) && "
+        f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
         'if [ -n "$ignored" ]; then '
-        "git ls-files -ci -z --exclude-standard | "
+        f"git ls-files -ci -z --exclude-standard -- . {exempt} | "
         "xargs -0 git rm --cached --quiet -r --; "
         "fi"
     )

@@ -354,8 +354,8 @@ CREATE TABLE whatsapp_chat_links (
     session_id TEXT,
     verified_email TEXT,                         -- #311 Phase 2
     verified_at TEXT,
-    message_count INTEGER DEFAULT 0,
-    last_active TEXT,
+    message_count INTEGER DEFAULT 0,             -- #1533: inbound DMs, bumped by record_inbound(); not backfilled
+    last_active TEXT,                            -- #1533: record_inbound() is its only live writer
     created_at TEXT NOT NULL,
     UNIQUE(binding_id, wa_user_phone)
 );

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from config import GEMINI_API_KEY
 from database import db
 from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName
-from services import brain_orb_voice_service, idempotency_service, rate_limiter
+from services import brain_orb_postprocess, brain_orb_voice_service, idempotency_service, rate_limiter
 # Runtime-resolved flags (#85): system_settings override → BRAIN_ORB_* env
 # opt-in → OFF. Imported as module-level names so tests can monkeypatch the
 # gate seam (`monkeypatch.setattr(bo, "is_brain_orb_enabled", ...)`).
@@ -63,13 +63,10 @@ _VOICE_TOKEN_RATE_LIMIT = 10
 _VOICE_TOKEN_RATE_WINDOW = 60
 
 
-async def _agent_request(agent_name: str, method: str, path: str, *, content: bytes | None = None, timeout: float) -> httpx.Response:
-    """Shared gate + proxy: flag-gate → agent running → agent-auth'd request.
-
-    Returns the upstream ``httpx.Response`` for the caller to map. Raises the
-    mapped ``HTTPException`` on flag-off (404 — flag is the single source of
-    truth), missing/stopped agent (404 / 503), or transport failure (503 / 504).
-    """
+async def _require_running_agent(agent_name: str) -> None:
+    """Shared gate: flag-gate → agent exists → agent running. Raises the mapped
+    ``HTTPException`` on flag-off (404 — flag is the single source of truth) or
+    missing/stopped agent (404 / 503)."""
     if not is_brain_orb_enabled():
         raise HTTPException(status_code=404, detail="Brain Orb is not enabled")
     container = get_agent_container(agent_name)
@@ -78,6 +75,16 @@ async def _agent_request(agent_name: str, method: str, path: str, *, content: by
     await container_reload(container)
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+
+async def _agent_request(agent_name: str, method: str, path: str, *, content: bytes | None = None, timeout: float) -> httpx.Response:
+    """Shared gate + proxy: flag-gate → agent running → agent-auth'd request.
+
+    Returns the upstream ``httpx.Response`` for the caller to map. Raises the
+    mapped ``HTTPException`` on flag-off (404 — flag is the single source of
+    truth), missing/stopped agent (404 / 503), or transport failure (503 / 504).
+    """
+    await _require_running_agent(agent_name)
     url = f"http://agent-{agent_name}:{_AGENT_PORT}{path}"
     try:
         async with agent_httpx_client(agent_name, timeout=timeout) as client:
@@ -249,7 +256,16 @@ async def post_brain_orb_action(
     deduped via `Idempotency-Key` (Invariant #18): a re-POST with the same key replays
     the stored result (`X-Idempotent-Replay: true`) without a second write; an in-flight
     duplicate → 409. The key folds the action verb so a reused client key can't replay a
-    different verb's snapshot. The agent owns the write semantics (Invariant #8)."""
+    different verb's snapshot. The agent owns the write semantics (Invariant #8).
+
+    Post-session processing (#102): the hook's own detached `claude -p` fork was
+    invisible to the platform and reaped by the agent-server's cgroup orphan sweep, so
+    the PLATFORM now owns the trigger — `capture_transcript`'s `process` flag is
+    stripped before the hook call (older hooks must not also fork) and, once the
+    transcript is saved, `services/brain_orb_postprocess.dispatch_postprocess` runs the
+    configured prompt as a standard `execute_task(triggered_by="voice")` — a real,
+    observable execution. `process_transcript` never reaches the hook at all for the
+    same reason; it dispatches directly."""
     _require_write_enabled()
     body = await request.body()
     if len(body) > _MAX_ACTION_BODY:
@@ -262,6 +278,14 @@ async def post_brain_orb_action(
     if action not in _ALLOWED_ACTIONS:
         # run_skill (arbitrary exec) remains out of scope; anything else invalid.
         raise HTTPException(status_code=400, detail="Unsupported action")
+
+    wants_process = action == "capture_transcript" and bool(payload.get("process"))
+    if wants_process:
+        # #102: strip the hook-side trigger — the platform dispatches the post-session
+        # run below, and an older hook seeing `process` would ALSO fork its detached
+        # (invisible, sweep-reaped) claude.
+        payload = {k: v for k, v in payload.items() if k != "process"}
+        body = json.dumps(payload).encode()
 
     # Idempotency FIRST (before rate limit) so a legit retry replays instead of 429ing.
     scope = idempotency_service.make_agent_scope(agent_name)
@@ -277,6 +301,7 @@ async def post_brain_orb_action(
             headers={**_NO_STORE, "X-Idempotent-Replay": "true"},
         )
 
+    postprocess_result = None
     try:
         rate_limiter.enforce(
             f"brain_orb_action:{current_user.id}:{agent_name}:{action}",
@@ -284,13 +309,44 @@ async def post_brain_orb_action(
             _ACTION_RATE_WINDOW,
             detail="Too many Brain Orb actions.",
         )
-        # Backend timeout sits ABOVE the agent-server hook's 60s (review F3) so a slow
-        # hook surfaces as the agent's own 504, not a premature backend timeout that
-        # would release the idempotency claim on an ambiguous outcome → double-write.
-        response = await _agent_request(
-            agent_name, "POST", "/api/brain-orb/action", content=body, timeout=90.0
-        )
-        result = _passthrough(response, not_found="KB writes not supported")
+        if action == "process_transcript":
+            # #102: never reaches the hook — the manual re-run dispatches through the
+            # same observable execution path as the session-end trigger.
+            snapshot = await _dispatch_process_transcript(agent_name, payload, current_user)
+            result = Response(
+                content=json.dumps(snapshot), media_type="application/json", headers=_NO_STORE
+            )
+        else:
+            # Backend timeout sits ABOVE the agent-server hook's 60s (review F3) so a slow
+            # hook surfaces as the agent's own 504, not a premature backend timeout that
+            # would release the idempotency claim on an ambiguous outcome → double-write.
+            response = await _agent_request(
+                agent_name, "POST", "/api/brain-orb/action", content=body, timeout=90.0
+            )
+            result = _passthrough(response, not_found="KB writes not supported")
+            try:
+                snapshot = json.loads(response.content)
+            except ValueError:
+                snapshot = None
+            if wants_process and isinstance(snapshot, dict):
+                if snapshot.get("ok") and snapshot.get("saved") and snapshot.get("path"):
+                    postprocess_result = await brain_orb_postprocess.dispatch_postprocess(
+                        agent_name,
+                        transcript_path=str(snapshot["path"]),
+                        source_user_id=current_user.id,
+                        source_user_email=getattr(current_user, "email", None),
+                    )
+                else:
+                    postprocess_result = {
+                        "dispatched": False,
+                        "reason": snapshot.get("reason") or "transcript not saved",
+                    }
+                snapshot["postprocess"] = postprocess_result
+                # Re-serialize the augmented snapshot (only this verb — every other
+                # action stays a byte pass-through) so replays carry the dispatch too.
+                result = Response(
+                    content=json.dumps(snapshot), media_type="application/json", headers=_NO_STORE
+                )
     except HTTPException:
         # Release the in-flight claim so the client can retry (429 / agent error / 504).
         idempotency_service.fail(decision)
@@ -299,12 +355,13 @@ async def post_brain_orb_action(
         idempotency_service.fail(decision)
         raise
 
-    try:
-        snapshot = json.loads(response.content)
-    except ValueError:
-        snapshot = None
     idempotency_service.complete(decision, None, snapshot)
 
+    details = {"action": action}
+    if postprocess_result is not None:
+        details["postprocess_dispatched"] = bool(postprocess_result.get("dispatched"))
+        if postprocess_result.get("execution_id"):
+            details["postprocess_execution_id"] = postprocess_result["execution_id"]
     await _safe_audit(
         event_type=AuditEventType.CONFIGURATION,
         event_action=f"brain_orb_{action}",
@@ -315,9 +372,28 @@ async def post_brain_orb_action(
         target_id=agent_name,
         endpoint=str(request.url.path),
         request_id=getattr(request.state, "request_id", None),
-        details={"action": action},
+        details=details,
     )
     return result
+
+
+async def _dispatch_process_transcript(agent_name: str, payload: dict, current_user) -> dict:
+    """Manual postprocess re-run (#102): validate the transcript reference and dispatch
+    the configured prompt as a standard execution. Mirrors the old hook verb's response
+    shape (`ok` tracks whether a run actually started)."""
+    await _require_running_agent(agent_name)  # same gates the hook path enforced
+    transcript_path = str(payload.get("path") or "").strip()
+    transcript_text = str(payload.get("transcript") or "").strip()
+    if not transcript_path and not transcript_text:
+        raise HTTPException(status_code=400, detail="need a transcript path or text")
+    dispatched = await brain_orb_postprocess.dispatch_postprocess(
+        agent_name,
+        transcript_path=transcript_path or None,
+        transcript_text=transcript_text or None,
+        source_user_id=current_user.id,
+        source_user_email=getattr(current_user, "email", None),
+    )
+    return {"ok": bool(dispatched.get("dispatched")), **dispatched}
 
 
 @router.post("/{agent_name}/brain-orb/refresh")

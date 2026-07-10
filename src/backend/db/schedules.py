@@ -2511,6 +2511,24 @@ class ScheduleOperations:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_git_config(row) if row else None
 
+    def get_git_config_agent_names_for_repo(self, github_repo: str) -> List[str]:
+        """Agent names whose git config binds ``github_repo`` (any branch/mode).
+
+        Fork-to-own creation guard (trinity-enterprise#93): source-mode rows
+        bypass the partial UNIQUE(github_repo, working_branch) index, so two
+        auto-pushing agents could otherwise bind the same destination repo.
+        NB: agent delete is a SOFT delete — the git-config row is cascaded only
+        at purge (retention default 180d), so a hit may name a soft-deleted
+        agent. That block is intentional: admin recovery (#834) would resurrect
+        the binding. Comparison is case-insensitive — GitHub repo slugs are.
+        """
+        stmt = select(agent_git_config.c.agent_name).where(
+            func.lower(agent_git_config.c.github_repo) == github_repo.lower()
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).scalars().all()
+        return list(rows)
+
     def update_git_sync(self, agent_name: str, commit_sha: str) -> bool:
         """Update git sync timestamp and commit SHA after successful sync."""
         now = utc_now_iso()
@@ -3083,10 +3101,30 @@ class ScheduleOperations:
             return result.rowcount > 0
 
     def list_git_enabled_agents(self) -> List[AgentGitConfig]:
-        """List all agents with git sync enabled."""
+        """List all agents with git sync enabled.
+
+        Joins `agent_ownership` and excludes soft-deleted agents (#1561).
+        `agent_git_config` rows survive soft delete by design, so without this
+        filter the 60s `SyncHealthService` poller (and `GET /api/fleet/sync-audit`)
+        keeps hitting removed containers forever — each `httpx.ConnectError`
+        poisons the transport circuit breaker and eventually drives it to
+        DORMANT + a bogus `circuit_breaker_dormant` alert for an agent that no
+        longer exists. Mirrors the #834 hardening on `list_all_enabled_schedules()`.
+        """
         stmt = (
             select(agent_git_config)
-            .where(agent_git_config.c.sync_enabled == 1)
+            .select_from(
+                agent_git_config.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_git_config.c.sync_enabled == 1,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            )
             .order_by(agent_git_config.c.agent_name)
         )
         with get_engine().connect() as conn:

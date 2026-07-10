@@ -52,6 +52,15 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             if [ -n "${GITHUB_PAT}" ]; then
                 git remote set-url origin "${CLONE_URL}"
             fi
+            # trinity-enterprise#93: keep the credential-less upstream remote
+            # (template source) in place across restarts — self-healing if it
+            # was removed.
+            if [ -n "${GIT_UPSTREAM_REPO}" ]; then
+                UPSTREAM_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GIT_UPSTREAM_REPO}.git"
+                git remote set-url upstream "${UPSTREAM_URL}" 2>/dev/null || \
+                    git remote add upstream "${UPSTREAM_URL}" 2>/dev/null || \
+                    echo "Note: could not add upstream remote"
+            fi
             git fetch origin 2>&1 || echo "Note: Could not fetch from remote"
 
             # #1439: .git exists ⇒ a prior clone succeeded; clear any stale
@@ -139,6 +148,17 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
 
             # Store git remote URL with credentials for push operations
             git remote set-url origin "${CLONE_URL}"
+
+            # trinity-enterprise#93: fork-to-own agents track the template
+            # they were copied from as `upstream` (credential-less — the
+            # template is public; read-only by construction) so
+            # `git pull upstream <branch>` adopts template improvements.
+            if [ -n "${GIT_UPSTREAM_REPO}" ]; then
+                UPSTREAM_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GIT_UPSTREAM_REPO}.git"
+                git remote set-url upstream "${UPSTREAM_URL}" 2>/dev/null || \
+                    git remote add upstream "${UPSTREAM_URL}" 2>/dev/null || \
+                    echo "Note: could not add upstream remote"
+            fi
 
             # #1439: .local (base-image pip cache) is untouched — the merge never
             # removes it — so no backup/restore is needed (the old rm-then-clone

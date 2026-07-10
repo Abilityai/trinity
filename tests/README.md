@@ -3,9 +3,10 @@
 ## Quick start
 
 ```bash
-# From repo root — pip resolves the `-e ./src/cli` editable install relative
-# to CWD, so the repo root is the working directory the requirements file
-# assumes (this is also how CI invokes it).
+# From repo root. The local CLI (trinity_cli, used by test_cli_*.py) is installed
+# on demand by the run-*.sh wrappers (via tests/setup-env.sh) — it is kept out of
+# requirements-test.txt so an editable path doesn't red the repo's "Dependency
+# Graph" check on every release.
 python -m venv tests/.venv && source tests/.venv/bin/activate
 pip install -r tests/requirements-test.txt
 bash tests/run-integration.sh   # ~30 sec, 25 tests — verifies env
@@ -65,14 +66,14 @@ docker compose exec backend python -c \
 
 ### `ModuleNotFoundError: No module named 'trinity_cli'`
 
-`tests/requirements-test.txt` includes `-e ./src/cli` (pip resolves the
-path against CWD, not the requirements file — see the comment in the
-file), so a fresh `pip install -r tests/requirements-test.txt` **from the
-repo root** should resolve this. If not:
+The `run-*.sh` wrappers install the editable CLI on demand (via
+`tests/setup-env.sh`). It is kept out of `tests/requirements-test.txt` because
+an `-e ./src/cli` line there breaks GitHub's dependency-graph updater. If you
+invoke pytest directly (without a wrapper), install it yourself:
 
 ```bash
 # From repo root:
-.venv/bin/pip install -e ./src/cli
+tests/.venv/bin/pip install -e ./src/cli
 ```
 
 ### Conductor workspaces: backend mounts the *original* repo, not the worktree

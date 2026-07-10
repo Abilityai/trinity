@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Brain Orb scopes hook (#58 Phase 2, trinity-enterprise#76).
+
+GET surface: prints {active, available, contract_version} — the vault scopes
+the orb's scope panel offers. Scopes are the vault's real top-level folders
+(family folders like Books also list per-book child scopes); the active set is
+the persisted state (default: everything, matching the seed export).
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import discover_scopes, emit, read_active
+
+
+def main():
+    entries = discover_scopes()
+    emit({"active": read_active(), "available": entries})
+
+
+main()

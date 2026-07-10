@@ -15,6 +15,10 @@
 
 | Date | ID | Change | Flow |
 |------|-----|--------|------|
+| 2026-07-07 | #1500 | fix(ui): Tasks tab joins `FULLSCREEN_TABS` — task list flex-fills the viewport (old `max-h-96` cap becomes the `min-h-96` floor), panel root is the short-viewport fallback scroller; e2e fill/parity spec + `.first()` repair of the #954 spec broken by #1114's measuring mirror | [tasks-tab.md](feature-flows/tasks-tab.md) |
+| 2026-07-07 | trinity-enterprise#107 | feat: auto-seed a default **Cornelius** second-brain agent on fresh install with the Brain Orb enabled — bundled `local:cornelius` template (pre-generated seed graph so the orb renders immediately); first-run-only (durable `cornelius_seeded` flag) + fresh-install-scoped (`count_non_system_agents()`) `ensure_seeded()`; setup-completion BackgroundTask + `main.py` lifespan safety-net; local bundle ⇒ no upstream `origin` (durable ownership deferred to fork-to-own trinity-enterprise#109) | [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md) |
+| 2026-07-06 | #1450 | fix(canary): B-01 queue-status coherence — Side B (queued id-count) reads via the SAME `get_engine()`/`DATABASE_URL` seam as the accessor (backend-consistent on Postgres, not raw-sqlite vs engine; #300/#1093 gap), dedicated `queued_ids_via_engine` field leaves `queued_exec_ids` for B-02/E-02; collector does one confirm-re-read so a transient enqueue/drain race self-heals while a persistent drift still fires; engine-read failure → B-01 skip. Production residue of #1446 | [architecture.md](architecture.md) |
+| 2026-07-06 | #1489 | fix(frontend): plumb `VITE_BUG_REPORTING_ENABLED` / `VITE_BUG_INTAKE_URL` as prod build args (`ARG`+`ENV` in `Dockerfile.prod` before `npm run build`, `${VAR:-default}` compose `build.args`, `.env.example` docs) so the #1116 disable/repoint knobs actually reach the shipped image — Vite inlines `import.meta.env` at build time. compose==ARG==code default; disable works end-to-end, repoint still CSP-blocked (deferred #1485). Umbrella #1485 | [in-app-bug-reporting.md](feature-flows/in-app-bug-reporting.md) |
 | 2026-07-06 | #1485 | fix(config): forward operator-intake / dispatch-breaker / public-access levers through **both** compose files (docs the #1039/#1067 packaging-gap class); honor cross-tool `DO_NOT_TRACK` convention in `config.py` (#1486/#1487/#1488) | [dispatch-circuit-breaker.md](feature-flows/dispatch-circuit-breaker.md) |
 | 2026-07-04 | #903 | fix(slack): thread-scoped session + per-speaker attribution + sender-filtered memory | [slack-channel-routing.md](feature-flows/slack-channel-routing.md) |
 | 2026-07-04 | #1445 | fix(webhooks): gate schedule/webhook **creation** on a live owning agent (`is_agent_live` → 404; access-check-first so non-owners see a uniform 403) so a webhook token always resolves to a schedule of a live agent — closes the orphan-schedule class that made valid tokens 404 after #1423's soft-delete-aware token-lookup INNER JOIN | [webhook-triggers.md](feature-flows/webhook-triggers.md) |
@@ -57,6 +61,7 @@
 | Flow | Document | Description |
 |------|----------|-------------|
 | Agent Lifecycle | [agent-lifecycle.md](feature-flows/agent-lifecycle.md) | Create, start, stop, delete Docker containers |
+| Default Cornelius Agent | [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md) | Auto-seed a default Cornelius second-brain agent + enable the Brain Orb on fresh install; first-run-only, fresh-install-scoped `ensure_seeded()` (trinity-enterprise#107) |
 | Agent Rename | [agent-rename.md](feature-flows/agent-rename.md) | Rename agents via UI, MCP, or API (RENAME-001) |
 | Agent Terminal | [agent-terminal.md](feature-flows/agent-terminal.md) | Browser-based xterm.js terminal with Claude/Gemini/Bash modes |
 | Credential Injection | [credential-injection.md](feature-flows/credential-injection.md) | CRED-002: Direct file injection, encrypted git storage |
@@ -180,6 +185,7 @@
 | MCP Orchestration | [mcp-orchestration.md](feature-flows/mcp-orchestration.md) | 62 MCP tools for agent orchestration |
 | MCP Git Tools | [mcp-git-tools.md](feature-flows/mcp-git-tools.md) | Deterministic git tools over MCP + request-id audit correlation (#905) |
 | MCP Agent Exposure | [mcp-agent-exposure.md](feature-flows/mcp-agent-exposure.md) | Per-agent opt-in dedicated `chat_with_<slug>` MCP tool, dynamically poll-reconciled (#846) |
+| MCP Connector | [mcp-connector.md](feature-flows/mcp-connector.md) | Per-agent MCP connector — expose playbooks as tools to an external AI client via a scoped key; OSS-core (ent#46 → #118) |
 | Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 | Write User Memory | [write-user-memory.md](feature-flows/write-user-memory.md) | Per-user memory write MCP tool (MEM-001, #888) |

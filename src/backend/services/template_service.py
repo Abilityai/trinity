@@ -109,6 +109,27 @@ def _fetch_all_metadata(repos: List[str]) -> Dict[str, dict]:
 # Template Expansion
 # ============================================================================
 
+# Default sort weight for a template that declares no `priority:` (lower =
+# earlier). The router sorts by `(priority, display_name)`.
+_DEFAULT_TEMPLATE_PRIORITY = 100
+
+
+def _coerce_priority(value) -> int:
+    """Return a sortable int priority from a raw template.yaml value.
+
+    The router sorts on `(priority, display_name)`, so a non-int priority
+    would raise `TypeError: '<' not supported between 'NoneType' and 'int'`
+    (a missing key defaults via `.get(..., 100)`, but a present-yet-null or
+    string value slips through and 500s the whole endpoint). Coerce here so
+    every surfaced template carries a real int. `bool` is excluded because
+    `isinstance(True, int)` is True in Python — a `priority: true` typo must
+    not sort as `1`.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return _DEFAULT_TEMPLATE_PRIORITY
+
+
 def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> dict:
     """Build a full template dict from repo + fetched metadata + optional admin overrides.
 
@@ -141,6 +162,10 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         "github_repo": repo,
         "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
         "source": "github",
+        # Surface `priority` so the router's `(priority, display_name)` sort is
+        # honored. Coerced to a real int — a GitHub repo's template.yaml is
+        # untrusted and could set `priority: "high"`, which would 500 the sort.
+        "priority": _coerce_priority(metadata.get("priority")),
         "resources": metadata.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": metadata.get("skills", []),
         "mcp_servers": metadata.get("mcp_servers", []),
@@ -155,6 +180,13 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # `.trinity/data-paths.yaml` + the per-agent .gitignore at creation.
         # Opt-in — defaults to an empty list when the template omits the key.
         "data_paths": metadata.get("data_paths", []),
+        # trinity-enterprise#93: fork-to-own declaration. 'required' makes
+        # creation demand a user-owned destination repo (crud enforces it —
+        # the copy lands there and origin points at it). Also drives the
+        # featured card treatment in CreateAgentModal, with `tagline` as the
+        # card subtitle.
+        "fork_to_own": metadata.get("fork_to_own"),
+        "tagline": metadata.get("tagline", ""),
     }
 
 
@@ -204,6 +236,17 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         "display_name": data.get("display_name") or data.get("name") or name,
         "description": data.get("description") or data.get("tagline") or "",
         "source": "local",
+        # Surface `priority` (coerced int) so the router's
+        # `(priority, display_name)` sort orders real starters ahead of the
+        # rest (scout/sage/scribe declare `priority: 20`; most others omit it
+        # and fall to the default). (#1513)
+        "priority": _coerce_priority(data.get("priority")),
+        # `hidden: true` marks internal test/canary/demo fixtures that must not
+        # appear in the user-facing catalog. Surfaced here (not filtered) so a
+        # single-id resolve — `get_local_template()` / creation-by-id — still
+        # works for the test harness; `get_local_templates()` does the actual
+        # exclusion. (#1513)
+        "hidden": bool(data.get("hidden", False)),
         "resources": data.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": data.get("skills", []),
         "mcp_servers": list(data.get("credentials", {}).get("mcp_servers", {}).keys())
@@ -225,6 +268,12 @@ def get_local_templates() -> List[dict]:
     Each entry has `id` prefixed `local:<dirname>` and shape matching
     `_build_template` (the GitHub-template builder) so the frontend
     handles both sources identically. (#843)
+
+    Templates marked `hidden: true` in their `template.yaml` — internal
+    test/canary fixtures and demo agents — are excluded from this
+    user-facing catalog. They remain fully resolvable by id via
+    `get_local_template()` and creatable by id (the create path resolves
+    by directory name), so the test/canary harness is unaffected. (#1513)
     """
     templates_dir = _local_templates_dir()
     if not templates_dir.exists():
@@ -235,7 +284,7 @@ def get_local_templates() -> List[dict]:
         if not child.is_dir():
             continue
         entry = _build_local_template(child)
-        if entry is not None:
+        if entry is not None and not entry.get("hidden"):
             out.append(entry)
     return out
 

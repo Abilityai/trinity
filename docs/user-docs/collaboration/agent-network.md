@@ -64,6 +64,6 @@ Agents can share files via Docker volumes:
 
 ## See Also
 
-- [Event Subscriptions](../features/event-subscriptions.md) -- Pub/sub for inter-agent pipelines
-- [System Manifests](../features/system-manifests.md) -- Deploy multi-agent systems from a single file
-- [Scheduling](../features/scheduling.md) -- Automated agent execution
+- [Event Subscriptions](./event-subscriptions.md) -- Pub/sub for inter-agent pipelines
+- [System Manifest](./system-manifest.md) -- Deploy multi-agent systems from a single file
+- [Scheduling](../automation/scheduling.md) -- Automated agent execution

@@ -61,6 +61,20 @@
 - **Status**: ✅ Implemented
 - **Description**: Read template.yaml for display name, description, resources, credentials
 
+### 4.4 Fork-to-Own Templates (trinity-enterprise#93)
+- **Status**: ✅ Implemented (2026-07-06)
+- **Description**: A GitHub template can declare `fork_to_own: required` in its `template.yaml`; creating an agent from it copies the template into a repo the **user owns** (private by default) and the agent's `origin` points there — captures, operator Push, and auto-sync write to the user's repo, never the shared upstream template. Cornelius is the first user; the mechanism is template-generic.
+- **Key Features**:
+  - `POST /api/agents` accepts an optional `fork_to_own` block: `{destination_repo: "owner/name", github_pat (SecretStr), private: true}`. The copy (repo creation + push of the template's default branch with full history) runs under the **user's PAT** — the platform PAT is read-only for the template clone.
+  - Backend enforces `fork_to_own: required` (400 `FORK_TO_OWN_REQUIRED` without the block) so MCP/CLI paths can't silently create upstream-pointed agents. `@branch` template syntax and `local:` templates are rejected with the block (400).
+  - Privacy: destination repo is **private by default**; public requires an explicit `private: false` the UI gates behind a loud warning.
+  - The user PAT is persisted as the agent's per-agent PAT (#347, AES-256-GCM) so recreates re-bake it — the agent never falls back to the platform PAT.
+  - Destination collision handling: non-empty repo → 409 `FORK_DESTINATION_EXISTS`, unless its only branch head matches the template tip (retry-safe reuse); repo already bound to a live agent → 409 `FORK_DESTINATION_IN_USE`; empty repo (incl. pre-created without README) is reused.
+  - `upstream` remote auto-added in the agent workspace (credential-less, public templates) so `git pull upstream main` adopts template improvements; `GIT_UPSTREAM_REPO` env var baked at creation.
+  - Fork-to-own agents are pinned to source mode (origin main = the brain) with the 15-min auto-sync heartbeat enabled (pushing to your own main is the point).
+  - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
+- **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
+
 ---
 
 ## 5. Agent Chat & Terminal
@@ -339,3 +353,33 @@ See [feature-flows/brain-orb.md](../feature-flows/brain-orb.md).
 **Still out of scope**: `run_skill` (arbitrary allow-listed headless exec from the orb) — the full exec surface
 with a `template.yaml` allow-list ceiling + #1083 detached-execution integration remains unbuilt; open a fresh
 issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
+
+---
+
+## Default Cornelius Agent — Auto-Seed on Fresh Install (trinity-enterprise#107)
+
+- **Status**: ✅ Implemented (2026-07-07)
+- **Description**: A fresh Trinity install auto-seeds a default "Cornelius" second-brain agent with the
+  Brain Orb enabled, so a first-run operator lands on a working knowledge-graph agent out-of-the-box
+  (no manual create/clone). Provisioned by
+  `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
+- **Key Features**:
+  - **Bundled local template**: a new `config/agent-templates/cornelius/` LOCAL template
+    (`capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks, a pre-generated
+    `resources/agent-visualization/data.json` seed graph so the orb renders immediately, and a minimal
+    seed `Brain/` vault). Sourced from the public `github.com/Abilityai/cornelius`; provisioned via the
+    ordinary `create_agent_internal` from `local:cornelius` (no PAT / network / clone).
+  - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
+    deletes Cornelius is **not** re-provisioned.
+  - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),
+    so upgrades of established fleets aren't surprised by a new agent.
+  - **Existence-guarded flag enable**: turns on the `brain_orb_enabled` platform flag only when unset —
+    never clobbers an admin who set it OFF.
+  - **Triggers**: the setup-completion handler (`routers/setup.py`, fresh installs, FastAPI BackgroundTask)
+    + a `main.py` lifespan safety-net gated on `setup_completed && !cornelius_seeded` (upgrades). A Redis
+    SETNX lock (`cornelius:provision`, fail-open, mirrors the #1464 leader-lock) guards the `--workers 2` race.
+- **Known deviation (local bundle)**: the default Cornelius is a LOCAL bundle, not github-native, so it has
+  **no git origin** — it won't auto-`git pull` upstream template updates. Durable ownership is deferred to
+  fork-to-own (trinity-enterprise#109). No DB migration (`system_settings` is free-form KV). The Brain Orb was
+  already fully OSS (flag-gated, not entitlement-gated), so no de-gating was needed.
+- **Flow**: `docs/memory/feature-flows/cornelius-default-agent.md`

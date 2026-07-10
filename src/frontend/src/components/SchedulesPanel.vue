@@ -598,7 +598,7 @@
                 </div>
                 <!-- Cost -->
                 <span v-if="exec.cost" class="text-gray-500 dark:text-gray-400 font-mono">
-                  ${{ exec.cost.toFixed(4) }}
+                  {{ formatCost(exec.cost) }}
                 </span>
                 <span v-if="exec.duration_ms" class="text-gray-400 dark:text-gray-500">{{ formatDuration(exec.duration_ms) }}</span>
                 <span
@@ -658,7 +658,7 @@
             </div>
             <div>
               <p class="text-xs text-gray-500 dark:text-gray-400">Cost</p>
-              <p class="text-sm font-medium font-mono dark:text-white">${{ selectedExecution.cost?.toFixed(4) || '0.0000' }}</p>
+              <p class="text-sm font-medium font-mono dark:text-white">{{ formatCost(selectedExecution.cost) }}</p>
             </div>
             <div>
               <p class="text-xs text-gray-500 dark:text-gray-400">Context Used</p>
@@ -758,6 +758,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { formatCost } from '../composables/useFormatters'
 import axios from 'axios'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'

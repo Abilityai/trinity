@@ -34,7 +34,7 @@
               <span class="text-status-danger-400">{{ item.failed_count }}</span>
             </div>
             <div v-else-if="chartType === 'cost'">
-              ${{ item.total_cost.toFixed(2) }}
+              {{ formatCost(item.total_cost) }}
             </div>
             <div v-else>
               {{ item.success_rate.toFixed(1) }}%
@@ -102,6 +102,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { formatCost } from '../../composables/useFormatters'
 
 const props = defineProps({
   title: {

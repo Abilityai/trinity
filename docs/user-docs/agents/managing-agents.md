@@ -31,6 +31,8 @@ When the window is too narrow to fit every tab, the trailing tabs collapse into 
 
 ### Overview Tab
 
+![Agent detail — Overview tab showing the About lead, a needs-attention banner, and activity trend charts (executions by type, success rate, duration)](../images/agent-overview-tab.png)
+
 The Overview tab is a glanceable, database-backed summary. It renders even when the agent is stopped:
 
 - **About** -- display name, tagline, and description, with a "New task" shortcut.

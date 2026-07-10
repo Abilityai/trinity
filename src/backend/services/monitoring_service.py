@@ -25,6 +25,7 @@ import httpx
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services.agent_auth import agent_httpx_client
+from services.model_context import DEFAULT_CONTEXT_WINDOW
 from db_models import (
     AgentHealthStatus,
     DockerHealthCheck,
@@ -476,7 +477,7 @@ async def check_business_health(
             if session_response.status_code == 200:
                 session_data = session_response.json()
                 context_used = session_data.get("context_used", 0)
-                context_max = session_data.get("context_max", 200000)
+                context_max = session_data.get("context_max") or DEFAULT_CONTEXT_WINDOW
                 if context_max > 0:
                     context_percent = (context_used / context_max) * 100
     except Exception:

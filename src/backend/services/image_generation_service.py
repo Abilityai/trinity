@@ -252,28 +252,57 @@ class ImageGenerationService:
         """
         url = f"{GEMINI_API_BASE}/{GEMINI_TEXT_MODEL}:generateContent"
 
-        payload = {
-            "system_instruction": {
-                "parts": [{"text": system_prompt}],
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_message}],
-                }
-            ],
-            "generationConfig": {
+        def _build_payload(disable_thinking: bool) -> dict:
+            gen_config = {
                 "temperature": 0.7,
-                "maxOutputTokens": 512,
-            },
-        }
+                # #1130 follow-up: GEMINI_TEXT_MODEL defaults to a *thinking* model
+                # (gemini-3.5-flash). Its reasoning phase draws from the output
+                # budget, so a tight cap (was 512) let thinking consume ~491 tokens
+                # and truncate the refined prompt (finishReason=MAX_TOKENS) to a
+                # ~90-char fragment — dropping the AVATAR fixed technical block
+                # (background #1a1f2e/#111827, indigo rim #6366f1, head-and-shoulders
+                # framing, 85mm lens, 5600K key). That block is the sole source of
+                # avatar color-scheme + consistency, so avatars came out wildly
+                # different and off-palette. Generous headroom keeps the full block
+                # intact even when thinking stays on.
+                "maxOutputTokens": 4096,
+            }
+            if disable_thinking:
+                # Prompt refinement is a deterministic rewrite that needs no
+                # chain-of-thought. Disabling thinking makes it fast/cheap and
+                # immune to the budget squeeze above. Not every model allows a zero
+                # budget (e.g. gemini-2.5-pro is thinking-mandatory → HTTP 400), so
+                # the caller retries without this field on a 400.
+                gen_config["thinkingConfig"] = {"thinkingBudget": 0}
+            return {
+                "system_instruction": {
+                    "parts": [{"text": system_prompt}],
+                },
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": user_message}],
+                    }
+                ],
+                "generationConfig": gen_config,
+            }
 
         response = await self._http.post(
             url,
-            json=payload,
+            json=_build_payload(disable_thinking=True),
             headers={"x-goog-api-key": GEMINI_API_KEY},
             timeout=PROMPT_REFINEMENT_TIMEOUT,
         )
+
+        # A thinking-mandatory model rejects thinkingBudget=0 with a 400; retry once
+        # with thinking on (the 4096-token headroom above prevents truncation).
+        if response.status_code == 400:
+            response = await self._http.post(
+                url,
+                json=_build_payload(disable_thinking=False),
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+                timeout=PROMPT_REFINEMENT_TIMEOUT,
+            )
 
         if response.status_code != 200:
             raise RuntimeError(

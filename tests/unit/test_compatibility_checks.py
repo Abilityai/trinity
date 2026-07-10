@@ -192,6 +192,17 @@ class TestStaticChecks:
         assert _run_one("S-002", snap)[0] == "fail"   # .mcp.json not ignored
         assert _run_one("S-005", snap)[0] == "fail"   # .trinity/ not ignored
 
+    def test_s005_accepts_star_form_trinity_ignore(self):
+        # Brain-Orb templates ship `.trinity/*` + `!.trinity/brain-orb/` so the
+        # committed hooks stay tracked (trinity-enterprise#76). The star form
+        # satisfies the same "runtime state isn't committed" intent — S-005
+        # must not flag it (its auto-fix would re-append the dir form).
+        snap = good_snapshot()
+        snap["files"][".gitignore"] = _f(
+            ".env\n.mcp.json\n.trinity/*\n!.trinity/brain-orb/\n"
+        )
+        assert _run_one("S-005", snap)[0] == "pass"
+
     def test_blanket_claude_exclusion_g001(self):
         snap = good_snapshot()
         snap["files"][".gitignore"] = _f(".claude/\n")

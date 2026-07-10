@@ -27,6 +27,12 @@ half-open probe.
 | **Dispatch** (#526) | `services/dispatch_breaker.py` (`DispatchBreaker`) | `agent:dispatch:{name}` | `error_code == AUTH` only (D10) | *auth-dead* |
 | *(seam)* heartbeat (#307) | calls `DispatchBreaker.record_failure("missed_heartbeat")` | — | missed heartbeat | *wedged* |
 
+Both keys are namespaced by agent **name**, not container identity, and carry no
+TTL — so both are cleared together across the agent lifecycle by
+`services/agent_runtime_state.py` (`clear_agent_breakers`), or a recycled name
+inherits its predecessor's verdict (#1560). See architecture.md → Circuit Breakers
+→ *Lifecycle clearing* for the six call sites.
+
 Separate namespaces + separate Lua → neither contaminates the other's counter
 (`AgentClient.record_success()` HTTP-200 never touches the dispatch breaker).
 Both share the Redis plumbing in the **top-level** `redis_breaker_util.py`

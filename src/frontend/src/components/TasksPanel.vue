@@ -1,5 +1,10 @@
 <template>
-  <div class="space-y-6">
+  <!-- #1500: flex-fill column inside the fullscreen Tasks tab. The root is also
+       the short-viewport fallback scroller (overflow-y-auto is load-bearing:
+       without it, fixed chrome + the list's min-height would hard-clip the
+       composer — the page itself cannot scroll in fullscreen mode). Degrades to
+       natural height outside a flex parent (flex-1 inert). -->
+  <div class="p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
     <!-- Header with Queue Status -->
     <div class="flex justify-between items-center">
       <div>
@@ -75,7 +80,7 @@
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Total Cost</p>
-        <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">${{ totalCost.toFixed(4) }}</p>
+        <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">{{ formatCostCompact(totalCost) }}</p>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Avg Duration</p>
@@ -134,16 +139,18 @@
       </p>
     </div>
 
-    <!-- Task History -->
-    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+    <!-- Task History (#1500: flex-1 absorbs remaining height; min-h-96 keeps the
+         old max-h-96 cap as the new FLOOR — never fewer visible rows than before —
+         and hands short-viewport overflow to the root scroller) -->
+    <div data-testid="task-history-card" class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden flex-1 min-h-96 flex flex-col">
       <!-- Loading State -->
-      <div v-if="loading && allTasks.length === 0" class="text-center py-8">
+      <div v-if="loading && allTasks.length === 0" class="text-center py-8 flex-1 flex flex-col justify-center">
         <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading tasks...</p>
       </div>
 
       <!-- Empty State -->
-      <div v-else-if="allTasks.length === 0" class="text-center py-12">
+      <div v-else-if="allTasks.length === 0" class="text-center py-12 flex-1 flex flex-col justify-center">
         <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
         </svg>
@@ -151,8 +158,8 @@
         <p class="text-sm text-gray-400 dark:text-gray-500">Run a task above or configure schedules</p>
       </div>
 
-      <!-- Task List with vertical scroll -->
-      <div v-else class="divide-y divide-gray-200 dark:divide-gray-700 max-h-96 overflow-y-auto">
+      <!-- Task List with vertical scroll (#1500: fills the card, no fixed cap) -->
+      <div v-else data-testid="task-list" class="divide-y divide-gray-200 dark:divide-gray-700 flex-1 min-h-0 overflow-y-auto">
         <div
           v-for="task in allTasks"
           :key="task.id"
@@ -237,7 +244,7 @@
               <div class="flex items-center space-x-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
                 <span v-if="task.model_used" class="font-mono bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">{{ task.model_used }}</span>
                 <span v-if="task.duration_ms" class="font-mono">{{ formatDuration(task.duration_ms) }}</span>
-                <span v-if="task.cost" class="font-mono">${{ task.cost.toFixed(4) }}</span>
+                <span v-if="task.cost" class="font-mono">{{ formatCost(task.cost) }}</span>
                 <div v-if="task.context_used && task.context_max" class="flex items-center space-x-1">
                   <div class="w-16 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                     <div
@@ -486,7 +493,7 @@
                       </div>
                       <div class="flex items-center space-x-3 font-mono">
                         <span>{{ entry.duration }}</span>
-                        <span class="text-action-primary-600 dark:text-action-primary-400">${{ entry.cost }}</span>
+                        <span class="text-action-primary-600 dark:text-action-primary-400">{{ entry.cost }}</span>
                       </div>
                     </div>
                   </div>
@@ -524,6 +531,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 
 // Template ref for highlighted task element
@@ -1055,7 +1063,7 @@ function parseExecutionLog(log) {
         type: 'result',
         numTurns: msg.num_turns || msg.numTurns || '-',
         duration: msg.duration_ms ? formatDuration(msg.duration_ms) : (msg.duration || '-'),
-        cost: msg.cost_usd?.toFixed(4) || msg.total_cost_usd?.toFixed(4) || '0.0000'
+        cost: formatCost(msg.cost_usd ?? msg.total_cost_usd ?? 0)
       })
       continue
     }

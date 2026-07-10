@@ -261,3 +261,82 @@ def test_rm_cached_for_newly_ignored_files(tmp_path):
     # touches the index, never the user's files.
     assert cache_file.exists(), "rm --cached must not delete the on-disk file"
     assert session_file.exists(), "rm --cached must not delete the on-disk file"
+
+
+def test_rm_cached_exempts_brain_orb_hooks(tmp_path):
+    """Template-committed Brain Orb hooks survive the gitignore migration
+    (trinity-enterprise#76). The fleet merge appends `.trinity/`, which makes
+    the committed `.trinity/brain-orb/*` hooks ignored-but-tracked; the
+    rm-cached sweep must exempt exactly that directory — untracking the hooks
+    would commit+push their deletion, so a later re-clone boots hookless.
+    Sibling `.trinity/` files must STILL be swept (the exemption is surgical).
+    """
+    gs = _load_git_service()
+
+    def git(*args, check=True):
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=10,
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    git("config", "commit.gpgsign", "false")
+
+    hook = tmp_path / ".trinity" / "brain-orb" / "action"
+    setup = tmp_path / ".trinity" / "setup.sh"
+    leaked_state = tmp_path / ".trinity" / "runtime-state.yaml"
+    for f, content in [(hook, "#!/usr/bin/env python3\n"),
+                       (setup, "#!/bin/bash\n"),
+                       (leaked_state, "x: 1\n")]:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content)
+
+    # Template shape: parent star-ignored, setup.sh + hook dir re-included (a
+    # dir-form `.trinity/` exclusion can't be re-included under, so templates
+    # use `*`).
+    (tmp_path / ".gitignore").write_text(
+        ".trinity/*\n!.trinity/setup.sh\n!.trinity/brain-orb/\n")
+    git("add", str(hook), str(setup))
+    git("add", "-f", str(leaked_state))  # simulate an old agent that committed state
+    git("commit", "-q", "-m", "template ships brain-orb hooks")
+
+    tracked_before = set(git("ls-files").stdout.splitlines())
+    assert ".trinity/brain-orb/action" in tracked_before
+    assert ".trinity/setup.sh" in tracked_before
+    assert ".trinity/runtime-state.yaml" in tracked_before
+
+    # Run the real migration: fleet merge (appends `.trinity/`) + rm-cached.
+    for build in (
+        gs._build_gitignore_merge_command,
+        gs._build_rm_cached_ignored_command,
+    ):
+        result = subprocess.run(
+            build(str(tmp_path)),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"command failed: {build.__name__}\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+
+    tracked_after = set(git("ls-files").stdout.splitlines())
+    assert ".trinity/brain-orb/action" in tracked_after, (
+        f"brain-orb hook was untracked by the sweep; tracked={tracked_after}"
+    )
+    assert ".trinity/setup.sh" in tracked_after, (
+        f"setup.sh was untracked by the sweep (caught live in the #76 e2e Push); "
+        f"tracked={tracked_after}"
+    )
+    assert ".trinity/runtime-state.yaml" not in tracked_after, (
+        f"sibling .trinity/ state must still be swept; tracked={tracked_after}"
+    )
+    assert hook.exists() and setup.exists() and leaked_state.exists()

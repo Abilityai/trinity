@@ -56,11 +56,11 @@ class TestTelegramRosterQuery:
         bind_b = ops.get_binding_by_agent("agent-b")["id"]
 
         # agent-a: one with username, one without
-        ops.get_or_create_chat_link(bind_a, "1001", "alice")
-        ops.get_or_create_chat_link(bind_a, "1002", None)
+        ops.record_inbound(bind_a, "1001", "alice")
+        ops.record_inbound(bind_a, "1002", None)
         ops.set_verified_email(bind_a, "1001", "alice@example.com")
         # agent-b: should never appear in agent-a's roster
-        ops.get_or_create_chat_link(bind_b, "2001", "bob")
+        ops.record_inbound(bind_b, "2001", "bob")
 
         clients = ops.list_clients_for_agent("agent-a")
         assert len(clients) == 2
@@ -93,7 +93,7 @@ class TestWhatsAppRosterQuery:
             from_number="whatsapp:+15551230000",
         )
         bind = ops.get_binding_by_agent("agent-wa")["id"]
-        ops.get_or_create_chat_link(bind, "whatsapp:+15559998888", "Carol")
+        ops.record_inbound(bind, "whatsapp:+15559998888", "Carol")
         ops.set_verified_email(bind, "whatsapp:+15559998888", "carol@example.com")
 
         clients = ops.list_clients_for_agent("agent-wa")

@@ -181,3 +181,154 @@ def test_description_falls_back_to_tagline(tmp_path, monkeypatch):
     ts = _load_template_service(monkeypatch, tmp_path)
     t = ts.get_local_templates()[0]
     assert t["description"] == "punchy line"
+
+
+# -----------------------------------------------------------------------------
+# hidden: true — internal fixtures excluded from the catalog (#1513)
+# -----------------------------------------------------------------------------
+
+def test_hidden_template_excluded_from_list(tmp_path, monkeypatch):
+    """A directory whose template.yaml sets `hidden: true` is a test/canary/demo
+    fixture — it must NOT appear in the user-facing catalog list."""
+    _seed_template(tmp_path, "test-echo", body="name: test-echo\nhidden: true")
+    _seed_template(tmp_path, "scout", body="name: scout\ndisplay_name: Scout")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    ids = {t["id"] for t in ts.get_local_templates()}
+    assert ids == {"local:scout"}  # test-echo hidden, scout surfaced
+
+
+def test_hidden_template_still_resolvable_by_id(tmp_path, monkeypatch):
+    """Hiding only affects the LIST — a hidden fixture stays resolvable by id so
+    creation-by-id keeps working for the canary/test harness (#1513)."""
+    _seed_template(tmp_path, "test-echo", body="name: test-echo\nhidden: true")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    t = ts.get_local_template("local:test-echo")
+    assert t is not None
+    assert t["id"] == "local:test-echo"
+    assert t["hidden"] is True
+
+
+def test_hidden_false_and_absent_are_visible(tmp_path, monkeypatch):
+    """`hidden: false` and an omitted `hidden` key are both catalog-visible."""
+    _seed_template(tmp_path, "explicit-false", body="name: explicit-false\nhidden: false")
+    _seed_template(tmp_path, "omitted", body="name: omitted")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    by_id = {t["id"]: t for t in ts.get_local_templates()}
+    assert set(by_id) == {"local:explicit-false", "local:omitted"}
+    assert by_id["local:explicit-false"]["hidden"] is False
+    assert by_id["local:omitted"]["hidden"] is False
+
+
+# -----------------------------------------------------------------------------
+# priority surfacing + coercion — guards the None-in-sort-key 500 (#1513)
+# -----------------------------------------------------------------------------
+
+def test_priority_surfaced_and_coerced_to_int(tmp_path, monkeypatch):
+    """Every surfaced template carries an int `priority`. A present-but-null,
+    string, or bool value must coerce to the default — otherwise the router's
+    `(priority, display_name)` sort raises TypeError and 500s the endpoint."""
+    _seed_template(tmp_path, "has-int", body="name: has-int\npriority: 20")
+    _seed_template(tmp_path, "no-key", body="name: no-key")
+    _seed_template(tmp_path, "null-val", body="name: null-val\npriority: null")
+    _seed_template(tmp_path, "str-val", body="name: str-val\npriority: high")
+    _seed_template(tmp_path, "bool-val", body="name: bool-val\npriority: true")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    by_id = {t["id"]: t for t in ts.get_local_templates()}
+    assert by_id["local:has-int"]["priority"] == 20
+    for id_ in ("local:no-key", "local:null-val", "local:str-val", "local:bool-val"):
+        p = by_id[id_]["priority"]
+        assert isinstance(p, int) and not isinstance(p, bool), f"{id_}: {p!r}"
+        assert p == 100
+
+
+def test_coerce_priority_helper(tmp_path, monkeypatch):
+    """Direct unit coverage of the coercion helper's edge cases."""
+    ts = _load_template_service(monkeypatch, tmp_path)
+    assert ts._coerce_priority(20) == 20
+    assert ts._coerce_priority(0) == 0            # a legit 'highest' — NOT coerced away
+    assert ts._coerce_priority(-5) == -5
+    assert ts._coerce_priority(None) == 100
+    assert ts._coerce_priority("high") == 100
+    assert ts._coerce_priority(True) == 100        # bool is not a valid priority
+    assert ts._coerce_priority(1.5) == 100
+
+
+def test_router_sort_key_never_raises_over_mixed_priority(tmp_path, monkeypatch):
+    """Replicates routers/templates.py's exact sort over a mixed catalog. With
+    coercion in place the key is always `(int, str)`, so the sort orders
+    priority-ascending and never raises — the regression guard for the crash a
+    raw `data.get('priority')` would have shipped (#1513)."""
+    _seed_template(tmp_path, "starter", body="name: starter\ndisplay_name: Starter\npriority: 20")
+    _seed_template(tmp_path, "plain-b", body="name: plain-b\ndisplay_name: Bravo")
+    _seed_template(tmp_path, "plain-a", body="name: plain-a\ndisplay_name: Alpha")
+    _seed_template(tmp_path, "nulled", body="name: nulled\ndisplay_name: Nulled\npriority: null")
+    ts = _load_template_service(monkeypatch, tmp_path)
+
+    templates = ts.get_local_templates()
+    # exact key from routers/templates.py::list_templates
+    templates.sort(key=lambda t: (t.get("priority", 100), t.get("display_name", "")))
+    order = [t["id"] for t in templates]
+
+    # priority 20 leads; the rest (default 100) fall back to display_name order
+    assert order == ["local:starter", "local:plain-a", "local:plain-b", "local:nulled"]
+
+
+# -----------------------------------------------------------------------------
+# Real-catalog convention guard — a future unflagged fixture fails CI (#1513)
+# -----------------------------------------------------------------------------
+
+def _load_ts_real_catalog(monkeypatch):
+    """Load template_service pointed at the REAL config/agent-templates/ dir."""
+    real_dir = _BACKEND.parent.parent / "config" / "agent-templates"
+    return _load_template_service(monkeypatch, real_dir), real_dir
+
+
+def test_real_catalog_hides_all_known_fixtures(monkeypatch):
+    """The shipped catalog must never surface an internal fixture or the
+    auto-deployed system agent — even if a future author forgets `hidden: true`,
+    this convention check fails CI before it leaks to users."""
+    ts, real_dir = _load_ts_real_catalog(monkeypatch)
+    if not real_dir.exists():
+        pytest.skip("config/agent-templates not present in this checkout")
+
+    ids = {t["id"].split(":", 1)[1] for t in ts.get_local_templates()}
+
+    # No fixture (by explicit name or naming convention) may appear.
+    forbidden = {
+        "test-echo", "test-counter", "test-delegator", "test-codex",
+        "test-gemini", "sleep-echo", "test-leak-hook",
+        "demo-researcher", "demo-analyst", "trinity-system",
+    }
+    leaked = forbidden & ids
+    assert not leaked, f"internal fixtures leaked into the catalog: {sorted(leaked)}"
+
+    convention_leaks = {n for n in ids if n.startswith(("test-", "demo-"))}
+    assert not convention_leaks, f"test-/demo- named dirs in catalog: {sorted(convention_leaks)}"
+
+
+def test_real_catalog_surfaces_starters_ahead_of_suite(monkeypatch):
+    """scout/sage/scribe are present and rank ahead of the dd-* suite after the
+    router sort — the priority-surfacing fix, verified end-to-end (#1513).
+    Also guards that scribe's template.yaml parses (a broken YAML would silently
+    drop it from the catalog)."""
+    ts, real_dir = _load_ts_real_catalog(monkeypatch)
+    if not real_dir.exists():
+        pytest.skip("config/agent-templates not present in this checkout")
+
+    templates = ts.get_local_templates()
+    templates.sort(key=lambda t: (t.get("priority", 100), t.get("display_name", "")))
+    order = [t["id"].split(":", 1)[1] for t in templates]
+
+    for starter in ("scout", "sage", "scribe"):
+        assert starter in order, f"starter {starter} missing from catalog"
+
+    dd_positions = [i for i, n in enumerate(order) if n.startswith("dd-")]
+    if dd_positions:
+        last_starter = max(order.index(s) for s in ("scout", "sage", "scribe"))
+        assert last_starter < min(dd_positions), (
+            "real starters must sort ahead of the dd-* suite"
+        )

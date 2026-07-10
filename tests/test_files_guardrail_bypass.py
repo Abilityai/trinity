@@ -104,7 +104,7 @@ class TestAisecC2ExactReproduction:
             pytest.skip("Agent server not ready")
         assert_status(response, 400)
         body = response.json()
-        assert "Disallowed file path" in body.get("detail", "")
+        assert "Disallowed credential file path" in body.get("detail", "")
         assert ".mcp.json.template" in body.get("detail", "")
 
 

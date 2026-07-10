@@ -3,13 +3,59 @@ Pydantic models for the Trinity backend API.
 """
 import re
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
 from utils.helpers import to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
+
+
+# Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
+# inner hyphens); repo name word chars, dots, hyphens. Anchored so the value can
+# be safely embedded in GitHub API paths and git URLs (trinity-enterprise#93).
+_FORK_DESTINATION_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$"
+)
+
+
+class ForkToOwnRequest(BaseModel):
+    """Fork-to-own creation parameters (trinity-enterprise#93).
+
+    Copies the GitHub template into a repo the user owns before creating the
+    agent from it. The PAT is the USER's token — it creates the destination
+    repo, pushes the template copy, and becomes the agent's per-agent PAT
+    (#347). SecretStr keeps it out of reprs/logs; unwrap exactly once at the
+    crud boundary.
+    """
+    destination_repo: str = Field(
+        ..., description="Destination repo as owner/name in the user's account or org"
+    )
+    github_pat: SecretStr = Field(
+        ..., description="User's GitHub PAT — creates the repo and becomes the agent's git identity"
+    )
+    private: bool = Field(
+        True, description="Destination repo visibility (private by default)"
+    )
+
+    @field_validator("destination_repo")
+    @classmethod
+    def _validate_destination(cls, v: str) -> str:
+        v = v.strip()
+        if ".." in v or not _FORK_DESTINATION_RE.match(v):
+            raise ValueError(
+                "destination_repo must be 'owner/name' (GitHub owner and repo "
+                "name characters only)"
+            )
+        return v
+
+    @field_validator("github_pat")
+    @classmethod
+    def _validate_pat(cls, v: SecretStr) -> SecretStr:
+        if not v.get_secret_value().strip():
+            raise ValueError("github_pat must not be empty")
+        return v
 
 
 class AgentConfig(BaseModel):
@@ -34,6 +80,9 @@ class AgentConfig(BaseModel):
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
     # Security options
     full_capabilities: Optional[bool] = False  # True = Docker default caps (apt-get works), False = restricted (secure default)
+    # Fork-to-own creation (trinity-enterprise#93): copy the github: template
+    # into a user-owned repo first; the agent is created from that copy.
+    fork_to_own: Optional[ForkToOwnRequest] = None
 
 
 class AgentStatus(BaseModel):
@@ -773,6 +822,60 @@ class McpExposedUpdate(BaseModel):
     same access gate — this only publishes a surface.
     """
     enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# Per-agent MCP connector (ent#46; OSS-core since #118)
+# ---------------------------------------------------------------------------
+
+class ConnectorConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/connector.
+
+    ``exposed_playbooks=None`` leaves the allow-list unchanged; an explicit list
+    sets it; ``expose_all_playbooks=True`` resets it to "all user_invocable".
+    """
+    enabled: Optional[bool] = None
+    exposed_playbooks: Optional[List[str]] = None
+    expose_all_playbooks: Optional[bool] = None
+
+
+class ConnectorClientSnippet(BaseModel):
+    """A copy-paste-ready connector config for one AI client."""
+    client: str
+    label: str
+    format: str            # 'shell' | 'json'
+    content: str           # the literal block to copy (key pre-embedded)
+    note: Optional[str] = None
+
+
+class ConnectorPlaybook(BaseModel):
+    """A playbook exposed by the connector as an MCP tool."""
+    name: str
+    description: Optional[str] = None
+    argument_hint: Optional[str] = None
+    automation: Optional[str] = None
+
+
+class ConnectorStatus(BaseModel):
+    """Response for GET .../connector (owner view)."""
+    agent_name: str
+    enabled: bool = False
+    exposed_playbooks: Optional[List[str]] = None
+    has_key: bool = False
+    key_prefix: Optional[str] = None
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ConnectorKeySecret(BaseModel):
+    """Response when minting/regenerating the key — secret returned once."""
+    agent_name: str
+    api_key: str
+    key_prefix: str
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
 
 
 class VoiceRepliesUpdate(BaseModel):

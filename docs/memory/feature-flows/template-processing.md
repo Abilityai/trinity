@@ -133,6 +133,20 @@ async def list_templates(current_user: User = Depends(get_current_user)):
     # 6. Return merged list
 ```
 
+**Catalog curation (#1513).** `get_local_templates()` excludes any template
+whose `template.yaml` sets `hidden: true` — the internal test/canary fixtures
+(`test-*`, `sleep-echo`) and demo/system agents (`demo-researcher`,
+`demo-analyst`, `trinity-system`). Hidden templates stay resolvable by id via
+`get_local_template()` and creatable by id (the create path resolves by
+directory name), so the canary/test harness is unaffected — only the
+user-facing list hides them. Both `_build_local_template` and `_build_template`
+now surface a coerced-int `priority` (`_coerce_priority`; a present-but-null or
+string value would otherwise `TypeError` the router sort), so the step-5 sort
+actually orders the real starters (`scout`/`sage`/`scribe`, `priority: 20`)
+ahead of the rest. `Templates.vue` renders a **Starter Templates** (local)
+section in addition to GitHub, so it shows the same curated set as
+`CreateAgentModal`.
+
 ### Template Response Schema
 ```json
 {
@@ -583,6 +597,29 @@ curl -X POST http://localhost:8000/api/agents \
 
 ---
 
+## Fork-to-Own Creation (trinity-enterprise#93)
+
+A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_build_template` surfaces the flag (plus `tagline`) on `GET /api/templates`, and creation from such a template copies the repo into a **user-owned** destination first. Cornelius is the first user; the mechanism is template-generic.
+
+**Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr), private: true}`. Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
+
+**Copy pipeline** (`services/agent_service/fork_to_own.py`, runs in the `github:` branch of `create_agent_internal` BEFORE the docker try-block so structured `FORK_*` errors reach the UI):
+1. `validate_token(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`.
+2. Destination state: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse; exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+3. Bare single-branch full-history clone of the template (read auth: platform PAT or none) staged under `/data/agent-fork-tmp` (backend `/tmp` is a 100 MB tmpfs), push to destination with the **user PAT via `GIT_CONFIG_*` env** (`http.extraHeader` — token never on argv/URL), `git ls-remote` poll (≤15s) so the agent's startup clone can't race an empty repo (#1439 class). All output passes `scrub_secret` (plain + b64 forms) before logging.
+
+**Binding guard**: destination already referenced by any `agent_git_config` row → 409 `FORK_DESTINATION_IN_USE` (agent name disclosed only when the caller can access it, #186). Re-checked **after** `reserve_and_generate_instance_id` (source-mode rows bypass the partial UNIQUE index; the whole copy sits between check and act) — concurrent losers (all but the lexicographically-first name) roll back their row deterministically.
+
+**Ownership wiring**: `github_repo_for_agent=destination`, `GITHUB_PAT`=user PAT (SecretStr unwrapped exactly once at the crud boundary); the PAT is persisted via `db.set_agent_github_pat` (#347, AES-256-GCM) INSIDE the docker try-block — failure rolls back the reserved row + MCP key, so a fork agent can never silently fall back to the platform PAT on recreate (`get_github_pat_for_agent` resolves per-agent first). `GIT_UPSTREAM_REPO=<template>` is baked; `startup.sh` adds a credential-less `upstream` remote in both the fresh-clone and restart paths, making `git pull upstream <branch>` the documented template-update path. Fork agents get `GIT_SYNC_AUTO=true` + the auto-sync DB flag even in source mode (pushing captures to your own main is the point).
+
+**Frontend** (`CreateAgentModal.vue`): templates with `fork_to_own === 'required'` render as featured cards (tagline subtitle) above the standard list; selecting one reveals destination/PAT/visibility fields. Private is the default; Public sits behind a loud warning. PAT hint steers to a fine-grained single-repo token (the agent can read its own git credential — see `docs/security-reports/cso-2026-07-06.md`). The PAT ref is cleared after create.
+
+**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo.
+
+Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static).
+
+---
+
 ## Status
 **Working** - Template processing fully functional for both GitHub and local templates
 
@@ -592,6 +629,8 @@ curl -X POST http://localhost:8000/api/agents \
 
 | Date | Changes |
 |------|---------|
+| 2026-07-07 | **Catalog curation (#1513)**: `get_local_templates()` now excludes `hidden: true` fixtures (test/canary/demo/system) from the user-facing list while keeping them creatable by id; `_build_local_template`/`_build_template` surface a coerced-int `priority` so the router sort actually orders real starters first; fixed `scribe/template.yaml` (unquoted `usage:` broke YAML parse → silently dropped from catalog); `Templates.vue` renders a Starter (local) section matching CreateAgentModal. See "Catalog curation" note above. |
+| 2026-07-06 | **Fork-to-own creation (trinity-enterprise#93)**: `fork_to_own: required` template flag → copy into user-owned repo (private by default) at creation; user PAT as per-agent git identity; upstream remote for template updates; featured create-modal cards. New section above. |
 | 2026-02-05 | **CRED-002**: Removed Redis credential_manager references. GitHub PAT now retrieved via `get_github_pat()` from SQLite settings or env var. Removed `initialize_github_pat()` documentation. Updated Security Considerations. |
 | 2026-01-23 | **Full verification**: Updated all line numbers for Templates.vue (16-24, 55-134, 137-216, 218-247, 262-267, 290-296, 299-302, 304-332), CreateAgentModal.vue (191-196, 198, 208-210, 219-230, 263-285), template_service.py (64-103, 106-118, 121-140, 143-225, 228-299, 309-358, 361-380), crud.py (96-144, 145-182), config.py (91-164), and startup.sh (6-125, 127-157, 164-222, 275-286). Added multi-runtime support and shared_folders template config. Updated credential file handling details. |
 | 2025-12-30 | **Flow verification**: Updated line numbers for Templates.vue, CreateAgentModal.vue. Updated template processing to reference services/agent_service/create.py. Added startup.sh Git Sync details, content folder convention, Trinity-compatible validation. Updated config.py line numbers for GITHUB_TEMPLATES. |

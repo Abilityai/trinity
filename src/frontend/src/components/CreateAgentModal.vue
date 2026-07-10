@@ -43,6 +43,35 @@
                 </div>
 
                 <div v-else class="mt-1 space-y-2 max-h-80 overflow-y-auto">
+                  <!-- Featured fork-to-own templates (trinity-enterprise#93) -->
+                  <div v-if="featuredTemplates.length > 0" class="pb-1">
+                    <div
+                      v-for="template in featuredTemplates"
+                      :key="template.id"
+                      @click="form.template = template.id"
+                      :class="[
+                        'relative flex items-center p-3 border-2 rounded-lg cursor-pointer transition-all',
+                        form.template === template.id ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-action-primary-300 dark:border-action-primary-700 hover:border-action-primary-400 dark:hover:border-action-primary-500 bg-action-primary-50/40 dark:bg-action-primary-900/10'
+                      ]"
+                    >
+                      <div class="flex-shrink-0 w-8 h-8 rounded-full bg-action-primary-600 flex items-center justify-center">
+                        <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                        </svg>
+                      </div>
+                      <div class="ml-3 flex-1">
+                        <p class="text-sm font-medium text-gray-900 dark:text-white">{{ template.display_name }}</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ template.tagline || truncateDescription(template.description) }}</p>
+                        <p class="text-[11px] text-action-primary-700 dark:text-action-primary-300 mt-0.5">Creates a copy in your own GitHub account</p>
+                      </div>
+                      <div v-if="form.template === template.id" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
+                        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+
                   <!-- Blank agent option -->
                   <div
                     @click="form.template = ''"
@@ -172,6 +201,59 @@
                   </div>
                 </div>
 
+                <!-- Fork-to-own fields (trinity-enterprise#93) -->
+                <div v-if="isForkToOwn" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
+                  <p class="text-xs text-gray-600 dark:text-gray-300">
+                    This template is copied into a repository <span class="font-medium">you own</span> — your agent's
+                    knowledge lives there, and template updates stay one <code class="text-[11px]">git pull upstream</code> away.
+                  </p>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Your repository <span class="text-status-danger-500">*</span></label>
+                    <input
+                      v-model="forkDestination"
+                      type="text"
+                      class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
+                      placeholder="your-github-username/my-agent-brain"
+                    />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Doesn't need to exist — it will be created for you. (If you pre-create it, leave it empty: no README.)</p>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">GitHub token <span class="text-status-danger-500">*</span></label>
+                    <input
+                      v-model="forkPat"
+                      type="password"
+                      autocomplete="off"
+                      class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
+                      placeholder="ghp_… or github_pat_…"
+                    />
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      <span class="font-medium">Recommended:</span> a fine-grained token scoped to just this repository
+                      (Administration + Contents write). A classic PAT with <code>repo</code> scope also works but grants
+                      access to <em>all</em> your repositories — and the agent can read its own git credential, so prefer
+                      the narrow token. Stored encrypted as this agent's git identity.
+                    </p>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</label>
+                    <div class="mt-1 flex gap-4">
+                      <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
+                        <input type="radio" v-model="forkPrivate" :value="true" class="text-action-primary-600 focus:ring-action-primary-500" />
+                        <span class="ml-1.5">Private (recommended)</span>
+                      </label>
+                      <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
+                        <input type="radio" v-model="forkPrivate" :value="false" class="text-action-primary-600 focus:ring-action-primary-500" />
+                        <span class="ml-1.5">Public</span>
+                      </label>
+                    </div>
+                    <div v-if="!forkPrivate" class="mt-2 p-2 bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-300 dark:border-status-danger-700 rounded-md">
+                      <p class="text-xs font-medium text-status-danger-700 dark:text-status-danger-300">
+                        ⚠ Everything this agent captures — notes, insights, potentially personal information — will be
+                        publicly visible on GitHub. Choose Private unless you are certain.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- Selected template description -->
                 <div v-if="selectedTemplate" class="mt-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
                   <p class="text-sm text-gray-700 dark:text-gray-300">{{ selectedTemplate.description }}</p>
@@ -202,7 +284,7 @@
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
-              {{ loading ? 'Creating...' : 'Create Agent' }}
+              {{ loading ? (isForkToOwn ? 'Creating your repository…' : 'Creating...') : 'Create Agent' }}
             </button>
             <button
               type="button"
@@ -243,6 +325,11 @@ const form = reactive({
 const githubRepoUrl = ref('')
 const githubRepoInput = ref(null)
 
+// Fork-to-own inputs (trinity-enterprise#93)
+const forkDestination = ref('')
+const forkPat = ref('')
+const forkPrivate = ref(true)
+
 // Watch for initialTemplate changes (in case modal is reused)
 watch(() => props.initialTemplate, (newVal) => {
   form.template = newVal || ''
@@ -263,14 +350,24 @@ const error = ref('')
 const templatesLoading = ref(true)
 const templatesError = ref('')
 
-// Computed properties to separate GitHub and local templates
+// Computed properties to separate GitHub and local templates.
+// Fork-to-own templates (trinity-enterprise#93) get the featured section and
+// are excluded from the plain GitHub list.
+// Only 'required' is load-bearing in v1 — the backend enforces exactly that
+// value, so the UI features (and demands destination+PAT for) the same set.
+const featuredTemplates = computed(() => {
+  return templates.value.filter(t => t.fork_to_own === 'required')
+})
+
 const githubTemplates = computed(() => {
-  return templates.value.filter(t => t.source === 'github')
+  return templates.value.filter(t => t.source === 'github' && t.fork_to_own !== 'required')
 })
 
 const localTemplates = computed(() => {
   return templates.value.filter(t => t.source === 'local' || !t.source)
 })
+
+const isForkToOwn = computed(() => selectedTemplate.value?.fork_to_own === 'required')
 
 const selectedTemplate = computed(() => {
   if (!form.template) return null
@@ -357,17 +454,44 @@ const createAgent = async () => {
       payload.template = form.template
     }
 
+    // Fork-to-own (trinity-enterprise#93): destination + token are required
+    // for templates that declare it. Shape check only — the backend owns the
+    // authoritative validation.
+    if (isForkToOwn.value) {
+      const dest = forkDestination.value.trim()
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(dest)) {
+        error.value = 'Enter your repository as owner/name (e.g., your-username/my-agent-brain)'
+        loading.value = false
+        return
+      }
+      if (!forkPat.value.trim()) {
+        error.value = 'A GitHub token is required to create the repository in your account'
+        loading.value = false
+        return
+      }
+      payload.fork_to_own = {
+        destination_repo: dest,
+        github_pat: forkPat.value.trim(),
+        private: forkPrivate.value
+      }
+    }
+
     const agent = await agentsStore.createAgent(payload)
+    forkPat.value = ''  // hygiene: don't keep the token in the reactive ref
     emit('created', agent)
     emit('close')
   } catch (err) {
     const detail = err.response?.data?.detail
-    if (detail && typeof detail === 'object' && detail.code === 'QUOTA_EXCEEDED') {
+    if (detail && typeof detail === 'object' && (detail.code === 'QUOTA_EXCEEDED' || detail.error)) {
+      // Structured errors (quota, FORK_* codes) carry a user-facing message.
       error.value = `${detail.error}`
     } else if (typeof detail === 'string') {
       error.value = detail
+    } else if (Array.isArray(detail)) {
+      // FastAPI 422 validation errors
+      error.value = detail[0]?.msg || 'Invalid input'
     } else {
-      error.value = detail?.error || 'Failed to create agent'
+      error.value = 'Failed to create agent'
     }
   } finally {
     loading.value = false

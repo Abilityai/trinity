@@ -243,17 +243,21 @@ def _pending_login_matches(binding_id: int, phone: str, email: str) -> bool:
     The adapter calls `_set_pending_login` AFTER `db.create_login_code`, so
     observing the code in the DB does not imply the pending key is also set.
     Tests must wait for THIS before POSTing `/login <code>`.
+
+    Read through the backend container's own Redis client (the same
+    `get_redis_client()` the adapter uses) rather than a bare `redis-cli GET`:
+    the platform now runs Redis with mandatory ACL auth (#589), so an
+    unauthenticated `redis-cli` returns `NOAUTH Authentication required.` with
+    exit code 0 — which a naive stdout comparison silently treats as a
+    never-matching value. Going through the backend uses the authenticated
+    `REDIS_URL` (correct user + DB) with no hardcoded password.
     """
-    result = subprocess.run(
-        [
-            "docker", "exec", "-i", "trinity-redis", "redis-cli",
-            "GET", f"whatsapp_pending_login:{binding_id}:{phone}",
-        ],
-        capture_output=True, text=True, timeout=10,
+    script = (
+        "from adapters.whatsapp_adapter import _get_pending_login; "
+        f"val = _get_pending_login({binding_id}, {phone!r}); "
+        f"print({_OUTPUT_MARKER!r}); print(val or '')"
     )
-    if result.returncode != 0:
-        return False
-    return result.stdout.strip() == email.lower()
+    return _backend_py(script) == email.lower()
 
 
 def _access_request(agent_name: str, email: str) -> Optional[dict]:

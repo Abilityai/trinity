@@ -148,6 +148,22 @@ def _stub_platform_audit():
     sys.modules["services.platform_audit_service"] = mod
 
 
+# Shared service modules whose stubs (installed below for voice.py's import
+# chain) are INCOMPLETE — the template_service stub omits is_trinity_compatible,
+# the docker_service stub omits execute_command_in_container. If they leak past
+# this file they break later unit files whose import chains pull the real symbols
+# (`ImportError: cannot import name '…' (unknown location)`, e.g. test_fork_to_own,
+# test_73_stats_cache). We snapshot them here and restore right after voice.py
+# imports. The `_STUBBED_MODULE_NAMES` list + `_restore_sys_modules` fixture below
+# are the snapshot/restore pattern tests/lint_sys_modules.py recognises (#762;
+# precedent: test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    "services.docker_service",
+    "services.template_service",
+    "services.platform_audit_service",
+]
+_voice_auth_pre_stub = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+
 _voice_service, _FakeVoiceSession = _stub_voice_service()
 _stub_docker_service()
 _stub_template_service()
@@ -166,6 +182,32 @@ voice_router = _ilu.module_from_spec(_spec)
 # Pre-register so relative imports inside voice.py (none right now) would work.
 sys.modules["routers.voice"] = voice_router
 _spec.loader.exec_module(voice_router)
+
+# voice.py has captured what it needs from the stubs; restore the real shared
+# service modules so later unit files see the real ones, not our stubs (see the
+# snapshot above). This is the load-bearing cross-file fix — it runs at import
+# time, which a per-test fixture cannot.
+for _name, _orig in _voice_auth_pre_stub.items():
+    if _orig is not None:
+        sys.modules[_name] = _orig
+    else:
+        sys.modules.pop(_name, None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Per-test snapshot/restore safety net for the stubbed shared modules, and
+    the lint-recognised marker (with `_STUBBED_MODULE_NAMES` above) for #762."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
 
 from fastapi import HTTPException  # noqa: E402
 from jose import jwt  # noqa: E402
