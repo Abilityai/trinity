@@ -263,6 +263,7 @@ _EXPECTED_UPDATE_SITES = {
     "cancel_queued_execution",
     "cancel_queued_for_agent",
     "fail_queued_for_agent",
+    "fail_all_nonterminal_for_agent",      # trinity-enterprise#69: ghost discard; AND status IN (queued, running, pending_retry) — terminal rows untouched (no-op proof: test_69_ephemeral_agents.py::test_fail_all_nonterminal_for_agent)
     "expire_stale_queued",
     "update_execution_status",             # RELIABILITY-005 CAS (#524)
     "mark_stale_executions_failed",

@@ -1423,6 +1423,52 @@ class ScheduleOperations:
             )
             return result.rowcount
 
+    def fail_all_nonterminal_for_agent(
+        self, agent_name: str, reason: str = "ghost_discarded"
+    ) -> int:
+        """Bulk-FAIL every non-terminal execution for an agent
+        (trinity-enterprise#69).
+
+        Discard step 1 for ephemeral agents: queued, running, AND
+        pending_retry rows are all doomed (the container is about to be
+        force-removed and the DB rows purged), so terminal-ize them first.
+        This keeps canary L-03/E-01 green through the purge — the KEEP-policy
+        ``schedule_executions`` rows that survive must never be non-terminal
+        rows referencing an agent absent from ``agent_ownership``. It also
+        means a late in-flight ``apply_result`` for one of these rows loses
+        its CAS and records no side effects (no breaker-key resurrection).
+
+        The status filter doubles as the CAS guard: a row that reached a real
+        terminal (e.g. SUCCESS landing between our read and write) is not
+        overwritten.
+
+        Returns:
+            Count of rows moved to FAILED.
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status.in_(
+                            [
+                                TaskExecutionStatus.QUEUED,
+                                TaskExecutionStatus.RUNNING,
+                                TaskExecutionStatus.PENDING_RETRY,
+                            ]
+                        ),
+                    )
+                )
+                .values(
+                    status=TaskExecutionStatus.FAILED,
+                    completed_at=now,
+                    error=reason,
+                )
+            )
+            return result.rowcount
+
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         """Mark queued executions older than max_age_hours as FAILED.
 

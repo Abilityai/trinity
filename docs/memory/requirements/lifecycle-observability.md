@@ -274,3 +274,83 @@ endpoint — reports flow agent → MCP → backend.
 (#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
 
 ---
+
+## Ephemeral "Ghost" Agents (trinity-enterprise#69)
+
+**Description**: A disposable-agent lifecycle — an agent is created with a hard
+**budget** (`max_executions` and/or `ttl_seconds`) and is **hard-discarded** when
+the budget is exhausted: container removed, DB rows purged via the cascade
+primitive, Redis runtime state cleared. Ghosts never enter soft-delete/retention
+(no 180-day name reservation) and are volume-less (container writable layer only —
+they never recreate, so nothing needs to survive a recreate). Creation with an
+ephemeral budget is **entitlement-gated** (the `ephemeral_agents` module exposes
+it; the lifecycle mechanics below are edition-agnostic OSS primitives — the
+`suspended_at` core-primitive pattern). Scoped to **heterogeneous-workspace jobs**
+(different repo/config per ghost); same-agent burst parallelism stays with
+`fan_out` and, post-pull, replica groups.
+
+- **FR-1 — Budgeted creation**: `POST /api/agents` accepts an optional
+  `ephemeral {max_executions?, ttl_seconds?}` block (≥1 required;
+  `ephemeral_expires_at` is ALWAYS stamped, defaulting to the TTL ceiling, so no
+  ghost is immortal). Ghost names are server-suffixed (`{name}-{rand}`) —
+  unique-by-construction. Defaults: `max_parallel_tasks=1`, no credential
+  injection (opt-in), git auto-sync off, no avatar seed, no workspace volume.
+  Gates, in order: entitlement (403) → ephemeral-caller refusal (an ephemeral
+  agent cannot spawn ephemeral agents, 403) → atomic per-owner ephemeral quota
+  (Redis INCR-with-cap, 429) → per-parent spawn rate limit (429, agent-scoped
+  callers). Labels: `trinity.ephemeral=true`, `trinity.ephemeral-expires-at`,
+  `trinity.spawned-by`.
+- **FR-2 — Budget enforcement**: admission gate at the TOP of
+  `CapacityManager.acquire` (beside the dispatch-breaker gate — nothing is
+  enqueued for an exhausted/expired ghost; predicate counts terminal + running +
+  queued rows). Terminal-side: an `apply_result` post-CAS-win hook counts ALL
+  terminal statuses and background-triggers discard at budget (fail-open, after
+  slot release). `/chat` finalizes outside `apply_result` — its exhaustion is
+  admission-gated immediately and discard lags to the GC sweep (≤5 min),
+  documented. Pull-mode note: the #1081 claim endpoint must re-check the same
+  predicate.
+- **FR-3 — Hard discard**: `discard_ephemeral_agent(name)` under a per-name Redis
+  SETNX lock, crash-convergent ordering: (0) durable intent marker
+  (`ephemeral_expires_at = now`) → (1) cancel queued + CAS-fail all non-terminal
+  rows (`ghost_discarded`) + close activities → (2) remove container
+  (force, NotFound-tolerated) → (3) `clear_agent_runtime_state` (BEFORE purge —
+  the name must never free while slots/heartbeat keys survive) → (4) purge via
+  `cascade_delete` (executions KEEP; age out via the 90d retention sweep) →
+  (5) audit `ephemeral_discard`. `DELETE /api/agents/{name}` routes ephemeral
+  agents here (branch BEFORE the container lookup; a half-discarded ghost is
+  force-discardable, never 404).
+- **FR-4 — GC**: `cleanup_service._sweep_ephemeral_agents` (5-min): DB pass
+  (expired/exhausted rows → discard) + Docker-as-truth orphan pass
+  (`trinity.ephemeral` containers with no live ownership row, older than a
+  ~15-min newborn grace window → removed). Capped per cycle; folds into the
+  consolidated lease reaper later (#429).
+- **FR-5 — Ghost key containment**: a ghost's key stays `scope="agent"` (a new
+  scope value would break heartbeat/report/callback auth, which key off
+  `User.agent_name` = scope-"agent"-only); containment is a `(method, path)`
+  allowlist enforced at the single auth entry point (the connector-fence
+  pattern), keyed off the agent row's `is_ephemeral` — the flag dies with the
+  ghost. Allowed: heartbeat, execution result callback, reports, notifications,
+  own info; everything else 403. v1 has NO trusted opt-out (a parent needing a
+  fully-capable worker creates a durable agent); fail-open on DB read error.
+- **FR-6 — Spawn provenance + parent control (Part 2)**: any agent-spawned
+  creation (durable or ephemeral) auto-writes the `agent_permissions`
+  parent→child edge (`created_by="spawn:{parent}"`) and persists
+  `spawned_by_agent` + `spawned_by_key_id` on `agent_ownership` — the parent can
+  immediately chat/list/info the child. Agent-scoped callers may
+  start/stop/delete ONLY agents whose `spawned_by_agent` AND `spawned_by_key_id`
+  match the calling key (interim until #948 capability tokens); sharing,
+  permission grants, rename, and credential ops stay human-only (403 for
+  agent-scoped callers). Fleet-wide narrowing of agent-key breadth on other
+  mutating routes is an accepted-risk follow-up.
+- **FR-7 — Fleet hygiene**: ghosts are excluded from the heartbeat watch loop and
+  fleet health polling (no stale-alerts for discarded ghosts); operator-queue
+  polling keeps them (a ghost may escalate). Execution/cost stats stay inclusive
+  (billing truth). Schedule creation on a ghost → 400
+  `schedule_on_ephemeral_agent`. `is_ephemeral` surfaced on `GET /api/agents` +
+  MCP `list_agents`. Post-discard, KEEP execution rows are admin-only visible
+  (owner visibility derives from the purged ownership row) — documented.
+
+**Deferred**: non-LLM command-runner runtime; gVisor/microVM isolation lane;
+per-ghost egress control; creation UI (MCP-first); `is_ephemeral` filter on
+`/api/executions` if stats skew materializes; durable-agent volume-leak fix
+(separate public bug — `volume_remove` has no callers).
