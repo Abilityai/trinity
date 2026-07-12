@@ -32,7 +32,7 @@ PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "fa
 # deployments — the consent box still appears but nothing ever leaves the box.
 OPERATOR_INTAKE_ENABLED = (
     os.getenv("OPERATOR_INTAKE_ENABLED", "true").lower() == "true"
-    and os.getenv("DO_NOT_TRACK", "0") not in ("1", "true", "True")
+    and os.getenv("DO_NOT_TRACK", "0").strip().lower() in ("0", "", "false")
 )
 # Stable Cloudflare-fronted vanity domain (same app as #1116's /v1/report-bug);
 # /v1/ versions the contract so the backing Worker can be replaced forever.

@@ -267,6 +267,19 @@ class TelegramAdapter(ChannelAdapter):
             return None
         return db.get_telegram_verified_email(binding["id"], message.sender_id)
 
+    async def record_inbound_activity(
+        self, message: NormalizedMessage, agent_name: str
+    ) -> None:
+        """Count this DM on the Sharing-tab client roster (#1533)."""
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return
+        db.record_telegram_inbound(
+            binding["id"],
+            message.sender_id,
+            message.metadata.get("username"),
+        )
+
     async def prompt_auth(
         self,
         message: NormalizedMessage,

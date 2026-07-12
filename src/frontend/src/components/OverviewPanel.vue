@@ -14,6 +14,7 @@
  */
 import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
+import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import StackedBarChart from './StackedBarChart.vue'
@@ -109,7 +110,7 @@ function fmtPct(v) {
 }
 function fmtDateTime(iso) {
   if (!iso) return '—'
-  try { return new Date(iso).toLocaleString() } catch { return iso }
+  try { return parseUTC(iso).toLocaleString() } catch { return iso }
 }
 
 // --- chart data ---

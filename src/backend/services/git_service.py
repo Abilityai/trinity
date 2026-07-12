@@ -671,7 +671,9 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
                 return response.json()
             return None
     except Exception as e:
-        print(f"Error getting git status for {agent_name}: {e}")
+        # #1561: structured logging, not a bare print() — otherwise these
+        # failures have no level/timestamp and are invisible to log-based alerting.
+        logger.warning("Error getting git status for %s: %s", agent_name, e)
         return None
 
 
