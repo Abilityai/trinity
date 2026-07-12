@@ -36,7 +36,7 @@ All encrypted credentials — OAuth tokens, channel bot tokens (Slack, Telegram,
 
 ## How do I upgrade Trinity safely?
 
-Back up the database first, then: `git pull origin main`, rebuild the platform images with `docker compose build --no-cache backend frontend mcp-server scheduler`, restart them with `docker compose restart backend frontend mcp-server scheduler`, and run the six health probes. Agent containers keep running throughout — only platform services restart. Confirm the new build is actually live with `curl http://localhost:8000/api/version`, which reports the git commit baked into the image. See [Upgrading](../guides/deploying/upgrading.md).
+Use `./scripts/deploy/safe-upgrade.sh --project-name trinity`. It backs up persistent state first, rebuilds platform services, starts them under the same compose project, waits for backend health, and prints `/api/version`. For production, pass the same `--env-file` and `-f` compose files that created the running stack. Agent containers keep running throughout; their `agent-*-workspace` volumes are backed up and preserved. See [Upgrading](../guides/deploying/upgrading.md).
 
 ## Why should I use docker compose restart instead of down and up?
 
@@ -52,11 +52,11 @@ Only when `docker/base-image/Dockerfile` changes in the code you pulled — run 
 
 ## How do I back up my Trinity instance?
 
-The database is the primary target. On a dev install (named volume), copy it out with a throwaway container: `docker run --rm -v trinity_trinity-data:/data -v ~/backups:/backup alpine cp /data/trinity.db /backup/trinity-$(date +%Y%m%d-%H%M%S).db` — this works while services are running. On a production server the database is a bind-mounted file, so a plain `cp /srv/trinity-data/trinity.db ~/backups/...` does the job; PostgreSQL deployments use `pg_dump` instead. Also back up `.env` (it holds your encryption key) — agent code lives in git and Redis data is ephemeral, so neither needs separate backups. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
+Run `./scripts/deploy/backup-persistent-state.sh --project-name trinity`. It backs up PostgreSQL with `pg_dump` when a compose `postgres` service exists, archives SQLite files otherwise, archives backend `/data`, copies `.env`, and archives every `agent-*-workspace` volume. Use `--output-dir /srv/trinity-backups/persistent-state` or another durable host path in production. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
 
 ## How often should I back up, and how long should I keep backups?
 
-Back up before every upgrade and every destructive operation, and daily on production instances via cron. The documented cron job runs at 03:00, writes a timestamped copy of `trinity.db`, and deletes backups older than 14 days: `0 3 * * * docker run --rm -v trinity_trinity-data:/data -v ~/backups:/backup alpine cp /data/trinity.db /backup/trinity-$(date +\%Y\%m\%d-\%H\%M\%S).db && find ~/backups -name "trinity-*.db" -mtime +14 -delete`. Verify a backup is readable with `sqlite3 <file> ".tables"`. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
+Back up before every upgrade and every destructive operation, and daily on production instances via cron. The documented cron job runs `backup-persistent-state.sh`, writes a timestamped bundle, and deletes bundles older than 14 days. Verify the manifest exists and verify `postgres.dump` with `pg_restore -l` when PostgreSQL is active. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
 
 ## How do I restore from a backup?
 
@@ -64,7 +64,7 @@ Stop the writers first — `docker compose stop backend scheduler` — to releas
 
 ## Where does Trinity actually store my data?
 
-Platform state lives in `trinity.db`: in the named Docker volume `trinity_trinity-data` on a dev install, or in the bind-mount directory set by `TRINITY_DATA_PATH` (default `./trinity-data`; an absolute path like `/srv/trinity-data` is recommended) in production. It holds agents, schedules, chat history, user accounts, the audit log, and encrypted channel tokens. Each agent additionally gets its own Docker volumes — a durable home/workspace volume that survives container recreation — while Redis holds only ephemeral runtime state and agent source code lives in git. All of it survives `docker compose down`/`up` cycles. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
+Platform state lives either in `trinity.db` (SQLite) or in PostgreSQL when `DATABASE_URL` is set. That database holds agents, schedules, chat history, user accounts, the audit log, and encrypted channel tokens. Backend `/data` also matters because it can hold the skills-library cache and local runtime artifacts. Each agent has a durable `agent-*-workspace` Docker volume mounted at `/home/developer`; that is where runtime work survives container recreation. Redis is transient. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
 
 ## Should I use SQLite or PostgreSQL?
 

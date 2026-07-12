@@ -10,9 +10,9 @@
 - **Status**: ✅ Implemented
 - **Description**: No in-memory registry; query Docker directly with container labels
 
-### 8.2 SQLite Data Persistence
+### 8.2 Database Persistence
 - **Status**: ✅ Implemented
-- **Description**: Users, ownership, API keys, chat sessions via bind mount
+- **Description**: Users, ownership, API keys, chat sessions, audit state, and encrypted credential metadata persist in SQLite (`/data/trinity.db`) or PostgreSQL when `DATABASE_URL` is set. Production upgrades must treat the active database backend as authoritative instead of assuming SQLite.
 
 ### 8.3 Redis for Secrets
 - **Status**: ✅ Implemented
@@ -117,6 +117,15 @@
   - 3 MCP tools: `get_fleet_health`, `get_agent_health`, `trigger_health_check`
 - **Status Levels**: healthy → degraded → unhealthy → critical → unknown
 - **Flow**: `docs/memory/feature-flows/agent-monitoring.md`
+
+### 12.8b Safe Upgrade Persistent-State Backup
+- **Status**: ✅ Implemented (2026-07-12)
+- **Description**: Running-instance upgrades use a guarded script path that backs up persistent state before rebuilding/recreating platform services.
+- **Key Features**:
+  - `scripts/deploy/backup-persistent-state.sh` discovers the compose project by Docker labels, writes a PostgreSQL custom-format dump for bundled PostgreSQL deployments, archives SQLite files when SQLite is active, archives backend `/data`, copies `.env` when present, and archives every `agent-*-workspace` volume.
+  - `scripts/deploy/safe-upgrade.sh` keeps the compose project name stable, runs the backup first, rebuilds platform services, starts only platform services, waits for backend health, and reports `/api/version`.
+  - Routine upgrades do not remove agent containers, Docker volumes, or the agent network. Destructive operations such as `docker compose down -v` and `docker volume rm` are explicit reset operations, not upgrade steps.
+- **Flow**: `docs/memory/feature-flows/safe-upgrade-persistent-state.md`
 
 ### 12.8a Richer Agent `/health` Signal (#1020)
 - **Status**: ✅ Implemented (2026-06-02)

@@ -16,6 +16,7 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 |-----------|-------|-----------|
 | Deploy yourself (or another agent) to a Trinity instance | [Deploy an agent](#deploy-an-agent-to-trinity) | `trinity agents list` (or `GET /api/agents`) shows the agent `running` |
 | Stand up a new Trinity instance | [Stand up an instance](#stand-up-a-trinity-instance) | `curl /health` → `{"status": "healthy"}` |
+| Upgrade a running Trinity instance | [Upgrade safely](#upgrade-a-running-trinity-instance-safely) | `safe-upgrade.sh` completes, a backup manifest exists, and `/api/version` reports the target build |
 | Operate an existing instance (chat, schedules, fleet ops) | [Operate over MCP](#operate-a-trinity-instance-over-mcp) | an MCP tool call (e.g. `list_agents`) returns results over your API key |
 | Evaluate Trinity / summarize it for your operator | [README.md](README.md), then [docs/user-docs/README.md](docs/user-docs/README.md); system design: [docs/memory/architecture.md](docs/memory/architecture.md) | you can state what Trinity is, how to run it, and its license |
 | Contribute to Trinity's codebase | [Work on this repository](#work-on-this-repository) — Claude Code also auto-loads [CLAUDE.md](CLAUDE.md) | tests pass and a PR is open against `dev` |
@@ -32,7 +33,7 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 | Unauthenticated endpoints | `/health`, `/api/auth/mode`, `/api/setup/status`, `/api/token` |
 | Agent SSH ports | 2222+ (incrementing per agent) |
 | Required agent files | `CLAUDE.md` (agent instructions), `template.yaml` (metadata); optional `.env.example`, `.mcp.json.template` |
-| Persistence | SQLite at `~/trinity-data/trinity.db` (host bind mount); Redis for transient state |
+| Persistence | SQLite at `/data/trinity.db` or PostgreSQL via `DATABASE_URL`; backend `/data` and `agent-*-workspace` Docker volumes carry durable runtime state; Redis is transient |
 | License | Apache 2.0 — free for any use, commercial included |
 
 ## Stand up a Trinity instance
@@ -98,6 +99,36 @@ TOKEN=$(curl -s -X POST http://localhost:8000/api/token \
   -d 'username=admin&password=YOUR_ADMIN_PASSWORD' | jq -r .access_token)
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ```
+
+## Upgrade a running Trinity instance safely
+
+Use the guarded upgrade wrapper for any running instance with real state:
+
+```bash
+./scripts/deploy/safe-upgrade.sh --project-name trinity
+```
+
+For production installs with a dedicated env file and compose override, pass the exact compose project and files that created the running stack:
+
+```bash
+./scripts/deploy/safe-upgrade.sh \
+  --project-name trinity \
+  --env-file /path/to/.env \
+  -f docker-compose.prod.yml \
+  -f /path/to/host-override.yml
+```
+
+The versioned skill artifact for this runbook is [docs/agent-skills/trinity-safe-upgrade/SKILL.md](docs/agent-skills/trinity-safe-upgrade/SKILL.md). Copy or sync that folder into the active skills library when you want a running agent to select it as a skill; the built-in system-agent template also exposes `/ops/safe-upgrade`. The wrapper first runs `scripts/deploy/backup-persistent-state.sh`, which creates an ignored backup bundle containing:
+
+- a logical PostgreSQL dump when the compose project has a `postgres` service;
+- SQLite files when the instance is not using PostgreSQL;
+- backend `/data`, including local skills/library artifacts;
+- every `agent-*-workspace` volume, which is where agent runtime work persists;
+- `.env` when present, because it contains the credential encryption key.
+
+Do not use `docker compose down -v`, `docker volume rm`, or a different compose project name during an upgrade unless the operator explicitly asked for a destructive reset. Routine upgrades rebuild/recreate platform services only; agent containers and their workspace volumes stay intact. If `docker/base-image/Dockerfile` changes, rebuild the base image as a separate explicit step and recreate only the agents that need that base image after the persistent-state backup exists.
+
+**Done when** the script exits successfully, `backups/persistent-state/*/manifest.txt` exists (or the configured backup directory has the manifest), and `curl -s http://localhost:8000/api/version` reports the expected commit. Full runbook: [Upgrading](docs/user-docs/guides/deploying/upgrading.md), backup details: [Backup and Restore](docs/user-docs/guides/deploying/backup-and-restore.md).
 
 ## Operate a Trinity instance over MCP
 

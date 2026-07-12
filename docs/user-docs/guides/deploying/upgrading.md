@@ -12,7 +12,7 @@ Run this procedure before or after every `git pull` that includes changes to pla
 
 Before touching anything:
 
-- [ ] **Back up the database** (Step 1 below — do this first, always)
+- [ ] **Back up persistent state** (Step 1 below — do this first, always)
 - [ ] Confirm at least 2 GB disk free: `df -h /`
 - [ ] Note the current Git SHA: `git rev-parse HEAD`
 - [ ] Check that no critical agent tasks are running: `docker ps --filter "label=trinity.platform=agent"`
@@ -20,11 +20,51 @@ Before touching anything:
 
 ---
 
-## Procedure
+## Recommended Procedure
 
-### Step 1: Back Up the Database
+Use the safe upgrade wrapper when operating a real instance:
 
-The database is the critical state. Back it up before every upgrade.
+```bash
+./scripts/deploy/safe-upgrade.sh --project-name trinity
+```
+
+For production with an env file or host-specific override:
+
+```bash
+./scripts/deploy/safe-upgrade.sh \
+  --project-name trinity \
+  --env-file /path/to/.env \
+  -f docker-compose.prod.yml \
+  -f /path/to/host-override.yml
+```
+
+The wrapper runs `backup-persistent-state.sh`, rebuilds platform images, starts the platform services with the same compose project, waits for backend health, and prints `/api/version`. Agent containers are not deleted during this path; their `agent-*-workspace` volumes are backed up first and then left attached to their existing containers.
+
+Use the manual procedure below only when you need to perform the same steps by hand.
+
+---
+
+## Manual Procedure
+
+### Step 1: Back Up Persistent State
+
+The database is critical, but it is not the only state that matters. Back up the database, backend `/data`, `.env`, and agent workspace volumes before every upgrade:
+
+```bash
+./scripts/deploy/backup-persistent-state.sh --project-name trinity
+```
+
+Production example:
+
+```bash
+./scripts/deploy/backup-persistent-state.sh \
+  --project-name trinity \
+  --output-dir /srv/trinity-backups/persistent-state
+```
+
+The backup bundle is created under `backups/persistent-state/` by default. It is intentionally gitignored and chmod 700 because `env.backup` contains secrets when `.env` exists.
+
+If you need the legacy SQLite-only copy command, use it only after confirming the instance is not using PostgreSQL:
 
 ```bash
 # Development (named volume)
@@ -81,7 +121,7 @@ docker compose -f docker-compose.prod.yml build --no-cache backend frontend mcp-
 
 ### Step 4: Restart Platform Services
 
-> **Use `docker compose restart`, not `down/up`.** `docker compose down` removes the `trinity-agent-network`, which orphans every running agent container — they keep running but lose their network and have to be removed and recreated. `restart` preserves both the agents and the network. The only times to use `down` are: (1) intentional full teardown, (2) recovering from a corrupted compose state.
+> **Use `docker compose restart` or `safe-upgrade.sh`, not `down -v`.** `docker compose down` removes the `trinity-agent-network`, which orphans every running agent container — they keep running but lose their network and have to be removed and recreated. `docker compose down -v` is destructive: it removes the compose-managed data volumes. The only times to use `down` are: (1) intentional full teardown, (2) recovering from a corrupted compose state.
 
 ```bash
 # Development
@@ -153,6 +193,12 @@ After the base image is rebuilt, existing agent containers continue using the ol
 ## Rollback
 
 If something goes wrong after the upgrade:
+
+First identify the backup bundle created immediately before the upgrade:
+
+```bash
+ls -td backups/persistent-state/* | head -1
+```
 
 ### 1. Stop platform services
 

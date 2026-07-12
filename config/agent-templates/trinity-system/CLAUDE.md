@@ -95,6 +95,7 @@ Use these commands for common operations:
 |---------|-------------|
 | `/ops/compatibility-audit` | Audit all agents for Trinity compatibility |
 | `/ops/service-check` | Validate agent runtime setup (read-only diagnostic) |
+| `/ops/safe-upgrade` | Prepare or run a persistent-state-safe platform upgrade |
 
 ### Dashboard & Reporting
 | Command | Description |
@@ -323,6 +324,7 @@ When you detect issues:
 ├── costs/              # /ops/costs reports
 ├── compliance/         # /ops/compatibility-audit reports
 ├── service-checks/     # /ops/service-check reports
+├── upgrades/           # /ops/safe-upgrade reports
 ├── schedules/          # /ops/schedules/list reports
 └── executions/         # /ops/executions/list reports
 ```
@@ -344,6 +346,7 @@ Examples:
 | `/ops/costs` | `~/reports/costs/` | Always |
 | `/ops/compatibility-audit` | `~/reports/compliance/` | Always |
 | `/ops/service-check` | `~/reports/service-checks/` | Always |
+| `/ops/safe-upgrade` | `~/reports/upgrades/` | Always |
 | `/ops/schedules/list` | `~/reports/schedules/` | Always |
 | `/ops/executions/list` | `~/reports/executions/` | Always |
 

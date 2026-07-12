@@ -14,8 +14,10 @@
 |---|---|---|---|
 | `trinity.db` (SQLite) | **Yes — primary target** | Named volume `trinity_trinity-data` (dev) or bind-mount at `TRINITY_DATA_PATH` (prod) | Agents, schedules, chat history, credentials metadata, audit log |
 | PostgreSQL database | **Yes — if `DATABASE_URL` is set** | Bundled `trinity-postgres` container (dev) or your managed PostgreSQL (prod) | Same contents as `trinity.db`; back up with `pg_dump` (see below) instead of a file copy |
+| Backend `/data` | **Yes** | Compose volume or host bind mount mounted at `/data` in `backend` | Skills library sync cache, local runtime artifacts, and SQLite files when SQLite is active |
 | `.env` file | **Yes** | Host filesystem | **Not in git.** Losing it means losing `CREDENTIAL_ENCRYPTION_KEY`, which makes all encrypted credentials unrecoverable. |
-| Agent code | Not separately | Git repositories | Each agent's code lives in a git repo — already versioned there. |
+| Agent workspaces | **Yes** | Docker volumes named `agent-*-workspace` | Durable `/home/developer` state for running agents; survives container recreation but not volume loss |
+| Agent source repos | Not separately | Git repositories | Versioned agent template/source code should already live in git. |
 | Redis data | Not separately | Named volume `trinity_redis-data` | Ephemeral: JWT tokens, capacity counters. All regenerated on next start. |
 | Platform config | Not separately | Git repo | `docker-compose.yml`, `config/`, `scripts/` — all in version control. |
 
@@ -30,7 +32,28 @@
 
 ## Procedure
 
-### Step 1: Back Up the Database
+### Step 1: Back Up Persistent State
+
+For a running instance, prefer the bundled backup script:
+
+```bash
+./scripts/deploy/backup-persistent-state.sh --project-name trinity
+```
+
+It discovers the running compose project, writes a PostgreSQL dump when the project includes a `postgres` service, falls back to SQLite file archival when no PostgreSQL database is active, archives backend `/data`, archives every `agent-*-workspace` volume, and copies `.env` when present.
+
+Use a durable host path for production backups:
+
+```bash
+./scripts/deploy/backup-persistent-state.sh \
+  --project-name trinity \
+  --env-file /path/to/.env \
+  --output-dir /srv/trinity-backups/persistent-state
+```
+
+The bundle contains secrets if `.env` is present. Keep it outside git and offload it to encrypted storage.
+
+### Legacy SQLite-Only Backup
 
 Run this on the host with services running — it does not require stopping anything:
 
@@ -57,7 +80,7 @@ The volume name prefix `trinity_` comes from the Docker Compose project name (th
 > ```
 > Restore with `psql -U trinity trinity < backup.sql` into an empty database (services stopped first).
 
-### Step 2: Back Up `.env`
+### Step 2: Back Up `.env` Manually, if Needed
 
 ```bash
 cp .env ~/backups/trinity-env-$(date +%Y%m%d).bak
@@ -69,6 +92,15 @@ Store this in a secure location (password manager, encrypted storage). Never com
 ---
 
 ## Verify
+
+For backup bundles produced by `backup-persistent-state.sh`:
+
+```bash
+ls -lh backups/persistent-state/*/manifest.txt
+docker run --rm -v "$PWD/backups/persistent-state/<bundle>:/backup:ro" postgres:16-alpine pg_restore -l /backup/postgres.dump
+```
+
+Use the PostgreSQL verification only when the bundle contains `postgres.dump`.
 
 ```bash
 sqlite3 ~/backups/trinity-YYYYMMDD-HHMMSS.db ".tables"
@@ -127,7 +159,7 @@ curl -s http://localhost:8001/health
 
 ## Automation
 
-Add a cron job to back up the database daily and retain 14 days of history:
+Add a cron job to back up persistent state daily and retain 14 days of history:
 
 ```bash
 crontab -e
@@ -136,15 +168,15 @@ crontab -e
 Add this line (adjust paths as needed):
 
 ```cron
-0 3 * * * docker run --rm -v trinity_trinity-data:/data -v ~/backups:/backup alpine cp /data/trinity.db /backup/trinity-$(date +\%Y\%m\%d-\%H\%M\%S).db && find ~/backups -name "trinity-*.db" -mtime +14 -delete
+0 3 * * * cd /path/to/trinity && ./scripts/deploy/backup-persistent-state.sh --project-name trinity --output-dir /srv/trinity-backups/persistent-state && find /srv/trinity-backups/persistent-state -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +
 ```
 
-This runs at 03:00 daily, creates a timestamped backup, and deletes backups older than 14 days.
+This runs at 03:00 daily, creates a timestamped backup bundle, and deletes backup bundles older than 14 days.
 
 Verify the cron job is working after the first scheduled run:
 
 ```bash
-ls -lh ~/backups/trinity-*.db
+ls -lh /srv/trinity-backups/persistent-state/*/manifest.txt
 ```
 
 ---
@@ -162,6 +194,7 @@ ls -lh ~/backups/trinity-*.db
 
 **Not in `trinity.db`:**
 - Agent source code (in git)
+- Agent runtime work in `/home/developer` (in each `agent-*-workspace` volume)
 - Runtime secrets held by Redis (ephemeral — regenerate on restart)
 - Container logs (in Vector's log files under the `trinity-logs` volume)
 - Platform images (rebuild from source)
