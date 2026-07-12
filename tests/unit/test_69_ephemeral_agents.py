@@ -309,8 +309,13 @@ def test_database_manager_delegations_exist():
 
 @pytest.fixture
 def gated_capacity(monkeypatch):
-    """A CapacityManager whose Redis/slot layers must never be touched."""
-    from services import capacity_manager as cm
+    """A CapacityManager whose Redis/slot layers must never be touched.
+
+    Uses the collection-time _REAL_MODULES object — a bare import at fixture
+    time can resolve a sibling test's leaked sys.modules stub (see
+    _own_real_modules).
+    """
+    cm = _REAL_MODULES["services.capacity_manager"]
 
     manager = cm.CapacityManager.__new__(cm.CapacityManager)
     # Any slot/overflow access blows up the test — the gate must fire first.
@@ -424,8 +429,10 @@ def _req(method: str, path: str):
 
 @pytest.fixture
 def ghost_fence(monkeypatch):
-    import dependencies
-    from database import db
+    # _REAL_MODULES objects, not bare imports — fixture-time imports can
+    # resolve a sibling's leaked sys.modules stub (see _own_real_modules).
+    dependencies = _REAL_MODULES["dependencies"]
+    db = _REAL_MODULES["database"].db
 
     monkeypatch.setattr(
         db, "get_agent_ephemeral_info",
@@ -615,9 +622,19 @@ async def test_budget_hook_noop_under_budget_and_for_durable(monkeypatch):
 
 @pytest.fixture
 def discard_env(agent_ops, monkeypatch):
-    """Real DB through the harness; Docker/capacity/audit/Redis stubbed."""
-    import services.agent_service.ephemeral as ephemeral_mod
-    from database import db as facade
+    """Real DB through the harness; Docker/capacity/audit/Redis stubbed.
+
+    All patches target the `_REAL_MODULES` objects DIRECTLY — never string
+    targets. A string target resolves through `sys.modules` at patch time,
+    which under some pytest-randomly orderings is a sibling test's leaked
+    stale entry, so the patch lands on the wrong module object while
+    discard's call-time import (under the `_own_real_modules` pin) resolves
+    the real one → the mock is never hit (CI seed 12345). Object-form
+    patching + the pin makes patch target and call-time import provably the
+    same object, regardless of fixture instantiation order.
+    """
+    ephemeral_mod = _REAL_MODULES["services.agent_service.ephemeral"]
+    facade = _REAL_MODULES["database"].db
 
     # The primitive reads through the database facade — point the facade's
     # ops at the harness-backed instances (the facade object was constructed
@@ -639,30 +656,50 @@ def discard_env(agent_ops, monkeypatch):
     # Docker: container present-then-removed by default
     fake_container = MagicMock()
     monkeypatch.setattr(
-        "services.docker_service.get_agent_container",
+        _REAL_MODULES["services.docker_service"],
+        "get_agent_container",
         lambda name: fake_container,
     )
     remove_mock = AsyncMock()
-    monkeypatch.setattr("services.docker_utils.container_remove", remove_mock)
+    monkeypatch.setattr(
+        _REAL_MODULES["services.docker_utils"], "container_remove", remove_mock
+    )
 
     # capacity overflow cancel
     cap = MagicMock()
     cap.cancel_all_overflow = AsyncMock(return_value=0)
     monkeypatch.setattr(
-        "services.capacity_manager.get_capacity_manager", lambda: cap
+        _REAL_MODULES["services.capacity_manager"],
+        "get_capacity_manager",
+        lambda: cap,
     )
 
     # Redis runtime-state clear
     clear_mock = AsyncMock()
     monkeypatch.setattr(
-        "services.agent_runtime_state.clear_agent_runtime_state", clear_mock
+        _REAL_MODULES["services.agent_runtime_state"],
+        "clear_agent_runtime_state",
+        clear_mock,
     )
 
-    # Audit is NOT mocked: the real platform_audit_service writes through
-    # get_engine() → the harness DB, so tests assert the persisted audit_log
-    # row (read-back through the real backend — the learnings-preferred
-    # style; module-attr mock patches proved rebind-flaky here).
-    return SimpleNamespace(remove=remove_mock, clear=clear_mock, capacity=cap)
+    # Audit: patch the singleton INSTANCE's `log` method. Both alternatives
+    # proved order-flaky under pytest-randomly: replacing the module attribute
+    # loses to sibling stub leaks rebinding the module, and asserting the
+    # persisted audit_log row depends on the real service's internals across
+    # orderings (CI seed 12345 caught a 0-row run). The `_own_real_modules`
+    # pin guarantees discard's call-time import resolves OUR real module,
+    # whose attribute is this exact singleton object — so an instance-method
+    # patch is deterministic.
+    audit_log_mock = AsyncMock()
+    monkeypatch.setattr(
+        _REAL_MODULES["services.platform_audit_service"].platform_audit_service,
+        "log",
+        audit_log_mock,
+    )
+
+    return SimpleNamespace(
+        remove=remove_mock, clear=clear_mock, capacity=cap, audit_log=audit_log_mock
+    )
 
 
 @pytest.mark.asyncio
@@ -686,10 +723,9 @@ async def test_discard_full_path_and_idempotent_rerun(discard_env, agent_ops):
     # ordering side effects ran
     discard_env.remove.assert_awaited()
     discard_env.clear.assert_awaited()
-    # the audit row landed (real service → harness DB)
-    assert scalar(
-        "SELECT COUNT(*) FROM audit_log WHERE event_action = 'ephemeral_discard'"
-    ) == 1
+    # the audit seam fired with the discard action
+    discard_env.audit_log.assert_awaited_once()
+    assert discard_env.audit_log.await_args.kwargs.get("event_action") == "ephemeral_discard"
 
     # re-run converges to no-op without raising
     assert await discard_ephemeral_agent("ghost-d1", reason="test") is False
