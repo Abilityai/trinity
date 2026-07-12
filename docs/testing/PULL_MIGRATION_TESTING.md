@@ -35,7 +35,7 @@ integration stage gated on defect confirmation):
 7. ✅ **Integration** — live pilot (#946), pull PROVEN end-to-end on `gtm-synthesizer` (§6).
 8. ⬜ **Soak** — #856 fleet-scale ≥2-week zero-orphan (Phase-5 gate). Not laptop-reproducible.
 
-**Environment that moved this plan:** the local stack is now **PostgreSQL** (pull revisions `0015`/`0016`,
+**Environment that moved this plan:** the local stack is now **PostgreSQL** (pull revisions `0016`/`0017`,
 `0012` as originally tested; dark columns verified on live PG), and live turns are locally exercisable with a
 working out-of-tree `ANTHROPIC_API_KEY`.
 Consequence: the concurrency-race and PG-migration tiers move from "needs infra you don't have" to "runnable
@@ -50,7 +50,7 @@ locally today." SQLite serializes writes and *hid* the double-claim race; PG doe
 | ID | Severity | One-liner | Status |
 |----|----------|-----------|--------|
 | **C1** | ⛔ Critical | `claim_next_queued` **double-claims → double-RUNS** a row up to N× under real-PG contention (subquery InitPlan + no outer status re-check). Token CAS single-values only the terminal write, not the executions. | ✅ **FIXED + VERIFIED** — `FOR UPDATE SKIP LOCKED` (PG) + outer `status='queued'` re-check; re-run **0/25** double-claims (was 25/25); SQLite green. |
-| **PG1** | ⛔ Ship-blocker | Over-length Alembic revision IDs (41 chars) truncation-fail on default `version_num VARCHAR(32)` → **fresh PostgreSQL deploy can't boot**. Live DB survives only by a pre-widened column. | ✅ **RESOLVED (superseded)** — dev fixed the identical class as **#1420** (`0008a_widen_alembic_version` + `env.py` `version_table_column_type=String(255)`). On rebase onto dev the branch inherits that fix; the session's duplicate `env.py` widening was dropped and the pull revisions renumbered `0015`/`0016`. Originally verified independently (env.py widening → fresh empty PG reaches head; PG suite **47/47**). |
+| **PG1** | ⛔ Ship-blocker | Over-length Alembic revision IDs (41 chars) truncation-fail on default `version_num VARCHAR(32)` → **fresh PostgreSQL deploy can't boot**. Live DB survives only by a pre-widened column. | ✅ **RESOLVED (superseded)** — dev fixed the identical class as **#1420** (`0008a_widen_alembic_version` + `env.py` `version_table_column_type=String(255)`). On rebase onto dev the branch inherits that fix; the session's duplicate `env.py` widening was dropped and the pull revisions renumbered `0016`/`0017`. Originally verified independently (env.py widening → fresh empty PG reaches head; PG suite **47/47**). |
 | **B1–B6** | 🔴 High | All six suspected defects confirmed (below). | ✅ **B1/B2/B3/B5-lost-result FIXED + unit-verified**; **B6 fixed, static-verified**; **B4 + B5-double-run deferred by design**. |
 
 C1 and PG1 were surfaced by *executing* the plan (concurrency + real-PG tiers), not predicted. C1 is the
@@ -77,7 +77,7 @@ reaper-touched row. The fix targets this single point.
 | # | Fix | Files | Verified |
 |---|-----|-------|----------|
 | **C1** | Claim subquery `FOR UPDATE SKIP LOCKED` (PG) + outer `status='queued'` re-check. | `db/schedules.py::claim_next_queued` | ✅ real-PG multi-process 0/25 double-claims; SQLite green |
-| **PG1** | Superseded by dev's **#1420** (`0008a_widen_alembic_version` + `env.py` `String(255)`); inherited on rebase. Session's duplicate `env.py` widening dropped; pull revisions renumbered `0015`/`0016`. | dev `migrations/env.py` (#1420) | ✅ fresh empty PG reaches head; PG suite 47/47 |
+| **PG1** | Superseded by dev's **#1420** (`0008a_widen_alembic_version` + `env.py` `String(255)`); inherited on rebase. Session's duplicate `env.py` widening dropped; pull revisions renumbered `0016`/`0017`. | dev `migrations/env.py` (#1420) | ✅ fresh empty PG reaches head; PG suite 47/47 |
 | **B1** | Recreate pops `PULL_MODE_ENV_KEYS` before re-applying; the claim seam's agent-key path is allowlist-gated in `_pull_authorized` (internal-secret + result paths intentionally ungated so an in-flight result still lands). | `pull_mode.py`, `lifecycle.py`, `routers/internal.py` | ✅ unit |
 | **B2** | `park_expired_lease` keeps `claim_token` → a late SUCCESS CAS-overwrites the parked FAILED row. | `db/schedules.py` | ✅ unit |
 | **B3** | Reaper creates the operator alert **before** the park write, parks **only if the alert persisted** → a failed alert leaves the row reapable, not invisible poison. | `lease_reaper_service.py` | ✅ unit |
@@ -103,7 +103,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 |----|------|----------|
 | T0.1 | Non-pull rows still swept identically for all 6 amended selectors | Every legacy `lease_expires_at IS NULL` row swept exactly as pre-#1081. Diff vs `dev@0d3e58b7`. |
 | T0.2 | Reaper inert with zero leases — real cleanup cycle | `find_expired_leases → []`; `CleanupReport` unchanged; no exception/latency. |
-| T0.3 | Migration idempotency — fresh + upgrade, both engines | 3 columns present, nullable, correct defaults; `ADD COLUMN IF NOT EXISTS` no-ops on re-run; SQLite `migrations.py` and Alembic `0015`/`0016` agree. |
+| T0.3 | Migration idempotency — fresh + upgrade, both engines | 3 columns present, nullable, correct defaults; `ADD COLUMN IF NOT EXISTS` no-ops on re-run; SQLite `migrations.py` and Alembic `0016`/`0017` agree. |
 | T0.4 | Legacy CAS path unchanged (`claim_token=None`) | Push terminal writes byte-identical. |
 | T0.5 | Status-projection guard covers new sites (AST guard) | `requeue_expired_lease` + `park_expired_lease` classified in `_EXPECTED_UPDATE_SITES`. |
 | T0.6 | Pull columns never populated with flag OFF | All 3 pull columns stay NULL on every row. |
@@ -191,7 +191,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 | ID | Test | Expected |
 |----|------|----------|
 | T7.1 | Run the whole #1081 suite on live PG | The double-claim race (T2.1) only manifests on PG. Make PG the default CI leg for this feature. |
-| T7.2 | Alembic `0015`→`0016` on live PG | Columns created; `down_revision` chain clean (re-parented onto dev head `0014`); pre-Alembic PG stamped at baseline. |
+| T7.2 | Alembic `0016`→`0017` on live PG | Columns created; `down_revision` chain clean (re-parented onto dev head `0015_enterprise_connectors`); pre-Alembic PG stamped at baseline. |
 | T7.3 | SQLite↔PG parity | `schema-parity` + `check_alembic_parity.py` green for the 4 new columns. |
 | T7.4 | Column-type assertion on PG | `lease_expires_at`/`claim_token`/`claimed_by_worker` TEXT; `redelivery_count` INTEGER DEFAULT 0. |
 
@@ -234,12 +234,12 @@ promote it to a committed real-PG multi-process regression test when C1 lands.
 > **Resolution note (post-rebase):** dev fixed this identical class independently as **#1420**
 > (`0008a_widen_alembic_version` migration + `env.py` `version_table_column_type=String(255)`). Rebasing
 > onto dev inherits that fix, so the session's own `env.py` widening was dropped and the pull revisions were
-> renumbered `0015`/`0016` (re-parented onto dev head `0014`). The finding below is the original session
+> renumbered `0016`/`0017` (re-parented onto dev head `0015_enterprise_connectors`). The finding below is the original session
 > diagnosis, kept as the historical record.
 
 Alembic's `alembic_version.version_num` defaults to **`VARCHAR(32)`**, but the descriptive `NNNN_<table>_<change>`
 revision IDs are **41 chars** (e.g. `0009_agent_ownership_public_channel_model`, and the pull revisions, then
-`0011`/`0012`, now `0015`/`0016`). On a clean PG bootstrap, `init_database()` → `upgrade_to_head()`
+`0011`/`0012`, now `0016`/`0017`). On a clean PG bootstrap, `init_database()` → `upgrade_to_head()`
 truncation-fails at the first over-length id with `StringDataRightTruncation`; Alembic runs the whole upgrade
 in one transaction, so it **rolls back entirely → no schema → backend can't start.**
 
@@ -345,5 +345,5 @@ canary-on-PG (#1540) · B6 runtime-verify on the rebuilt image · the ≥2-week 
 | Capacity shadow meter | `db/schedules.py::count_active_leased_by_agent`; `services/capacity_manager.py` |
 | Agent worker pool | `docker/base-image/agent_server/services/pull_worker.py`; `agent_server/main.py` |
 | Env injection + gating | `services/agent_service/pull_mode.py`; `crud.py`, `lifecycle.py`; `config.py` |
-| Migrations | `migrations/versions/0015_schedule_executions_pull_claim_lease.py`, `0016_schedule_executions_redelivery_count.py`; SQLite `db/migrations.py` (version-column widening carried by dev #1420 `env.py`) |
+| Migrations | `migrations/versions/0016_schedule_executions_pull_claim_lease.py`, `0017_schedule_executions_redelivery_count.py`; SQLite `db/migrations.py` (version-column widening carried by dev #1420 `env.py`) |
 | Tests | `tests/unit/test_1081_*.py`, `test_cleanup_inner_sweeps.py`, `test_schedule_status_observability.py`, `tests/test_canary_invariants.py` |

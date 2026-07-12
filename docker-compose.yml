@@ -125,6 +125,17 @@ services:
       # too but keeps its own internal default (http://backend:8000); intentionally
       # not wired here so it still reaches the backend over the Docker network.
       - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+      # Self-signup + operator-intake privacy levers. Read by config.py; without
+      # these lines the .env values are inert (the #1039 packaging-gap class).
+      # PUBLIC_ACCESS_REQUESTS_ENABLED gates POST /api/access/request (secure
+      # default false); OPERATOR_INTAKE_* / DO_NOT_TRACK is the air-gapped opt-out
+      # for the first-run intake POST (#1486/#1488). OPERATOR_INTAKE_URL keeps its
+      # FULL non-empty default — a bare :- would arrive set-but-empty and shadow
+      # the code default (#1076 class).
+      - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
+      - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter
@@ -163,6 +174,12 @@ services:
       # false; safe to flip early (non-202 agent responses fall back to sync).
       # Backend-only — the scheduler doesn't dispatch to agents.
       - DISPATCH_ASYNC=${DISPATCH_ASYNC:-false}
+      # Dispatch circuit breaker global gate (RELIABILITY-007, #526). Producer-side
+      # per-agent breaker; engages ONLY when this AND the per-agent
+      # agent_ownership.circuit_breaker_enabled toggle are both on. Default false —
+      # without this line the owner-facing PUT .../circuit-breaker toggle silently
+      # no-ops (#1487, the #1039 packaging-gap class).
+      - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
       # Issue #874: uvicorn --reload writes __pycache__/ next to source files
       # in the ./src/backend bind mount. On Linux dev hosts the host dir is
       # owned by the developer UID, not container UID 1000, so the writes

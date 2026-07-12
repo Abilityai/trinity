@@ -500,16 +500,17 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to cancel backlog for agent {agent_name}: {e}")
 
-    # RELIABILITY-004 / #307: clear the agent's heartbeat Redis keys now. The
-    # `seen` marker has no TTL, so without this it would leak past delete; the
-    # hb/misses keys self-expire but are cleared too for cleanliness. The
-    # watch loop bounds itself to live agents, so a stopped container is never
-    # read regardless — this just stops the slow key accumulation. Best-effort.
+    # #1560 / RELIABILITY-004 (#307): clear every per-agent Redis keyspace in one
+    # sweep — heartbeat markers (the `seen` key has no TTL), both circuit
+    # breakers, and the execution slots. The breakers are keyed by name, so
+    # leaving them behind hands a dead agent's verdict to whatever agent next
+    # takes this name. The container was removed above, so clearing slots cannot
+    # race a live execution. Best-effort: never blocks the delete.
     try:
-        from services import heartbeat_service
-        heartbeat_service.clear_heartbeat(agent_name)
+        from services.agent_runtime_state import clear_agent_runtime_state
+        await clear_agent_runtime_state(agent_name)
     except Exception as e:
-        logger.warning(f"Failed to clear heartbeat keys for agent {agent_name}: {e}")
+        logger.warning(f"Failed to clear Redis runtime state for agent {agent_name}: {e}")
 
     # Mark the row as soft-deleted. Children stay until the retention
     # sweep; the unique constraint on agent_name naturally blocks reuse

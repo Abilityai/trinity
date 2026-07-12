@@ -18,15 +18,15 @@ and never re-running baseline — also picks the column up on
 ``alembic upgrade head``. ``ADD COLUMN IF NOT EXISTS`` keeps it a no-op when the
 baseline already created the table with the column.
 
-Revision ID: 0016_schedule_executions_redelivery_count
-Revises: 0015_schedule_executions_pull_claim_lease
+Revision ID: 0017_schedule_executions_redelivery_count
+Revises: 0016_schedule_executions_pull_claim_lease
 Create Date: 2026-07-02
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0016_schedule_executions_redelivery_count"
-down_revision = "0015_schedule_executions_pull_claim_lease"
+revision = "0017_schedule_executions_redelivery_count"
+down_revision = "0016_schedule_executions_pull_claim_lease"
 branch_labels = None
 depends_on = None
 

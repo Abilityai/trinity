@@ -26,6 +26,7 @@ from services.docker_service import (
 from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
+from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     get_github_template,
     generate_credential_files,
@@ -187,6 +188,14 @@ async def create_agent_internal(
         or db.is_agent_name_reserved(config.name)
     ):
         raise HTTPException(status_code=409, detail="Agent already exists")
+
+    # #1560: reaching here means the name is free — but `is_agent_name_reserved`
+    # only stops matching once the retention purge hard-deletes the row, and the
+    # breakers are keyed by name with no TTL. Clear any predecessor's verdict
+    # BEFORE the container exists, so nothing races the agent's first heartbeat.
+    # Breakers only: no slots exist for a name nothing is running under yet, and
+    # the full sweep is reserved for teardown paths.
+    clear_agent_breakers(config.name)
 
     # Agent quota enforcement: per-role limits (QUOTA-001)
     max_agents = get_agent_quota_for_role(current_user.role)

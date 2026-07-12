@@ -2723,6 +2723,29 @@ def _migrate_agent_reports_table(cursor, conn):
     print("Created agent_reports table (#918)")
 
 
+def _migrate_enterprise_connectors_table(cursor, conn):
+    """Create enterprise_connectors table (per-agent MCP connector, ent#46 → OSS #118).
+
+    Config row per agent: enabled + exposed-playbook allow-list. Schema is also in
+    db/schema.py for fresh installs; this handles existing installs. Idempotent —
+    ``CREATE TABLE IF NOT EXISTS`` on the SAME name the enterprise module used, so an
+    existing enterprise install adopts its data unchanged (zero data migration, no
+    duplicate-table drift, #118). Mirrored by Alembic 0015_enterprise_connectors for PG.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enterprise_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -2736,7 +2759,7 @@ def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     "Dark" = the columns exist but nothing reads or writes them yet. This is
     pure schema groundwork for the pull-coordination phases (umbrella #1081);
     no endpoint, service, or runtime behavior changes here. Mirrored by the
-    Alembic revision 0015_schedule_executions_pull_claim_lease for PostgreSQL.
+    Alembic revision 0016_schedule_executions_pull_claim_lease for PostgreSQL.
     """
     new_columns = [
         ("claim_token", "TEXT"),
@@ -2766,7 +2789,7 @@ def _migrate_schedule_executions_redelivery_count(cursor, conn):
 
     DISTINCT from ``retry_count`` (#678 reader-race in-line retry) — that column
     is untouched. Mirrored by the Alembic revision
-    ``0016_schedule_executions_redelivery_count`` for PostgreSQL.
+    ``0017_schedule_executions_redelivery_count`` for PostgreSQL.
     """
     _safe_add_column(
         cursor,
@@ -2864,6 +2887,7 @@ MIGRATIONS = [
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
+    ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
 ]

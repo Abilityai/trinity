@@ -42,7 +42,7 @@ on a live instance. Companion to `PULL_MIGRATION_STATUS.md` (what shipped) and `
 2. **Record the rollback target** — the currently-running backend image tag / commit SHA.
 3. **Confirm the deploy is inert:** `PULL_MODE_PILOT_AGENTS` empty in the backend env (default). A fresh
    deploy should change *no runtime behavior* until you opt an agent in.
-4. **Post-deploy, confirm migrations applied:** Alembic head reaches `0016_schedule_executions_redelivery_count`
+4. **Post-deploy, confirm migrations applied:** Alembic head reaches `0017_schedule_executions_redelivery_count`
    (Postgres) / the SQLite `schedule_executions_redelivery_count` migration is recorded, and the backend
    `/health` is 200.
 
@@ -89,7 +89,9 @@ The migrations are purely additive. **Recommended posture: leave the columns.** 
 a future re-deploy a no-op (`ADD COLUMN IF NOT EXISTS`).
 
 If you are *required* to remove them (e.g., a strict schema audit):
-- Postgres: `alembic downgrade 0014_agent_schedules_webhook_auth` (drops `0016`→`0015`). Verify no
+- Postgres: `alembic downgrade 0015_enterprise_connectors` (drops `0017`→`0016`, the two pull revisions).
+  Do **not** target `0014_agent_schedules_webhook_auth` — that also drops `0015_enterprise_connectors`
+  (the OSS-core MCP connector table, #118), which has nothing to do with this feature. Verify no
   application is mid-write to `schedule_executions` first.
 - SQLite: the bespoke runner has no down-migrations; restore from the §2 backup instead.
 

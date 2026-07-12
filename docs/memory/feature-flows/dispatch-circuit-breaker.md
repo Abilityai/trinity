@@ -27,6 +27,12 @@ half-open probe.
 | **Dispatch** (#526) | `services/dispatch_breaker.py` (`DispatchBreaker`) | `agent:dispatch:{name}` | `error_code == AUTH` only (D10) | *auth-dead* |
 | *(seam)* heartbeat (#307) | calls `DispatchBreaker.record_failure("missed_heartbeat")` | — | missed heartbeat | *wedged* |
 
+Both keys are namespaced by agent **name**, not container identity, and carry no
+TTL — so both are cleared together across the agent lifecycle by
+`services/agent_runtime_state.py` (`clear_agent_breakers`), or a recycled name
+inherits its predecessor's verdict (#1560). See architecture.md → Circuit Breakers
+→ *Lifecycle clearing* for the six call sites.
+
 Separate namespaces + separate Lua → neither contaminates the other's counter
 (`AgentClient.record_success()` HTTP-200 never touches the dispatch breaker).
 Both share the Redis plumbing in the **top-level** `redis_breaker_util.py`
@@ -103,6 +109,10 @@ upstream `acquire()` gate already admitted, so router-only agents still self-hea
   (migration `agent_ownership_circuit_breaker`, mixin getters/setters in
   `db/agent_settings/resources.py`).
 - **Config**: `DISPATCH_BREAKER_ENABLED` env (default `false`) — global master switch.
+  Forwarded to the backend container through **both** compose files and documented in
+  `.env.example` (#1487/#1485); before that fix the var was read by `config.py` but
+  never reached the container, so the owner-facing toggle silently no-op'd (the
+  #1039/#1067 packaging-gap class).
 - **Operator API**: `GET/PUT /api/agents/{name}/circuit-breaker` (state / owner-gated toggle);
   `POST /api/agents/{name}/circuit-breaker/reset` resets BOTH breakers (admin).
 - **Health**: `circuit_breaker` block on `GET /api/monitoring/agents/{name}`.

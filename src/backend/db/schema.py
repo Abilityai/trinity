@@ -139,6 +139,19 @@ TABLES = {
         )
     """,
 
+    # Per-agent MCP connector config (ent#46; OSS-core since #118). Kept the
+    # `enterprise_connectors` name so existing enterprise installs adopt their data
+    # with zero migration. The scoped key lives in mcp_api_keys (scope='connector').
+    "enterprise_connectors": """
+        CREATE TABLE IF NOT EXISTS enterprise_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+
     "email_whitelist": """
         CREATE TABLE IF NOT EXISTS email_whitelist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

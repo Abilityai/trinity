@@ -79,6 +79,34 @@ TERMINAL_EXECUTION_STATUSES = (
 _TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in TERMINAL_EXECUTION_STATUSES)
 
 
+# E-03 / G-03 (#1077) terminal subset — success/failed/cancelled ONLY, and
+# deliberately NOT reusing `TERMINAL_EXECUTION_STATUSES` / `_TERMINAL_SQL_LIST`
+# above, which include `skipped`. A `skipped` execution (an empty-stdout
+# pre-check, #454) legitimately has no `completed_at`/`duration_ms`, so pulling
+# it into the terminal-row set would make E-03 (completed_at populated) fire on
+# a perfectly healthy row.
+_E03_TERMINAL_STATUSES = (
+    TaskExecutionStatus.SUCCESS.value,
+    TaskExecutionStatus.FAILED.value,
+    TaskExecutionStatus.CANCELLED.value,
+)
+
+# Head-room past the per-agent execution timeout when sizing the terminal-row
+# window (see `_collect_terminal_rows`). Matches `SLOT_TTL_BUFFER` in
+# services/slot_service.py and the E-01 invariant's buffer — hard-coded so the
+# canary stays insulated from runtime config drift.
+TERMINAL_WINDOW_BUFFER_SECONDS = 300
+
+# Cap on terminal rows pulled per cycle. `schedule_executions` has no
+# (status, started_at) index and retains terminal rows 90 days, so an unbounded
+# window scan is a full scan every 5 min. E-03/G-03 are a leading-edge
+# regression tripwire — a live malformed-row bug fires continuously on fresh
+# rows — not a backfill audit, so bounding the scan is an accepted coverage
+# tradeoff (logged via a `sampled` flag when hit). Mirrors the analytics
+# 5000-row cap.
+_TERMINAL_ROWS_CAP = 5000
+
+
 # Tables whose `agent_name` column references `agent_ownership.agent_name`.
 # Used by L-03 (delete cascades) to scan for orphan rows.
 #
@@ -197,6 +225,17 @@ class AgentSnapshot:
     # completed) → B-01 skips this agent rather than comparing against a
     # different backend's row set.
     queued_ids_via_engine: Optional[Set[str]] = None
+    # E-04 / G-04 input (#1077): per-queued-execution metadata
+    # `{eid: {"queued_at": ..., "backlog_metadata": ...}}`, scoped STRICTLY to
+    # `status='queued'` rows in `_collect_executions` — never terminal rows, so
+    # #1449 (deferred; NULLs `backlog_metadata` on terminal rows) cannot make
+    # E-04 false-fire. Populated only when the `queued_at` + `backlog_metadata`
+    # columns both exist (BACKLOG-001); on an older/minimal DDL the map is left
+    # empty for that agent so E-04/G-04 skip its queued eids (older-image
+    # fail-open). An eid in `queued_exec_ids` but ABSENT from this map means the
+    # metadata columns weren't observable — E-04/G-04 skip it; a PRESENT entry
+    # with a NULL value is a real E-04 violation.
+    queued_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Per-slot Redis TTL on the companion `agent:slot:{name}:{eid}` HASH.
     # Value semantics from `redis.ttl()`: positive int = seconds until
     # expiry; -2 = key does not exist; -1 = key exists with no TTL. S-03
@@ -252,6 +291,13 @@ class Snapshot:
     # never advanced — the "Next: Nd ago" bug, #1472). Empty means the read was
     # skipped (recorded in sources_unavailable).
     enabled_schedules: List[Dict[str, Any]] = field(default_factory=list)
+    # E-03 / G-03 input (#1077): recent terminal execution rows
+    # ({id, agent_name, status, started_at, completed_at, duration_ms}),
+    # windowed on `started_at` (NOT `completed_at` — E-03 must see rows whose
+    # `completed_at` is NULL). Scoped to success/failed/cancelled (never
+    # `skipped`). Empty when the collection was skipped (older/minimal DDL
+    # missing `completed_at`/`duration_ms`, recorded in `sources_unavailable`).
+    terminal_rows: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
 
@@ -292,6 +338,15 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
     query so the canary cycle stays O(N agents) and never grows per-row.
     The column has been on `schedule_executions` since #106; rows predating
     that migration return NULL and are tolerated by the E-05 grace window.
+
+    Also captures `queued_at` + `backlog_metadata` for **queued** rows (E-04 /
+    G-04, #1077) in the same query, keyed by execution_id in `queued_meta`.
+    Both columns are PRAGMA-guarded (added by BACKLOG-001): when either is
+    absent (older/minimal DDL) `queued_meta` is left empty so E-04/G-04 skip
+    those eids (older-image fail-open) rather than firing on a column that never
+    existed. The metadata is read STRICTLY off queued rows — never terminal ones
+    — so #1449 (deferred; NULLs `backlog_metadata` on terminal rows) can't make
+    E-04 false-fire.
     """
     from db.connection import get_db_connection
 
@@ -307,11 +362,17 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         # like `claude_session_id` so minimal test DDLs (or a pre-migration DB)
         # that lack the column still collect — absent ⇒ every row is non-leased.
         has_lease_col = "lease_expires_at" in cols
+        # E-04/G-04 (#1077): both queued-metadata columns must exist to observe
+        # queued metadata at all. Guard on BOTH (they land together in
+        # BACKLOG-001) so a partial DDL degrades to older-image fail-open.
+        has_queued_meta = "queued_at" in cols and "backlog_metadata" in cols
         select_cols = "id, status, started_at"
         if has_session_col:
             select_cols += ", claude_session_id"
         if has_lease_col:
             select_cols += ", lease_expires_at"
+        if has_queued_meta:
+            select_cols += ", queued_at, backlog_metadata"
         cursor.execute(
             f"SELECT {select_cols} FROM schedule_executions "
             "WHERE agent_name = ? AND status IN ('running', 'queued')",
@@ -323,6 +384,7 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
             "started_at": {},
             "claude_session_ids": {},
             "lease_expires_at": {},
+            "queued_meta": {},
         }
         for row in cursor.fetchall():
             if row["status"] == "running":
@@ -337,6 +399,14 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                 )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
+                if has_queued_meta:
+                    # A NULL value here IS a violation (real E-04 case); leaving
+                    # the eid out of the map only happens when the columns are
+                    # absent (older image → skipped above).
+                    out["queued_meta"][row["id"]] = {
+                        "queued_at": row["queued_at"],
+                        "backlog_metadata": row["backlog_metadata"],
+                    }
         return out
 
 
@@ -502,6 +572,88 @@ def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
             (*TERMINAL_EXECUTION_STATUSES, cutoff),
         )
         return {row["id"]: row["status"] for row in cursor.fetchall()}
+
+
+def _collect_terminal_rows(window_seconds: int) -> Dict[str, Any]:
+    """Recent terminal rows for E-03 (`completed_at` populated) + G-03
+    (`started_at <= completed_at`), windowed on `started_at`.
+
+    Window on `started_at`, NOT `completed_at`: E-03 must be able to see a
+    terminal row whose `completed_at` is NULL — the very bug it guards — and a
+    `completed_at` window would filter those out. Scoped to
+    success/failed/cancelled via the LOCAL `_E03_TERMINAL_STATUSES` list; the
+    module-level `_TERMINAL_SQL_LIST` also includes `skipped`, which
+    legitimately has no `completed_at`/`duration_ms` and would false-fire E-03.
+
+    Column-absent vs value-NULL: if `completed_at` or `duration_ms` is missing
+    from a minimal/older DDL, the whole collection is skipped (reported via the
+    returned `unavailable`) so E-03/G-03 skip the cycle — defaulting an *absent*
+    column to None would make E-03 fire on every row. A NULL *value* is a real
+    violation; an absent *column* is a source gap.
+
+    Bounded `ORDER BY started_at DESC LIMIT _TERMINAL_ROWS_CAP`: see the
+    constant's rationale (no index, 90-day retention, tripwire-not-audit).
+
+    Returns ``{"rows": List[Dict], "unavailable": Optional[str],
+    "sampled": bool}``.
+    """
+    from db.connection import get_db_connection
+
+    placeholders = ",".join("?" * len(_E03_TERMINAL_STATUSES))
+    # `iso_cutoff` is minute-granular (keyword-only `minutes`); round the
+    # second-granular window UP so it never shrinks below the requested span
+    # (a slightly larger window can never miss a just-completed terminal row).
+    cutoff_minutes = (int(window_seconds) + 59) // 60
+    cutoff = iso_cutoff(minutes=cutoff_minutes)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(schedule_executions)")
+        cols = {c["name"] for c in cursor.fetchall()}
+        missing = [c for c in ("completed_at", "duration_ms") if c not in cols]
+        if missing:
+            return {
+                "rows": [],
+                "unavailable": (
+                    "schedule_executions missing column(s): "
+                    + ", ".join(missing)
+                ),
+                "sampled": False,
+            }
+        # Fetch one past the cap so we can flag when the window was truncated
+        # without a second COUNT query.
+        cursor.execute(
+            f"""
+            SELECT id, agent_name, status, started_at, completed_at, duration_ms
+            FROM schedule_executions
+            WHERE status IN ({placeholders})
+              AND started_at > ?
+            ORDER BY started_at DESC
+            LIMIT {_TERMINAL_ROWS_CAP + 1}
+            """,
+            (*_E03_TERMINAL_STATUSES, cutoff),
+        )
+        fetched = cursor.fetchall()
+        sampled = len(fetched) > _TERMINAL_ROWS_CAP
+        rows = [
+            {
+                "id": r["id"],
+                "agent_name": r["agent_name"],
+                "status": r["status"],
+                "started_at": r["started_at"],
+                "completed_at": r["completed_at"],
+                "duration_ms": r["duration_ms"],
+            }
+            for r in fetched[:_TERMINAL_ROWS_CAP]
+        ]
+        if sampled:
+            logger.warning(
+                "canary terminal-row collector hit the %d-row cap "
+                "(window=%ds); E-03/G-03 coverage is leading-edge only "
+                "this cycle",
+                _TERMINAL_ROWS_CAP,
+                window_seconds,
+            )
+        return {"rows": rows, "unavailable": None, "sampled": sampled}
 
 
 def _collect_enabled_schedules() -> List[Dict[str, Any]]:
@@ -728,6 +880,7 @@ def collect_snapshot() -> Snapshot:
                 "started_at": {},
                 "claude_session_ids": {},
                 "lease_expires_at": {},
+                "queued_meta": {},
             }
 
         # B-01 inputs (#1450): both sides go through the `get_engine()` seam so
@@ -791,6 +944,7 @@ def collect_snapshot() -> Snapshot:
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
                 running_lease_expires_at=execs.get("lease_expires_at", {}),
                 queued_exec_ids=execs["queued"],
+                queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,
                 queued_ids_via_engine=engine_qids,
             )
@@ -816,6 +970,25 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: enabled schedules read failed")
         snap.sources_unavailable.append(f"sqlite.enabled_schedules: {exc}")
+
+    # SQLite: recent terminal rows for E-03 (completed_at populated) + G-03
+    # (started_at <= completed_at). Window off the MAX per-agent execution
+    # timeout so a just-completed max-timeout task (per-agent cap 60–7200s,
+    # #922) whose started_at is up to its timeout ago is still in-window;
+    # default 900s when no agents exist. Principled, not a hardcoded 120min.
+    max_timeout = max(
+        (int(r["execution_timeout_seconds"]) for r in agent_rows), default=900
+    )
+    try:
+        terminal = _collect_terminal_rows(max_timeout + TERMINAL_WINDOW_BUFFER_SECONDS)
+        snap.terminal_rows = terminal["rows"]
+        if terminal["unavailable"]:
+            snap.sources_unavailable.append(
+                f"sqlite.terminal_rows: {terminal['unavailable']}"
+            )
+    except Exception as exc:
+        logger.exception("canary snapshot: terminal-row read failed")
+        snap.sources_unavailable.append(f"sqlite.terminal_rows: {exc}")
 
     # Redis: drain-tick heartbeat for B-02. Reuses the slot_service Redis
     # client (same one used by `_collect_redis_slot_state` above). On

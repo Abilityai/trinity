@@ -24,15 +24,15 @@ behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert), on read-only agen
 | Phase | Scope | Status |
 |-------|-------|--------|
 | #945 | Message-envelope payload schema (spec) | ✅ done (`MESSAGE_ENVELOPE_SCHEMA.md`) |
-| **Phase 0** | Dark nullable `claim_token` / `lease_expires_at` / `claimed_by_worker` on `schedule_executions` | ✅ done (dual-track: SQLite `migrations.py` + Alembic `0015`) |
+| **Phase 0** | Dark nullable `claim_token` / `lease_expires_at` / `claimed_by_worker` on `schedule_executions` | ✅ done (dual-track: SQLite `migrations.py` + Alembic `0016`) |
 | **Phase 1** | Dark pull endpoints — atomic claim + result CAS | ✅ done |
 | **Phase 2** | Agent worker-pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done (build + **live pilot proven**, §6) |
-| **Phase 3** | Lease-reaper + `MAX_REDELIVERY` + capacity **shadow** meter + canary S-01 lease-exclusion | ✅ done (Alembic `0016` adds `redelivery_count`) |
+| **Phase 3** | Lease-reaper + `MAX_REDELIVERY` + capacity **shadow** meter + canary S-01 lease-exclusion | ✅ done (Alembic `0017` adds `redelivery_count`) |
 | **Phase 4** | Sync edge adapter (`/chat`, `chat_with_agent`) + async fan-out join | ⬜ not started |
 | **Phase 5** | Default-ON + delete legacy (ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03) | ⬜ blocked on ≥2-wk soak (#856) + side-effect gates |
 
 **Prerequisite — PostgreSQL at fleet scale (#1183/#746/#1278, SQLite EOS 2026-09-01):** the local instance
-now runs on PostgreSQL; the dark migrations (`0015`, `0016` — originally `0011`/`0012`, renumbered on rebase
+now runs on PostgreSQL; the dark migrations (`0016`, `0017` — originally `0011`/`0012`, renumbered on rebase
 onto dev) are applied and verified on live PG. Fleet-scale carry + single-source consolidation remain. Not
 needed for the local pilot.
 
@@ -41,7 +41,7 @@ needed for the local pilot.
 1. **#945 message-envelope schema** (`MESSAGE_ENVELOPE_SCHEMA.md`): field-level payload per boundary
    message kind (chat/task/event/reply + next-task claim + result POST); `status` + `error_code` taxonomy
    byte-identical to `ACTOR_MODEL_POSTCARD.md`.
-2. **Phase 0 — dark schema** (Alembic `0015`, SQLite `schedule_executions_pull_claim_lease`): three nullable
+2. **Phase 0 — dark schema** (Alembic `0016`, SQLite `schedule_executions_pull_claim_lease`): three nullable
    columns on `schedule_executions`. Dual-track (`migrations.py` + Alembic + `schema.py`/`tables.py`/`db_models.py`).
 3. **Phase 1 — dark pull endpoints** (`routers/internal.py` → `services/pull_coordination_service.py` →
    `db/schedules.py`):
@@ -58,7 +58,7 @@ needed for the local pilot.
 5. **Pull-seam auth hardening**: the two pull seams accept either a valid `X-Internal-Secret` (backend) **or**
    the agent's own scoped MCP key with agent_name/ownership match (via `authorize_heartbeat`). No master
    secret in an agent container; the worker auths with `Bearer ${TRINITY_MCP_API_KEY}` (respects #1159/#307).
-6. **Phase 3 — reaper + `MAX_REDELIVERY`** (Alembic `0016` adds `redelivery_count`, distinct from `retry_count`):
+6. **Phase 3 — reaper + `MAX_REDELIVERY`** (Alembic `0017` adds `redelivery_count`, distinct from `retry_count`):
    `services/lease_reaper_service.py` + additive `cleanup_service._sweep_expired_leases`. Finds
    `status='running' AND lease_expires_at < now`; under cap → **re-queue the SAME `execution_id`** (status →
    queued, clear lease/claim/worker, `redelivery_count++`); at cap (`>= MAX_REDELIVERY`, default 3) → FAIL +

@@ -292,7 +292,7 @@ class CleanupService:
         self._sweep_rate_limit_events()
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
-        self._sweep_soft_deleted_agents(report)
+        await self._sweep_soft_deleted_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
         self._maybe_wal_checkpoint(report)
@@ -626,13 +626,19 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
 
-    def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
+    async def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
         """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
         their retention window. `purge_agent_ownership` runs the #816
         cascade_delete primitive so every per-agent child row goes with the
         parent in a single transaction. Bounded by the same 5000-row/cycle cap
         as the other sweeps so a backlog after a long-disabled retention
         setting drains gradually.
+
+        Purge is also the moment an agent name becomes *reusable* — up to here
+        `is_agent_name_reserved` still matches the soft-deleted row and blocks
+        creation. So each purged name gets its per-agent Redis state swept too
+        (#1560): the container is long gone, and anything left keyed to the name
+        would be inherited by whatever agent claims it next.
         """
         try:
             from services.settings_service import OPS_SETTINGS_DEFAULTS
@@ -655,11 +661,15 @@ class CleanupService:
                     retention_days=sd_days,
                     limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
                 )
+                from services.agent_runtime_state import clear_agent_runtime_state
+
                 purged = 0
                 for name in names:
                     try:
                         if db.purge_agent_ownership(name):
                             purged += 1
+                            # #1560: the name is reusable from this instant on.
+                            await clear_agent_runtime_state(name)
                     except Exception as e:
                         logger.warning(
                             f"[Cleanup] Failed to purge soft-deleted agent {name}: {e}"
