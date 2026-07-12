@@ -132,6 +132,14 @@ service_container() {
     | head -n 1
 }
 
+if git -C "${PROJECT_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  export GIT_COMMIT="${GIT_COMMIT:-$(git -C "${PROJECT_ROOT}" rev-parse HEAD)}"
+  export GIT_COMMIT_SUBJECT="${GIT_COMMIT_SUBJECT:-$(git -C "${PROJECT_ROOT}" log -1 --pretty=%s)}"
+  export GIT_COMMIT_TIMESTAMP="${GIT_COMMIT_TIMESTAMP:-$(git -C "${PROJECT_ROOT}" log -1 --pretty=%cI)}"
+  export GIT_BRANCH="${GIT_BRANCH:-$(git -C "${PROJECT_ROOT}" symbolic-ref --short -q HEAD || git -C "${PROJECT_ROOT}" name-rev --name-only --no-undefined HEAD 2>/dev/null || git -C "${PROJECT_ROOT}" rev-parse --short HEAD)}"
+fi
+export BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+
 if [[ ${#COMPOSE_FILES[@]} -eq 0 ]]; then
   if [[ -f "${PROJECT_ROOT}/docker-compose.prod.yml" ]]; then
     COMPOSE_FILES=("${PROJECT_ROOT}/docker-compose.prod.yml")
