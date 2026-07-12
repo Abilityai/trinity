@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs/onboarding/**'
       - 'docs/user-docs/**'
+      - 'docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md'
   workflow_dispatch:
 
 env:
@@ -47,6 +48,10 @@ jobs:
             basename=$(basename "$file" .md)
             cp "$file" "/tmp/docs-txt/${basename}.txt"
           done
+
+          # Agent guide — the get_agent_requirements source and a frequent
+          # evaluator question target (#1459)
+          cp docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md /tmp/docs-txt/TRINITY_COMPATIBLE_AGENT_GUIDE.txt
 
           # Sync docs/user-docs (recursive, preserve relative paths with hyphens)
           find docs/user-docs -name "*.md" -type f | while read file; do
