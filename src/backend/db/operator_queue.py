@@ -84,7 +84,13 @@ class OperatorQueueOperations:
         Returns:
             The item ID
         """
-        item_id = item["id"]
+        # #1525: `id` was the last hard-indexed field. The sync loop guards on a
+        # truthy id before calling, but keep the DB boundary self-defensive so an
+        # id-less item can never KeyError-hot-loop here (raise a clear ValueError
+        # the caller quarantines, rather than an opaque KeyError).
+        item_id = item.get("id")
+        if not item_id:
+            raise ValueError("operator-queue item is missing a required 'id'")
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
 
