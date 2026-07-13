@@ -642,6 +642,13 @@ never bypassed.
 - `mcp_exposed` is surfaced on `GET /api/agents` / MCP `list_agents`. Dual-track
   migration (SQLite `agent_ownership_mcp_exposed` + Alembic
   `0009_agent_ownership_mcp_exposed`).
+- **Connect surface (#1575):** the Expose-via-MCP panel (`components/McpExposedPanel.vue`)
+  gains a one-click **Copy connection config** action when exposed — it reuses the
+  existing [MCP connector](feature-flows/mcp-connector.md) (scoped `scope='connector'`
+  key + playbooks-as-tools + `build_snippets`) to hand an external client a
+  ready-to-paste `.mcp.json` with a least-privilege, agent-scoped, revocable key
+  already embedded. No new endpoint/key type — the connector endpoints are reused
+  (owner-only, keys already list in Settings → MCP Keys, revoke severs the connection).
 
 ### Brain Orb — Self-Rendering Mind page (#58, trinity-enterprise)
 
