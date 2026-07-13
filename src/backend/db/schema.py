@@ -681,6 +681,7 @@ TABLES = {
             behind_main INTEGER DEFAULT 0,
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
+            git_dir_bytes INTEGER,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

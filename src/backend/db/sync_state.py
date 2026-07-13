@@ -31,6 +31,7 @@ _COLUMNS = (
     "behind_main",
     "ahead_working",
     "behind_working",
+    "git_dir_bytes",  # #1596: agent .git on-disk size (bloat observability)
     "last_check_at",
     "updated_at",
 )
@@ -72,6 +73,7 @@ class SyncStateOperations:
         behind_main: Optional[int] = None,
         ahead_working: Optional[int] = None,
         behind_working: Optional[int] = None,
+        git_dir_bytes: Optional[int] = None,
         last_check_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
@@ -110,6 +112,7 @@ class SyncStateOperations:
             "behind_main": _merged("behind_main", behind_main) or 0,
             "ahead_working": _merged("ahead_working", ahead_working) or 0,
             "behind_working": _merged("behind_working", behind_working) or 0,
+            "git_dir_bytes": _merged("git_dir_bytes", git_dir_bytes),  # #1596
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }

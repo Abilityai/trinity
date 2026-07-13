@@ -2811,6 +2811,21 @@ def _migrate_enterprise_connectors_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
+    """Add git_dir_bytes to agent_sync_state (#1596).
+
+    Records the agent's `.git` on-disk size (measured by the auto-sync heartbeat)
+    so operators can watch workspace-repo bloat before the disk fills. Nullable —
+    populated on the next sync of a git-enabled agent.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "git_dir_bytes",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
+    )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -2901,4 +2916,5 @@ MIGRATIONS = [
     ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
     ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
     ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
+    ("agent_sync_state_git_dir_bytes", _migrate_agent_sync_state_git_dir_bytes),
 ]
