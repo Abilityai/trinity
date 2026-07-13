@@ -17,8 +17,8 @@ Create Date: 2026-07-09
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0017_schedule_executions_source_channel"
-down_revision = "0016_agent_ownership_tts_channel_flags"
+revision = "0018_schedule_executions_source_channel"
+down_revision = "0017_agent_ownership_tts_channel_flags"
 branch_labels = None
 depends_on = None
 

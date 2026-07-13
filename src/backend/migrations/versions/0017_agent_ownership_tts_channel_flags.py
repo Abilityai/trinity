@@ -18,8 +18,8 @@ Create Date: 2026-07-09
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0016_agent_ownership_tts_channel_flags"
-down_revision = "0015_enterprise_connectors"
+revision = "0017_agent_ownership_tts_channel_flags"
+down_revision = "0016_agent_ownership_ephemeral"
 branch_labels = None
 depends_on = None
 
