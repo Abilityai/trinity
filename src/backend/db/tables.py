@@ -104,6 +104,11 @@ agent_ownership = Table(
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("deleted_at", Text),
+    Column("is_ephemeral", Integer),               # trinity-enterprise#69: 1 = ghost agent (budgeted, hard-discarded)
+    Column("ephemeral_max_executions", Integer),   # trinity-enterprise#69: NULL = no exec budget
+    Column("ephemeral_expires_at", Text),          # trinity-enterprise#69: ALWAYS set for ghosts (no immortal ghost)
+    Column("spawned_by_agent", Text),              # trinity-enterprise#69 Part 2: parent agent name (provenance)
+    Column("spawned_by_key_id", Text),             # trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
 )
 
 agent_sharing = Table(

@@ -20,7 +20,7 @@ from models import (
     CredentialImportResponse,
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name
+from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, reject_agent_principal
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
@@ -176,11 +176,15 @@ async def inject_credentials(
     This is the new simplified credential injection that writes files
     directly to the agent's workspace without Redis or template processing.
 
+    trinity-enterprise#69 Part 2: credential ops are human-only — an
+    agent-scoped key (which resolves to the owner) is rejected below.
+
     Args:
         agent_name: Name of the agent
         request_body: Contains files dict mapping paths to contents
                      e.g., {".env": "KEY=value", ".mcp.json": "{}"}
     """
+    reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -308,6 +312,8 @@ async def export_credentials(
     """
     from services.credential_encryption import get_credential_encryption_service
 
+    # trinity-enterprise#69 Part 2: credential ops are human-only.
+    reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -380,6 +386,8 @@ async def import_credentials(
     """
     from services.credential_encryption import get_credential_encryption_service
 
+    # trinity-enterprise#69 Part 2: credential ops are human-only.
+    reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

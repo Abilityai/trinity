@@ -58,6 +58,31 @@ class ForkToOwnRequest(BaseModel):
         return v
 
 
+class EphemeralConfig(BaseModel):
+    """Ephemeral "ghost" agent budget (trinity-enterprise#69).
+
+    At least one of ``max_executions`` / ``ttl_seconds`` is required. A TTL is
+    ALWAYS stamped at creation (defaulting to the platform ceiling when only
+    ``max_executions`` is given) so no ghost is immortal.
+    """
+    max_executions: Optional[int] = Field(
+        None, ge=1, le=100,
+        description="Discard after this many terminal executions (1-100)",
+    )
+    ttl_seconds: Optional[int] = Field(
+        None, ge=60,
+        description="Discard after this many seconds (60..platform ceiling, default ceiling 24h)",
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_budget(self):
+        if self.max_executions is None and self.ttl_seconds is None:
+            raise ValueError(
+                "ephemeral requires max_executions and/or ttl_seconds"
+            )
+        return self
+
+
 class AgentConfig(BaseModel):
     """Configuration for creating a new agent."""
     name: str
@@ -83,6 +108,9 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
+    # hard-discarded at budget. Entitlement-gated at the creation path.
+    ephemeral: Optional[EphemeralConfig] = None
 
 
 class AgentStatus(BaseModel):
@@ -97,6 +125,7 @@ class AgentStatus(BaseModel):
     template: Optional[str] = None
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
+    ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
 
     class Config:
         json_encoders = {

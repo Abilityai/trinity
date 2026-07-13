@@ -29,7 +29,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -468,6 +468,33 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     if not db.can_user_delete_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to delete this agent")
 
+    # trinity-enterprise#69 Part 2: agent-scoped callers may delete/discard
+    # ONLY agents they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
+
+    # trinity-enterprise#69: ephemeral agents route to HARD discard — no
+    # soft-delete, no 180d name reservation. This branch runs BEFORE the
+    # container lookup: a half-discarded ghost (crash residue: live row, no
+    # container) must be force-discardable, never 404.
+    eph_info = db.get_agent_ephemeral_info(agent_name)
+    if isinstance(eph_info, dict) and eph_info.get("is_ephemeral"):
+        from services.agent_service.ephemeral import discard_ephemeral_agent
+        discarded = await discard_ephemeral_agent(agent_name, reason="deleted_by_request")
+        if manager:
+            await manager.broadcast(json.dumps({
+                "event": "agent_deleted",
+                "data": {"name": agent_name}
+            }))
+        # Honest status (review LOW): False = another discard already in
+        # flight (lock contention) or already gone — both converge via GC.
+        return {
+            "message": (
+                f"Ephemeral agent {agent_name} discarded"
+                if discarded
+                else f"Ephemeral agent {agent_name} discard already in progress"
+            )
+        }
+
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -545,6 +572,9 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 @router.post("/{agent_name}/start")
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
+    # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
+    # they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
     try:
         result = await start_agent_internal(agent_name)
         invalidate_context_stats_cache()  # PERF-269
@@ -590,6 +620,9 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 @router.post("/{agent_name}/stop")
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
+    # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
+    # they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

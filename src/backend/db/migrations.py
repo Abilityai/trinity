@@ -2661,6 +2661,30 @@ def _migrate_agent_ownership_tts_voice(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_ephemeral(cursor, conn):
+    """trinity-enterprise#69 — ephemeral "ghost" agents + spawn provenance.
+
+    Adds the ephemeral-lifecycle columns to ``agent_ownership``:
+    ``is_ephemeral INTEGER DEFAULT 0`` (1 = budgeted ghost, hard-discarded at
+    budget), ``ephemeral_max_executions INTEGER`` (NULL = no exec budget),
+    ``ephemeral_expires_at TEXT`` (ALWAYS stamped for ghosts — no immortal
+    ghost; also the durable discard-intent marker), and the Part 2 spawn
+    provenance ``spawned_by_agent TEXT`` + ``spawned_by_key_id TEXT`` (set for
+    ANY agent-spawned creation, durable or ephemeral). All additive, nullable /
+    default-0 — existing rows unaffected. Mirrored by Alembic
+    0016_agent_ownership_ephemeral for PostgreSQL.
+    """
+    for col, ddl in (
+        ("is_ephemeral", "ALTER TABLE agent_ownership ADD COLUMN is_ephemeral INTEGER DEFAULT 0"),
+        ("ephemeral_max_executions", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_max_executions INTEGER"),
+        ("ephemeral_expires_at", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_expires_at TEXT"),
+        ("spawned_by_agent", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_agent TEXT"),
+        ("spawned_by_key_id", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_key_id TEXT"),
+    ):
+        _safe_add_column(cursor, "agent_ownership", col, ddl)
+    conn.commit()
+
+
 def _migrate_agent_loops_no_progress(cursor, conn):
     """#1157 — no-progress / doom-loop detection.
 
@@ -2833,4 +2857,5 @@ MIGRATIONS = [
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
     ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
+    ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
 ]
