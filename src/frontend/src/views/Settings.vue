@@ -340,6 +340,85 @@
                     {{ brainOrbError }}
                   </p>
                 </div>
+
+                <!-- ElevenLabs / Voice platform settings (trinity-enterprise#117) -->
+                <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <h3 class="text-sm font-medium text-gray-900 dark:text-white">Voice (ElevenLabs)</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    API key + default voice for outbound voice replies. Agents with voice enabled can
+                    reply with a spoken voice note on messaging channels. Changes apply immediately — no restart.
+                  </p>
+
+                  <!-- API key -->
+                  <div class="mt-3">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      ElevenLabs API key
+                      <span
+                        v-if="elevenLabs.keyConfigured"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200"
+                      >{{ elevenLabs.keySource === 'env' ? 'configured (env)' : 'configured' }}</span>
+                      <span
+                        v-else
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+                      >not set</span>
+                    </label>
+                    <div class="flex gap-2">
+                      <input
+                        v-model="elevenLabs.apiKeyInput"
+                        type="password"
+                        :placeholder="elevenLabs.keyConfigured ? 'Enter a new key to replace' : 'Paste your ElevenLabs API key'"
+                        :disabled="savingElevenLabs"
+                        class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        @click="saveElevenLabsKey"
+                        :disabled="savingElevenLabs || !elevenLabs.apiKeyInput.trim()"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+                      >Save</button>
+                      <button
+                        v-if="elevenLabs.keyConfigured && elevenLabs.keySource === 'override'"
+                        type="button"
+                        @click="clearElevenLabsKey"
+                        :disabled="savingElevenLabs"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                      >Clear</button>
+                    </div>
+                  </div>
+
+                  <!-- Default voice id -->
+                  <div class="mt-3">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Default voice ID</label>
+                    <div class="flex gap-2">
+                      <input
+                        v-model="elevenLabs.defaultVoiceId"
+                        type="text"
+                        placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
+                        :disabled="savingElevenLabs"
+                        class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        @click="saveElevenLabsDefaultVoice"
+                        :disabled="savingElevenLabs"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+                      >Save</button>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Agents without their own voice ID fall back to this one.
+                    </p>
+                  </div>
+
+                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    Saved
+                  </div>
+                  <p v-if="elevenLabsError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
+                    {{ elevenLabsError }}
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -2322,6 +2401,17 @@ const brainOrbGeminiKey = ref(false)
 const savingBrainOrb = ref(false)
 const brainOrbSaveSuccess = ref(false)
 const brainOrbError = ref('')
+
+// ElevenLabs / Voice platform settings (ent#117)
+const elevenLabs = reactive({
+  keyConfigured: false,
+  keySource: 'none',   // override | env | none
+  apiKeyInput: '',
+  defaultVoiceId: '',
+})
+const savingElevenLabs = ref(false)
+const elevenLabsSaveSuccess = ref(false)
+const elevenLabsError = ref('')
 const savingPublicUrl = ref(false)
 const publicUrlSaveSuccess = ref(false)
 
@@ -2486,6 +2576,7 @@ async function loadSettings() {
       loadDefaultAccessPolicy(),
       loadMaxParallelTasksCeiling(),
       loadBrainOrbSettings(),
+      loadElevenLabsSettings(),
       loadApiKeyStatus(),
       loadSlackSettings(),
       loadSlackTransportStatus(),
@@ -2809,6 +2900,55 @@ async function putBrainOrbSettings(payload) {
   } finally {
     savingBrainOrb.value = false
   }
+}
+
+// ElevenLabs / Voice platform settings (ent#117)
+function applyElevenLabsState(state) {
+  elevenLabs.keyConfigured = !!state.key_configured
+  elevenLabs.keySource = state.key_source || 'none'
+  elevenLabs.defaultVoiceId = state.default_voice_id || ''
+}
+
+async function loadElevenLabsSettings() {
+  try {
+    const { data } = await axios.get('/api/settings/elevenlabs', { headers: authStore.authHeader })
+    applyElevenLabsState(data)
+  } catch {
+    // non-critical; panel shows unconfigured
+  }
+}
+
+async function putElevenLabsSettings(payload) {
+  savingElevenLabs.value = true
+  elevenLabsSaveSuccess.value = false
+  elevenLabsError.value = ''
+  try {
+    const { data } = await axios.put('/api/settings/elevenlabs', payload, { headers: authStore.authHeader })
+    applyElevenLabsState(data)
+    elevenLabs.apiKeyInput = ''
+    elevenLabsSaveSuccess.value = true
+    setTimeout(() => { elevenLabsSaveSuccess.value = false }, 3000)
+    // Refresh the tts_available feature flag the rest of this session gates on.
+    sessionsStore.loadFeatureFlags(true).catch(() => {})
+  } catch (e) {
+    elevenLabsError.value = e.response?.data?.detail || 'Failed to save voice settings'
+    await loadElevenLabsSettings()
+  } finally {
+    savingElevenLabs.value = false
+  }
+}
+
+async function saveElevenLabsKey() {
+  if (!elevenLabs.apiKeyInput.trim()) return
+  await putElevenLabsSettings({ api_key: elevenLabs.apiKeyInput.trim() })
+}
+
+async function clearElevenLabsKey() {
+  await putElevenLabsSettings({ clear: ['api_key'] })
+}
+
+async function saveElevenLabsDefaultVoice() {
+  await putElevenLabsSettings({ default_voice_id: elevenLabs.defaultVoiceId.trim() })
 }
 
 // Public URL methods

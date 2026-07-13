@@ -33,9 +33,17 @@ _OUTPUT_FORMAT = "mp3_44100_128"
 _HTTP_TIMEOUT = 30.0
 
 
+def _resolve_api_key() -> str:
+    """Resolve the ElevenLabs key at call time via the runtime settings resolver
+    (stored setting → env → ''). ent#117 made the key runtime-configurable, so we
+    never read the frozen ``config.ELEVENLABS_API_KEY`` directly."""
+    from services.settings_service import settings_service
+    return settings_service.get_elevenlabs_api_key()
+
+
 def is_available() -> bool:
     """True when TTS can run at all (provider key configured)."""
-    return bool(config.ELEVENLABS_API_KEY)
+    return bool(_resolve_api_key())
 
 
 def _within_cost_cap(text: str) -> bool:
@@ -45,7 +53,8 @@ def _within_cost_cap(text: str) -> bool:
 async def synthesize_mp3(text: str, voice_id: str) -> Optional[bytes]:
     """Synthesize ``text`` to MP3 bytes via ElevenLabs. ``None`` on any failure
     or when the shared cost cap / guards reject it (caller falls back to text)."""
-    if not is_available():
+    api_key = _resolve_api_key()
+    if not api_key:
         return None
     if not voice_id:
         return None
@@ -58,7 +67,7 @@ async def synthesize_mp3(text: str, voice_id: str) -> Optional[bytes]:
 
     url = f"{_ELEVENLABS_BASE}/{voice_id}"
     headers = {
-        "xi-api-key": config.ELEVENLABS_API_KEY,
+        "xi-api-key": api_key,
         "accept": "audio/mpeg",
         "content-type": "application/json",
     }

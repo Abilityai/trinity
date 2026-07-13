@@ -11,10 +11,13 @@ from routers.settings. Now all settings retrieval logic lives here, and
 routers.settings re-exports these functions for backward compatibility.
 """
 import json
+import logging
 import os
 import time
 from typing import List, Optional
 from database import db
+
+logger = logging.getLogger(__name__)
 
 # Platform default model (#831)
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
@@ -136,6 +139,64 @@ class SettingsService:
         if key:
             return key
         return os.getenv('GOOGLE_API_KEY', '')
+
+    # =========================================================================
+    # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
+    # =========================================================================
+    #
+    # The key is stored AES-256-GCM encrypted (Invariant #12) under
+    # ``elevenlabs_api_key_encrypted`` — unlike the plaintext anthropic/github/google
+    # keys above — because it is a delivery secret with no env-only precedent to honor.
+    # Resolution precedence: stored (encrypted) setting → ``ELEVENLABS_API_KEY`` env →
+    # unavailable. Uncached (one SQLite read per call) for --workers 2 consistency, and
+    # fail-open (any decrypt/read error falls back to env) so a bad row never 500s the
+    # voice path or the feature-flags endpoint.
+
+    _ELEVENLABS_KEY_SETTING = 'elevenlabs_api_key_encrypted'
+    _DEFAULT_VOICE_SETTING = 'tts_default_voice_id'
+
+    def get_elevenlabs_api_key(self) -> str:
+        """Resolve the ElevenLabs API key: decrypted stored setting → env → ''."""
+        envelope = self.get_setting(self._ELEVENLABS_KEY_SETTING)
+        if envelope:
+            try:
+                from services.credential_encryption import CredentialEncryptionService
+                decrypted = CredentialEncryptionService().decrypt(envelope)
+                key = (decrypted.get('elevenlabs_api_key') or '').strip()
+                if key:
+                    return key
+            except Exception as e:
+                logger.error(f"Failed to decrypt ElevenLabs API key setting: {e}")
+        return os.getenv('ELEVENLABS_API_KEY', '')
+
+    def elevenlabs_key_source(self) -> str:
+        """Report where the key resolves from, for the admin panel: override|env|none."""
+        if self.get_setting(self._ELEVENLABS_KEY_SETTING):
+            return 'override'
+        if os.getenv('ELEVENLABS_API_KEY', '').strip():
+            return 'env'
+        return 'none'
+
+    def set_elevenlabs_api_key(self, key: str) -> None:
+        """Encrypt + persist the ElevenLabs API key (AES-256-GCM envelope)."""
+        from services.credential_encryption import CredentialEncryptionService
+        envelope = CredentialEncryptionService().encrypt({'elevenlabs_api_key': key.strip()})
+        db.set_setting(self._ELEVENLABS_KEY_SETTING, envelope)
+
+    def clear_elevenlabs_api_key(self) -> bool:
+        """Remove the stored key (reverts to env/unavailable)."""
+        return db.delete_setting(self._ELEVENLABS_KEY_SETTING)
+
+    def get_default_voice_id(self) -> Optional[str]:
+        """Platform default ElevenLabs voice id (plaintext setting; NULL when unset)."""
+        value = self.get_setting(self._DEFAULT_VOICE_SETTING)
+        return (value or '').strip() or None
+
+    def set_default_voice_id(self, voice_id: str) -> None:
+        db.set_setting(self._DEFAULT_VOICE_SETTING, voice_id.strip())
+
+    def clear_default_voice_id(self) -> bool:
+        return db.delete_setting(self._DEFAULT_VOICE_SETTING)
 
     # =========================================================================
     # Slack Integration Settings (SLACK-001)
@@ -459,6 +520,45 @@ AGENT_QUOTA_DESCRIPTIONS = {
     "max_agents_operator": "Maximum agents an operator can own (0 = unlimited, default: 3)",
     "max_agents_user": "Maximum agents a regular user can own (0 = unlimited, default: 1)",
 }
+
+# trinity-enterprise#69 — ephemeral "ghost" agent limits. Separate from the
+# durable per-role quota (burst parallelism is the use case; the durable quota
+# would starve it). NO admin exemption — the spawner is usually an agent-scoped
+# key that resolves to its owner (often an admin), and this quota exists to
+# bound runaway spawning, not to police humans.
+EPHEMERAL_AGENT_DEFAULTS = {
+    "max_ephemeral_agents_per_owner": "5",
+    "ephemeral_ttl_ceiling_seconds": "86400",  # 24h
+}
+
+
+def get_ephemeral_agent_quota() -> int:
+    """Max live ephemeral agents per owner (0 = unlimited, default 5)."""
+    value = settings_service.get_setting("max_ephemeral_agents_per_owner")
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["max_ephemeral_agents_per_owner"])
+
+
+def get_ephemeral_ttl_ceiling_seconds() -> int:
+    """Hard TTL ceiling for ephemeral agents (default 24h).
+
+    Every ghost gets ``ephemeral_expires_at`` stamped at creation — when the
+    caller gives only ``max_executions``, the TTL defaults to this ceiling so
+    no ghost is immortal. A requested TTL above the ceiling is a 400.
+    """
+    value = settings_service.get_setting("ephemeral_ttl_ceiling_seconds")
+    if value is not None:
+        try:
+            ceiling = int(value)
+            if ceiling > 0:
+                return ceiling
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["ephemeral_ttl_ceiling_seconds"])
 
 
 def get_agent_quota_for_role(role: str) -> int:

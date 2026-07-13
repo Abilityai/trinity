@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import RenameAgentRequest, User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, reject_agent_principal
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
@@ -50,6 +50,8 @@ async def rename_agent_endpoint(
     Body:
     - new_name: The new name for the agent
 
+    trinity-enterprise#69 Part 2: rename is human-only (agent-scoped keys 403).
+
     Returns:
     - message: Success message
     - old_name: Previous agent name
@@ -57,6 +59,8 @@ async def rename_agent_endpoint(
 
     Note: The agent will be briefly stopped and restarted during rename.
     """
+    # trinity-enterprise#69 Part 2: rename is a human-only operation.
+    reject_agent_principal(current_user)
     # Check if user can rename this agent
     if not db.can_user_rename_agent(current_user.username, agent_name):
         # Check if it's a system agent for better error message

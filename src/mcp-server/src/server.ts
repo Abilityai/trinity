@@ -23,6 +23,7 @@ import { createExecutionTools } from "./tools/executions.js";
 import { createEventTools } from "./tools/events.js";
 import { createChannelTools } from "./tools/channels.js";
 import { createMessageTools } from "./tools/messages.js";
+import { createVoiceReplyTools } from "./tools/voice.js";
 import { createVoipTools } from "./tools/voip.js";
 import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
@@ -261,6 +262,7 @@ export async function createServer(config: ServerConfig = {}) {
     createEventTools(client, requireApiKey),
     createChannelTools(client, requireApiKey),
     createMessageTools(client, requireApiKey),
+    createVoiceReplyTools(client, requireApiKey), // send_voice_reply — per-message voice (ent#117)
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)

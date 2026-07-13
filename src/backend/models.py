@@ -58,6 +58,31 @@ class ForkToOwnRequest(BaseModel):
         return v
 
 
+class EphemeralConfig(BaseModel):
+    """Ephemeral "ghost" agent budget (trinity-enterprise#69).
+
+    At least one of ``max_executions`` / ``ttl_seconds`` is required. A TTL is
+    ALWAYS stamped at creation (defaulting to the platform ceiling when only
+    ``max_executions`` is given) so no ghost is immortal.
+    """
+    max_executions: Optional[int] = Field(
+        None, ge=1, le=100,
+        description="Discard after this many terminal executions (1-100)",
+    )
+    ttl_seconds: Optional[int] = Field(
+        None, ge=60,
+        description="Discard after this many seconds (60..platform ceiling, default ceiling 24h)",
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_budget(self):
+        if self.max_executions is None and self.ttl_seconds is None:
+            raise ValueError(
+                "ephemeral requires max_executions and/or ttl_seconds"
+            )
+        return self
+
+
 class AgentConfig(BaseModel):
     """Configuration for creating a new agent."""
     name: str
@@ -83,6 +108,9 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
+    # hard-discarded at budget. Entitlement-gated at the creation path.
+    ephemeral: Optional[EphemeralConfig] = None
 
 
 class AgentStatus(BaseModel):
@@ -97,6 +125,7 @@ class AgentStatus(BaseModel):
     template: Optional[str] = None
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
+    ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
 
     class Config:
         json_encoders = {
@@ -734,6 +763,20 @@ class BrainOrbSettingsUpdate(BaseModel):
     clear: Optional[List[str]] = None
 
 
+class ElevenLabsSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/elevenlabs (trinity-enterprise#117).
+
+    Partial update. ``api_key`` sets the ElevenLabs key (stored AES-256-GCM
+    encrypted; never echoed back). ``default_voice_id`` sets the platform default
+    voice the agent-level config falls back to. ``clear`` lists which to remove:
+    "api_key" (revert to env/unavailable) and/or "default_voice_id". A field may
+    not be both set and cleared (400).
+    """
+    api_key: Optional[str] = None
+    default_voice_id: Optional[str] = None
+    clear: Optional[List[str]] = None
+
+
 # Max length for the public/channel custom-instructions fragment (#1205).
 PUBLIC_CHANNEL_PROMPT_MAX_LEN = 4000
 
@@ -879,14 +922,18 @@ class ConnectorKeySecret(BaseModel):
 
 
 class VoiceRepliesUpdate(BaseModel):
-    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25).
+    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25; v2 ent#117).
 
-    Shared agent-level outbound-voice config: when ``enabled``, channel adapters
-    speak the agent's reply via the shared TTS service using ``voice_id``
-    (an ElevenLabs voice id). ``voice_id`` is required when enabling.
+    Partial update. Agent-level fields (from the Settings surface): ``enabled`` +
+    ``voice_id`` — when both are present they set the agent-level capability
+    (voice id is an ElevenLabs voice id; may be omitted to fall back to the platform
+    default). ``channels`` (from the channel panels) is a partial map of
+    ``{telegram|slack|whatsapp: bool}`` per-channel voice-allowed flags. At least
+    one of ``enabled`` / ``channels`` should be provided.
     """
-    enabled: bool
+    enabled: Optional[bool] = None
     voice_id: Optional[str] = None
+    channels: Optional[Dict[str, bool]] = None
 
     @field_validator("voice_id")
     @classmethod
@@ -895,6 +942,28 @@ class VoiceRepliesUpdate(BaseModel):
             return None
         v = v.strip()
         return v or None
+
+    @field_validator("channels")
+    @classmethod
+    def _validate_channels(cls, v: Optional[Dict[str, bool]]) -> Optional[Dict[str, bool]]:
+        if v is None:
+            return None
+        allowed = {"telegram", "slack", "whatsapp"}
+        unknown = set(v) - allowed
+        if unknown:
+            raise ValueError(f"unknown channel(s): {', '.join(sorted(unknown))}")
+        return v
+
+
+class VoiceReplyRequest(BaseModel):
+    """Body for POST /api/agents/{name}/voice-reply (send_voice_reply MCP tool, ent#117).
+
+    ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
+    ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
+    """
+    text: str = Field(min_length=1, max_length=4096)
+    execution_id: str = Field(min_length=1)
+    dedup_label: str = ""
 
 
 class PublicChannelModelUpdate(BaseModel):

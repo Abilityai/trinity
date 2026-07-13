@@ -33,7 +33,9 @@ def _load_docker_utils():
         "sys.modules",
         {"services.docker_service": Mock(docker_client=mock_client)},
     ):
-        sys.modules.pop("services.docker_utils", None)
+        # Loaded via spec into a fresh module object (not `import`), so there's
+        # no `services.docker_utils` sys.modules entry to clear — and the #762
+        # lint bans bare sys.modules mutation anyway.
         spec = importlib.util.spec_from_file_location(
             "docker_utils", f"{_backend}/services/docker_utils.py"
         )

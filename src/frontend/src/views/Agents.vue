@@ -309,6 +309,13 @@
                   >
                     SYSTEM
                   </span>
+                  <span
+                    v-if="agent.ephemeral"
+                    class="px-1.5 py-0.5 text-[10px] font-semibold bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded flex-shrink-0"
+                    title="Ephemeral agent — budgeted, auto-discarded when its executions or TTL run out (no recovery)"
+                  >
+                    GHOST
+                  </span>
                   <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
                   <span
                     v-if="agent.is_shared"

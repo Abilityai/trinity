@@ -517,7 +517,13 @@ def get_all_circuit_states() -> Dict[str, dict]:
 
 
 def force_circuit_dormant(agent_name: str, *, reason: str = "manual") -> None:
-    """Park an agent's circuit in dormant state. Used by autonomy-off (#631 AC#5).
+    """Park an agent's circuit in dormant state.
+
+    Test-only / operator helper — no production caller since #1557 removed the
+    autonomy-off hook (it conflated "administratively paused" with "transport
+    unhealthy" and fast-failed inbound chat). Kept because it pairs with
+    ``reset_circuit`` as a manual breaker primitive and is used by the breaker
+    tests to stage dormant state. Do NOT wire this into a lifecycle path.
 
     Idempotent. Safe to call from any worker.
     """

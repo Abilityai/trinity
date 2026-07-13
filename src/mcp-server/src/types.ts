@@ -28,6 +28,12 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
+  // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
+  // max_executions/ttl_seconds; entitlement-gated at the backend.
+  ephemeral?: {
+    max_executions?: number;
+    ttl_seconds?: number;
+  };
 }
 
 export interface ChatResponse {

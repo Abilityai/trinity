@@ -1,9 +1,9 @@
 <template>
   <!--
-    Shared per-agent voice-replies control (epic #24). Reads/writes the shared
-    agent-level TTS config (GET/PUT /api/agents/{name}/voice-replies) so every
-    channel panel (Telegram #25, WhatsApp trinity-enterprise#56) uses one control
-    over one config — no per-channel duplication.
+    Agent-level voice-replies config (ent#117). Enable + voice selection live here
+    once (agent Settings); each channel panel carries only a per-channel on/off flag
+    (VoiceChannelToggle). When enabled, the agent gains the send_voice_reply tool and
+    chooses voice per message — replies are text by default.
   -->
   <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
     <div class="flex items-start gap-3">
@@ -20,7 +20,8 @@
       <div class="flex-1">
         <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Voice replies</div>
         <div class="text-xs text-gray-500 dark:text-gray-400">
-          Speak this agent's replies as a voice note (ElevenLabs). Long replies fall back to text.
+          Let this agent speak replies as a voice note (ElevenLabs). Replies are text by default —
+          the agent chooses voice per message. Enable it per channel in each channel's settings.
           <span v-if="!voice.available" class="block mt-1 text-status-warning-600 dark:text-status-warning-400">
             Voice is unavailable — the platform has no ElevenLabs API key configured.
           </span>
@@ -34,7 +35,7 @@
           :id="`tts-voice-id-${agentName}`"
           v-model="voiceId"
           type="text"
-          placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
+          :placeholder="defaultVoiceId ? `Default: ${defaultVoiceId}` : 'e.g. 21m00Tcm4TlvDq8ikWAM'"
           :disabled="!voice.available || voiceSaving"
           class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
         />
@@ -45,7 +46,10 @@
           class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
         >Save</button>
       </div>
-      <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">Paste a voice ID from your ElevenLabs account.</p>
+      <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+        <template v-if="defaultVoiceId">Leave blank to use the platform default voice.</template>
+        <template v-else>Paste a voice ID from your ElevenLabs account.</template>
+      </p>
       <p v-if="message" class="mt-1 text-xs" :class="messageError ? 'text-status-danger-600' : 'text-status-success-600'">{{ message }}</p>
     </div>
   </div>
@@ -61,6 +65,7 @@ const props = defineProps({
 
 const voice = ref({ enabled: false, available: false })
 const voiceId = ref('')
+const defaultVoiceId = ref('')
 const voiceSaving = ref(false)
 const message = ref('')
 const messageError = ref(false)
@@ -76,6 +81,7 @@ async function loadVoice() {
     const { data } = await api.get(`/api/agents/${props.agentName}/voice-replies`)
     voice.value = { enabled: !!data.enabled, available: !!data.available }
     voiceId.value = data.voice_id || ''
+    defaultVoiceId.value = data.default_voice_id || ''
   } catch {
     voice.value = { enabled: false, available: false }
   }
@@ -99,10 +105,10 @@ async function saveVoice() {
 }
 
 async function toggleVoice(enabled) {
-  // Enabling without a voice id would 400 — keep the toggle visually on and let
-  // the user paste an id + Save. Disabling persists immediately.
+  // Enabling with no voice id AND no platform default would 400 — keep the toggle
+  // visually on and let the user paste an id + Save. Disabling persists immediately.
   voice.value = { ...voice.value, enabled }
-  if (enabled && !voiceId.value.trim()) return
+  if (enabled && !voiceId.value.trim() && !defaultVoiceId.value) return
   await saveVoice()
 }
 

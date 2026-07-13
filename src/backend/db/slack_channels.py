@@ -229,6 +229,32 @@ class SlackChannelOperations:
         binding = self.get_channel_agent(team_id, slack_channel_id)
         return binding["agent_name"] if binding else None
 
+    def get_bot_token_for_channel(self, slack_channel_id: str) -> Optional[str]:
+        """Resolve the workspace bot token for a Slack channel by channel id alone
+        (ent#117 — the voice-reply service has the channel id but no team id).
+
+        Joins ``slack_channel_agents`` (by channel) → ``slack_workspaces`` (by team)
+        and returns the decrypted bot token. Slack channel ids are globally unique,
+        so the channel row determines the team. Returns None when the channel isn't a
+        bound SLACK-002 channel (DM-default / SLACK-001 link paths aren't covered — the
+        caller falls back to text)."""
+        stmt = (
+            select(slack_workspaces.c.bot_token)
+            .select_from(
+                slack_channel_agents.join(
+                    slack_workspaces,
+                    slack_channel_agents.c.team_id == slack_workspaces.c.team_id,
+                )
+            )
+            .where(slack_channel_agents.c.slack_channel_id == slack_channel_id)
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        if not row or not row[0]:
+            return None
+        return self._decrypt_token(row[0])
+
     def get_dm_default_agent(self, team_id: str) -> Optional[str]:
         """Get the default agent for DMs in a workspace."""
         stmt = (

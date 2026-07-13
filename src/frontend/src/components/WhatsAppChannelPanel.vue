@@ -106,7 +106,7 @@
       </div>
 
       <!-- Voice replies (epic #24 / trinity-enterprise#56) — shared agent-level TTS control -->
-      <VoiceRepliesControl :agent-name="agentName" class="mt-2" />
+      <VoiceChannelToggle :agent-name="agentName" channel="whatsapp" class="mt-2" />
     </div>
 
     <!-- Disconnected State — Credentials Form -->
@@ -190,7 +190,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '../api'
-import VoiceRepliesControl from './VoiceRepliesControl.vue'
+import VoiceChannelToggle from './VoiceChannelToggle.vue'
 
 const props = defineProps({
   agentName: {

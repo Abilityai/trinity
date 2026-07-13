@@ -32,6 +32,7 @@ from .agent_settings import (
     FileSharingMixin,
     McpExposureMixin,
     TtsMixin,
+    EphemeralMixin,
 )
 from utils.helpers import utc_now_iso
 
@@ -51,6 +52,7 @@ class AgentOperations(
     FileSharingMixin,
     McpExposureMixin,
     TtsMixin,
+    EphemeralMixin,
 ):
     """Agent ownership, access control, and settings database operations.
 
@@ -72,6 +74,12 @@ class AgentOperations(
         owner_username: str,
         is_system: bool = False,
         require_email: bool = False,
+        is_ephemeral: bool = False,
+        ephemeral_max_executions: Optional[int] = None,
+        ephemeral_expires_at: Optional[str] = None,
+        spawned_by_agent: Optional[str] = None,
+        spawned_by_key_id: Optional[str] = None,
+        max_parallel_tasks: Optional[int] = None,
     ) -> bool:
         """Register the owner of an agent.
 
@@ -84,6 +92,14 @@ class AgentOperations(
                 fleet-wide default at creation. Defaults False so internal
                 callers (e.g. the system agent) are unaffected; user agent
                 creation passes the platform default.
+            is_ephemeral / ephemeral_max_executions / ephemeral_expires_at:
+                trinity-enterprise#69 ghost-agent budget. ``ephemeral_expires_at``
+                must be non-NULL whenever ``is_ephemeral`` is set (no immortal
+                ghost — the creation path always stamps it).
+            spawned_by_agent / spawned_by_key_id: Part 2 spawn provenance,
+                written for ANY agent-spawned creation (durable or ephemeral).
+            max_parallel_tasks: optional explicit concurrency cap; ghosts pass 1
+                (overshoot bound). None keeps the column default.
         """
         user = self._user_ops.get_user_by_username(owner_username)
         if not user:
@@ -101,17 +117,29 @@ class AgentOperations(
             # #1129: same reasoning for require_email — pass it
             # explicitly so the secure-by-default seed lands on existing
             # DBs whose baked-in column default is 0.
-            with get_engine().begin() as conn:
-                conn.execute(
-                    insert(agent_ownership).values(
-                        agent_name=agent_name,
-                        owner_id=user["id"],
-                        created_at=utc_now_iso(),
-                        is_system=1 if is_system else 0,
-                        execution_timeout_seconds=3600,
-                        require_email=1 if require_email else 0,
-                    )
+            values = dict(
+                agent_name=agent_name,
+                owner_id=user["id"],
+                created_at=utc_now_iso(),
+                is_system=1 if is_system else 0,
+                execution_timeout_seconds=3600,
+                require_email=1 if require_email else 0,
+            )
+            if is_ephemeral:
+                values.update(
+                    is_ephemeral=1,
+                    ephemeral_max_executions=ephemeral_max_executions,
+                    ephemeral_expires_at=ephemeral_expires_at,
                 )
+            if spawned_by_agent:
+                values.update(
+                    spawned_by_agent=spawned_by_agent,
+                    spawned_by_key_id=spawned_by_key_id,
+                )
+            if max_parallel_tasks is not None:
+                values["max_parallel_tasks"] = max_parallel_tasks
+            with get_engine().begin() as conn:
+                conn.execute(insert(agent_ownership).values(**values))
             return True
         except IntegrityError:
             # Agent already registered - update is_system flag if needed

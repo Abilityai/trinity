@@ -103,6 +103,14 @@
             </span>
             <!-- Runtime badge (Claude/Gemini) -->
             <RuntimeBadge :runtime="agent.runtime" />
+            <!-- Ephemeral ghost badge (trinity-enterprise#69) -->
+            <span
+              v-if="agent.ephemeral"
+              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+              title="Ephemeral agent — budgeted, auto-discarded when its executions or TTL run out (no recovery)"
+            >
+              GHOST
+            </span>
             <!-- System agent badge -->
             <span
               v-if="agent.is_system"
