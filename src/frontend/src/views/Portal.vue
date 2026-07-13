@@ -160,6 +160,7 @@
       :create-session="(name) => store.createSession(name)"
       :synthesize="(name, text) => store.synthesizeTts(name, text)"
       :transcribe="(name, blob) => store.transcribeStt(name, blob)"
+      :upload-document="(name, file) => store.uploadDocument(name, file)"
       :voice-available="!!chatAgent.voice_available"
       @close="chatAgent = null; chatInitialSession = null"
     />
