@@ -38,6 +38,15 @@ Separate namespaces + separate Lua → neither contaminates the other's counter
 Both share the Redis plumbing in the **top-level** `redis_breaker_util.py`
 (fail-open client, Lua `ScriptCache`, decode helpers, `fail_open` wrapper).
 
+Both breakers reflect **agent health**, never an administrative state: disabling
+autonomy pauses the agent's *schedules*, not its breaker (the #631 AC#5
+`force_circuit_dormant` hook was removed in #1557 — the `execute_task` transport
+gate is consulted for every trigger, so it fast-failed inbound chat on a healthy
+paused agent). The gate's fast-fail reason is built by
+`task_execution_service._circuit_breaker_error(transport_open, dispatch_open)`,
+which names the breaker that fired (transport → *unreachable*, dispatch →
+*auth-dead*) while keeping the substring `circuit breaker open`.
+
 **Why `redis_breaker_util.py` is top-level (not `services/`)**: `agent_client.py`
 is loaded *standalone* via `importlib` in both its unit and integration test
 suites to bypass the heavy `services/__init__.py`. A `from services.X import`

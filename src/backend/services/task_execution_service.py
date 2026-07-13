@@ -829,6 +829,30 @@ async def _write_terminal_and_gate(
 
 
 # ---------------------------------------------------------------------------
+# Circuit-breaker fast-fail messaging (#1557)
+# ---------------------------------------------------------------------------
+
+def _circuit_breaker_error(transport_open: bool, dispatch_open: bool) -> str:
+    """Honest fast-fail reason for an open circuit, by which breaker fired.
+
+    The two breakers mean different things and an operator acts differently on
+    each: the *transport* breaker (``CircuitState``, #631) opens on TCP
+    connect failures — the agent is unreachable; the *dispatch* breaker
+    (``DispatchBreaker``, #526) opens on repeated AUTH/503 — the agent answers
+    but its subscription/credentials are failing. The old blanket
+    "agent is unhealthy" text lied for the (common) transport case and, before
+    #1557, also fired for a merely *paused* agent. Every branch keeps the
+    substring ``circuit breaker open`` (asserted by
+    ``tests/integration/test_1560_breaker_lifecycle.py``).
+    """
+    if transport_open and dispatch_open:
+        return "Agent unreachable and auth-failing — transport and dispatch circuit breaker open"
+    if dispatch_open:
+        return "Agent auth failing — dispatch circuit breaker open (repeated 503/AUTH from the agent)"
+    return "Agent unreachable — transport circuit breaker open (no TCP response from the agent)"
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -1078,7 +1102,7 @@ class TaskExecutionService:
                     DispatchBreaker(agent_name).to_dict().get("state") == "open"
                 )
             if transport_open or dispatch_open:
-                error_msg = "Agent circuit breaker open — agent is unhealthy"
+                error_msg = _circuit_breaker_error(transport_open, dispatch_open)
                 logger.warning(f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}")
                 # #671/H4: route the terminal write through the CAS — the
                 # activity is completed only if this writer won (a lost CAS to a
