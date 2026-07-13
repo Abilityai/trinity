@@ -24,6 +24,7 @@ from services.upload_service import process_file_uploads, decode_web_file, WEB_M
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
+    EphemeralBudgetExhausted,
     PersistentTaskPayload,
     get_capacity_manager,
 )
@@ -84,6 +85,33 @@ def _record_deprecated_task_timeout_use() -> None:
         pipe.execute()
     except Exception as e:  # telemetry only — must not affect task dispatch
         logger.debug("[#1068] usage counter update failed: %s", e)
+
+
+def _raise_ephemeral_exhausted_410(agent_name: str, execution_id, exc) -> NoReturn:
+    """Map an EphemeralBudgetExhausted to HTTP 410 Gone (trinity-enterprise#69).
+
+    The ghost's budget is spent — it is at end-of-life and will be discarded by
+    the terminal hook / GC sweep; 410 (not 429) tells the caller retrying won't
+    help. Closes the pre-created execution row when one exists.
+    """
+    if execution_id:
+        try:
+            db.update_execution_status(
+                execution_id=execution_id,
+                status=TaskExecutionStatus.FAILED,
+                error=f"ephemeral_exhausted: ghost agent budget spent ({exc.reason})",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Chat] Failed to mark execution {execution_id} FAILED on ephemeral exhaustion: {e}"
+            )
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": f"Ephemeral agent '{agent_name}' budget is spent ({exc.reason}); it is being discarded.",
+            "code": "ephemeral_budget_exhausted",
+        },
+    )
 
 
 def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> NoReturn:
@@ -285,6 +313,10 @@ async def _admit_chat_request(
                 "message_length": len(request.message) if request.message else 0,
             },
         )
+    except EphemeralBudgetExhausted as e:
+        # trinity-enterprise#69: ghost budget spent — nothing admitted/enqueued.
+        idempotency_service.fail(idem)
+        _raise_ephemeral_exhausted_410(name, chat_execution_id, e)
     except CapacityFull as e:
         logger.warning(f"[Chat] Agent '{name}' at capacity, rejecting request (reason={e.reason})")
         # Nothing dispatched — release the idempotency claim so the caller can
@@ -1627,6 +1659,10 @@ async def execute_parallel_task(
             # Without this the in_flight row blocks same-key retries for 24h.
             idempotency_service.fail(idem)
             _raise_circuit_open_503(name, execution_id, e)
+        except EphemeralBudgetExhausted as e:
+            # trinity-enterprise#69: ghost budget spent — 410, no enqueue.
+            idempotency_service.fail(idem)
+            _raise_ephemeral_exhausted_410(name, execution_id, e)
 
         if cap_result.state == "queued_persistent":
             logger.info(
@@ -1746,6 +1782,10 @@ async def execute_parallel_task(
         # blocked for 24h, mirroring /chat (line 242) and CapacityFull above.
         idempotency_service.fail(idem)
         _raise_circuit_open_503(name, execution_id, e)
+    except EphemeralBudgetExhausted as e:
+        # trinity-enterprise#69: ghost budget spent — 410, no enqueue.
+        idempotency_service.fail(idem)
+        _raise_ephemeral_exhausted_410(name, execution_id, e)
 
     sync_slot_acquired = sync_cap_result.state == "admitted"
 

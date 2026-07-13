@@ -460,6 +460,45 @@ AGENT_QUOTA_DESCRIPTIONS = {
     "max_agents_user": "Maximum agents a regular user can own (0 = unlimited, default: 1)",
 }
 
+# trinity-enterprise#69 — ephemeral "ghost" agent limits. Separate from the
+# durable per-role quota (burst parallelism is the use case; the durable quota
+# would starve it). NO admin exemption — the spawner is usually an agent-scoped
+# key that resolves to its owner (often an admin), and this quota exists to
+# bound runaway spawning, not to police humans.
+EPHEMERAL_AGENT_DEFAULTS = {
+    "max_ephemeral_agents_per_owner": "5",
+    "ephemeral_ttl_ceiling_seconds": "86400",  # 24h
+}
+
+
+def get_ephemeral_agent_quota() -> int:
+    """Max live ephemeral agents per owner (0 = unlimited, default 5)."""
+    value = settings_service.get_setting("max_ephemeral_agents_per_owner")
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["max_ephemeral_agents_per_owner"])
+
+
+def get_ephemeral_ttl_ceiling_seconds() -> int:
+    """Hard TTL ceiling for ephemeral agents (default 24h).
+
+    Every ghost gets ``ephemeral_expires_at`` stamped at creation — when the
+    caller gives only ``max_executions``, the TTL defaults to this ceiling so
+    no ghost is immortal. A requested TTL above the ceiling is a 400.
+    """
+    value = settings_service.get_setting("ephemeral_ttl_ceiling_seconds")
+    if value is not None:
+        try:
+            ceiling = int(value)
+            if ceiling > 0:
+                return ceiling
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["ephemeral_ttl_ceiling_seconds"])
+
 
 def get_agent_quota_for_role(role: str) -> int:
     """

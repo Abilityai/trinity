@@ -114,7 +114,8 @@ def get_agent_status_from_container(container) -> AgentStatus:
         container_id=container.id,
         template=labels.get("trinity.template", None) or None,
         runtime=runtime,
-        base_image_version=base_image_version
+        base_image_version=base_image_version,
+        ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
     )
 
 
@@ -130,6 +131,28 @@ def list_all_agents() -> List[AgentStatus]:
         return [get_agent_status_from_container(c) for c in containers]
     except Exception as e:
         print(f"Error listing agents from Docker: {e}")
+        return []
+
+
+def list_ephemeral_agent_containers() -> list:
+    """Containers labeled ``trinity.ephemeral=true``, any state
+    (trinity-enterprise#69).
+
+    Used by the cleanup GC's Docker-as-truth orphan pass: an ephemeral
+    container whose ownership row is gone (backend restarted mid-create or
+    mid-discard) is reclaimable from the label alone. Returns raw container
+    objects — callers read ``.labels`` (``trinity.agent-name``,
+    ``trinity.created``) for the grace-window check.
+    """
+    if not docker_client:
+        return []
+    try:
+        return docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.ephemeral=true"},
+        )
+    except Exception as e:
+        logger.error(f"Error listing ephemeral agent containers: {e}")
         return []
 
 
@@ -190,6 +213,7 @@ def list_all_agents_fast() -> List[AgentStatus]:
                 # in every fast-path view (#1187 review I6).
                 runtime=labels.get("trinity.agent-runtime", "claude-code"),
                 base_image_version=labels.get("trinity.base-image-version"),  # Label only, no image lookup
+                ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
             )
             agents.append(agent)
 

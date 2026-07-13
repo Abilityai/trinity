@@ -38,7 +38,12 @@ from services.agent_call_limiter import (
     acquire_agent_call_slot,
 )
 from services.agent_client import CircuitState
-from services.capacity_manager import CapacityFull, CircuitOpen, get_capacity_manager
+from services.capacity_manager import (
+    CapacityFull,
+    CircuitOpen,
+    EphemeralBudgetExhausted,
+    get_capacity_manager,
+)
 from services.dispatch_breaker import DispatchBreaker
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
@@ -92,6 +97,7 @@ class TaskExecutionErrorCode(str, Enum):
     RECONCILED = "reconciled"       # Terminal write lost the CAS; row reflects another writer's terminal (#671/H4)
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
+    EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
 
 
 @dataclass
@@ -737,6 +743,42 @@ async def _record_dispatch_terminal(
         _spawn_bg(_audit_circuit_transition(agent_name, "closed"))
 
 
+async def _maybe_discard_exhausted_ephemeral(agent_name: str) -> None:
+    """trinity-enterprise#69: budget hook — runs as a BACKGROUND task after a
+    CAS-won terminal (spawned via ``_spawn_bg`` so the finalize path pays
+    nothing and an exception here can never leak a slot lease).
+
+    Counts ALL budget-consuming terminals (success/failed/cancelled) and
+    triggers the hard discard once the ghost's ``ephemeral_max_executions`` is
+    reached. ``/chat`` finalizes its terminals outside ``apply_result`` — that
+    surface's exhaustion is admission-gated immediately (CapacityManager) and
+    discard lags to the GC sweep (≤5 min), by design. Fail-open everywhere.
+    """
+    try:
+        info = db.get_agent_ephemeral_info(agent_name)
+        if not isinstance(info, dict) or not info.get("is_ephemeral"):
+            return
+        max_exec = info.get("ephemeral_max_executions")
+        if not max_exec:
+            return
+        usage = db.count_ephemeral_budget_usage(agent_name)
+        if usage["terminal"] < max_exec:
+            return
+        # Lazy import: services.agent_service.ephemeral imports capacity/db
+        # machinery — a module-level import here would be circular.
+        from services.agent_service.ephemeral import discard_ephemeral_agent
+
+        logger.info(
+            f"[TaskExecService] Ephemeral budget reached for {agent_name} "
+            f"({usage['terminal']}/{max_exec}) — discarding"
+        )
+        await discard_ephemeral_agent(agent_name, reason="budget_exhausted")
+    except Exception as e:  # fail-open: budget enforcement backstopped by GC
+        logger.warning(
+            f"[TaskExecService] ephemeral budget hook failed for {agent_name}: {e}"
+        )
+
+
 async def _write_terminal_and_gate(
     execution_id: Optional[str],
     activity_id: Optional[str],
@@ -994,6 +1036,29 @@ class TaskExecutionService:
                         response="",
                         error=error_msg,
                         error_code=TaskExecutionErrorCode.CIRCUIT_OPEN,
+                    )
+                except EphemeralBudgetExhausted as e:
+                    # trinity-enterprise#69: ghost budget spent — fast-fail
+                    # before any agent call; nothing was admitted or enqueued.
+                    # Discard itself is driven by the apply_result hook / GC
+                    # sweep, never from the admission path.
+                    error_msg = f"ephemeral_exhausted: ghost agent budget spent ({e.reason})"
+                    logger.info(
+                        f"[TaskExecService] Ephemeral budget gate denied {agent_name} "
+                        f"({e.reason}); fast-failing execution {execution_id}"
+                    )
+                    if execution_id:
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
+                    return TaskExecutionResult(
+                        execution_id=execution_id or "",
+                        status=TaskExecutionStatus.FAILED,
+                        response="",
+                        error=error_msg,
+                        error_code=TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED,
                     )
 
             # ---- 3. Track activity start -------------------------------------
@@ -1781,6 +1846,9 @@ class TaskExecutionService:
             await _record_dispatch_terminal(agent_name, breaker_enabled, None)
             if release_slot and eid:
                 await capacity.release(agent_name, eid)
+            # trinity-enterprise#69: post-CAS-win budget check, backgrounded
+            # AFTER slot release so a discard can never wedge the finalizer.
+            _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
 
             return TaskExecutionResult(
                 execution_id=eid or "",
@@ -1867,6 +1935,10 @@ class TaskExecutionService:
                 logger.debug("[#1085] governor record skipped", exc_info=True)
         if won and release_slot and eid:
             await capacity.release(agent_name, eid)
+        if won:
+            # trinity-enterprise#69: failed/cancelled terminals consume budget
+            # too — same backgrounded post-release hook as the success branch.
+            _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
 
         return TaskExecutionResult(
             execution_id=eid or "",

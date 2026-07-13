@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
@@ -271,6 +271,9 @@ async def set_agent_permissions(
     current_user: User = Depends(get_current_user)
 ):
     """Set permissions for an agent (full replacement)."""
+    # trinity-enterprise#69 Part 2: permission grants are human-only — a
+    # parent agent must never delegate/re-grant its control to other agents.
+    reject_agent_principal(current_user)
     result = await set_agent_permissions_logic(agent_name, body, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,
@@ -295,6 +298,8 @@ async def add_agent_permission(
     current_user: User = Depends(get_current_user)
 ):
     """Add permission for an agent to communicate with another agent."""
+    # trinity-enterprise#69 Part 2: permission grants are human-only.
+    reject_agent_principal(current_user)
     result = await add_agent_permission_logic(agent_name, target_agent, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,
@@ -319,6 +324,8 @@ async def remove_agent_permission(
     current_user: User = Depends(get_current_user)
 ):
     """Remove permission for an agent to communicate with another agent."""
+    # trinity-enterprise#69 Part 2: permission revokes are human-only.
+    reject_agent_principal(current_user)
     result = await remove_agent_permission_logic(agent_name, target_agent, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,

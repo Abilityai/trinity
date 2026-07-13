@@ -1059,7 +1059,15 @@ class MonitoringService:
         # `list_all_agents_fast()` already passes `all=True`, so this
         # includes stopped/exited/dead/created containers (normalised
         # to status="stopped"). Check all of them.
-        agents = list_all_agents_fast()
+        # trinity-enterprise#69: ephemeral ghosts excluded — they churn at
+        # budget scale (one probe RPC per ghost per cycle is pure overhead)
+        # and a discarded ghost must not degrade aggregate fleet health.
+        # `is not True`: only an explicit ephemeral flag excludes (older
+        # AgentStatus shapes / doubles without the field stay covered).
+        agents = [
+            a for a in list_all_agents_fast()
+            if getattr(a, "ephemeral", False) is not True
+        ]
         all_agent_names = [a.name for a in agents]
 
         if not all_agent_names:
