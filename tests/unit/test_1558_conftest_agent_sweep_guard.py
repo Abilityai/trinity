@@ -20,6 +20,13 @@ import pytest
 # collected in isolation, a backend import can bind `sys.modules["utils"]` to
 # the backend package first, hiding `tests/utils/cleanup.py`. Make the tests
 # package win here (mirrors the conftest's own sys.modules surgery, #762 family).
+# The import-time `utils` re-binding below can leak to sibling tests, so this
+# file uses the blessed snapshot/restore precedent (#762 lint escape hatch): a
+# top-level `_STUBBED_MODULE_NAMES` + an autouse `_restore_sys_modules` fixture
+# (see tests/unit/test_telegram_webhook_backfill.py). The pair both documents
+# the mutation and restores the original binding after every test.
+_STUBBED_MODULE_NAMES = ["utils"]
+
 _TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
@@ -42,6 +49,21 @@ from utils.cleanup import (
 pytestmark = pytest.mark.unit
 
 LOCAL = "http://localhost:8000"
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Restore the pre-test `utils` binding so the import-time re-resolution
+    above doesn't leak the tests-package `utils` into sibling modules."""
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
 
 
 class TestSweepPolicy:
