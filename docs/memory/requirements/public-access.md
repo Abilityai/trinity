@@ -569,3 +569,62 @@ Edited from the Sharing tab.
   a DB lookup failure degrades to the memory block alone (never blocks a chat).
 - **FR-6 — Group chats**: applied to group channels too (group surfaces are
   public-facing).
+
+### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
+
+**Description**: Reworks outbound voice replies (ElevenLabs TTS) so that voice is
+a **capability the agent chooses per message**, not a hard rule that converts
+every reply to speech. Enabling voice grants the agent the *ability* to speak;
+each channel reply is delivered as **text by default** and becomes a voice note
+only when the agent explicitly asks for it via a new `send_voice_reply` MCP tool.
+Config moves to the agent's Settings surface (channel panels keep only a
+per-channel on/off flag), and the ElevenLabs API key + a platform default voice
+ID become runtime-configurable in platform Settings. OSS-core (the TTS layer,
+adapters, and settings pattern are all OSS). Supersedes the always-voice behavior
+of the epic #24 voice-replies feature.
+
+- **FR-1 — Per-message choice (`send_voice_reply` MCP tool)**: an agent calls
+  `send_voice_reply(text, execution_id, dedup_label?)` during a channel turn; the
+  backend resolves the channel destination from the execution, synthesizes, and
+  delivers the voice note immediately. The agent's normal final text reply is
+  still delivered as text (the agent uses the existing `[NO_REPLY]` marker to
+  suppress it for voice-only). Adapters no longer speak replies unconditionally —
+  text is the default path.
+- **FR-2 — Effect idempotency**: the send is wrapped in
+  `idempotency_service.effect_guard("voice_reply", {recipient, channel}, …)`
+  (#1084) so a re-delivered turn does not double-speak; an in-flight duplicate
+  raises `EffectInProgressError` → 409.
+- **FR-3 — Execution destination persistence**: `schedule_executions` gains
+  `source_channel` / `source_channel_chat_id` / `source_channel_thread` (nullable,
+  dual-track migration per #1183), populated by `message_router` on channel
+  executions, so the tool can reconstruct the exact delivery target (works for
+  groups and unverified users; no lossy email→chat-link guessing, no thread loss).
+- **FR-4 — Agent-level config, channel-level flag**: voice enable + voice
+  selection live once on the agent Settings surface (moved out of the three
+  channel panels). Each channel panel keeps only a per-channel voice on/off flag:
+  `agent_ownership.tts_voice_{telegram,slack,whatsapp}_enabled` (`INTEGER DEFAULT 1`
+  so already-enabled agents keep the capability on every channel; dual-track
+  migration). Effective voice = agent-enabled AND channel flag AND platform TTS
+  available.
+- **FR-5 — Capability advertisement**: the `send_voice_reply` tool is documented
+  in the platform system prompt only when the agent has voice enabled AND the
+  current channel's flag is on, so agents don't attempt voice where it can't
+  deliver.
+- **FR-6 — Fallback preserved**: any synthesis/delivery miss (no key, no voice id,
+  channel flag off, over `TTS_MAX_CHARS`, provider/transcode error) returns
+  not-delivered so the agent falls back to text — never a dropped reply.
+- **FR-7 — ElevenLabs key + default voice in platform Settings**: admin
+  `GET/PUT /api/settings/elevenlabs` sets/clears the key at runtime (no restart),
+  stored AES-256-GCM encrypted (Invariant #12), surfaced as `configured: bool`
+  only. Resolution precedence: stored setting → `ELEVENLABS_API_KEY` env → unavailable,
+  read through an uncached runtime resolver (`--workers 2` safe). A platform
+  default voice ID lives in the same panel; the agent-level voice falls back to it
+  when the agent has no `tts_voice_id`. Changes audit-logged (key masked; default
+  voice old→new). `GET /api/settings/feature-flags` exposes `tts_available`.
+- **FR-8 — Migration of existing agents**: an already-`tts_voice_replies_enabled`
+  agent keeps all three channel flags ON but no longer auto-speaks every reply
+  (behavior change: always-voice → agent-chosen).
+- **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
+  (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
+  only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
+  flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.

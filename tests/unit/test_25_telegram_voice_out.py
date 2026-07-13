@@ -71,40 +71,42 @@ def _mock_httpx(status=200, content=b"MP3BYTES"):
 
 
 def test_is_available(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "")
+    # ent#117: the key is resolved at call time (settings → env), not read from
+    # the frozen config value — patch the resolver.
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "")
     assert tts_service.is_available() is False
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     assert tts_service.is_available() is True
 
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_no_key(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "")
     assert await tts_service.synthesize_mp3("hello", "voice1") is None
 
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_over_cost_cap(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     monkeypatch.setattr(config, "TTS_MAX_CHARS", 10)
     assert await tts_service.synthesize_mp3("x" * 11, "voice1") is None
 
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_empty_text(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     assert await tts_service.synthesize_mp3("", "voice1") is None
 
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_no_voice_id(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     assert await tts_service.synthesize_mp3("hello", "") is None
 
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_success(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     monkeypatch.setattr(config, "TTS_MAX_CHARS", 1500)
     client = _mock_httpx(200, b"MP3BYTES")
     monkeypatch.setattr(tts_service.httpx, "AsyncClient", lambda *a, **k: client)
@@ -117,7 +119,7 @@ async def test_synthesize_mp3_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_synthesize_mp3_provider_error(monkeypatch):
-    monkeypatch.setattr(config, "ELEVENLABS_API_KEY", "sk-xxx")
+    monkeypatch.setattr(tts_service, "_resolve_api_key", lambda: "sk-xxx")
     client = _mock_httpx(429, b"")
     monkeypatch.setattr(tts_service.httpx, "AsyncClient", lambda *a, **k: client)
     assert await tts_service.synthesize_mp3("hello", "voice1") is None
@@ -182,59 +184,8 @@ async def test_voice_note_synth_fails_short_circuits(monkeypatch):
     transcode.assert_not_called()
 
 
-# --------------------------------------------------------------------------- #
-# telegram_adapter._maybe_send_voice
-# --------------------------------------------------------------------------- #
-
-@pytest.fixture
-def adapter():
-    if "database" not in sys.modules:
-        fake_db = types.ModuleType("database")
-        fake_db.db = MagicMock()
-        sys.modules["database"] = fake_db
-    from adapters.telegram_adapter import TelegramAdapter
-    return TelegramAdapter()
-
-
-def _resp(is_group=False):
-    from adapters.base import ChannelResponse
-    return ChannelResponse(text="Hello there", metadata={"agent_name": "a1", "is_group": is_group})
-
-
-@pytest.mark.asyncio
-async def test_maybe_send_voice_disabled(adapter, monkeypatch):
-    from database import db
-    monkeypatch.setattr(db, "get_tts_config", lambda n: {"enabled": False, "voice_id": None})
-    sent = AsyncMock()
-    monkeypatch.setattr(adapter, "_send_voice", sent)
-    ok = await adapter._maybe_send_voice("tok", "chat1", "Hello", "a1", None, _resp())
-    assert ok is False
-    sent.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_maybe_send_voice_success(adapter, monkeypatch):
-    from database import db
-    monkeypatch.setattr(db, "get_tts_config", lambda n: {"enabled": True, "voice_id": "v1"})
-    monkeypatch.setattr(
-        "services.tts_service.synthesize_voice_note", AsyncMock(return_value=b"OGG")
-    )
-    sent = AsyncMock(return_value={"message_id": 1})
-    monkeypatch.setattr(adapter, "_send_voice", sent)
-    ok = await adapter._maybe_send_voice("tok", "chat1", "Hello", "a1", None, _resp())
-    assert ok is True
-    sent.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_maybe_send_voice_tts_none_falls_back(adapter, monkeypatch):
-    from database import db
-    monkeypatch.setattr(db, "get_tts_config", lambda n: {"enabled": True, "voice_id": "v1"})
-    monkeypatch.setattr(
-        "services.tts_service.synthesize_voice_note", AsyncMock(return_value=None)
-    )
-    sent = AsyncMock()
-    monkeypatch.setattr(adapter, "_send_voice", sent)
-    ok = await adapter._maybe_send_voice("tok", "chat1", "Hello", "a1", None, _resp())
-    assert ok is False
-    sent.assert_not_called()
+# NOTE (ent#117): the adapter-driven always-voice `_maybe_send_voice` was removed —
+# voice is now a per-message capability delivered by services/voice_reply_service.py
+# (agent opts in via the send_voice_reply MCP tool). Those decision branches are
+# covered by tests/unit/test_117_voice_replies_v2.py. This file keeps the still-valid
+# tts_service synthesis/transcode coverage above.

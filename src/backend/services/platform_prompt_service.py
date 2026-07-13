@@ -643,6 +643,38 @@ def build_public_channel_caller_prompt(
     return "\n\n".join(parts) if parts else None
 
 
+def build_voice_capability_prompt(agent_name: str, channel: str) -> Optional[str]:
+    """Advertise the ``send_voice_reply`` capability (ent#117) — ONLY when voice is
+    enabled for the agent AND allowed on ``channel`` AND platform TTS is configured,
+    so the agent never attempts voice where it can't be delivered (FR-5).
+
+    Returns an instruction fragment to fold into the channel caller prompt, or None.
+    Never raises — a lookup failure degrades to no advertisement (the tool still
+    self-gates server-side)."""
+    try:
+        import services.tts_service as tts_service
+        if not tts_service.is_available():
+            return None
+        cfg = db.get_tts_config(agent_name)
+        if not cfg.get("enabled"):
+            return None
+        if not cfg.get("channels", {}).get(channel, False):
+            return None
+    except Exception as e:  # noqa: BLE001 — never block a chat on this
+        logger.warning("voice-capability prompt check failed for %s: %s", agent_name, e)
+        return None
+    return (
+        "## Speaking (voice replies)\n"
+        "You can reply with a spoken voice note on this channel using the "
+        "`send_voice_reply` tool (pass your current execution_id). Your replies are "
+        "TEXT by default — only use voice when a spoken reply genuinely fits (a short "
+        "confirmation, greeting, or answer meant to be heard). Keep spoken text short. "
+        "After sending a voice note, end your turn with `[NO_REPLY]` if you do NOT also "
+        "want the same content sent as text. If voice can't be delivered the tool tells "
+        "you and you should just reply with text."
+    )
+
+
 def is_execution_context_enabled() -> bool:
     """Operator kill-switch for the execution context block. Default: enabled."""
     try:

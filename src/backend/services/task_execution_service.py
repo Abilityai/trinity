@@ -892,6 +892,9 @@ class TaskExecutionService:
         attempt: Optional[int] = None,
         images: Optional[list] = None,
         dispatch_gate_checked: bool = False,
+        source_channel: Optional[str] = None,
+        source_channel_chat_id: Optional[str] = None,
+        source_channel_thread: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -967,6 +970,9 @@ class TaskExecutionService:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=_exec_sub_id,
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_thread=source_channel_thread,
             )
             execution_id = execution.id if execution else None
 

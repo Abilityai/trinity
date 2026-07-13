@@ -1446,6 +1446,31 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Deliver one reply of the current channel turn as a spoken voice note
+   * (trinity-enterprise#117). The backend resolves the channel destination from
+   * the execution_id and gates on the agent + per-channel voice flags. Fail-soft:
+   * returns delivered=false (not an error) when voice can't be delivered.
+   */
+  async sendVoiceReply(
+    agentName: string,
+    data: {
+      text: string;
+      execution_id: string;
+      dedup_label?: string;
+    }
+  ): Promise<{
+    delivered: boolean;
+    channel?: string;
+    reason?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/voice-reply`,
+      data
+    );
+  }
+
   // ============================================================================
   // VoIP Telephony (VOIP-001, #1056)
   // ============================================================================

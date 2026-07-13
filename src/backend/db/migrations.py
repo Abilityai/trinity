@@ -2747,6 +2747,47 @@ def _migrate_agent_reports_table(cursor, conn):
     print("Created agent_reports table (#918)")
 
 
+def _migrate_agent_ownership_tts_channel_flags(cursor, conn):
+    """trinity-enterprise#117 — per-channel voice-allowed flags.
+
+    Adds ``tts_voice_{telegram,slack,whatsapp}_enabled INTEGER DEFAULT 1`` to
+    ``agent_ownership``. Voice enablement + voice selection stay agent-level
+    (``tts_voice_replies_enabled`` / ``tts_voice_id``); these three flags let an
+    owner allow/deny voice per channel. DEFAULT 1 so an already-enabled agent keeps
+    the capability on every channel (the behavior change is always-voice →
+    agent-chosen, not a loss of channel coverage). Mirrored by Alembic
+    0017_agent_ownership_tts_channel_flags for PostgreSQL.
+    """
+    for channel in ("telegram", "slack", "whatsapp"):
+        col = f"tts_voice_{channel}_enabled"
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col} INTEGER DEFAULT 1",
+        )
+    conn.commit()
+
+
+def _migrate_schedule_executions_source_channel(cursor, conn):
+    """trinity-enterprise#117 — persist channel delivery target on the execution.
+
+    Adds ``source_channel`` / ``source_channel_chat_id`` / ``source_channel_thread``
+    (all nullable TEXT) to ``schedule_executions``. Populated by the channel message
+    router so the ``send_voice_reply`` MCP tool (#117) can reconstruct the exact
+    delivery destination from an ``execution_id`` alone — works for group chats and
+    unverified users, with thread fidelity. NULL for non-channel executions.
+    Mirrored by Alembic 0018_schedule_executions_source_channel for PostgreSQL.
+    """
+    for col in ("source_channel", "source_channel_chat_id", "source_channel_thread"):
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col} TEXT",
+        )
+
+
 def _migrate_enterprise_connectors_table(cursor, conn):
     """Create enterprise_connectors table (per-agent MCP connector, ent#46 → OSS #118).
 
@@ -2858,4 +2899,6 @@ MIGRATIONS = [
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
     ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
     ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
+    ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
+    ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
 ]

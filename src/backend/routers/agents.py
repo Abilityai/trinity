@@ -25,6 +25,7 @@ from models import (
     HeartbeatPayload,
     McpExposedUpdate,
     VoiceRepliesUpdate,
+    VoiceReplyRequest,
     TaskExecutionStatus,
     User,
 )
@@ -900,19 +901,26 @@ async def get_voice_replies_endpoint(
     agent_name: AuthorizedAgentByName,
     current_user: CurrentUser,
 ):
-    """Shared per-agent outbound-voice config (epic #24 / #25).
+    """Per-agent outbound-voice config (epic #24 / #25; v2 ent#117).
 
-    Returns the toggle + configured ElevenLabs voice id, plus ``available`` —
-    whether the platform has TTS configured at all (``ELEVENLABS_API_KEY``) — so
-    the UI can show an inactive state instead of a dead toggle.
+    Returns the agent-level toggle + voice id, the per-channel voice-allowed flags,
+    the ``effective_voice_id`` (agent voice id else platform default), and
+    ``available`` — whether the platform has TTS configured at all — so the UI can
+    show an inactive state instead of a dead toggle. ``default_voice_id`` is the
+    platform default the agent falls back to when it has no voice of its own.
     """
     import services.tts_service as tts_service
+    from services.settings_service import settings_service
 
     cfg = db.get_tts_config(agent_name)
+    default_voice = settings_service.get_default_voice_id()
     return {
         "agent_name": agent_name,
         "enabled": cfg["enabled"],
         "voice_id": cfg["voice_id"],
+        "channels": cfg["channels"],
+        "effective_voice_id": cfg["voice_id"] or default_voice,
+        "default_voice_id": default_voice,
         "available": tts_service.is_available(),
     }
 
@@ -923,16 +931,31 @@ async def set_voice_replies_endpoint(
     body: VoiceRepliesUpdate,
     current_user: CurrentUser,
 ):
-    """Enable/disable spoken replies and set the ElevenLabs voice id (owner-only).
+    """Update per-agent voice config (owner-only; ent#117 partial update).
 
-    Enabling requires a ``voice_id``. When on, channel adapters (Telegram first)
-    speak replies via the shared TTS service, falling back to text on any failure
-    or when the reply exceeds the shared cost cap.
+    Agent-level fields (``enabled`` + ``voice_id``, from the Settings surface) and
+    per-channel voice-allowed flags (``channels``, from the channel panels) can be
+    updated together or independently. Enabling requires an effective voice id:
+    ``voice_id`` in the body, else a platform default voice. When enabled, the agent
+    gains the ``send_voice_reply`` capability on channels whose flag is on; voice is
+    no longer sent unconditionally — the agent chooses per message.
     """
-    if body.enabled and not body.voice_id:
-        raise HTTPException(status_code=400, detail="voice_id is required to enable voice replies")
+    from services.settings_service import settings_service
 
-    db.set_tts_config(agent_name, body.enabled, body.voice_id)
+    if body.enabled is None and body.channels is None:
+        raise HTTPException(status_code=400, detail="provide 'enabled' and/or 'channels'")
+
+    if body.enabled is not None:
+        if body.enabled and not (body.voice_id or settings_service.get_default_voice_id()):
+            raise HTTPException(
+                status_code=400,
+                detail="a voice_id is required to enable voice replies (or set a platform default voice)",
+            )
+        db.set_tts_config(agent_name, body.enabled, body.voice_id)
+
+    if body.channels is not None:
+        db.set_tts_channel_flags(agent_name, body.channels)
+
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="voice_replies_config",
@@ -940,14 +963,69 @@ async def set_voice_replies_endpoint(
         actor_user=current_user,
         target_type="agent",
         target_id=agent_name,
-        details={"enabled": body.enabled, "has_voice_id": bool(body.voice_id)},
+        details={
+            "enabled": body.enabled,
+            "has_voice_id": bool(body.voice_id),
+            "channels": body.channels,
+        },
     )
     cfg = db.get_tts_config(agent_name)
+    default_voice = settings_service.get_default_voice_id()
     return {
         "agent_name": agent_name,
         "enabled": cfg["enabled"],
         "voice_id": cfg["voice_id"],
+        "channels": cfg["channels"],
+        "effective_voice_id": cfg["voice_id"] or default_voice,
     }
+
+
+@router.post("/{agent_name}/voice-reply")
+async def send_voice_reply_endpoint(
+    agent_name: AuthorizedAgentByName,
+    body: VoiceReplyRequest,
+    current_user: CurrentUser,
+):
+    """Deliver one reply of the current channel turn as a voice note (ent#117).
+
+    Backs the ``send_voice_reply`` MCP tool. Self-gated (an agent-scoped key may
+    only speak as itself). Resolves the channel destination from the execution and
+    delivers via the channel's send primitive. Fail-soft: gating/synthesis/delivery
+    misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
+    to text; an in-flight duplicate for the same turn returns 409.
+    """
+    from services import voice_reply_service, idempotency_service
+
+    # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
+    # as itself; a user-scoped key already passed AuthorizedAgentByName.
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Agent-scoped key may only speak as itself")
+
+    execution = db.get_execution(body.execution_id)
+    if not execution or execution.agent_name != agent_name:
+        return {"delivered": False, "reason": "execution_not_found"}
+
+    # Only user-facing channel turns have a deliverable voice destination.
+    channel = execution.source_channel or execution.triggered_by
+    if channel not in ("telegram", "slack", "whatsapp"):
+        return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
+    if not execution.source_channel_chat_id:
+        return {"delivered": False, "channel": channel, "reason": "no_destination"}
+
+    try:
+        result = await voice_reply_service.send_voice_reply(
+            agent_name=agent_name,
+            channel=channel,
+            chat_id=execution.source_channel_chat_id,
+            thread_id=execution.source_channel_thread,
+            text=body.text,
+            execution_id=body.execution_id,
+            dedup_label=body.dedup_label or "",
+        )
+    except idempotency_service.EffectInProgressError:
+        raise HTTPException(status_code=409, detail="A voice note for this turn is already being sent")
+
+    return {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
 
 
 # ============================================================================

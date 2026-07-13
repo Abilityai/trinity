@@ -724,6 +724,9 @@ class DatabaseManager:
     def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
         return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
 
+    def set_tts_channel_flags(self, agent_name: str, channels: dict):
+        return self._agent_ops.set_tts_channel_flags(agent_name, channels)
+
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
@@ -971,6 +974,9 @@ class DatabaseManager:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -984,6 +990,9 @@ class DatabaseManager:
             fan_out_id=fan_out_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
+            source_channel=source_channel,
+            source_channel_chat_id=source_channel_chat_id,
+            source_channel_thread=source_channel_thread,
         )
 
     def create_schedule_execution(
@@ -1920,6 +1929,9 @@ class DatabaseManager:
 
     def get_slack_workspace_bot_token(self, team_id):
         return self._slack_channel_ops.get_workspace_bot_token(team_id)
+
+    def get_slack_bot_token_for_channel(self, slack_channel_id):
+        return self._slack_channel_ops.get_bot_token_for_channel(slack_channel_id)
 
     def get_all_slack_workspaces(self):
         return self._slack_channel_ops.get_all_workspaces()

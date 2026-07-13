@@ -99,6 +99,9 @@ TABLES = {
             mcp_exposed INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
+            tts_voice_telegram_enabled INTEGER DEFAULT 1,
+            tts_voice_slack_enabled INTEGER DEFAULT 1,
+            tts_voice_whatsapp_enabled INTEGER DEFAULT 1,
             deleted_at TEXT,
             is_ephemeral INTEGER DEFAULT 0,
             ephemeral_max_executions INTEGER,
@@ -261,6 +264,9 @@ TABLES = {
             fan_out_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
+            source_channel TEXT,
+            source_channel_chat_id TEXT,
+            source_channel_thread TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
