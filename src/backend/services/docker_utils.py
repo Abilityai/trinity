@@ -11,7 +11,9 @@ Issue: https://github.com/abilityai/trinity/issues/42
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import docker
 
 from services.docker_service import docker_client
 
@@ -200,14 +202,131 @@ async def volume_create(name: str, labels: Optional[Dict[str, str]] = None) -> A
     )
 
 
-async def volume_remove(volume) -> None:
+async def volume_remove(volume, force: bool = False) -> None:
     """Remove a volume without blocking the event loop.
 
     Args:
         volume: Volume object
+        force: Pass ``force=True`` to the SDK (ignores a missing volume; an
+            in-use volume still raises ``APIError`` 409 — Docker never force-
+            removes a volume referenced by a live container).
     """
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(_docker_executor, volume.remove)
+    await loop.run_in_executor(_docker_executor, lambda: volume.remove(force=force))
+
+
+# =============================================================================
+# Agent Volume Reclamation (#1581)
+# =============================================================================
+#
+# `agent-{name}-workspace|public|shared` volumes are created in the agent
+# lifecycle but were removed by NOTHING — soft-delete keeps them (recovery
+# window), and the #834 retention hard-purge deleted the DB rows only, leaking
+# the volumes forever. These helpers are the missing teardown, DOUBLE-GUARDED so
+# a bug can never destroy a live/durable agent's data: a volume is removable for
+# `agent_name` only when its name is EXACTLY one of the three expected names AND
+# its `trinity.agent-name` label matches AND its `trinity.platform` label is an
+# agent-data platform. Any mismatch/missing-label refuses (fail-closed).
+
+_AGENT_VOLUME_SUFFIXES = ("workspace", "public", "shared")
+_AGENT_VOLUME_PLATFORMS = frozenset(
+    {"agent-workspace", "agent-public", "agent-shared"}
+)
+# Label key present on every agent data volume — the cheap list filter for the
+# orphan sweep (catches all three platforms in one call).
+_AGENT_VOLUME_LABEL_KEY = "trinity.agent-name"
+
+
+def _volume_labels(volume) -> Dict[str, str]:
+    try:
+        return (volume.attrs.get("Labels") or {}) if volume.attrs else {}
+    except Exception:
+        return {}
+
+
+def is_reclaimable_agent_volume(volume, agent_name: str) -> bool:
+    """Fail-closed guard: True ONLY if ``volume`` is safe to destroy for
+    ``agent_name`` (name AND label both match; #1581 double-guard).
+
+    Refuses when the name isn't exactly ``agent-{agent_name}-{suffix}``, the
+    ``trinity.agent-name`` label is absent or differs, or the
+    ``trinity.platform`` label isn't an agent-data platform.
+    """
+    if not agent_name:
+        return False
+    name = getattr(volume, "name", None)
+    if name not in {f"agent-{agent_name}-{s}" for s in _AGENT_VOLUME_SUFFIXES}:
+        return False
+    labels = _volume_labels(volume)
+    if labels.get("trinity.agent-name") != agent_name:
+        return False
+    if labels.get("trinity.platform") not in _AGENT_VOLUME_PLATFORMS:
+        return False
+    return True
+
+
+async def remove_agent_volumes(agent_name: str) -> int:
+    """Remove an agent's data volumes (workspace/public/shared) — #1581.
+
+    Called at the retention hard-purge (the instant the agent becomes
+    unrecoverable), NEVER at soft-delete. Each candidate is re-checked by
+    :func:`is_reclaimable_agent_volume` before removal (name + label). Missing
+    volumes are a no-op; an in-use volume is left for the next sweep (the
+    container should already be gone at purge time). Returns the count removed.
+    """
+    if docker_client is None:
+        return 0
+    removed = 0
+    for suffix in _AGENT_VOLUME_SUFFIXES:
+        vol_name = f"agent-{agent_name}-{suffix}"
+        try:
+            volume = await volume_get(vol_name)
+        except docker.errors.NotFound:
+            continue
+        except Exception as e:
+            logger.warning(f"[#1581] could not read volume {vol_name}: {e}")
+            continue
+        if not is_reclaimable_agent_volume(volume, agent_name):
+            logger.error(
+                f"[#1581] refusing to remove volume {vol_name}: guard "
+                f"(name+label) did not match agent {agent_name}"
+            )
+            continue
+        try:
+            await volume_remove(volume, force=True)
+            removed += 1
+            logger.info(f"[#1581] removed agent volume {vol_name}")
+        except docker.errors.NotFound:
+            continue
+        except docker.errors.APIError as e:
+            # 409 = still in use by a container — retry on the next sweep.
+            logger.warning(
+                f"[#1581] volume {vol_name} in use / not removable yet: {e}"
+            )
+        except Exception as e:
+            logger.warning(f"[#1581] failed to remove volume {vol_name}: {e}")
+    return removed
+
+
+async def list_agent_data_volumes() -> List[Any]:
+    """All agent data volumes across the fleet (any agent), by label key.
+
+    Used by the #1581 orphan sweep. Returns raw volume objects — callers read
+    ``.name`` / ``.attrs`` (``Labels['trinity.agent-name']``, ``CreatedAt``).
+    """
+    if docker_client is None:
+        return []
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(
+            _docker_executor,
+            lambda: docker_client.volumes.list(
+                filters={"label": _AGENT_VOLUME_LABEL_KEY}
+            ),
+        )
+    except Exception as e:
+        logger.error(f"[#1581] listing agent data volumes failed: {e}")
+        return []
 
 
 # =============================================================================
