@@ -88,13 +88,41 @@
             <span v-if="op.last_active"> · last active {{ formatLastActive(op.last_active) }}</span>
           </p>
         </div>
-        <button
-          @click="removeOperator(op.email)"
-          :disabled="removing === op.email"
-          class="ml-3 shrink-0 text-sm text-status-danger-600 dark:text-status-danger-400 hover:underline disabled:opacity-50"
-        >{{ removing === op.email ? 'Removing…' : 'Remove' }}</button>
+        <div class="ml-3 flex items-center gap-4 shrink-0">
+          <!-- #1577: per-recipient proactive-messaging toggle (allow_proactive
+               on agent_sharing). The flag rides on the sharing row, which exists
+               pre-resolution, so a pending invite can be pre-authorized too. -->
+          <label
+            class="flex items-center gap-2 cursor-pointer select-none"
+            :title="proactiveTitle(op)"
+          >
+            <span class="text-xs text-gray-500 dark:text-gray-400">Proactive</span>
+            <span class="relative inline-flex items-center">
+              <input
+                type="checkbox"
+                class="sr-only peer"
+                :checked="op.allow_proactive"
+                :disabled="savingProactive === op.email"
+                @change="onToggleProactive(op, $event.target.checked)"
+              />
+              <div class="w-9 h-5 bg-gray-200 dark:bg-gray-700 rounded-full peer peer-checked:bg-action-primary-600 peer-focus:ring-2 peer-focus:ring-action-primary-500 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:border after:border-gray-300 after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4 peer-disabled:opacity-50"></div>
+            </span>
+          </label>
+          <button
+            @click="removeOperator(op.email)"
+            :disabled="removing === op.email"
+            class="text-sm text-status-danger-600 dark:text-status-danger-400 hover:underline disabled:opacity-50"
+          >{{ removing === op.email ? 'Removing…' : 'Remove' }}</button>
+        </div>
       </li>
     </ul>
+    <p
+      v-if="!loading && !error && operators.length > 0"
+      class="text-xs text-gray-500 dark:text-gray-400"
+    >
+      <span class="font-medium">Proactive</span> lets the agent message a user without being
+      prompted (e.g. Telegram alerts). The agent owner always receives proactive messages.
+    </p>
   </div>
 </template>
 
@@ -113,6 +141,7 @@ const loading = ref(true)
 const error = ref(false)
 const adding = ref(false)
 const removing = ref('')
+const savingProactive = ref('')   // #1577: email whose proactive toggle is in flight
 const newEmail = ref('')
 const message = ref(null)
 
@@ -155,6 +184,29 @@ async function removeOperator(email) {
   } finally {
     removing.value = ''
   }
+}
+
+// #1577: persist the proactive flag, reflecting the server's confirmed state
+// (no optimistic-only flip). On failure, revert the row and surface the error.
+async function onToggleProactive(op, next) {
+  savingProactive.value = op.email
+  message.value = null
+  const prev = op.allow_proactive
+  try {
+    const res = await agentsStore.setProactive(props.agentName, op.email, next)
+    op.allow_proactive = !!res.allow_proactive
+  } catch (e) {
+    op.allow_proactive = prev  // revert so the toggle matches persisted state
+    message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to update proactive setting.' }
+  } finally {
+    savingProactive.value = ''
+  }
+}
+
+function proactiveTitle(op) {
+  return op.status === 'pending'
+    ? 'Allow the agent to message this user proactively. Takes effect once they sign in and connect a channel.'
+    : 'Allow the agent to send this user proactive (unprompted) messages.'
 }
 
 function formatLastActive(iso) {
