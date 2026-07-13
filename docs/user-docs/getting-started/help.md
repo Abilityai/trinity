@@ -6,6 +6,31 @@ Get instant answers about Trinity through the AI-powered documentation assistant
 
 Ask questions about Trinity and get grounded answers from the documentation.
 
+### In Your Editor (MCP)
+
+Add the standalone docs assistant to Claude Code, Claude Desktop, Cursor, or any
+MCP client — no Trinity instance or API key required:
+
+```bash
+# Claude Code
+claude mcp add trinity-docs -- npx -y @abilityai/trinity-docs-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "trinity-docs": {
+      "command": "npx",
+      "args": ["-y", "@abilityai/trinity-docs-mcp"]
+    }
+  }
+}
+```
+
+This gives your assistant an `ask_trinity` tool (multi-turn Q&A over these docs)
+and `get_agent_requirements` (the Trinity Compatible Agent Guide). Requires
+Node.js ≥ 18. Details: [`src/helper-mcp/`](https://github.com/abilityai/trinity/tree/main/src/helper-mcp).
+
 ### CLI Usage
 
 ```bash
