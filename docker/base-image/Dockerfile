@@ -45,6 +45,17 @@ RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /
     apt-get install -y --no-install-recommends docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (#1574): the managed PAT (GH_TOKEN/GITHUB_TOKEN, exported by
+# startup.sh) authenticates `gh` + the REST API, not just git — but `gh` must be
+# present. Install from GitHub's official apt repo (mirrors the docker-ce-cli
+# stanza above).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Install Gemini CLI for multi-runtime support

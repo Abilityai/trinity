@@ -58,38 +58,55 @@ Enables agents to send proactive messages to specific users by verified email ac
 
 ## Frontend Layer
 
-### SharingPanel Toggle (#376)
+### Access-tab Toggle (#376, relocated #1317 → restored #1577)
 
-The `allow_proactive` flag is managed via a toggle switch in the Team Sharing section of the Sharing tab.
+The `allow_proactive` flag is managed via a per-operator toggle in the **Access tab**
+(`AccessPanel.vue`). *(History: the toggle originally lived in the Sharing tab's Team
+Sharing section (`SharingPanel.vue`, #377); the #1317 Access-tab redesign replaced that
+markup and silently dropped the toggle — a UI-only regression restored in #1577.)*
 
-**Location**: `src/frontend/src/components/SharingPanel.vue`
+**Location**: `src/frontend/src/components/AccessPanel.vue` (operator roster rows).
 
-**UI Structure** (lines 124-149):
+**State source**: `GET /api/agents/{name}/access` already returns `allow_proactive`
+per row (`AgentOperatorAccess`, `db/agent_settings/sharing.py:get_agent_operator_access`),
+so the panel reads the persisted flag from the roster it already loads — no extra fetch.
+Pending (unresolved-email) invites are toggleable too: the flag rides on the
+`agent_sharing` row, which exists before the email resolves to an account. The owner is
+not in the operator roster and is always allowed (a static note states this).
+
+**UI Structure**:
 ```vue
-<li v-for="share in shares" :key="share.id">
+<li v-for="op in operators" :key="op.email">
+  <!-- … name / status / role … -->
   <div class="flex items-center gap-4">
-    <!-- Proactive messaging toggle -->
-    <label title="Agent can/cannot send proactive messages">
+    <label :title="proactiveTitle(op)">
       <span>Proactive</span>
-      <switch :checked="share.allow_proactive" @click="toggleProactive(share)" />
+      <input type="checkbox" :checked="op.allow_proactive"
+             :disabled="savingProactive === op.email"
+             @change="onToggleProactive(op, $event.target.checked)" />
     </label>
-    <button @click="removeShare(...)">Remove</button>
+    <button @click="removeOperator(op.email)">Remove</button>
   </div>
 </li>
 ```
 
-**Toggle Handler** (lines 224-240):
+**Toggle Handler** (honest status — reflects the server's confirmed value, reverts on
+failure; no optimistic-only flip):
 ```javascript
-const toggleProactive = async (share) => {
-  await axios.put(
-    `/api/agents/${props.agentName}/shares/proactive`,
-    { email: share.shared_with_email, allow_proactive: !share.allow_proactive },
-    { headers: authStore.authHeader }
-  )
-  share.allow_proactive = !share.allow_proactive
-  showNotification(share.allow_proactive ? 'Proactive messaging enabled' : 'Proactive messaging disabled', 'success')
+async function onToggleProactive(op, next) {
+  const prev = op.allow_proactive
+  try {
+    const res = await agentsStore.setProactive(agentName, op.email, next)   // PUT .../shares/proactive
+    op.allow_proactive = !!res.allow_proactive
+  } catch (e) {
+    op.allow_proactive = prev
+    message.value = { type: 'error', text: '…' }
+  }
 }
 ```
+
+The `setProactive` store action (`stores/agents.js`) issues
+`PUT /api/agents/{name}/shares/proactive { email, allow_proactive }`.
 
 **Model** (`src/backend/db_models.py:53-60`):
 ```python

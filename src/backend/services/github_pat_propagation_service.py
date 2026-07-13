@@ -31,25 +31,36 @@ AGENT_HTTP_TIMEOUT_SECONDS = 30.0
 # Captures everything up to (and including) the newline so we can replace cleanly.
 _GITHUB_PAT_LINE_RE = re.compile(r'(?m)^[ \t]*GITHUB_PAT=.*$')
 
+# #1574: the same managed token also authenticates the `gh` CLI + REST API, which
+# read GH_TOKEN/GITHUB_TOKEN. The no-restart propagation keeps all three in sync in
+# the agent's .env so a next-start / .env-sourcing shell has them too (the live git
+# remote-URL rewrite remains the load-bearing immediate fix — see the callers).
+_TOKEN_ENV_KEYS = ("GITHUB_PAT", "GH_TOKEN", "GITHUB_TOKEN")
 
-def _format_pat_line(pat: str) -> str:
-    """Format a GITHUB_PAT line matching the agent's own .env writer.
+
+def _format_pat_line(pat: str, key: str = "GITHUB_PAT") -> str:
+    """Format a `KEY="value"` .env line matching the agent's own .env writer.
 
     The agent writes credentials as `KEY="value"` with embedded double quotes
     escaped (see docker/base-image/agent_server/routers/credentials.py).
     """
     escaped = pat.replace('"', '\\"')
-    return f'GITHUB_PAT="{escaped}"'
+    return f'{key}="{escaped}"'
 
 
 def _patch_env_github_pat(env_content: str, new_pat: str) -> str:
-    """Return env_content with the GITHUB_PAT line replaced."""
-    new_line = _format_pat_line(new_pat)
-    if _GITHUB_PAT_LINE_RE.search(env_content):
-        return _GITHUB_PAT_LINE_RE.sub(new_line, env_content, count=1)
-    # Caller should have filtered this case, but keep the behavior explicit.
-    suffix = "" if env_content.endswith("\n") else "\n"
-    return f"{env_content}{suffix}{new_line}\n"
+    """Return env_content with GITHUB_PAT (and the #1574 gh mirrors) set to
+    ``new_pat`` — each key replaced in place if present, else appended."""
+    out = env_content
+    for key in _TOKEN_ENV_KEYS:
+        line_re = re.compile(rf'(?m)^[ \t]*{key}=.*$')
+        new_line = _format_pat_line(new_pat, key)
+        if line_re.search(out):
+            out = line_re.sub(new_line, out, count=1)
+        else:
+            suffix = "" if (out == "" or out.endswith("\n")) else "\n"
+            out = f"{out}{suffix}{new_line}\n"
+    return out
 
 
 def _env_has_github_pat(env_content: str) -> bool:

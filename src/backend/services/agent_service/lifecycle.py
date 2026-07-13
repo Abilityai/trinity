@@ -442,6 +442,16 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         current_pat = get_github_pat_for_agent(agent_name)
         if current_pat:
             env_vars['GITHUB_PAT'] = current_pat
+    # #1574: mirror the resolved PAT onto GH_TOKEN/GITHUB_TOKEN so the `gh` CLI +
+    # REST API authenticate too — always tracking the final GITHUB_PAT, and never
+    # set when no token resolved (identical gating, no empty/broken credential).
+    _resolved_pat = env_vars.get('GITHUB_PAT')
+    if _resolved_pat:
+        env_vars['GH_TOKEN'] = _resolved_pat
+        env_vars['GITHUB_TOKEN'] = _resolved_pat
+    else:
+        env_vars.pop('GH_TOKEN', None)
+        env_vars.pop('GITHUB_TOKEN', None)
     # NB: gated on db.get_agent_github_pat (NOT the global fallback) so a global-
     # only PAT is never injected into a previously-tokenless container (#211's
     # opt-in path); kept in sync with the recreate matcher so the two converge.

@@ -29,6 +29,14 @@ _websocket_manager = None
 
 QUEUE_FILE_PATH = ".trinity/operator-queue.json"
 DEFAULT_POLL_INTERVAL = 5  # seconds
+# #1525: after this many consecutive failed create attempts for the same request
+# id, quarantine it — stop re-attempting so one persistently-failing create can't
+# produce an unbounded ~5s ERROR loop. It's retried again after a process restart
+# (or if it leaves `pending` / gets created some other way).
+MAX_CREATE_ATTEMPTS = 3
+# Safety valve so the in-memory quarantine map can never grow without bound if an
+# agent streams unique failing ids; cleared wholesale past this size.
+_MAX_QUARANTINE_ENTRIES = 5000
 
 
 def set_websocket_manager(manager):
@@ -44,6 +52,10 @@ class OperatorQueueSyncService:
         self.poll_interval = poll_interval
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        # #1525: req_id → consecutive create-failure count. Bounds the retry loop
+        # for a request whose DB create keeps raising (malformed input, a DB
+        # error, …) so it can't hot-loop forever. Entry is dropped on success.
+        self._create_failures: dict[str, int] = {}
 
     def start(self):
         """Start the background polling loop."""
@@ -140,12 +152,33 @@ class OperatorQueueSyncService:
             req_status = req.get("status", "pending")
 
             if req_status == "pending" and not db.operator_queue_item_exists(req_id):
+                # #1525: quarantine a request whose create keeps failing so a
+                # single malformed/unpersistable entry can't hot-loop the ~5s
+                # sync (the row never persists → exists() stays False → retry
+                # forever). Skip once it has hit the attempt cap.
+                if self._create_failures.get(req_id, 0) >= MAX_CREATE_ATTEMPTS:
+                    continue
                 # New item — create in DB
                 try:
                     db.create_operator_queue_item(agent_name, req)
                     new_items.append(req)
+                    self._create_failures.pop(req_id, None)  # recovered — clear count
                 except Exception as e:
-                    logger.error(f"Failed to create queue item {req_id}: {e}")
+                    attempts = self._create_failures.get(req_id, 0) + 1
+                    if len(self._create_failures) >= _MAX_QUARANTINE_ENTRIES:
+                        self._create_failures.clear()  # safety valve — never unbounded
+                    self._create_failures[req_id] = attempts
+                    if attempts >= MAX_CREATE_ATTEMPTS:
+                        logger.error(
+                            f"Quarantining operator-queue request {req_id} after "
+                            f"{attempts} failed create attempts (last error: {e}); it "
+                            f"won't be retried until it changes or the service restarts"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to create queue item {req_id} "
+                            f"(attempt {attempts}/{MAX_CREATE_ATTEMPTS}): {e}"
+                        )
 
             elif req_status == "acknowledged":
                 # Agent acknowledged our response
@@ -159,7 +192,7 @@ class OperatorQueueSyncService:
                     await _websocket_manager.broadcast(json.dumps({
                         "type": "operator_queue_new",
                         "data": {
-                            "id": item["id"],
+                            "id": item.get("id", ""),
                             "agent_name": agent_name,
                             "type": item.get("type", "question"),
                             "priority": item.get("priority", "medium"),

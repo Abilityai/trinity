@@ -82,6 +82,12 @@ RETENTION_CHUNK_SIZE_PER_CYCLE = 5000
 ORPHAN_VOLUME_RECLAIM_PER_CYCLE = 100
 ORPHAN_VOLUME_GRACE_SECONDS = 3600  # 1h — comfortably past any create latency
 
+# Issue #1142: `responded` operator_queue rows carry an operator answer the 5s
+# write-back loop still has to deliver to the agent file (a stopped agent picks
+# it up on restart), so they are never deleted younger than this generous floor —
+# independent of a shorter operator_queue_retention_days set for terminal rows.
+OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS = 30
+
 # trinity-enterprise#69: ephemeral ghost GC bounds. Discards do serial Docker
 # I/O (stop/remove) — cap per cycle + per-discard timeout so a burst of expired
 # ghosts can't stall the watchdog/slot sweeps for the whole fleet.
@@ -212,6 +218,8 @@ class CleanupReport:
     # ephemeral containers reclaimed (Docker-as-truth pass)
     ephemeral_agents_discarded: int = 0
     ephemeral_orphans_reclaimed: int = 0
+    # Issue #1142: terminal operator_queue rows deleted past their retention window
+    operator_queue_pruned: int = 0
 
     @property
     def total(self) -> int:
@@ -224,7 +232,7 @@ class CleanupReport:
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned + self.agent_volumes_removed +
                 self.orphan_agent_volumes_reclaimed + self.ephemeral_agents_discarded +
-                self.ephemeral_orphans_reclaimed)
+                self.ephemeral_orphans_reclaimed + self.operator_queue_pruned)
 
     def to_dict(self) -> Dict:
         return {
@@ -246,6 +254,7 @@ class CleanupReport:
             "agent_reports_pruned": self.agent_reports_pruned,
             "agent_volumes_removed": self.agent_volumes_removed,
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
+            "operator_queue_pruned": self.operator_queue_pruned,
             "total": self.total,
         }
 
@@ -313,6 +322,7 @@ class CleanupService:
         self._sweep_rate_limit_events()
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
+        self._sweep_operator_queue_retention(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -577,6 +587,45 @@ class CleanupService:
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
+
+    def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
+        """4c-quinquies. Issue #1142: delete terminal operator_queue rows past
+        their retention window. `operator_queue` was the one #772-adjacent table
+        with no automatic sweep — terminal rows (acknowledged/cancelled/expired)
+        accumulated forever; #1017's Clear All only *hid* them. `responded` rows
+        are protected by a more generous floor (they still carry an undelivered
+        operator answer). `0` disables; capped per cycle like the other sweeps.
+        """
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+            raw = db.get_setting_value(
+                "operator_queue_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("operator_queue_retention_days", "90"),
+            )
+            try:
+                days = max(int(raw), 0)
+            except (TypeError, ValueError):
+                days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading operator_queue retention setting: {e}")
+            days = 0
+
+        if days <= 0:
+            return
+        try:
+            pruned = db.prune_operator_queue_terminal_items(
+                retention_days=days,
+                responded_retention_days=OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS,
+                limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
+            )
+            report.operator_queue_pruned = pruned
+            if pruned > 0:
+                logger.info(
+                    f"[Cleanup] Deleted {pruned} terminal operator_queue rows "
+                    f"older than their retention window (#1142)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning operator_queue: {e}")
 
     async def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
         """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
@@ -913,7 +962,8 @@ class CleanupService:
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
                            + report.idempotency_keys_purged
-                           + report.agent_reports_pruned)
+                           + report.agent_reports_pruned
+                           + report.operator_queue_pruned)  # #1142
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

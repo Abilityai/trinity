@@ -79,6 +79,30 @@
 
       <!-- Composer -->
       <div class="border-t border-gray-200 dark:border-gray-700 p-3">
+        <!-- Attached files (#144) — chips with upload state; removable before send. -->
+        <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
+          <span
+            v-for="a in attachments"
+            :key="a.id"
+            class="inline-flex items-center gap-1.5 max-w-[14rem] rounded-full pl-2 pr-1 py-0.5 text-xs border"
+            :class="a.status === 'error'
+              ? 'border-status-danger-300 dark:border-status-danger-700 bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+              : 'border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200'"
+            :title="a.status === 'error' ? a.error : a.name"
+          >
+            <svg v-if="a.status === 'uploading'" class="animate-spin h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            <svg v-else-if="a.status === 'done'" class="h-3 w-3 shrink-0 text-status-success-600 dark:text-status-success-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+            <svg v-else class="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            <span class="truncate">{{ a.name }}</span>
+            <button
+              type="button"
+              class="shrink-0 rounded-full w-4 h-4 inline-flex items-center justify-center hover:bg-gray-300 dark:hover:bg-gray-600"
+              title="Remove"
+              @click="removeAttachment(a.id)"
+            >×</button>
+          </span>
+        </div>
+
         <form class="flex items-end gap-2" @submit.prevent="send">
           <!-- Dictate: browser speech-to-text (Chrome/Edge). -->
           <button
@@ -90,6 +114,26 @@
             :disabled="transcribing"
             @click="toggleMic"
           >{{ transcribing ? '⏳' : '🎤' }}</button>
+          <!-- Attach a file (#144) — only when a portal upload handler is wired. -->
+          <button
+            v-if="canAttach"
+            type="button"
+            class="shrink-0 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 px-3 py-2 text-sm disabled:opacity-50"
+            title="Attach a file (max 25 MB each)"
+            :disabled="sending"
+            @click="fileInputRef?.click()"
+          >
+            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+          </button>
+          <input
+            v-if="canAttach"
+            ref="fileInputRef"
+            type="file"
+            class="hidden"
+            multiple
+            accept="image/*,application/pdf,text/*,application/json,.csv,.txt,.md,.json,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+            @change="onPickFiles"
+          />
           <textarea
             v-model="input"
             rows="1"
@@ -100,7 +144,7 @@
           <button
             type="submit"
             class="shrink-0 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm px-4 py-2 disabled:opacity-50"
-            :disabled="sending || !input.trim()"
+            :disabled="sending || uploading || (!input.trim() && !hasSentableAttachment)"
           >Send</button>
         </form>
       </div>
@@ -143,6 +187,11 @@ const props = defineProps({
   transcribe: { type: Function, default: null },
   // Whether this agent has a configured voice + the platform key (roster flag).
   voiceAvailable: { type: Boolean, default: false },
+  // File attachments (#144): (agentName, File) => Promise<{filename,size_bytes,…}>.
+  // Uploads land in the agent's inbox; the next chat turn surfaces them (images
+  // as vision, documents listed). Omitted on surfaces without upload (operator
+  // preview) — the attach control hides when this is absent.
+  uploadDocument: { type: Function, default: null },
 })
 defineEmits(['close'])
 
@@ -304,6 +353,47 @@ const sending = ref(false)
 const error = ref(null)
 const scrollEl = ref(null)
 
+// --- File attachments (#144) ---
+// Each chip: { id, name, size, status: 'uploading'|'done'|'error', error?, serverName? }.
+// A file uploads to the agent inbox immediately on pick; on send we reference the
+// done attachments by name so the backend attaches images as vision that turn.
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024   // matches the portal /documents cap
+const fileInputRef = ref(null)
+const attachments = ref([])
+let _attachSeq = 0
+
+const canAttach = computed(() => !!props.uploadDocument)
+const uploading = computed(() => attachments.value.some(a => a.status === 'uploading'))
+const doneAttachments = computed(() => attachments.value.filter(a => a.status === 'done'))
+const hasSentableAttachment = computed(() => doneAttachments.value.length > 0)
+
+async function onPickFiles(event) {
+  const files = Array.from(event.target?.files || [])
+  event.target.value = ''   // allow re-picking the same file
+  if (!props.uploadDocument) return
+  for (const file of files) {
+    const id = ++_attachSeq
+    if (file.size > MAX_ATTACH_BYTES) {
+      attachments.value.push({ id, name: file.name, size: file.size, status: 'error', error: 'File is too large (max 25 MB).' })
+      continue
+    }
+    const chip = { id, name: file.name, size: file.size, status: 'uploading' }
+    attachments.value.push(chip)
+    try {
+      const res = await props.uploadDocument(props.agent.name, file)
+      chip.status = 'done'
+      chip.serverName = res?.filename || file.name
+    } catch (err) {
+      chip.status = 'error'
+      chip.error = err.response?.data?.detail || 'Upload failed.'
+    }
+  }
+}
+
+function removeAttachment(id) {
+  attachments.value = attachments.value.filter(a => a.id !== id)
+}
+
 const render = (c) => renderMarkdown(c || '')
 
 async function scrollDown() {
@@ -348,15 +438,28 @@ async function newChat() {
 
 async function send() {
   const text = input.value.trim()
-  if (!text || sending.value) return
+  const attached = doneAttachments.value
+  // Allow a files-only turn; block while an upload is still in flight.
+  if ((!text && attached.length === 0) || sending.value || uploading.value) return
   error.value = null
-  messages.value.push({ role: 'user', content: text })
+  // The transcript shows what the client typed (or a friendly placeholder for a
+  // files-only turn); the file names ride along so the client sees what they sent.
+  const attachNames = attached.map(a => a.serverName || a.name)
+  const displayText = text || `📎 ${attachNames.join(', ')}`
+  // What the backend receives: the typed text plus an explicit reference to the
+  // attached files, so `_collect_inbox_for_turn` attaches images as vision this
+  // turn (it keys on the filename / image-intent) and lists documents.
+  const sendText = attachNames.length
+    ? `${text}${text ? '\n\n' : ''}[Attached: ${attachNames.join(', ')}]`
+    : text
+  messages.value.push({ role: 'user', content: displayText })
   input.value = ''
+  attachments.value = []   // sent — they now live in the agent inbox
   sending.value = true
   await scrollDown()
   const startedNew = currentSessionId.value === null
   try {
-    const data = await doSend(props.agent.name, text, currentSessionId.value)
+    const data = await doSend(props.agent.name, sendText, currentSessionId.value)
     const reply = data.response || '(no response)'
     messages.value.push({ role: 'assistant', content: reply })
     // Voice mode: speak the reply (best-effort; stays text on any failure).

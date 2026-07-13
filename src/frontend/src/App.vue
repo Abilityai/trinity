@@ -7,19 +7,22 @@
       </KeepAlive>
     </router-view>
 
-    <!-- Help chat widget (authenticated users only) -->
-    <HelpChatWidget v-if="authStore.isAuthenticated" />
+    <!-- Help chat widget (authenticated users only; hidden on standalone
+         client-facing surfaces like the portal where it overlaps the composer) -->
+    <HelpChatWidget v-if="authStore.isAuthenticated && !route.meta.hideHelpWidget" />
   </div>
 </template>
 
 <script setup>
 import { onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
 import { useWebSocket } from './utils/websocket'
 import HelpChatWidget from './components/HelpChatWidget.vue'
 
+const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const { connect } = useWebSocket()

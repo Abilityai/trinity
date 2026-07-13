@@ -22,6 +22,16 @@ AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
 mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
     echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
 
+# #1574: the managed PAT authenticates git (via the origin URL) AND the `gh` CLI
+# + REST API, which read GH_TOKEN/GITHUB_TOKEN. Export them from GITHUB_PAT so
+# every child process (agent server, terminal shells) auto-authenticates. Gated on
+# a resolved PAT — never an empty token that makes `gh` look logged-in but broken.
+# (Older baked images set only GITHUB_PAT; this belt covers them without recreate.)
+if [ -n "${GITHUB_PAT}" ]; then
+    export GH_TOKEN="${GITHUB_PAT}"
+    export GITHUB_TOKEN="${GITHUB_PAT}"
+fi
+
 # Initialize from GitHub repository if specified
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"
