@@ -14,6 +14,7 @@ Runs every 5 minutes with a one-shot startup sweep.
 import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +72,21 @@ MAX_ERROR_MESSAGE_LENGTH = 2000  # Issue #286: truncate combined error messages
 # backlog (~9000 terminal rows past 30 days) drains in 2 cycles; for the
 # 90-day row-delete sweep on the same fleet that's roughly one cycle.
 RETENTION_CHUNK_SIZE_PER_CYCLE = 5000
+
+# Issue #1581: orphan agent-volume reclaim. A data volume whose ownership row is
+# gone (backend crashed mid-create, or the purge-time removal hit an in-use
+# volume and skipped it) is reclaimable — but bounded per cycle so a large
+# backlog can't stall the loop's other sweeps, and gated by a grace window so a
+# volume created seconds before its ownership row is never mistaken for an
+# orphan (creation writes the volume BEFORE the row).
+ORPHAN_VOLUME_RECLAIM_PER_CYCLE = 100
+ORPHAN_VOLUME_GRACE_SECONDS = 3600  # 1h — comfortably past any create latency
+
+# Issue #1142: `responded` operator_queue rows carry an operator answer the 5s
+# write-back loop still has to deliver to the agent file (a stopped agent picks
+# it up on restart), so they are never deleted younger than this generous floor —
+# independent of a shorter operator_queue_retention_days set for terminal rows.
+OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS = 30
 
 # trinity-enterprise#69: ephemeral ghost GC bounds. Discards do serial Docker
 # I/O (stop/remove) — cap per cycle + per-discard timeout so a burst of expired
@@ -197,10 +213,16 @@ class CleanupReport:
     # #1081 Phase 3 (#429/#1402): lease-reaper — pull rows re-queued / poison-parked
     expired_leases_requeued: int = 0
     expired_leases_parked: int = 0
+    # Issue #1581: Docker data volumes removed at retention hard-purge +
+    # orphan volumes (no ownership row, past grace) reclaimed by the sweep
+    agent_volumes_removed: int = 0
+    orphan_agent_volumes_reclaimed: int = 0
     # trinity-enterprise#69: ephemeral ghosts discarded (DB pass) + orphan
     # ephemeral containers reclaimed (Docker-as-truth pass)
     ephemeral_agents_discarded: int = 0
     ephemeral_orphans_reclaimed: int = 0
+    # Issue #1142: terminal operator_queue rows deleted past their retention window
+    operator_queue_pruned: int = 0
 
     @property
     def total(self) -> int:
@@ -213,7 +235,9 @@ class CleanupReport:
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned +
                 self.expired_leases_requeued + self.expired_leases_parked +
-                self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed)
+                self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
+                self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
+                self.operator_queue_pruned)
 
     def to_dict(self) -> Dict:
         return {
@@ -235,6 +259,9 @@ class CleanupReport:
             "agent_reports_pruned": self.agent_reports_pruned,
             "expired_leases_requeued": self.expired_leases_requeued,
             "expired_leases_parked": self.expired_leases_parked,
+            "agent_volumes_removed": self.agent_volumes_removed,
+            "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
+            "operator_queue_pruned": self.operator_queue_pruned,
             "total": self.total,
         }
 
@@ -308,7 +335,9 @@ class CleanupService:
         self._sweep_rate_limit_events()
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
+        self._sweep_operator_queue_retention(report)
         await self._sweep_soft_deleted_agents(report)
+        await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
@@ -643,6 +672,45 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
 
+    def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
+        """4c-quinquies. Issue #1142: delete terminal operator_queue rows past
+        their retention window. `operator_queue` was the one #772-adjacent table
+        with no automatic sweep — terminal rows (acknowledged/cancelled/expired)
+        accumulated forever; #1017's Clear All only *hid* them. `responded` rows
+        are protected by a more generous floor (they still carry an undelivered
+        operator answer). `0` disables; capped per cycle like the other sweeps.
+        """
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+            raw = db.get_setting_value(
+                "operator_queue_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("operator_queue_retention_days", "90"),
+            )
+            try:
+                days = max(int(raw), 0)
+            except (TypeError, ValueError):
+                days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading operator_queue retention setting: {e}")
+            days = 0
+
+        if days <= 0:
+            return
+        try:
+            pruned = db.prune_operator_queue_terminal_items(
+                retention_days=days,
+                responded_retention_days=OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS,
+                limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
+            )
+            report.operator_queue_pruned = pruned
+            if pruned > 0:
+                logger.info(
+                    f"[Cleanup] Deleted {pruned} terminal operator_queue rows "
+                    f"older than their retention window (#1142)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning operator_queue: {e}")
+
     async def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
         """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past
         their retention window. `purge_agent_ownership` runs the #816
@@ -679,19 +747,34 @@ class CleanupService:
                     limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
                 )
                 from services.agent_runtime_state import clear_agent_runtime_state
+                from services.docker_utils import remove_agent_volumes
 
                 purged = 0
+                volumes_removed = 0
                 for name in names:
                     try:
                         if db.purge_agent_ownership(name):
                             purged += 1
                             # #1560: the name is reusable from this instant on.
                             await clear_agent_runtime_state(name)
+                            # #1581: the ownership row is gone (agent is now
+                            # unrecoverable) — the ONLY safe moment to drop the
+                            # data volumes. Guarded + tolerant; a residual
+                            # (in-use) volume retries via the orphan sweep, so a
+                            # failure here never blocks the purge.
+                            try:
+                                volumes_removed += await remove_agent_volumes(name)
+                            except Exception as e:
+                                logger.warning(
+                                    f"[#1581] volume removal after purge of {name} "
+                                    f"failed (orphan sweep will retry): {e}"
+                                )
                     except Exception as e:
                         logger.warning(
                             f"[Cleanup] Failed to purge soft-deleted agent {name}: {e}"
                         )
                 report.soft_deleted_agents_purged = purged
+                report.agent_volumes_removed = volumes_removed
                 if purged > 0:
                     logger.info(
                         f"[Cleanup] Hard-purged {purged} soft-deleted agent(s) "
@@ -699,6 +782,100 @@ class CleanupService:
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning soft-deleted agents: {e}")
+
+    async def _sweep_orphan_agent_volumes(self, report: CleanupReport) -> None:
+        """4c-bis-2. Issue #1581: reclaim orphaned agent data volumes.
+
+        Docker-as-truth backstop for the purge-time removal: an
+        `agent-{name}-{workspace|public|shared}` volume whose ownership row no
+        longer exists (`is_agent_name_reserved` is False — covers purged rows;
+        a soft-deleted agent still matches, so the recovery window is respected)
+        is reclaimable. Every removal goes through the same name+label guard as
+        the targeted path (`remove_agent_volumes`), so a live/durable agent's
+        data is unreachable by a bug. Bounded per cycle + a creation-grace
+        window (creation writes the volume before the ownership row).
+        """
+        try:
+            from services.docker_utils import (
+                list_agent_data_volumes,
+                remove_agent_volumes,
+            )
+
+            volumes = await list_agent_data_volumes()
+            if not volumes:
+                return
+
+            now = utc_now()
+            reclaimed = 0
+            # Group orphan volumes by agent so one remove_agent_volumes call
+            # drops all three (workspace/public/shared) of a dead agent.
+            orphan_agents: set = set()
+            for volume in volumes:
+                if len(orphan_agents) >= ORPHAN_VOLUME_RECLAIM_PER_CYCLE:
+                    break
+                try:
+                    labels = (volume.attrs.get("Labels") or {}) if volume.attrs else {}
+                    agent_name = labels.get("trinity.agent-name")
+                    if not agent_name or agent_name in orphan_agents:
+                        continue
+                    # Row still present (live OR soft-deleted → recoverable) —
+                    # not an orphan; the purge sweep owns it.
+                    if db.is_agent_name_reserved(agent_name):
+                        continue
+                    # Grace: skip a volume younger than the window (its ownership
+                    # row may still be mid-write during a slow create).
+                    created_raw = volume.attrs.get("CreatedAt") if volume.attrs else None
+                    age_s = self._volume_age_seconds(created_raw, now)
+                    if age_s is None or age_s < ORPHAN_VOLUME_GRACE_SECONDS:
+                        # Unparseable timestamp → treat conservatively as young
+                        # (never reclaim on ambiguity — the purge path is the
+                        # primary reclaim; this is only a backstop).
+                        continue
+                    orphan_agents.add(agent_name)
+                except Exception as e:
+                    logger.warning(f"[#1581] orphan-volume triage failed: {e}")
+
+            for agent_name in orphan_agents:
+                try:
+                    reclaimed += await remove_agent_volumes(agent_name)
+                except Exception as e:
+                    logger.warning(
+                        f"[#1581] orphan volume reclaim for {agent_name} failed: {e}"
+                    )
+
+            report.orphan_agent_volumes_reclaimed = reclaimed
+            if reclaimed > 0:
+                logger.info(
+                    f"[#1581] reclaimed {reclaimed} orphaned agent volume(s)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error in orphan agent-volume sweep: {e}")
+
+    @staticmethod
+    def _volume_age_seconds(created_raw: Optional[str], now) -> Optional[float]:
+        """Age in seconds of a Docker volume from its ``CreatedAt`` string.
+
+        Docker emits RFC3339 (often with sub-second precision and a ``Z``
+        suffix, sometimes with a numeric offset). Returns None when absent or
+        unparseable — the caller treats None conservatively (does not reclaim).
+        """
+        if not created_raw:
+            return None
+        try:
+            # Docker may emit RFC3339Nano (up to 9 fractional digits); Python's
+            # fromisoformat only accepts 3 or 6 — clamp to microseconds.
+            normalized = re.sub(
+                r"(\.\d{6})\d+(?=[Z+\-]|$)", r"\1", created_raw
+            )
+            created_dt = parse_iso_timestamp(normalized)
+            if created_dt is None:
+                return None
+            if created_dt.tzinfo is None:
+                from datetime import timezone as _tz
+                created_dt = created_dt.replace(tzinfo=_tz.utc)
+            return (now - created_dt).total_seconds()
+        except Exception:
+            return None
 
     async def _sweep_ephemeral_agents(self, report: CleanupReport) -> None:
         """4c-quater. trinity-enterprise#69: ephemeral "ghost" agent GC.
@@ -869,7 +1046,8 @@ class CleanupService:
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
                            + report.idempotency_keys_purged
-                           + report.agent_reports_pruned)
+                           + report.agent_reports_pruned
+                           + report.operator_queue_pruned)  # #1142
         if retention_total > 0:
             try:
                 _wal_checkpoint_truncate()

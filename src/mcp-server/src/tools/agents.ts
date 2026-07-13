@@ -922,9 +922,13 @@ export function createAgentTools(
       description:
         "Set a per-agent GitHub Personal Access Token. " +
         "The PAT is validated against GitHub API before saving and encrypted at rest. " +
-        "When set, git operations for this agent will use this PAT instead of the global PAT. " +
+        "When set, this agent uses this PAT (instead of the global PAT) for git AND " +
+        "for the `gh` CLI / GitHub REST API — the container exposes it as GITHUB_PAT " +
+        "plus GH_TOKEN/GITHUB_TOKEN, so `gh` and `gh api` auto-authenticate (#1574). " +
+        "The token must carry the scopes the operation needs (e.g. `repo`, or Issues: " +
+        "Read and write) — wiring makes it available but cannot grant missing scopes. " +
         "To clear the PAT and revert to global, pass an empty string. " +
-        "Note: Agent must be restarted for git operations to use the new PAT.",
+        "Note: Agent must be restarted for the new PAT to take effect.",
       parameters: z.object({
         agent_name: z
           .string()

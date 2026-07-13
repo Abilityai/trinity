@@ -466,7 +466,7 @@ Backend orchestration in `services/subscription_auto_switch.py`: `_hot_reload_su
 
 **Admin recovery (Phase 1c):** metadata-only (`deleted_at → NULL`) via `/api/admin/soft-deleted/*`. Agent recovery does NOT recreate the container (`needs_container_recreate=true`; operator runs `POST /api/agents/{name}/start`); schedule recovery rejoins the firing list next poll if enabled. Audit `agent_lifecycle:recover` / `schedule_recover`. Models `SoftDeletedAgent`/`SoftDeletedSchedule`.
 
-**Cleanup Service sweeps** (every 5 min): #772 retention — nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` past `execution_row_retention_days` (default 90), DELETEs `agent_health_checks` past `health_check_retention_days` (default 7). #834 purges — hard-deletes `agent_ownership` rows soft-deleted past `agent_soft_delete_retention_days` (default 180, `0`=off), cascading children via the #816 `purge_agent_ownership`/`cascade_delete` primitive; hard-deletes `agent_schedules` past `schedule_soft_delete_retention_days` (default 30, `0`=off) via `purge_schedule()`, cascading its `schedule_executions`. Each sweep capped at 5000 rows/cycle; `0` disables; `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. Also purges expired `idempotency_keys`. **Startup hook (#740):** one-shot `mark_orphan_loops_interrupted()` flips `agent_loops` rows left `queued`/`running` after a restart to `interrupted` (`stop_reason="interrupted"`); no auto-resume.
+**Cleanup Service sweeps** (every 5 min): #772 retention — nulls `schedule_executions.execution_log` past `execution_log_retention_days` (default 30), DELETEs terminal `schedule_executions` past `execution_row_retention_days` (default 90), DELETEs `agent_health_checks` past `health_check_retention_days` (default 7). #834 purges — hard-deletes `agent_ownership` rows soft-deleted past `agent_soft_delete_retention_days` (default 180, `0`=off), cascading children via the #816 `purge_agent_ownership`/`cascade_delete` primitive; hard-deletes `agent_schedules` past `schedule_soft_delete_retention_days` (default 30, `0`=off) via `purge_schedule()`, cascading its `schedule_executions`. **#1142 operator_queue retention** — DELETEs terminal `operator_queue` rows (acknowledged/cancelled/expired) past `operator_queue_retention_days` (default 90, `0`=off); `responded` rows use a more generous fixed floor (`OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS`, 30d — they still carry an operator answer the 5s write-back loop must deliver), `pending` never deleted (`db.prune_operator_queue_terminal_items`, select-ids-then-delete, capped). This is the automatic complement to #1017's manual Clear-All (which only *hid* via `cleared_at`). Each sweep capped at 5000 rows/cycle; `0` disables; `PRAGMA wal_checkpoint(TRUNCATE)` when any sweep reclaims rows. Also purges expired `idempotency_keys`. **#1581 volume reclaim** — at the #834 hard-purge (the instant the agent becomes unrecoverable, NOT at soft-delete) the agent's `agent-{name}-{workspace,public,shared}` Docker volumes are removed via `docker_utils.remove_agent_volumes` (double-guarded: exact name AND `trinity.agent-name`+`trinity.platform` labels must match, fail-closed; NotFound/in-use tolerated → retry). A separate bounded Docker-as-truth orphan sweep (`_sweep_orphan_agent_volumes`, ≤100 agents/cycle, 1h creation-grace) reclaims agent-data volumes whose ownership row is gone (soft-deleted rows still `is_agent_name_reserved` → recovery window respected). Closes the unbounded volume leak (`volume_remove` previously had zero lifecycle callers). **Startup hook (#740):** one-shot `mark_orphan_loops_interrupted()` flips `agent_loops` rows left `queued`/`running` after a restart to `interrupted` (`stop_reason="interrupted"`); no auto-resume.
 
 ### Ephemeral "Ghost" Agents (trinity-enterprise#69)
 
@@ -646,6 +646,13 @@ never bypassed.
 - `mcp_exposed` is surfaced on `GET /api/agents` / MCP `list_agents`. Dual-track
   migration (SQLite `agent_ownership_mcp_exposed` + Alembic
   `0009_agent_ownership_mcp_exposed`).
+- **Connect surface (#1575):** the Expose-via-MCP panel (`components/McpExposedPanel.vue`)
+  gains a one-click **Copy connection config** action when exposed — it reuses the
+  existing [MCP connector](feature-flows/mcp-connector.md) (scoped `scope='connector'`
+  key + playbooks-as-tools + `build_snippets`) to hand an external client a
+  ready-to-paste `.mcp.json` with a least-privilege, agent-scoped, revocable key
+  already embedded. No new endpoint/key type — the connector endpoints are reused
+  (owner-only, keys already list in Settings → MCP Keys, revoke severs the connection).
 
 ### Brain Orb — Self-Rendering Mind page (#58, trinity-enterprise)
 
@@ -946,7 +953,7 @@ Generalises #868 to agent scope (`db/schedules.py:get_agent_analytics`); read-on
 | GET | `/api/operator-queue` | List queue items (filters: status, type, priority, agent_name, since) |
 | GET | `/api/operator-queue/stats` | Counts by status/type/priority/agent |
 | POST | `/api/operator-queue/bulk-cancel` | Cancel listed pending items (`{ids: [...]}`, 1–500, ids-scoped so a sync race can't cancel unseen items); returns `{cancelled, skipped}`; audit-logged (#1017) |
-| POST | `/api/operator-queue/clear-resolved` | Hide terminal rows (acknowledged/cancelled/expired) by setting `cleared_at` — NOT a DELETE (the 5s sync loop would resurrect items whose agent-file entry still says `pending`); `responded` kept visible until delivered; actual deletion deferred to the retention sweep (#1142); returns `{cleared}`; audit-logged (#1017) |
+| POST | `/api/operator-queue/clear-resolved` | Hide terminal rows (acknowledged/cancelled/expired) by setting `cleared_at` — NOT a DELETE (the 5s sync loop would resurrect items whose agent-file entry still says `pending`); `responded` kept visible until delivered; actual row deletion is the automatic retention sweep's job (`operator_queue_retention_days`, #1142); returns `{cleared}`; audit-logged (#1017) |
 | GET | `/api/operator-queue/{id}` | Single item |
 | POST | `/api/operator-queue/{id}/respond` / `/cancel` | Submit operator response / cancel pending item. Respond returns **409** if the item left `pending` under the caller (race vs bulk-cancel, #1017) |
 | GET | `/api/operator-queue/agents/{name}` | Items for one agent |
@@ -1642,7 +1649,7 @@ CREATE TABLE operator_queue (
     responded_by_email TEXT,
     responded_at TEXT,
     acknowledged_at TEXT,
-    cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (deletion deferred to retention sweep #1142)
+    cleared_at TEXT,                    -- #1017: NULL = visible; set = hidden by Clear All (rows deleted by the #1142 retention sweep past operator_queue_retention_days)
     FOREIGN KEY (responded_by_id) REFERENCES users(id)
 );
 CREATE INDEX idx_operator_queue_agent ON operator_queue(agent_name);

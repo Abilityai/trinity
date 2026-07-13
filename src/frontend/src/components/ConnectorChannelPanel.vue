@@ -85,7 +85,17 @@
           <div v-for="s in freshSnippets" :key="s.client">
             <div class="flex items-center justify-between mb-1">
               <span class="text-xs font-medium text-gray-700 dark:text-gray-200">{{ s.label }}</span>
-              <button type="button" @click="copy(s.content)" class="text-xs text-action-primary-600 hover:underline">Copy</button>
+              <button
+                type="button"
+                @click="copy(s.content, s.client)"
+                class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded transition-all duration-300"
+                :class="copied === s.client
+                  ? 'bg-status-success-600 text-white ring-2 ring-status-success-400 shadow-sm shadow-status-success-500/40 copied-btn-flash'
+                  : 'text-action-primary-600 hover:underline'"
+              >
+                <svg v-if="copied === s.client" class="h-3.5 w-3.5 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                {{ copied === s.client ? 'Copied!' : 'Copy' }}
+              </button>
             </div>
             <pre class="text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto"><code>{{ s.content }}</code></pre>
             <p v-if="s.note" class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ s.note }}</p>
@@ -99,8 +109,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import api from '../api'
+import { copyToClipboard } from '../utils/clipboard'
 import ExposedToolsPanel from './ExposedToolsPanel.vue'
 
 const props = defineProps({
@@ -174,15 +185,45 @@ const toggleEnabled = async () => {
   }
 }
 
-const copy = async (text) => {
-  try {
-    await navigator.clipboard.writeText(text)
-    notify('Copied to clipboard.')
-  } catch {
-    notify('Copy failed — select and copy manually.', true)
-  }
+// Transient per-snippet "Copied!" affordance — holds the copied snippet's
+// client id for ~1.6s so the button flashes green. One shared timer.
+const copied = ref('')
+let copiedTimer = null
+const flashCopied = (id) => {
+  copied.value = id
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => { copied.value = '' }, 1600)
+}
+
+const copy = async (text, id = '') => {
+  const ok = await copyToClipboard(text)
+  if (ok && id) flashCopied(id)
+  notify(ok ? 'Copied to clipboard.' : 'Copy failed — select and copy manually.', !ok)
 }
 
 watch(() => props.agentName, () => loadStatus())
 onMounted(() => loadStatus())
+onUnmounted(() => { if (copiedTimer) clearTimeout(copiedTimer) })
 </script>
+
+<style scoped>
+.copied-pop {
+  animation: copied-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes copied-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.copied-btn-flash {
+  animation: copied-btn-flash 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes copied-btn-flash {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55); }
+  40% { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.28); }
+  100% { transform: scale(1); box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copied-pop, .copied-btn-flash { animation: none; }
+}
+</style>

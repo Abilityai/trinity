@@ -836,6 +836,11 @@ async def create_agent_internal(
     if github_repo_for_agent and github_pat_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent
         env_vars['GITHUB_PAT'] = github_pat_for_agent
+        # #1574: the SAME managed token also authenticates the `gh` CLI and the
+        # REST API (which read GH_TOKEN/GITHUB_TOKEN), not just git. Gated
+        # identically to GITHUB_PAT — never set for a tokenless agent.
+        env_vars['GH_TOKEN'] = github_pat_for_agent
+        env_vars['GITHUB_TOKEN'] = github_pat_for_agent
         # Phase 7: Enable git sync for GitHub-native agents
         env_vars['GIT_SYNC_ENABLED'] = 'true'
         # Dev/self-host: propagate optional git base-URL override to agent container

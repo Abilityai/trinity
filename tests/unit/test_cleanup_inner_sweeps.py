@@ -66,6 +66,7 @@ def _configure_db(db):
     db.idempotency_purge_expired.return_value = 11  # RELIABILITY-006 / #525
     db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
     db.find_expired_leases.return_value = []  # #1081 Phase 3 lease reaper — inert by default
+    db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
 
 
 def _run(svc):
@@ -97,7 +98,8 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     assert report.soft_deleted_schedules_purged == 2
     assert report.idempotency_keys_purged == 11
     assert report.agent_reports_pruned == 3  # #918
-    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3
+    assert report.operator_queue_pruned == 8  # #1142
+    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3 + 8  # +8 #1142
     # retention reclaimed rows ⇒ WAL checkpoint fires
     wal.assert_called_once()
     # cycle counter advanced
@@ -161,6 +163,7 @@ def test_wal_checkpoint_skipped_when_no_retention_work():
         db.find_soft_deleted_schedules_past_retention.return_value = []
         db.idempotency_purge_expired.return_value = 0
         db.prune_agent_reports.return_value = 0  # #918
+        db.prune_operator_queue_terminal_items.return_value = 0  # #1142
         _run(svc)
     wal.assert_not_called()
 
@@ -188,6 +191,7 @@ def test_wal_checkpoint_fires_when_only_agent_reports_pruned():
         db.find_soft_deleted_schedules_past_retention.return_value = []
         db.idempotency_purge_expired.return_value = 0
         db.prune_agent_reports.return_value = 4  # #918 — the only work this cycle
+        db.prune_operator_queue_terminal_items.return_value = 0  # #1142
         _run(svc)
     wal.assert_called_once()
 

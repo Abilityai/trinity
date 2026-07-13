@@ -82,6 +82,10 @@ OPS_SETTINGS_DEFAULTS = {
     # Issue #918: retention for agent_reports. Rows older than this many days
     # are deleted by the cleanup sweep. "0" disables the sweep.
     "agent_reports_retention_days": "90",
+    # Issue #1142: retention for terminal operator_queue rows
+    # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
+    # get a more generous fixed floor (never deleted younger than #772's guard).
+    "operator_queue_retention_days": "90",
 }
 
 # Descriptions for each ops setting
@@ -101,6 +105,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
+    "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
 }
 
 
