@@ -447,6 +447,18 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // #1577: toggle the per-recipient allow_proactive flag on an agent_sharing
+    // row (#321/#376). Owner/admin only; returns the persisted state.
+    async setProactive(name, email, allow) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/shares/proactive`,
+        { email, allow_proactive: allow },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     // Agent Permissions Actions (Phase 9.10)
     async getAgentPermissions(name) {
       const authStore = useAuthStore()
