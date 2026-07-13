@@ -1,0 +1,108 @@
+name: Publish Helper MCP to npm
+
+# Publishes @abilityai/trinity-docs-mcp (src/helper-mcp/) with npm provenance.
+#
+# BOOTSTRAP (one-time, manual): npm cannot pre-register a trusted publisher
+# for a package that does not exist yet (unlike PyPI pending publishers).
+# The FIRST publish must be done by a maintainer:
+#   1. create the @abilityai npm org (if absent)
+#   2. cd src/helper-mcp && npm publish --access public   (with a real login)
+#   3. on npmjs.com → package → Settings → add this workflow as a
+#      Trusted Publisher, then revoke the token used in step 2.
+# After that, this workflow publishes via OIDC — no long-lived npm token.
+
+on:
+  push:
+    tags:
+      - 'helper-mcp-v*'
+    branches:
+      - main
+    paths:
+      - 'src/helper-mcp/**'
+
+permissions:
+  contents: write
+  id-token: write  # Required for npm trusted publishing / --provenance
+
+jobs:
+  publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # Need full history for tag detection
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/helper-mcp-v* ]]; then
+            # Tag-triggered: helper-mcp-v0.2.0 → 0.2.0
+            VERSION="${GITHUB_REF_NAME#helper-mcp-v}"
+          else
+            # Push-triggered: auto-increment patch from latest helper-mcp-v* tag
+            LATEST_TAG=$(git tag -l 'helper-mcp-v*' --sort=-v:refname | head -1)
+            if [ -z "$LATEST_TAG" ]; then
+              VERSION="0.1.0"
+            else
+              BASE="${LATEST_TAG#helper-mcp-v}"
+              MAJOR=$(echo "$BASE" | cut -d. -f1)
+              MINOR=$(echo "$BASE" | cut -d. -f2)
+              PATCH=$(echo "$BASE" | cut -d. -f3)
+              PATCH=$((PATCH + 1))
+              VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Check if version already exists on npm
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if npm view "@abilityai/trinity-docs-mcp@${VERSION}" version > /dev/null 2>&1; then
+            echo "Version $VERSION already exists on npm — skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Inject version into package.json
+        if: steps.check.outputs.skip != 'true'
+        working-directory: src/helper-mcp
+        run: |
+          # npm pkg set (not npm version) — npm version ERRORS with "Version not
+          # changed" when the target equals package.json's current version, which
+          # is exactly the first run's state (no tags yet → 0.1.0 == 0.1.0).
+          npm pkg set version="${{ steps.version.outputs.version }}"
+          node -p "require('./package.json').version"
+
+      - name: Install
+        if: steps.check.outputs.skip != 'true'
+        working-directory: src/helper-mcp
+        run: npm ci
+
+      - name: Upgrade npm for OIDC trusted publishing
+        if: steps.check.outputs.skip != 'true'
+        # Trusted publishing requires npm >= 11.5.1; Node 22 bundles npm 10.x.
+        run: npm install -g npm@latest && npm --version
+
+      - name: Publish to npm (build + tests run via prepublishOnly)
+        if: steps.check.outputs.skip != 'true'
+        working-directory: src/helper-mcp
+        run: npm publish --provenance --access public
+
+      - name: Create git tag
+        if: steps.check.outputs.skip != 'true' && !startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="helper-mcp-v${VERSION}"
+          git tag "$TAG"
+          git push origin "$TAG"

@@ -120,3 +120,46 @@ runs the same access gate, so ownership/sharing is never bypassed.
 servers (each replica polls + reconciles independently).
 
 ---
+
+## Trinity Helper MCP Server (#1459)
+
+**Description**: A standalone, dependency-light MCP server (`src/helper-mcp/`, npm
+`@abilityai/trinity-docs-mcp`) that exposes the public Trinity Docs Q&A service
+(DOCS-QA-001, `docs/memory/feature-flows/trinity-docs-qa.md`) as MCP tools, so anyone can
+add a grounded "ask Trinity anything" assistant to Claude Code / Claude Desktop / any MCP
+client **without running a Trinity instance**. Pure protocol adapter over the existing
+`ask-trinity` Cloud Function — no new backend/QA logic, no authentication, no credentials.
+Distinct from the main Trinity MCP server (`src/mcp-server/`, requires a Trinity API key).
+
+- **FR-1 — `ask_trinity` tool**: `{question (required, ≤4,000 chars), session_id?
+  (opaque string)}` → POSTs the public endpoint; returns the answer plus the response
+  `session_id` for multi-turn follow-ups. Session expiry is **silent** server-side (an
+  expired/invalid id yields a NEW session with HTTP 200/`SUCCEEDED`) — the tool always
+  returns the effective session_id and appends a context-lost warning when it differs
+  from the input.
+- **FR-2 — `get_agent_requirements` tool**: fetches `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
+  from raw.githubusercontent.com at call time (living doc, no bundling staleness); on fetch
+  failure returns a static quick-reference fallback + the GitHub URL, never an error-only
+  response. Same tool name/shape as the main MCP server's (per-server namespacing).
+- **FR-3 — Robustness**: 50s abort timeout (under the 60s MCP client default), no
+  auto-retry, `redirect: "error"`, non-JSON response guard, structured error text for
+  non-200 / `state != SUCCEEDED` / empty answer — a tool call never crashes the server.
+  `session_id` is an opaque string end-to-end (live values exceed 2^53; numeric handling
+  would corrupt them).
+- **FR-4 — Distribution**: npx-runnable stdio package; runtime deps = official
+  `@modelcontextprotocol/sdk` + `zod` only (deliberately NOT fastmcp — smaller
+  supply-chain surface); `console.error`-only logging (stdout is the JSON-RPC channel);
+  Node ≥18 guarded at startup. Publish via `.github/workflows/publish-helper-mcp.yml`
+  (npm provenance; one-time manual first publish creates the package, then trusted
+  publishing takes over).
+- **FR-5 — Endpoint override**: `ASK_TRINITY_ENDPOINT` env var (default: the public Cloud
+  Function URL) for self-hosted mirrors and the CI smoke test; logged to stderr when set.
+- **FR-6 — Corpus**: the docs-sync workflow indexes `docs/onboarding/**`,
+  `docs/user-docs/**` (incl. the 264-Q&A FAQ) and `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
+  so answers cover evaluator/operator questions, not just onboarding.
+
+**Deferred**: hosted remote Streamable-HTTP endpoint + vanity URL + MCP registry listing
+(fast-follow; the official SDK keeps the transport option open); Cloud Function citations
+passthrough (the endpoint returns no citations today — the adapter forwards a `citations`
+field if it ever appears); #1460 (`ask_trinity` inside the main Trinity MCP server —
+shares the same tool name/schema and endpoint-client contract).

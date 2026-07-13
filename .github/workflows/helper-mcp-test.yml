@@ -1,0 +1,43 @@
+name: Helper MCP Tests
+
+on:
+  pull_request:
+    paths:
+      - 'src/helper-mcp/**'
+      - '.github/workflows/helper-mcp-test.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'src/helper-mcp/**'
+      - '.github/workflows/helper-mcp-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, unit + stdio smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/helper-mcp
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: src/helper-mcp/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Pack-and-run stdio smoke test
+        run: node scripts/smoke.mjs

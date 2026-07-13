@@ -1,0 +1,54 @@
+{
+  "name": "@abilityai/trinity-docs-mcp",
+  "version": "0.1.0",
+  "description": "Ask Trinity anything — standalone MCP server exposing the Trinity docs Q&A assistant (Vertex AI Search + Gemini, grounded on the Trinity documentation). No Trinity instance or API key required.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abilityai/trinity.git",
+    "directory": "src/helper-mcp"
+  },
+  "homepage": "https://github.com/abilityai/trinity/tree/main/src/helper-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/abilityai/trinity/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "trinity",
+    "documentation",
+    "docs",
+    "q&a"
+  ],
+  "bin": {
+    "trinity-docs-mcp": "bin/trinity-docs-mcp.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test src/*.test.ts",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^5.7.2"
+  }
+}
