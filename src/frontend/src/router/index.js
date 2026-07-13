@@ -177,7 +177,10 @@ const routes = [
     path: '/enterprise/client-portal',
     name: 'EnterpriseClientPortal',
     component: () => import('../views/enterprise/ClientPortal.vue'),
-    meta: { requiresAuth: true, requiresEntitlement: 'client_portal', title: 'Client Portal' }
+    // hideHelpWidget: the platform "Trinity Help" widget (bottom-right) overlaps
+    // the client chat composer's Send button and isn't relevant to a portal
+    // client — keep it off this standalone surface.
+    meta: { requiresAuth: true, requiresEntitlement: 'client_portal', title: 'Client Portal', hideHelpWidget: true }
   },
   {
     // Public client-facing portal — a client signs in with a verified email
@@ -187,7 +190,9 @@ const routes = [
     path: '/portal',
     name: 'ClientPortalPublic',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Client Portal' }
+    // hideHelpWidget: the operator-only help widget would overlap the portal
+    // chat's Send button (and is meaningless to a client) — off here.
+    meta: { title: 'Client Portal', hideHelpWidget: true }
   },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {
