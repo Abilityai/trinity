@@ -16,7 +16,7 @@ import json
 from typing import Optional, List, Dict, Set
 from datetime import datetime
 
-from sqlalchemy import select, update, func, and_, case
+from sqlalchemy import select, update, func, and_, or_, case, delete
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
@@ -344,6 +344,64 @@ class OperatorQueueOperations:
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue).where(and_(*conds)).values(cleared_at=now)
+            )
+            return result.rowcount
+
+    def prune_terminal_items(
+        self,
+        retention_days: int,
+        responded_retention_days: int,
+        limit: int = 5000,
+    ) -> int:
+        """#1142: hard-DELETE old terminal operator-queue rows (retention sweep).
+
+        The counterpart to #1017's ``clear_resolved_items`` (which only *hides*
+        via ``cleared_at`` because the 5s sync loop would resurrect a deleted row
+        still ``pending`` in the agent file). By retention age those rows are long
+        settled, so they can be removed:
+
+        - ``acknowledged`` / ``cancelled`` / ``expired`` older than ``retention_days``;
+        - ``responded`` only older than the more generous ``responded_retention_days``
+          — the write-back loop still has to deliver the operator's answer to the
+          agent file, and a stopped agent picks it up on restart, so a young
+          ``responded`` row must survive. ``pending`` rows are never deleted.
+
+        Age is measured on ``created_at`` (always set). Capped at ``limit`` rows
+        per call (select-ids-then-delete, portable across SQLite/PostgreSQL). A
+        disabled window (``retention_days <= 0``) prunes nothing. Returns the
+        count deleted.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        terminal_cutoff = iso_cutoff(hours=retention_days * 24)
+        # `responded` never uses a shorter window than the terminal one.
+        resp_days = max(responded_retention_days, retention_days)
+        responded_cutoff = iso_cutoff(hours=resp_days * 24)
+
+        id_stmt = (
+            select(operator_queue.c.id)
+            .where(
+                or_(
+                    and_(
+                        operator_queue.c.status.in_(
+                            ("acknowledged", "cancelled", "expired")
+                        ),
+                        operator_queue.c.created_at < terminal_cutoff,
+                    ),
+                    and_(
+                        operator_queue.c.status == "responded",
+                        operator_queue.c.created_at < responded_cutoff,
+                    ),
+                )
+            )
+            .limit(limit)
+        )
+        with get_engine().begin() as conn:
+            ids = [r[0] for r in conn.execute(id_stmt).all()]
+            if not ids:
+                return 0
+            result = conn.execute(
+                delete(operator_queue).where(operator_queue.c.id.in_(ids))
             )
             return result.rowcount
 

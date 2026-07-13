@@ -2202,6 +2202,12 @@ class DatabaseManager:
     def create_operator_queue_item(self, agent_name, item):
         return self._operator_queue_ops.create_item(agent_name, item)
 
+    def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
+        # #1142: retention sweep for terminal operator-queue rows.
+        return self._operator_queue_ops.prune_terminal_items(
+            retention_days, responded_retention_days, limit
+        )
+
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
