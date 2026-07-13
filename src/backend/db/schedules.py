@@ -261,6 +261,10 @@ class ScheduleOperations:
             # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402)
             redelivery_count=row["redelivery_count"]
                 if "redelivery_count" in row_keys and row["redelivery_count"] is not None else 0,
+            # Channel delivery target (ent#117)
+            source_channel=row["source_channel"] if "source_channel" in row_keys else None,
+            source_channel_chat_id=row["source_channel_chat_id"] if "source_channel_chat_id" in row_keys else None,
+            source_channel_thread=row["source_channel_thread"] if "source_channel_thread" in row_keys else None,
         )
 
     @staticmethod
@@ -1048,6 +1052,9 @@ class ScheduleOperations:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record for a manual/API-triggered task (no schedule).
 
@@ -1087,6 +1094,9 @@ class ScheduleOperations:
                     fan_out_id=fan_out_id,
                     loop_id=loop_id,
                     subscription_id=subscription_id,
+                    source_channel=source_channel,
+                    source_channel_chat_id=source_channel_chat_id,
+                    source_channel_thread=source_channel_thread,
                 )
             )
 
@@ -1107,6 +1117,9 @@ class ScheduleOperations:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=subscription_id,
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_thread=source_channel_thread,
             )
 
     def create_schedule_execution(
@@ -1705,6 +1718,52 @@ class ScheduleOperations:
                     and_(
                         schedule_executions.c.agent_name == agent_name,
                         schedule_executions.c.status == TaskExecutionStatus.QUEUED,
+                    )
+                )
+                .values(
+                    status=TaskExecutionStatus.FAILED,
+                    completed_at=now,
+                    error=reason,
+                )
+            )
+            return result.rowcount
+
+    def fail_all_nonterminal_for_agent(
+        self, agent_name: str, reason: str = "ghost_discarded"
+    ) -> int:
+        """Bulk-FAIL every non-terminal execution for an agent
+        (trinity-enterprise#69).
+
+        Discard step 1 for ephemeral agents: queued, running, AND
+        pending_retry rows are all doomed (the container is about to be
+        force-removed and the DB rows purged), so terminal-ize them first.
+        This keeps canary L-03/E-01 green through the purge — the KEEP-policy
+        ``schedule_executions`` rows that survive must never be non-terminal
+        rows referencing an agent absent from ``agent_ownership``. It also
+        means a late in-flight ``apply_result`` for one of these rows loses
+        its CAS and records no side effects (no breaker-key resurrection).
+
+        The status filter doubles as the CAS guard: a row that reached a real
+        terminal (e.g. SUCCESS landing between our read and write) is not
+        overwritten.
+
+        Returns:
+            Count of rows moved to FAILED.
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status.in_(
+                            [
+                                TaskExecutionStatus.QUEUED,
+                                TaskExecutionStatus.RUNNING,
+                                TaskExecutionStatus.PENDING_RETRY,
+                            ]
+                        ),
                     )
                 )
                 .values(

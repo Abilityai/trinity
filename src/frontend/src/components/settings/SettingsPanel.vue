@@ -28,6 +28,16 @@
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
       <McpExposedPanel :agent-name="agentName" :notify="notify" />
     </section>
+
+    <!-- Section 4: Voice replies (ent#117) — agent-level enable + voice selection.
+         Per-channel on/off flags live in each channel's panel (Sharing tab). -->
+    <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
+      <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">Voice</h3>
+      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        Give this agent the ability to reply with a spoken voice note on messaging channels.
+      </p>
+      <VoiceRepliesControl :agent-name="agentName" />
+    </section>
   </div>
 </template>
 
@@ -35,6 +45,7 @@
 import GuardrailsPanel from '../GuardrailsPanel.vue'
 import CapacityPanel from '../CapacityPanel.vue'
 import McpExposedPanel from '../McpExposedPanel.vue'
+import VoiceRepliesControl from '../VoiceRepliesControl.vue'
 
 defineProps({
   agentName: {

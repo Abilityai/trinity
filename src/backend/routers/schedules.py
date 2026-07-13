@@ -163,6 +163,19 @@ async def create_schedule(
     if not db.is_agent_live(name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # trinity-enterprise#69: cron on a dying agent is a footgun — an ephemeral
+    # agent's whole lifecycle is shorter than most cron cadences, and its
+    # discard would orphan the schedule mid-flight.
+    _eph = db.get_agent_ephemeral_info(name)
+    if isinstance(_eph, dict) and _eph.get("is_ephemeral"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Schedules cannot be created on ephemeral agents.",
+                "code": "schedule_on_ephemeral_agent",
+            },
+        )
+
     # #929: schedule timeout cannot exceed the agent cap. Validated here so
     # the operator gets the 400 at config time instead of a SIGKILL at run time.
     # After #913 the field is Optional — only enforce when the caller set it.

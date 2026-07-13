@@ -15,3 +15,4 @@ export { createEventTools } from "./events.js";
 export { createMemoryTools } from "./memory.js";
 export { createLoopTools } from "./loops.js";
 export { createOperatorQueueTools } from "./operator_queue.js";
+export { createVoiceReplyTools } from "./voice.js";

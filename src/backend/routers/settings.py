@@ -21,6 +21,7 @@ from models import (
     ApiKeyTest,
     ApiKeyUpdate,
     BrainOrbSettingsUpdate,
+    ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
@@ -182,6 +183,10 @@ async def get_public_feature_flags(
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
+        # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
+        # config UI + the send_voice_reply capability. Non-sensitive boolean.
+        "tts_available": bool(settings_service.get_elevenlabs_api_key()),
         "platform_default_model": settings_service.get_platform_default_model(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
@@ -1653,6 +1658,107 @@ async def update_brain_orb_settings(
         "flags": after,
         "gemini_key_configured": bool(GEMINI_API_KEY),
     }
+
+
+# ============================================================================
+# ElevenLabs / outbound-voice (TTS) Settings (trinity-enterprise#117)
+# NOTE: These routes MUST be defined BEFORE the /{key} catch-all (Invariant #4).
+# ============================================================================
+
+def _elevenlabs_settings_state() -> dict:
+    """Admin-panel view: key presence + source + default voice (never the key)."""
+    return {
+        "key_configured": bool(settings_service.get_elevenlabs_api_key()),
+        "key_source": settings_service.elevenlabs_key_source(),
+        "default_voice_id": settings_service.get_default_voice_id(),
+    }
+
+
+@router.get("/elevenlabs")
+async def get_elevenlabs_settings(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Get ElevenLabs/voice platform settings (ent#117).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4). The API
+    key is surfaced as `key_configured: bool` + `key_source` only — never echoed.
+    """
+    require_admin(current_user)
+    return _elevenlabs_settings_state()
+
+
+@router.put("/elevenlabs")
+async def update_elevenlabs_settings(
+    body: ElevenLabsSettingsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set/clear the ElevenLabs API key + platform default voice (ent#117).
+
+    Admin-only, audit-logged (key masked; default voice old→new). Key stored
+    AES-256-GCM encrypted. Runtime-resolved — no restart. `clear: ["api_key",
+    "default_voice_id"]` reverts to env/unset. A field may not be both set and cleared.
+    """
+    require_admin(current_user)
+
+    clear = body.clear or []
+    valid_clear = {"api_key", "default_voice_id"}
+    unknown = [f for f in clear if f not in valid_clear]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown field(s) in clear: {', '.join(sorted(unknown))}. "
+                   f"Valid: {', '.join(sorted(valid_clear))}",
+        )
+    if "api_key" in clear and body.api_key is not None:
+        raise HTTPException(status_code=400, detail="api_key both set and cleared")
+    if "default_voice_id" in clear and body.default_voice_id is not None:
+        raise HTTPException(status_code=400, detail="default_voice_id both set and cleared")
+
+    before = _elevenlabs_settings_state()
+    changes = {}
+
+    if body.api_key is not None:
+        key = body.api_key.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="api_key must not be empty (use clear instead)")
+        settings_service.set_elevenlabs_api_key(key)
+        changes["api_key"] = "set"
+    elif "api_key" in clear:
+        settings_service.clear_elevenlabs_api_key()
+        changes["api_key"] = "cleared"
+
+    if body.default_voice_id is not None:
+        voice = body.default_voice_id.strip()
+        if voice:
+            settings_service.set_default_voice_id(voice)
+        else:
+            settings_service.clear_default_voice_id()
+        changes["default_voice_id"] = {"old": before["default_voice_id"], "new": voice or None}
+    elif "default_voice_id" in clear:
+        settings_service.clear_default_voice_id()
+        changes["default_voice_id"] = {"old": before["default_voice_id"], "new": None}
+
+    if changes:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "setting": "elevenlabs",
+                "action": "update",
+                # Key value never logged — only whether it was set/cleared.
+                "changes": changes,
+            },
+        )
+
+    after = _elevenlabs_settings_state()
+    return {"success": True, **after}
 
 
 @router.get("/{key}")

@@ -16,6 +16,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 
 import httpx
@@ -70,6 +71,16 @@ MAX_ERROR_MESSAGE_LENGTH = 2000  # Issue #286: truncate combined error messages
 # backlog (~9000 terminal rows past 30 days) drains in 2 cycles; for the
 # 90-day row-delete sweep on the same fleet that's roughly one cycle.
 RETENTION_CHUNK_SIZE_PER_CYCLE = 5000
+
+# trinity-enterprise#69: ephemeral ghost GC bounds. Discards do serial Docker
+# I/O (stop/remove) — cap per cycle + per-discard timeout so a burst of expired
+# ghosts can't stall the watchdog/slot sweeps for the whole fleet.
+EPHEMERAL_DISCARDS_PER_CYCLE = 10
+EPHEMERAL_DISCARD_TIMEOUT_S = 60
+# Newborn grace: creation writes the ownership row LAST (template clone/image
+# pull can stretch the gap to minutes) — the orphan pass must not reap a
+# healthy mid-creation ghost. ~3 sweep cycles.
+EPHEMERAL_ORPHAN_GRACE_S = 900
 
 # WebSocket manager (injected from main.py)
 _ws_manager = None
@@ -186,6 +197,10 @@ class CleanupReport:
     # #1081 Phase 3 (#429/#1402): lease-reaper — pull rows re-queued / poison-parked
     expired_leases_requeued: int = 0
     expired_leases_parked: int = 0
+    # trinity-enterprise#69: ephemeral ghosts discarded (DB pass) + orphan
+    # ephemeral containers reclaimed (Docker-as-truth pass)
+    ephemeral_agents_discarded: int = 0
+    ephemeral_orphans_reclaimed: int = 0
 
     @property
     def total(self) -> int:
@@ -197,7 +212,8 @@ class CleanupReport:
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned +
-                self.expired_leases_requeued + self.expired_leases_parked)
+                self.expired_leases_requeued + self.expired_leases_parked +
+                self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed)
 
     def to_dict(self) -> Dict:
         return {
@@ -293,6 +309,7 @@ class CleanupService:
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
         await self._sweep_soft_deleted_agents(report)
+        await self._sweep_ephemeral_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
         self._maybe_wal_checkpoint(report)
@@ -682,6 +699,101 @@ class CleanupService:
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning soft-deleted agents: {e}")
+
+    async def _sweep_ephemeral_agents(self, report: CleanupReport) -> None:
+        """4c-quater. trinity-enterprise#69: ephemeral "ghost" agent GC.
+
+        Two passes, both bounded per cycle so a burst of expired ghosts can't
+        stall the loop's other sweeps:
+
+        1. **DB pass** — ghosts past their TTL or over their exec budget →
+           ``discard_ephemeral_agent`` (per-discard timeout; the primitive is
+           idempotent and crash-convergent, so a timed-out discard resumes
+           next cycle via its own intent marker).
+        2. **Docker-as-truth orphan pass** — containers labeled
+           ``trinity.ephemeral=true`` with NO ownership row (backend restarted
+           mid-create or mid-discard) → removed, with a newborn grace window
+           (creation writes the ownership row LAST; a sweep landing in that
+           gap must not reap a healthy newborn).
+
+        Interim-until-#429: this reclaim folds into the consolidated lease
+        reaper when the cleanup pyramid lands.
+        """
+        # --- pass 1: DB-driven discard ---
+        try:
+            from services.agent_service.ephemeral import discard_ephemeral_agent
+
+            names = db.find_discardable_ephemeral_agents(
+                limit=EPHEMERAL_DISCARDS_PER_CYCLE
+            )
+            discarded = 0
+            for name in names:
+                try:
+                    if await asyncio.wait_for(
+                        discard_ephemeral_agent(name, reason="gc_sweep"),
+                        timeout=EPHEMERAL_DISCARD_TIMEOUT_S,
+                    ):
+                        discarded += 1
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[Cleanup] Ephemeral discard of {name} timed out — "
+                        f"will resume next cycle (intent marker is durable)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[Cleanup] Failed to discard ephemeral agent {name}: {e}"
+                    )
+            report.ephemeral_agents_discarded = discarded
+            if discarded > 0:
+                logger.info(
+                    f"[Cleanup] Discarded {discarded} expired/exhausted ephemeral agent(s)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error in ephemeral DB sweep: {e}")
+
+        # --- pass 2: Docker-as-truth orphan reclaim ---
+        try:
+            from services.docker_service import list_ephemeral_agent_containers
+            from services.docker_utils import container_remove
+            from services.agent_runtime_state import clear_agent_runtime_state
+
+            reclaimed = 0
+            now = datetime.now(timezone.utc)
+            for container in list_ephemeral_agent_containers():
+                try:
+                    labels = getattr(container, "labels", {}) or {}
+                    name = labels.get("trinity.agent-name")
+                    if not name:
+                        continue
+                    # Row still present (live OR mid-discard) → pass 1 owns it.
+                    if db.is_agent_name_reserved(name):
+                        continue
+                    # Newborn grace: creation writes the ownership row LAST —
+                    # skip containers younger than the grace window.
+                    created_raw = labels.get("trinity.created")
+                    if created_raw:
+                        try:
+                            created_dt = parse_iso_timestamp(created_raw)
+                            if created_dt.tzinfo is None:
+                                created_dt = created_dt.replace(tzinfo=timezone.utc)
+                            age_s = (now - created_dt).total_seconds()
+                        except Exception:
+                            age_s = None
+                        if age_s is not None and age_s < EPHEMERAL_ORPHAN_GRACE_S:
+                            continue
+                    await container_remove(container, force=True)
+                    await clear_agent_runtime_state(name)
+                    reclaimed += 1
+                    logger.info(
+                        f"[Cleanup] Reclaimed orphaned ephemeral container for {name}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[Cleanup] Failed to reclaim orphaned ephemeral container: {e}"
+                    )
+            report.ephemeral_orphans_reclaimed = reclaimed
+        except Exception as e:
+            logger.error(f"[Cleanup] Error in ephemeral orphan sweep: {e}")
 
     def _sweep_soft_deleted_schedules(self, report: CleanupReport) -> None:
         """4c-ter. Issue #834 Phase 1b: hard-purge soft-deleted schedules past

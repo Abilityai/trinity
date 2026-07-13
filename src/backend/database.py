@@ -405,8 +405,31 @@ class DatabaseManager:
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================
 
-    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False):
-        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email)
+    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False, **kwargs):
+        # **kwargs carries the trinity-enterprise#69 ephemeral/provenance
+        # fields (is_ephemeral, ephemeral_max_executions, ephemeral_expires_at,
+        # spawned_by_agent, spawned_by_key_id, max_parallel_tasks).
+        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email, **kwargs)
+
+    # --- Ephemeral "ghost" agents (trinity-enterprise#69) ---
+
+    def get_agent_ephemeral_info(self, agent_name: str):
+        return self._agent_ops.get_agent_ephemeral_info(agent_name)
+
+    def mark_ephemeral_discard_intent(self, agent_name: str):
+        return self._agent_ops.mark_ephemeral_discard_intent(agent_name)
+
+    def count_ephemeral_budget_usage(self, agent_name: str):
+        return self._agent_ops.count_ephemeral_budget_usage(agent_name)
+
+    def find_discardable_ephemeral_agents(self, limit: int = 50):
+        return self._agent_ops.find_discardable_ephemeral_agents(limit)
+
+    def count_live_ephemeral_agents_for_owner(self, owner_id: int):
+        return self._agent_ops.count_live_ephemeral_agents_for_owner(owner_id)
+
+    def purge_ephemeral_agent_ownership(self, agent_name: str):
+        return self._agent_ops.purge_ephemeral_agent_ownership(agent_name)
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
@@ -701,6 +724,9 @@ class DatabaseManager:
     def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
         return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
 
+    def set_tts_channel_flags(self, agent_name: str, channels: dict):
+        return self._agent_ops.set_tts_channel_flags(agent_name, channels)
+
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
     # =========================================================================
@@ -766,6 +792,9 @@ class DatabaseManager:
 
     def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
         return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
+
+    def fail_all_nonterminal_for_agent(self, agent_name: str, reason: str = "ghost_discarded") -> int:
+        return self._schedule_ops.fail_all_nonterminal_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)
@@ -963,6 +992,9 @@ class DatabaseManager:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -976,6 +1008,9 @@ class DatabaseManager:
             fan_out_id=fan_out_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
+            source_channel=source_channel,
+            source_channel_chat_id=source_channel_chat_id,
+            source_channel_thread=source_channel_thread,
         )
 
     def create_schedule_execution(
@@ -1913,6 +1948,9 @@ class DatabaseManager:
 
     def get_slack_workspace_bot_token(self, team_id):
         return self._slack_channel_ops.get_workspace_bot_token(team_id)
+
+    def get_slack_bot_token_for_channel(self, slack_channel_id):
+        return self._slack_channel_ops.get_bot_token_for_channel(slack_channel_id)
 
     def get_all_slack_workspaces(self):
         return self._slack_channel_ops.get_all_workspaces()

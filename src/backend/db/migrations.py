@@ -2661,6 +2661,30 @@ def _migrate_agent_ownership_tts_voice(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_ephemeral(cursor, conn):
+    """trinity-enterprise#69 — ephemeral "ghost" agents + spawn provenance.
+
+    Adds the ephemeral-lifecycle columns to ``agent_ownership``:
+    ``is_ephemeral INTEGER DEFAULT 0`` (1 = budgeted ghost, hard-discarded at
+    budget), ``ephemeral_max_executions INTEGER`` (NULL = no exec budget),
+    ``ephemeral_expires_at TEXT`` (ALWAYS stamped for ghosts — no immortal
+    ghost; also the durable discard-intent marker), and the Part 2 spawn
+    provenance ``spawned_by_agent TEXT`` + ``spawned_by_key_id TEXT`` (set for
+    ANY agent-spawned creation, durable or ephemeral). All additive, nullable /
+    default-0 — existing rows unaffected. Mirrored by Alembic
+    0016_agent_ownership_ephemeral for PostgreSQL.
+    """
+    for col, ddl in (
+        ("is_ephemeral", "ALTER TABLE agent_ownership ADD COLUMN is_ephemeral INTEGER DEFAULT 0"),
+        ("ephemeral_max_executions", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_max_executions INTEGER"),
+        ("ephemeral_expires_at", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_expires_at TEXT"),
+        ("spawned_by_agent", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_agent TEXT"),
+        ("spawned_by_key_id", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_key_id TEXT"),
+    ):
+        _safe_add_column(cursor, "agent_ownership", col, ddl)
+    conn.commit()
+
+
 def _migrate_agent_loops_no_progress(cursor, conn):
     """#1157 — no-progress / doom-loop detection.
 
@@ -2723,6 +2747,47 @@ def _migrate_agent_reports_table(cursor, conn):
     print("Created agent_reports table (#918)")
 
 
+def _migrate_agent_ownership_tts_channel_flags(cursor, conn):
+    """trinity-enterprise#117 — per-channel voice-allowed flags.
+
+    Adds ``tts_voice_{telegram,slack,whatsapp}_enabled INTEGER DEFAULT 1`` to
+    ``agent_ownership``. Voice enablement + voice selection stay agent-level
+    (``tts_voice_replies_enabled`` / ``tts_voice_id``); these three flags let an
+    owner allow/deny voice per channel. DEFAULT 1 so an already-enabled agent keeps
+    the capability on every channel (the behavior change is always-voice →
+    agent-chosen, not a loss of channel coverage). Mirrored by Alembic
+    0017_agent_ownership_tts_channel_flags for PostgreSQL.
+    """
+    for channel in ("telegram", "slack", "whatsapp"):
+        col = f"tts_voice_{channel}_enabled"
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col} INTEGER DEFAULT 1",
+        )
+    conn.commit()
+
+
+def _migrate_schedule_executions_source_channel(cursor, conn):
+    """trinity-enterprise#117 — persist channel delivery target on the execution.
+
+    Adds ``source_channel`` / ``source_channel_chat_id`` / ``source_channel_thread``
+    (all nullable TEXT) to ``schedule_executions``. Populated by the channel message
+    router so the ``send_voice_reply`` MCP tool (#117) can reconstruct the exact
+    delivery destination from an ``execution_id`` alone — works for group chats and
+    unverified users, with thread fidelity. NULL for non-channel executions.
+    Mirrored by Alembic 0018_schedule_executions_source_channel for PostgreSQL.
+    """
+    for col in ("source_channel", "source_channel_chat_id", "source_channel_thread"):
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col} TEXT",
+        )
+
+
 def _migrate_enterprise_connectors_table(cursor, conn):
     """Create enterprise_connectors table (per-agent MCP connector, ent#46 → OSS #118).
 
@@ -2759,7 +2824,7 @@ def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     "Dark" = the columns exist but nothing reads or writes them yet. This is
     pure schema groundwork for the pull-coordination phases (umbrella #1081);
     no endpoint, service, or runtime behavior changes here. Mirrored by the
-    Alembic revision 0016_schedule_executions_pull_claim_lease for PostgreSQL.
+    Alembic revision 0019_schedule_executions_pull_claim_lease for PostgreSQL.
     """
     new_columns = [
         ("claim_token", "TEXT"),
@@ -2789,7 +2854,7 @@ def _migrate_schedule_executions_redelivery_count(cursor, conn):
 
     DISTINCT from ``retry_count`` (#678 reader-race in-line retry) — that column
     is untouched. Mirrored by the Alembic revision
-    ``0017_schedule_executions_redelivery_count`` for PostgreSQL.
+    ``0020_schedule_executions_redelivery_count`` for PostgreSQL.
     """
     _safe_add_column(
         cursor,
@@ -2888,6 +2953,9 @@ MIGRATIONS = [
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
     ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
+    ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
+    ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
+    ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
 ]

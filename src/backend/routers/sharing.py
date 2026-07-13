@@ -13,7 +13,7 @@ from models import (
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
-from dependencies import get_current_user, OwnedAgentByName, CurrentUser
+from dependencies import get_current_user, OwnedAgentByName, CurrentUser, reject_agent_principal
 from services.docker_service import get_agent_container
 from services.client_roster_service import get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -85,6 +85,8 @@ async def share_agent_endpoint(
     current_user: CurrentUser
 ):
     """Share an agent with another user by email."""
+    # trinity-enterprise#69 Part 2: sharing is a human-only decision.
+    reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -144,6 +146,8 @@ async def unshare_agent_endpoint(
     current_user: CurrentUser
 ):
     """Remove sharing access for a user."""
+    # trinity-enterprise#69 Part 2: sharing is a human-only decision.
+    reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

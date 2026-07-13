@@ -36,10 +36,14 @@ Public conversational Q&A system for Trinity documentation, powered by Vertex AI
 │                                        │                                 │
 │                    ┌───────────────────┼───────────────────┐            │
 │                    ▼                   ▼                   ▼            │
-│              ask-trinity.sh       curl/REST           Future UI         │
+│              ask-trinity.sh       curl/REST           UI + MCP          │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+Consumers: `scripts/ask-trinity.sh`, raw REST, the docs-site assistant, the
+in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
+(#1459 — see [MCP Distribution](#mcp-distribution--abilityaitrinity-docs-mcp-1459)).
 
 ## Components
 
@@ -61,7 +65,10 @@ Public conversational Q&A system for Trinity documentation, powered by Vertex AI
 |------|---------|
 | `.github/workflows/sync-docs-to-vertex.yml` | Auto-sync docs to GCS on push |
 | `scripts/ask-trinity.sh` | CLI tool for querying |
-| `docs/onboarding/*.md` | Source documentation |
+| `docs/onboarding/*.md` | Source documentation (onboarding) |
+| `docs/user-docs/**/*.md` | Source documentation (user docs incl. the 264-Q&A FAQ) |
+| `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Source documentation (agent guide, #1459) |
+| `src/helper-mcp/` | Standalone MCP server exposing the endpoint (`@abilityai/trinity-docs-mcp`, #1459) |
 
 ## Data Flow
 
@@ -104,6 +111,21 @@ Content-Type: application/json
   "session_id": "7547107641198884380"
 }
 ```
+
+**Contract notes (verified live, 2026-07-12 — #1459):**
+
+- **No citations field.** The Cloud Function does not surface the Vertex AI
+  Search citation references in its payload — consumers get `answer`/`state`/
+  `session_id` only. (A CF enhancement would light up citation pass-through in
+  the MCP adapters automatically.)
+- **Session expiry is silent.** An expired or invalid `session_id` returns
+  HTTP 200 with `state: SUCCEEDED`, a normal answer, and a **new**
+  `session_id` — context is lost with no failure signal. Consumers doing
+  multi-turn must compare the returned `session_id` to the one they sent.
+- **`session_id` exceeds 2^53.** Treat it as an opaque string; numeric JSON
+  handling silently corrupts it.
+- Errors return `{"error": "..."}` JSON (e.g. HTTP 400 on a missing question);
+  Google frontend failures may return HTML.
 
 ### Multi-Turn Chat
 
@@ -162,14 +184,14 @@ The assistant has a baked-in personality via system prompt:
 
 ## Indexed Documents
 
-| Document | Content |
-|----------|---------|
-| `00-welcome.txt` | Introduction to Trinity |
-| `01-getting-started.txt` | Installation and first agent |
-| `02-use-case-scenarios.txt` | Real-world usage examples |
-| `03-common-workflows.txt` | Day-to-day operations |
-| `04-troubleshooting.txt` | Problem diagnosis and fixes |
-| `README.txt` | Documentation index |
+The docs-sync workflow converts each source `.md` to `.txt` (Vertex AI Search
+requirement) and syncs to GCS with a flattened name (`/` → `-`):
+
+| Source | Content |
+|--------|---------|
+| `docs/onboarding/*.md` | Welcome, getting started, use cases, workflows, troubleshooting |
+| `docs/user-docs/**/*.md` | Full user documentation — guides, API reference, integrations, operations, and the 264-Q&A FAQ |
+| `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Agent authoring guide (`get_agent_requirements` source, #1459) |
 
 ## Limitations
 
@@ -216,11 +238,43 @@ User clicks help button → Panel opens → Types question → Enter to send
 - Conversation history shown in-panel during session
 - "New conversation" clears local messages and session ID
 
+## MCP Distribution — `@abilityai/trinity-docs-mcp` (#1459)
+
+A standalone, dependency-light MCP server (`src/helper-mcp/`) exposes this
+endpoint to any MCP client (Claude Code, Claude Desktop, Cursor) — **no Trinity
+instance or API key required**. Pure protocol adapter: no new backend/QA logic,
+no Cloud Function changes.
+
+- **Tools**: `ask_trinity` (question + optional `session_id` multi-turn — always
+  returns the effective `session_id` and warns when a silent session reset
+  dropped context) and `get_agent_requirements` (fetches the agent guide from
+  raw.githubusercontent.com live; quick-reference fallback on failure).
+- **Guards**: 4,000-char question cap, 50s abort timeout, no auto-retry,
+  `redirect: "error"`, non-JSON response guard, structured error text — a tool
+  call never crashes the server. `console.error`-only logging (stdout is the
+  JSON-RPC channel). Node ≥18 guarded at startup by the bin stub.
+- **Config**: `ASK_TRINITY_ENDPOINT` env override (self-hosted mirrors, smoke
+  test); default is the public Cloud Function.
+- **Distribution**: npx stdio package, runtime deps `@modelcontextprotocol/sdk`
+  + `zod` only. CI: `.github/workflows/helper-mcp-test.yml` (unit + pack-and-run
+  stdio smoke). Publish: `.github/workflows/publish-helper-mcp.yml` (npm
+  provenance; one-time manual first publish bootstraps trusted publishing —
+  see workflow header comment).
+- **Contract sharing**: tool name/schema kept identical to the planned
+  `ask_trinity` inside the main Trinity MCP server (#1460) so the two surfaces
+  never drift.
+- **Deferred**: hosted remote Streamable-HTTP variant + vanity URL + MCP
+  registry listing (the official SDK keeps the transport option open).
+
+Requirements: `docs/memory/requirements/mcp.md` → "Trinity Helper MCP Server (#1459)".
+
 ## Future Enhancements
 
-- [ ] Add more docs (architecture, API reference)
+- [x] ~~Add more docs~~ (done: user-docs incl. API reference + FAQ; agent guide added by #1459)
 - [x] ~~Integrate into Trinity UI as help widget~~ (done: #391)
 - [x] ~~Add conversation memory for follow-up questions~~ (done: session support)
+- [ ] Surface Vertex AI Search citations in the Cloud Function payload (consumers pass them through automatically)
+- [ ] Hosted remote MCP endpoint (Streamable HTTP) + MCP registry listing (#1459 fast-follow)
 - [ ] Support for code snippets with syntax highlighting
 - [ ] Usage analytics/telemetry
 

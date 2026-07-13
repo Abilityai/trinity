@@ -327,8 +327,21 @@ async def start_agent_internal(agent_name: str) -> dict:
         # retry window is too short under multi-agent deploys (#406).
         await wait_for_agent_ready(agent_name)
 
-        # Inject assigned credentials from the Credentials page
-        credentials_result = await inject_assigned_credentials(agent_name)
+        # Inject assigned credentials from the Credentials page.
+        # trinity-enterprise#69: ephemeral ghosts get NO automatic credential
+        # injection (no-credentials-by-default for arbitrary/untrusted
+        # workspaces); a human can still inject explicitly via the
+        # credentials endpoint, which is human-only under Part 2.
+        # isinstance-dict guard: the accessor's contract is Optional[Dict] —
+        # anything else (incl. a test double) must take the normal inject path.
+        try:
+            _eph_info = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            _eph_info = None
+        if isinstance(_eph_info, dict) and _eph_info.get("is_ephemeral"):
+            credentials_result = {"status": "skipped", "reason": "ephemeral_agent"}
+        else:
+            credentials_result = await inject_assigned_credentials(agent_name)
         credentials_status = credentials_result.get("status", "unknown")
 
         # Inject assigned skills from the Skills page

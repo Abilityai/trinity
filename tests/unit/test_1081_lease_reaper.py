@@ -36,11 +36,15 @@ import pytest
 _THIS = Path(__file__).resolve()
 _BACKEND = _THIS.parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
-while _BACKEND_STR in sys.path:
-    sys.path.remove(_BACKEND_STR)
-sys.path.insert(0, _BACKEND_STR)
+# NB: do NOT pop `utils` from sys.modules here. tests/unit/conftest.py already
+# installs src/backend/utils as the canonical `utils` package via an importlib
+# file loader precisely so sys.path ordering cannot shadow it. Evicting that
+# registration leaves `utils` unbound, and pytest's prepend import mode puts
+# `tests/` back at sys.path[0] — so the next module to import `utils` fresh
+# binds the tests/utils helper package instead, and every later
+# `from utils.url_validation import ...` in backend code dies at collection.
+if _BACKEND_STR not in sys.path:
+    sys.path.insert(0, _BACKEND_STR)
 
 from db_harness import db_backend, run as _hrun, scalar as _scalar  # noqa: E402
 

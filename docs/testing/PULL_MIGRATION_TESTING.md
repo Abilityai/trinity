@@ -345,5 +345,5 @@ canary-on-PG (#1540) · B6 runtime-verify on the rebuilt image · the ≥2-week 
 | Capacity shadow meter | `db/schedules.py::count_active_leased_by_agent`; `services/capacity_manager.py` |
 | Agent worker pool | `docker/base-image/agent_server/services/pull_worker.py`; `agent_server/main.py` |
 | Env injection + gating | `services/agent_service/pull_mode.py`; `crud.py`, `lifecycle.py`; `config.py` |
-| Migrations | `migrations/versions/0016_schedule_executions_pull_claim_lease.py`, `0017_schedule_executions_redelivery_count.py`; SQLite `db/migrations.py` (version-column widening carried by dev #1420 `env.py`) |
+| Migrations | `migrations/versions/0019_schedule_executions_pull_claim_lease.py`, `0020_schedule_executions_redelivery_count.py`; SQLite `db/migrations.py` (version-column widening carried by dev #1420 `env.py`) |
 | Tests | `tests/unit/test_1081_*.py`, `test_cleanup_inner_sweeps.py`, `test_schedule_status_observability.py`, `tests/test_canary_invariants.py` |

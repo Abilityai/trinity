@@ -24,6 +24,7 @@ from .git_pat import GitPATMixin
 from .file_sharing import FileSharingMixin
 from .mcp_exposure import McpExposureMixin
 from .tts import TtsMixin
+from .ephemeral import EphemeralMixin
 
 __all__ = [
     'SharingMixin',
@@ -37,4 +38,5 @@ __all__ = [
     'FileSharingMixin',
     'McpExposureMixin',
     'TtsMixin',
+    'EphemeralMixin',
 ]

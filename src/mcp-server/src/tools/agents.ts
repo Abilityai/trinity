@@ -261,6 +261,35 @@ export function createAgentTools(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
           ),
+        ephemeral: z
+          .object({
+            max_executions: z
+              .number()
+              .int()
+              .min(1)
+              .max(100)
+              .optional()
+              .describe("Discard after this many terminal executions (1-100)"),
+            ttl_seconds: z
+              .number()
+              .int()
+              .min(60)
+              .optional()
+              .describe(
+                "Discard after this many seconds (60..platform ceiling, default ceiling 24h)"
+              ),
+          })
+          .optional()
+          .describe(
+            "Create as an ephemeral 'ghost' agent: budgeted, volume-less, hard-discarded " +
+            "when the budget is exhausted (no soft-delete/recovery). At least one of " +
+            "max_executions/ttl_seconds is required; a TTL is always stamped so no ghost is " +
+            "immortal. The server suffixes the name for uniqueness — use the returned name. " +
+            "Ghost keys are restricted to heartbeat/reports/notifications/self-info. " +
+            "Intended for heterogeneous per-repo jobs (a different repo/config per ghost); " +
+            "for burst parallelism on ONE agent use fan_out instead. " +
+            "Requires the ephemeral_agents entitlement (403 otherwise)."
+          ),
       }),
       execute: async (
         args: {
@@ -272,6 +301,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
         context: any
       ) => {
@@ -289,6 +319,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          ephemeral: args.ephemeral,
         };
 
         // Get auth context from FastMCP session (set by authenticate callback)
@@ -357,9 +388,13 @@ export function createAgentTools(
     deleteAgent: {
       name: "delete_agent",
       description:
-        "Delete an agent from the Trinity platform. " +
-        "This will stop the agent container and remove it. " +
-        "Requires admin access. This action is irreversible.",
+        "Delete an agent from the Trinity platform (owner or admin). " +
+        "Durable agents are SOFT-deleted: the container is removed but data is " +
+        "recoverable by an admin until the retention window (default 180d) expires. " +
+        "Ephemeral 'ghost' agents are HARD-discarded immediately: container, storage, " +
+        "and DB rows are purged with no recovery — this is also how a parent agent " +
+        "discards a ghost it spawned before its budget expires. Agent-scoped keys may " +
+        "only delete agents they spawned.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to delete"),
       }),

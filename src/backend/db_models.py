@@ -243,6 +243,11 @@ class ScheduleExecution(BaseModel):
     # pull-claimed task's expired lease was re-queued (preserving execution_id).
     # DISTINCT from retry_count. At MAX_REDELIVERY the row is poison-parked.
     redelivery_count: int = 0
+    # Channel delivery target (ent#117): populated for channel-triggered executions so
+    # the send_voice_reply MCP tool can reconstruct where to deliver. NULL otherwise.
+    source_channel: Optional[str] = None            # telegram | slack | whatsapp
+    source_channel_chat_id: Optional[str] = None    # channel/chat/conversation id
+    source_channel_thread: Optional[str] = None      # thread id (nullable within a channel)
 
 
 # =========================================================================

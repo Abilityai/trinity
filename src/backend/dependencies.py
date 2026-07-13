@@ -2,6 +2,7 @@
 FastAPI dependencies for the Trinity backend.
 """
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Annotated
@@ -346,6 +347,17 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Connector keys may only chat their bound agent and list its playbooks",
                     )
+            # trinity-enterprise#69: ephemeral ("ghost") agent containment.
+            # An agent-scoped key resolves to the OWNER user on REST — for a
+            # ghost running an arbitrary/untrusted workspace that breadth is a
+            # fleet skeleton key (prompt-injected ghost reads sibling files,
+            # drives schedules, spawns agents). Fence it here at the single
+            # auth entry point, keyed off the agent row's is_ephemeral flag
+            # (the flag dies with the ghost — no key-schema change, and
+            # heartbeat/report/callback auth keeps working since scope stays
+            # "agent").
+            if agent_name:
+                _enforce_ephemeral_key_fence(request, agent_name)
             return User(
                 id=user["id"],
                 username=user["username"],
@@ -357,6 +369,103 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
 
     # Both JWT and MCP key failed
     raise credentials_exception
+
+
+# trinity-enterprise#69: the exact backend surface an EPHEMERAL agent's own
+# key may reach — liveness, terminal delivery, structured output, and
+# self-identity. Everything else (sibling files/chat/schedules/credentials,
+# agent creation → chain-spawn) is 403. `{name}` groups must equal the key's
+# own agent. Kept deliberately tiny; widen only with a recorded decision.
+_EPHEMERAL_ALLOWED_ROUTES = (
+    ("POST", re.compile(r"^/api/agents/(?P<name>[^/]+)/heartbeat$")),
+    ("POST", re.compile(r"^/api/agents/(?P<name>[^/]+)/executions/[^/]+/result$")),
+    ("POST", re.compile(r"^/api/agents/(?P<name>[^/]+)/reports$")),
+    ("POST", re.compile(r"^/api/notifications$")),
+    ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)$")),
+    ("GET", re.compile(r"^/api/agents/(?P<name>[^/]+)/info$")),
+)
+
+
+def _enforce_ephemeral_key_fence(request: Request, agent_name: str) -> None:
+    """Containment fence for ephemeral agents' own keys (trinity-enterprise#69).
+
+    Mirrors the connector fence above: enforced at the single auth entry
+    point so inline-access endpoints (which resolve agent keys to the owner)
+    can't be reached by a hostile ghost workspace. Fail-open on a DB read
+    error — the fence is a hardening layer, and a transient DB failure must
+    not take down heartbeats fleet-wide.
+    """
+    try:
+        info = db.get_agent_ephemeral_info(agent_name)
+    except Exception:
+        return
+    if not isinstance(info, dict) or not info.get("is_ephemeral"):
+        return
+    method = request.method.upper()
+    path = request.url.path
+    for allowed_method, pattern in _EPHEMERAL_ALLOWED_ROUTES:
+        if method != allowed_method:
+            continue
+        match = pattern.fullmatch(path)
+        if match:
+            bound_name = match.groupdict().get("name")
+            if bound_name is None or bound_name == agent_name:
+                return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Ephemeral agent keys are restricted to heartbeat, result delivery, reports, notifications, and self-info",
+    )
+
+
+def reject_agent_principal(current_user: User) -> None:
+    """Human-only operation guard (trinity-enterprise#69 Part 2).
+
+    Agent-scoped keys resolve to the owner user on REST, which incidentally
+    made sharing, permission grants, rename, and credential ops reachable by
+    an agent. These are human decisions — a parent agent is a *controller* of
+    the agents it spawns, never an owner. No-op for JWT / user-scoped /
+    system-scoped principals (``User.agent_name`` is set only for
+    scope="agent").
+    """
+    if current_user.agent_name:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This operation is human-only; agent-scoped keys cannot perform it",
+        )
+
+
+def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
+    """Lifecycle-mutation gate for agent-scoped callers
+    (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
+
+    An agent may start/stop/delete ONLY agents it spawned: the target's
+    ``spawned_by_agent`` must equal the caller AND ``spawned_by_key_id`` must
+    match the caller's current agent key (a name-only match is forgeable via
+    name reuse; the key id is stable and cascade-deletes with the parent).
+    No-op for human/system principals. #948 workflow-scoped capability tokens
+    will subsume this parenthood check; ``spawned_by_*`` stays as provenance.
+    """
+    if not current_user.agent_name:
+        return
+    denied = HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Agent-scoped keys may only manage agents they spawned",
+    )
+    try:
+        info = db.get_agent_ephemeral_info(target_agent)
+    except Exception:
+        raise denied
+    if not isinstance(info, dict) or info.get("spawned_by_agent") != current_user.agent_name:
+        raise denied
+    expected_key_id = info.get("spawned_by_key_id")
+    if not expected_key_id:
+        raise denied
+    try:
+        parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
+    except Exception:
+        raise denied
+    if not parent_key or parent_key.id != expected_key_id:
+        raise denied
 
 
 def _reject_connector_principal(current_user: User) -> None:
