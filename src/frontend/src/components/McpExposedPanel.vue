@@ -79,12 +79,14 @@
             type="button"
             @click="mintAndCopy"
             :disabled="connectorBusy"
-            class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md text-white disabled:opacity-50 transition-colors duration-300"
-            :class="copied === 'config' ? 'bg-status-success-600 hover:bg-status-success-600' : 'bg-action-primary-600 hover:bg-action-primary-700'"
+            class="inline-flex items-center justify-center gap-2 px-4 py-2 text-sm font-semibold rounded-md text-white disabled:opacity-50 transition-all duration-300"
+            :class="copied === 'config'
+              ? 'bg-status-success-600 hover:bg-status-success-600 ring-2 ring-status-success-400 ring-offset-2 ring-offset-white dark:ring-offset-gray-900 shadow-lg shadow-status-success-500/40 copied-btn-flash'
+              : 'bg-action-primary-600 hover:bg-action-primary-700'"
           >
-            <svg v-if="copied === 'config'" class="h-4 w-4 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+            <svg v-if="copied === 'config'" class="h-5 w-5 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
             <svg v-else-if="!connectorBusy" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 4h8a2 2 0 012 2v6a2 2 0 01-2 2h-8a2 2 0 01-2-2v-6a2 2 0 012-2z"/></svg>
-            {{ copied === 'config' ? 'Copied!' : (connectorBusy ? 'Generating…' : 'Copy connection config') }}
+            {{ copied === 'config' ? 'Copied to clipboard!' : (connectorBusy ? 'Generating…' : 'Copy connection config') }}
           </button>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
             Generates a scoped key and copies a ready-to-paste
@@ -115,10 +117,12 @@
                   type="button"
                   @click="copyExistingConfig"
                   :disabled="connectorBusy"
-                  class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md disabled:opacity-50 transition-colors duration-300"
-                  :class="copied === 'existing' ? 'bg-status-success-100 dark:bg-status-success-900/40 text-status-success-700 dark:text-status-success-300' : 'text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold rounded-md disabled:opacity-50 transition-all duration-300"
+                  :class="copied === 'existing'
+                    ? 'bg-status-success-600 text-white ring-2 ring-status-success-400 shadow-md shadow-status-success-500/40 copied-btn-flash'
+                    : 'text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'"
                 >
-                  <svg v-if="copied === 'existing'" class="h-3.5 w-3.5 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                  <svg v-if="copied === 'existing'" class="h-4 w-4 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                   {{ copied === 'existing' ? 'Copied!' : 'Copy config' }}
                 </button>
                 <button
@@ -368,7 +372,19 @@ onMounted(loadStatus)
   60% { transform: scale(1.15); opacity: 1; }
   100% { transform: scale(1); opacity: 1; }
 }
+
+/* Whole-button flash on copy — a quick pop plus an outward ring pulse so the
+   state change is unmissable, then settles into the steady green. */
+.copied-btn-flash {
+  animation: copied-btn-flash 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes copied-btn-flash {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55); }
+  40% { transform: scale(1.06); box-shadow: 0 0 0 8px rgba(34, 197, 94, 0.28); }
+  100% { transform: scale(1); box-shadow: 0 0 0 12px rgba(34, 197, 94, 0); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .copied-pop { animation: none; }
+  .copied-pop, .copied-btn-flash { animation: none; }
 }
 </style>
