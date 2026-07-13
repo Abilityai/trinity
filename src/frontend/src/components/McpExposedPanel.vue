@@ -79,10 +79,12 @@
             type="button"
             @click="mintAndCopy"
             :disabled="connectorBusy"
-            class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+            class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md text-white disabled:opacity-50 transition-colors duration-300"
+            :class="copied === 'config' ? 'bg-status-success-600 hover:bg-status-success-600' : 'bg-action-primary-600 hover:bg-action-primary-700'"
           >
-            <svg v-if="!connectorBusy" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 4h8a2 2 0 012 2v6a2 2 0 01-2 2h-8a2 2 0 01-2-2v-6a2 2 0 012-2z"/></svg>
-            {{ connectorBusy ? 'Generating…' : 'Copy connection config' }}
+            <svg v-if="copied === 'config'" class="h-4 w-4 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+            <svg v-else-if="!connectorBusy" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 4h8a2 2 0 012 2v6a2 2 0 01-2 2h-8a2 2 0 01-2-2v-6a2 2 0 012-2z"/></svg>
+            {{ copied === 'config' ? 'Copied!' : (connectorBusy ? 'Generating…' : 'Copy connection config') }}
           </button>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
             Generates a scoped key and copies a ready-to-paste
@@ -113,8 +115,12 @@
                   type="button"
                   @click="copyExistingConfig"
                   :disabled="connectorBusy"
-                  class="px-3 py-1.5 text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50"
-                >Copy config</button>
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md disabled:opacity-50 transition-colors duration-300"
+                  :class="copied === 'existing' ? 'bg-status-success-100 dark:bg-status-success-900/40 text-status-success-700 dark:text-status-success-300' : 'text-gray-700 dark:text-gray-200 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600'"
+                >
+                  <svg v-if="copied === 'existing'" class="h-3.5 w-3.5 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                  {{ copied === 'existing' ? 'Copied!' : 'Copy config' }}
+                </button>
                 <button
                   type="button"
                   @click="mintAndCopy"
@@ -160,7 +166,15 @@
             <div v-for="s in freshSnippets" :key="s.client">
               <div class="flex items-center justify-between mb-1">
                 <span class="text-xs font-medium text-gray-700 dark:text-gray-200">{{ s.label }}</span>
-                <button type="button" @click="copyText(s.content)" class="text-xs text-action-primary-600 hover:underline">Copy</button>
+                <button
+                  type="button"
+                  @click="copyText(s.content, s.client)"
+                  class="inline-flex items-center gap-1 text-xs hover:underline transition-colors duration-300"
+                  :class="copied === s.client ? 'text-status-success-600 dark:text-status-success-400' : 'text-action-primary-600'"
+                >
+                  <svg v-if="copied === s.client" class="h-3 w-3 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                  {{ copied === s.client ? 'Copied!' : 'Copy' }}
+                </button>
               </div>
               <pre class="text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto"><code>{{ s.content }}</code></pre>
               <p v-if="s.note" class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ s.note }}</p>
@@ -173,7 +187,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
 import { copyToClipboard } from '../utils/clipboard'
@@ -201,6 +215,18 @@ const connectorLoading = ref(false)
 const connectorBusy = ref(false)
 const connectorAccessDenied = ref(false)
 const freshSnippets = ref([])
+
+// Transient "Copied!" affordance — holds the id of the last-copied target
+// ('config' | 'existing' | a snippet client) for ~1.6s, then clears. One shared
+// timer so rapid clicks across buttons don't overlap.
+const copied = ref('')
+let copiedTimer = null
+function flashCopied(id) {
+  copied.value = id
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => { copied.value = '' }, 1600)
+}
+onUnmounted(() => { if (copiedTimer) clearTimeout(copiedTimer) })
 
 // The `.mcp.json` block is the canonical one-click paste target; fall back to
 // the first snippet if the client shape ever changes.
@@ -274,13 +300,14 @@ async function mintAndCopy() {
     const snippets = data.snippets || []
     freshSnippets.value = snippets
     const cfg = pickConfigSnippet(snippets)
-    const copied = cfg ? await copyToClipboard(cfg.content) : false
+    const didCopy = cfg ? await copyToClipboard(cfg.content) : false
+    if (didCopy) flashCopied('config')
     await loadConnector()
     notifyUser(
-      copied
+      didCopy
         ? 'Connection config copied — contains a live key, shown only once.'
         : 'Connection key generated — copy the config below.',
-      copied ? 'success' : 'info'
+      didCopy ? 'success' : 'info'
     )
   } catch (e) {
     notifyUser(e.response?.data?.detail || `Failed to generate connection config: ${e.message}`, 'error')
@@ -297,12 +324,13 @@ async function copyExistingConfig() {
     notifyUser('No connection config available — regenerate the key.', 'error')
     return
   }
-  const copied = await copyToClipboard(cfg.content)
+  const didCopy = await copyToClipboard(cfg.content)
+  if (didCopy) flashCopied('existing')
   notifyUser(
-    copied
+    didCopy
       ? 'Config copied (key placeholder). Use “Regenerate & copy” to embed a live key.'
       : 'Copy failed — select and copy manually.',
-    copied ? 'success' : 'error'
+    didCopy ? 'success' : 'error'
   )
 }
 
@@ -320,10 +348,27 @@ async function revokeKey() {
   }
 }
 
-async function copyText(text) {
+async function copyText(text, id = '') {
   const ok = await copyToClipboard(text)
+  if (ok && id) flashCopied(id)
   notifyUser(ok ? 'Copied to clipboard.' : 'Copy failed — select and copy manually.', ok ? 'success' : 'error')
 }
 
 onMounted(loadStatus)
 </script>
+
+<style scoped>
+/* Checkmark "pop" when a copy succeeds — scales/fades in, respects
+   reduced-motion. */
+.copied-pop {
+  animation: copied-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes copied-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copied-pop { animation: none; }
+}
+</style>
