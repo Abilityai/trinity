@@ -21,6 +21,7 @@ the public repo and the entitlement gate was dropped front and back. Part B
 | MCP tools | `src/mcp-server/src/tools/connector.ts` | `list_playbooks` / `run_playbook` / `ask` — `connectorOnly` `canAccess` (already OSS) |
 | Auth fence | `src/backend/dependencies.py` | `_enforce_connector_scope` / `_reject_connector_principal` — edition-agnostic (already OSS) |
 | UI | `components/ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` | in `SharingPanel.vue`, un-gated (#118) |
+| UI (2nd surface) | `components/McpExposedPanel.vue` "Connect an external client" section | #1575: one-click **Copy connection config** on the #846 Expose-via-MCP panel (Settings tab), shown when `mcp_exposed` is on. Reuses the SAME connector endpoints (`GET/POST/DELETE /connector[/key]`) + `ExposedToolsPanel` picker — mint-or-reuse the scoped key, copy the `.mcp.json` (with the live key embedded, via `utils/clipboard.copyToClipboard`), regenerate/revoke. No new backend/key/endpoint. Copy-once secret: an existing key re-copies the placeholder config and offers "Regenerate & copy" for a fresh live key |
 
 ## Endpoints (all under `/api/agents`)
 
