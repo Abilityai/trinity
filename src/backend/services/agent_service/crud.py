@@ -6,9 +6,10 @@ Contains the core logic for creating and deleting agents.
 import os
 import re
 import json
+import secrets
 import docker
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -26,15 +27,19 @@ from services.docker_service import (
 from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
+from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     get_github_template,
     generate_credential_files,
 )
 from services import git_service
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email
+from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.entitlement_service import entitlement_service
+from services import rate_limiter
+from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import sanitize_agent_name, utc_now_iso
+from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -175,6 +180,86 @@ async def create_agent_internal(
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
 
+    # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
+    # effect (no partial state on refusal).
+    ephemeral_expires_at = None
+    if config.ephemeral:
+        # Entitlement-gated creation surface (the lifecycle mechanics below
+        # are edition-agnostic; only creating WITH a budget is gated).
+        if not entitlement_service.is_entitled("ephemeral_agents"):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Ephemeral agents are not available in this edition.",
+                    "code": "ephemeral_not_entitled",
+                },
+            )
+        # fork_to_own makes a durable user-owned repo — pointless for a ghost.
+        if config.fork_to_own:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "fork_to_own cannot be combined with ephemeral.",
+                    "code": "ephemeral_fork_to_own_conflict",
+                },
+            )
+        # An ephemeral agent must not spawn ephemeral agents (chain-spawn
+        # depth-1 kill; belt to the key-fence braces in dependencies.py).
+        if current_user.agent_name:
+            parent_info = db.get_agent_ephemeral_info(current_user.agent_name)
+            if isinstance(parent_info, dict) and parent_info.get("is_ephemeral"):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "Ephemeral agents cannot spawn ephemeral agents.",
+                        "code": "ephemeral_spawn_recursion",
+                    },
+                )
+            # Per-parent spawn rate limit (agent-scoped callers only) —
+            # resets never compound across generations because of the
+            # recursion refusal above.
+            rate_limiter.enforce(
+                f"agent_spawn:{current_user.agent_name}",
+                int(os.getenv("EPHEMERAL_SPAWN_RATE_LIMIT", "10")),
+                int(os.getenv("EPHEMERAL_SPAWN_RATE_WINDOW_S", "3600")),
+                detail="Ephemeral spawn rate limit exceeded for this agent.",
+            )
+        # TTL is ALWAYS stamped (no immortal ghost): default to the platform
+        # ceiling when only max_executions was given.
+        ttl_ceiling = get_ephemeral_ttl_ceiling_seconds()
+        ttl = config.ephemeral.ttl_seconds or ttl_ceiling
+        if ttl > ttl_ceiling:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"ttl_seconds exceeds the platform ceiling ({ttl_ceiling}s).",
+                    "code": "ephemeral_ttl_exceeds_ceiling",
+                },
+            )
+        ephemeral_expires_at = to_utc_iso(
+            datetime.now(timezone.utc) + timedelta(seconds=ttl)
+        )
+        # Server-suffixed name: unique-by-construction, so a discarded ghost's
+        # KEEP-policy execution rows are never inherited by a successor and
+        # concurrent fan-out spawns can share a base name. 8 hex chars (review
+        # M3): 4 would collide at fan-out scale (~300 spawns of one base name
+        # within the 90d execution-row retention ≈ 50% birthday odds), and a
+        # collision inherits the dead ghost's terminal rows → stillborn ghost.
+        base_name = config.name[:48]
+        for _ in range(5):
+            candidate = f"{base_name}-{secrets.token_hex(4)}"
+            if not (
+                get_agent_by_name(candidate)
+                or db.is_agent_name_reserved(candidate)
+            ):
+                config.name = candidate
+                break
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not allocate a unique ephemeral agent name",
+            )
+
     # #834: the name-reservation check must also catch soft-deleted agents.
     # `get_agent_owner` filters them out (user-facing 404 transparency), so
     # we use the unfiltered `is_agent_name_reserved` here. Without this the
@@ -188,8 +273,19 @@ async def create_agent_internal(
     ):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
-    # Agent quota enforcement: per-role limits (QUOTA-001)
-    max_agents = get_agent_quota_for_role(current_user.role)
+    # #1560: reaching here means the name is free — but `is_agent_name_reserved`
+    # only stops matching once the retention purge hard-deletes the row, and the
+    # breakers are keyed by name with no TTL. Clear any predecessor's verdict
+    # BEFORE the container exists, so nothing races the agent's first heartbeat.
+    # Breakers only: no slots exist for a name nothing is running under yet, and
+    # the full sweep is reserved for teardown paths.
+    clear_agent_breakers(config.name)
+
+    # Agent quota enforcement: per-role limits (QUOTA-001).
+    # Ephemeral agents have their OWN quota (atomic reservation just before
+    # the docker block) — counting ghosts against the durable quota would
+    # starve the burst-parallelism use case (trinity-enterprise#69).
+    max_agents = get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
     if max_agents > 0:
         owned = db.get_agents_by_owner(current_user.username)
         # System agents don't count toward user quota
@@ -784,6 +880,29 @@ async def create_agent_internal(
     # - inject_credentials endpoint (Quick Inject)
     # - .credentials.enc import on agent startup
 
+    # trinity-enterprise#69: atomic ephemeral quota reservation (Redis
+    # INCR-with-cap; DB-count fallback when Redis is down). Placed immediately
+    # before the docker block so every later failure path releases it via the
+    # except-rollback below.
+    ephemeral_slot_reserved = False
+    ephemeral_owner_id = None
+    if config.ephemeral:
+        owner_row = db.get_user_by_username(current_user.username)
+        ephemeral_owner_id = (owner_row or {}).get("id") if isinstance(owner_row, dict) else getattr(owner_row, "id", None)
+        if ephemeral_owner_id is None:
+            raise HTTPException(status_code=500, detail="Could not resolve owner for ephemeral quota")
+        eph_cap = get_ephemeral_agent_quota()
+        if not ephemeral_service.try_reserve_ephemeral_slot(ephemeral_owner_id, eph_cap):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": f"Ephemeral agent quota exceeded ({eph_cap} live ghosts per owner).",
+                    "code": "ephemeral_quota_exceeded",
+                    "limit": eph_cap,
+                },
+            )
+        ephemeral_slot_reserved = True
+
     if docker_client:
         try:
             # trinity-enterprise#93: persist the user's PAT as the per-agent
@@ -799,25 +918,29 @@ async def create_agent_internal(
                     )
 
             # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
-            # This ensures files created by the agent survive container restarts
-            agent_volume_name = f"agent-{config.name}-workspace"
-            try:
-                await volume_get(agent_volume_name)
-            except docker.errors.NotFound:
-                await volume_create(
-                    name=agent_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-workspace',
-                        'trinity.agent-name': config.name
-                    }
-                )
-
+            # This ensures files created by the agent survive container restarts.
+            # trinity-enterprise#69: ephemeral ghosts are VOLUME-LESS — their
+            # /home/developer lives on the container writable layer (overlayfs),
+            # auto-reclaimed by container removal. Volumes exist to survive
+            # recreate, and ghosts never recreate.
             volumes = {
                 str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
                 str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
                 'encrypted-data': {'bind': '/data', 'mode': 'rw'},
-                agent_volume_name: {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
             }
+            if not config.ephemeral:
+                agent_volume_name = f"agent-{config.name}-workspace"
+                try:
+                    await volume_get(agent_volume_name)
+                except docker.errors.NotFound:
+                    await volume_create(
+                        name=agent_volume_name,
+                        labels={
+                            'trinity.platform': 'agent-workspace',
+                            'trinity.agent-name': config.name
+                        }
+                    )
+                volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
 
             if template_volume:
                 volumes.update(template_volume)
@@ -921,6 +1044,30 @@ async def create_agent_internal(
             # - Always drop ALL caps, then add back only what's needed
             # - Always apply AppArmor profile
             # - Always apply noexec,nosuid to /tmp
+            container_labels = {
+                'trinity.platform': 'agent',
+                'trinity.agent-name': config.name,
+                'trinity.agent-type': config.type,
+                'trinity.ssh-port': str(config.port),
+                'trinity.cpu': config.resources['cpu'],
+                'trinity.memory': config.resources['memory'],
+                'trinity.created': utc_now_iso(),
+                'trinity.template': config.template or '',
+                'trinity.agent-runtime': config.runtime or 'claude-code',
+                'trinity.full-capabilities': str(full_capabilities).lower(),
+                'trinity.base-image-version': get_platform_version()
+            }
+            if config.ephemeral:
+                # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
+                # orphan pass reclaims labeled containers whose ownership row
+                # is gone (backend restarted mid-create/mid-discard).
+                container_labels['trinity.ephemeral'] = 'true'
+                container_labels['trinity.ephemeral-expires-at'] = ephemeral_expires_at or ''
+            if current_user.agent_name:
+                # Part 2 spawn provenance rides on ANY agent-spawned creation
+                # (durable or ephemeral), pairing with the DB columns.
+                container_labels['trinity.spawned-by'] = current_user.agent_name
+
             container = await containers_run(
                 config.base_image,
                 detach=True,
@@ -928,19 +1075,7 @@ async def create_agent_internal(
                 ports={'22/tcp': config.port},
                 volumes=volumes,
                 environment=env_vars,
-                labels={
-                    'trinity.platform': 'agent',
-                    'trinity.agent-name': config.name,
-                    'trinity.agent-type': config.type,
-                    'trinity.ssh-port': str(config.port),
-                    'trinity.cpu': config.resources['cpu'],
-                    'trinity.memory': config.resources['memory'],
-                    'trinity.created': utc_now_iso(),
-                    'trinity.template': config.template or '',
-                    'trinity.agent-runtime': config.runtime or 'claude-code',
-                    'trinity.full-capabilities': str(full_capabilities).lower(),
-                    'trinity.base-image-version': get_platform_version()
-                },
+                labels=container_labels,
                 # Always apply AppArmor for additional sandboxing
                 security_opt=['apparmor:docker-default'],
                 # Always drop ALL capabilities first (defense in depth)
@@ -979,11 +1114,52 @@ async def create_agent_internal(
 
             # #1129: seed require_email from the fleet-wide default
             # (secure-by-default ON) at creation; owners can override per agent.
+            # trinity-enterprise#69 Part 2: spawn provenance is written for ANY
+            # agent-spawned creation; the parent's key id (not just its name)
+            # backs the control gate — a recycled name alone must never inherit
+            # control of surviving children.
+            spawned_by_key_id = None
+            if current_user.agent_name:
+                try:
+                    parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
+                    spawned_by_key_id = parent_key.id if parent_key else None
+                except Exception as e:
+                    logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
             db.register_agent_owner(
                 config.name,
                 current_user.username,
                 require_email=get_agent_default_require_email(),
+                is_ephemeral=bool(config.ephemeral),
+                ephemeral_max_executions=(config.ephemeral.max_executions if config.ephemeral else None),
+                ephemeral_expires_at=ephemeral_expires_at,
+                spawned_by_agent=current_user.agent_name,
+                spawned_by_key_id=spawned_by_key_id,
+                # Ghosts default to 1 concurrent turn: bounds check-then-act
+                # budget overshoot to a single in-flight execution and shrinks
+                # the blast radius of an untrusted workspace.
+                max_parallel_tasks=(1 if config.ephemeral else None),
             )
+
+            # trinity-enterprise#69 Part 2: auto-grant the parent→child
+            # permission edge so the spawning agent can immediately
+            # chat/list/info its child (the MCP layer gates on
+            # agent_permissions; grant_default_permissions is deliberately
+            # empty). created_by carries the spawn sentinel so a human grant
+            # and an auto-grant stay distinguishable.
+            if current_user.agent_name:
+                try:
+                    db.add_agent_permission(
+                        current_user.agent_name,
+                        config.name,
+                        created_by=f"spawn:{current_user.agent_name}",
+                    )
+                    logger.info(
+                        f"Auto-granted spawn permission edge {current_user.agent_name} -> {config.name}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to auto-grant spawn permission edge for {config.name}: {e}"
+                    )
 
             # Persist auto-assigned subscription (#74)
             if auto_assigned_subscription_id:
@@ -993,7 +1169,9 @@ async def create_agent_internal(
                     logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
 
             # AVATAR-003: Seed avatar prompt from template
-            _avatar_prompt = template_data.get("avatar_prompt") if template_data else None
+            # (skipped for ephemeral ghosts — avatar generation is a paid,
+            # durable-identity nicety a disposable agent never benefits from)
+            _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
             if _avatar_prompt:
                 try:
                     db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
@@ -1058,7 +1236,9 @@ async def create_agent_internal(
             # auto-sync heartbeat by default. Source-mode agents stay opt-in
             # (auto-pushing to main would clobber protected branches) —
             # except fork-to-own agents (#93), which own their repo.
-            if github_repo_for_agent and (not config.source_mode or fork_upstream_repo):
+            # trinity-enterprise#69: ghosts never auto-push — their workspace
+            # is throwaway by definition, so the 15-min sync heartbeat stays off.
+            if github_repo_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
                 try:
                     db.set_git_auto_sync_enabled(config.name, True)
                 except Exception as e:
@@ -1081,6 +1261,18 @@ async def create_agent_internal(
                         config.name,
                         cleanup_exc,
                     )
+            # trinity-enterprise#69: release the reserved ephemeral quota slot
+            # so a failed creation doesn't permanently consume owner capacity.
+            if ephemeral_slot_reserved and ephemeral_owner_id is not None:
+                try:
+                    ephemeral_service.release_ephemeral_slot(ephemeral_owner_id)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to release ephemeral quota slot for %s after "
+                        "creation failure: %s",
+                        config.name,
+                        cleanup_exc,
+                    )
             # #1197: the agent-scoped MCP key is minted before container
             # creation, so a failure here would otherwise leave an orphaned
             # mcp_api_keys row (one per failed attempt). Roll it back too.
@@ -1097,6 +1289,18 @@ async def create_agent_internal(
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
+        # trinity-enterprise#69 (review M2): release the quota reservation on
+        # the Docker-unavailable path too — otherwise repeated attempts during
+        # an outage consume the owner's ghost quota for the counter TTL.
+        if ephemeral_slot_reserved and ephemeral_owner_id is not None:
+            try:
+                ephemeral_service.release_ephemeral_slot(ephemeral_owner_id)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Failed to release ephemeral quota slot for %s (no docker): %s",
+                    config.name,
+                    cleanup_exc,
+                )
         raise HTTPException(
             status_code=503,
             detail="Docker not available - cannot create agents in demo mode"

@@ -571,7 +571,11 @@ async def trigger_fleet_health_check(
     from services.docker_service import list_all_agents_fast
 
     agents = list_all_agents_fast()
-    running_agents = [a.name for a in agents if a.status == "running"]
+    # trinity-enterprise#69: ghosts excluded from fleet health (see monitoring_service).
+    running_agents = [
+        a.name for a in agents
+        if a.status == "running" and getattr(a, "ephemeral", False) is not True
+    ]
 
     if not running_agents:
         return {"status": "no_agents", "message": "No running agents to check"}

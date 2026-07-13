@@ -35,6 +35,28 @@ while _BACKEND_STR in sys.path:
 sys.path.insert(0, _BACKEND_STR)
 
 
+# #1582: collection-time capture of the real modules TestAcquireCeilingClamp
+# binds. A sibling's module-level `sys.modules` stub — the #762/#1446 leak
+# family, e.g. `test_fleet_status_resilience` installing a fresh `services`
+# package with a real `__path__` — can otherwise leave `capacity_manager`'s
+# call-time `from services.settings_service import clamp_to_ceiling` reading a
+# DIFFERENT settings_service object than the one a test patched, so the patch
+# is silently never hit (this file sorts before every known leaker, so this
+# import runs leak-free). The autouse fixture re-pins these per test
+# (last-write-wins over any leak) and the test patches the captured object
+# directly — never a bare re-import that could resolve a leaked stub.
+import importlib as _importlib
+
+_REAL_MODULES = {
+    _name: _importlib.import_module(_name)
+    for _name in (
+        "services",
+        "services.settings_service",
+        "services.capacity_manager",
+    )
+}
+
+
 pytestmark = pytest.mark.unit
 
 
@@ -197,9 +219,24 @@ class TestAcquireCeilingClamp:
     facade caller (chat ×3, task_execution_service, …).
     """
 
+    @pytest.fixture(autouse=True)
+    def _pin_real_modules(self, monkeypatch):
+        """#1582: re-pin the real modules into sys.modules for the duration of
+        each test so the code-under-test's call-time import and this test's
+        patch target resolve to the SAME object. monkeypatch auto-restores."""
+        for _name, _mod in _REAL_MODULES.items():
+            monkeypatch.setitem(sys.modules, _name, _mod)
+
     def _patch_ceiling(self, monkeypatch, value):
-        from services import settings_service as ss
-        monkeypatch.setattr(ss, "get_max_parallel_tasks_ceiling", lambda: value)
+        # #1582: patch the CAPTURED real module object directly. `clamp_to_ceiling`
+        # (imported inside acquire from the now-pinned services.settings_service)
+        # reads `get_max_parallel_tasks_ceiling` from this module's globals — so
+        # patching it here is guaranteed to be seen at call time.
+        monkeypatch.setattr(
+            _REAL_MODULES["services.settings_service"],
+            "get_max_parallel_tasks_ceiling",
+            lambda: value,
+        )
 
     def test_acquire_clamps_above_ceiling(self, capacity, slot_service, monkeypatch):
         """max_concurrent=5 with ceiling=2 → slot acquired with max_parallel_tasks=2."""

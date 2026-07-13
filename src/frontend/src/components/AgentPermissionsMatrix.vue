@@ -60,13 +60,15 @@
         </span>
       </div>
 
-      <!-- Toast -->
-      <div v-if="message" :class="[
-        'mb-3 text-sm rounded-md px-3 py-2',
-        message.type === 'error'
-          ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-          : 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300'
-      ]">{{ message.text }}</div>
+      <!-- Toast: reserved fixed-height slot so appear/disappear never shifts the grid -->
+      <div class="min-h-[2.5rem] mb-3">
+        <div v-if="message" :class="[
+          'text-sm rounded-md px-3 py-2',
+          message.type === 'error'
+            ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
+            : 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300'
+        ]">{{ message.text }}</div>
+      </div>
 
       <div v-if="visibleAgents.length === 0" class="text-sm text-gray-500 dark:text-gray-400 py-6">
         No agents match “{{ filter }}”.
@@ -75,7 +77,7 @@
       <div v-else class="flex gap-4 items-start">
         <!-- The grid -->
         <div class="overflow-auto max-h-[70vh] border border-gray-200 dark:border-gray-700 rounded-lg flex-1">
-          <table class="border-collapse text-xs" @mouseleave="hoverRow = hoverCol = -1">
+          <table class="border-collapse text-sm" @mouseleave="hoverRow = hoverCol = -1">
             <thead>
               <!-- Target axis band -->
               <tr>
@@ -92,8 +94,8 @@
                 <!-- Split corner cell -->
                 <th class="sticky left-0 top-7 z-30 bg-gray-100 dark:bg-gray-800 w-40 min-w-40 h-16 p-0 border-b border-r border-gray-200 dark:border-gray-700">
                   <div class="relative w-full h-full corner-split">
-                    <span class="absolute top-1 right-1 text-[10px] text-gray-500 dark:text-gray-400">target →</span>
-                    <span class="absolute bottom-1 left-1 text-[10px] text-gray-500 dark:text-gray-400">caller ↓</span>
+                    <span class="absolute top-1 right-1 text-xs text-gray-500 dark:text-gray-400">target →</span>
+                    <span class="absolute bottom-1 left-1 text-xs text-gray-500 dark:text-gray-400">caller ↓</span>
                   </div>
                 </th>
                 <th
@@ -111,7 +113,7 @@
                       :title="`Column actions for → ${t.name}`"
                       @click="openHeaderMenu('col', t.name, $event)"
                     >⋯</button>
-                    <span class="col-label text-gray-700 dark:text-gray-300" :title="'→ ' + t.name">→ {{ t.name }}</span>
+                    <span class="col-label text-gray-700 dark:text-gray-300 font-medium" :title="'→ ' + t.name">→ {{ t.name }}</span>
                   </div>
                 </th>
               </tr>
@@ -130,7 +132,7 @@
                   ]"
                 >
                   <div class="flex items-center justify-between gap-2">
-                    <span class="text-gray-700 dark:text-gray-300" :title="s.name + ' →'">{{ s.name }} →</span>
+                    <span class="text-gray-700 dark:text-gray-300 font-medium" :title="s.name + ' →'">{{ s.name }} →</span>
                     <button
                       class="text-gray-400 hover:text-action-primary-600 dark:hover:text-action-primary-400"
                       :title="`Row actions for ${s.name} →`"
@@ -151,7 +153,7 @@
                     <span class="sr-only">self</span>
                   </template>
                   <template v-else-if="hasGrant(s.name, t.name)">
-                    <span class="text-action-primary-600 dark:text-action-primary-400 font-bold" aria-label="granted">✓</span>
+                    <span class="text-action-primary-600 dark:text-action-primary-400 font-bold text-base" aria-label="granted">✓</span>
                   </template>
                 </td>
               </tr>
@@ -302,7 +304,7 @@ const grantMeta = computed(() => {
 })
 
 function cellClass(s, t, ri, ci) {
-  const base = ['w-8', 'h-8', 'text-center', 'border-b', 'border-r', 'border-gray-100', 'dark:border-gray-700/60', 'cursor-pointer', 'select-none']
+  const base = ['w-11', 'h-11', 'text-center', 'border-b', 'border-r', 'border-gray-100', 'dark:border-gray-700/60', 'cursor-pointer', 'select-none']
   if (s.name === t.name) {
     base.push('self-diag', 'cursor-default')
     return base
@@ -496,7 +498,7 @@ onMounted(reload)
 .col-label {
   writing-mode: vertical-rl;
   transform: rotate(180deg);
-  max-height: 8rem;
+  max-height: 10rem;
   overflow: hidden;
   text-overflow: ellipsis;
 }

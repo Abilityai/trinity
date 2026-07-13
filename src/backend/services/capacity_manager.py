@@ -139,6 +139,29 @@ class CapacityFull(Exception):
         )
 
 
+class EphemeralBudgetExhausted(Exception):
+    """Raised by ``acquire`` when an ephemeral agent's budget is spent
+    (trinity-enterprise#69).
+
+    Sibling to ``CircuitOpen`` — raised at the very TOP of ``acquire`` so a
+    doomed turn is never admitted OR enqueued for an expired/exhausted ghost
+    (the same no-enqueue invariant as #526 D2). Covers every admission
+    surface (chat, task, webhook, a2a, loop iteration) through the single
+    facade. Pull-mode note (#1081): the future claim endpoint must re-check
+    the same predicate — this gate lives at today's admission chokepoint,
+    which pull-mode replaces.
+
+    ``reason``: "expired" (TTL passed) | "budget_exhausted" (exec count).
+    """
+
+    def __init__(self, agent_name: str, reason: str):
+        self.agent_name = agent_name
+        self.reason = reason
+        super().__init__(
+            f"Ephemeral agent '{agent_name}' budget spent ({reason})"
+        )
+
+
 class CircuitOpen(Exception):
     """Raised by ``acquire`` when the per-agent dispatch breaker is open
     (RELIABILITY-007, #526).
@@ -245,6 +268,44 @@ class CapacityManager:
         # admit limit is capped here.
         from services.settings_service import clamp_to_ceiling
         max_concurrent = clamp_to_ceiling(max_concurrent)
+
+        # ---- -1. Ephemeral budget gate (trinity-enterprise#69) ----------
+        # Before the breaker and before any slot/overflow work: an expired or
+        # budget-exhausted ghost admits nothing and enqueues nothing. The
+        # predicate counts terminal + active (queued/running/pending_retry)
+        # rows so check-then-act overshoot is bounded (ghosts also default to
+        # max_parallel_tasks=1). One PK-indexed read per acquire (the #506
+        # clamp precedent for uncached per-call reads); the COUNT runs only
+        # for ghosts. Fail-open on DB error — the gate is a budget guard, not
+        # a correctness gate, and a transient read failure must not take down
+        # fleet dispatch.
+        try:
+            from database import db as _db
+            from utils.helpers import utc_now_iso as _utc_now_iso
+            _eph = _db.get_agent_ephemeral_info(agent_name)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"[Capacity] ephemeral gate read failed for {agent_name}: {e}")
+            _eph = None
+        # isinstance-dict guard: the accessor's contract is Optional[Dict];
+        # anything else (incl. a test double) must fall through to normal
+        # admission rather than feed the comparison below.
+        if isinstance(_eph, dict) and _eph.get("is_ephemeral"):
+            _expires_at = _eph.get("ephemeral_expires_at")
+            # Lexicographic compare is valid: both sides are utc_now_iso-format
+            # ISO-Z strings (Invariant #16).
+            if _expires_at and _expires_at < _utc_now_iso():
+                raise EphemeralBudgetExhausted(agent_name, "expired")
+            _max_exec = _eph.get("ephemeral_max_executions")
+            if _max_exec:
+                try:
+                    _usage = _db.count_ephemeral_budget_usage(agent_name)
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning(
+                        f"[Capacity] ephemeral budget count failed for {agent_name}: {e}"
+                    )
+                    _usage = None
+                if _usage and (_usage["terminal"] + _usage["active"]) >= _max_exec:
+                    raise EphemeralBudgetExhausted(agent_name, "budget_exhausted")
 
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow

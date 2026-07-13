@@ -31,6 +31,20 @@ from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timesta
 
 logger = logging.getLogger(__name__)
 
+
+def _norm_ts(value: Optional[str]) -> Optional[str]:
+    """Normalize a stored ISO timestamp to UTC with an explicit 'Z' suffix (#1474).
+
+    Summary/list readers return raw ``dict(row)`` values straight from the DB.
+    A scheduler-written naive string (no offset) then serializes naive out of
+    Pydantic, and JS ``new Date(naive)`` parses it as *local* time — shifting
+    the row by the viewer's UTC offset. ``parse_iso_timestamp`` assumes UTC for
+    naive strings (matching every Python read path), and ``to_utc_iso`` re-emits
+    the 'Z' form the already-correct sibling readers produce. None passes through.
+    """
+    return to_utc_iso(parse_iso_timestamp(value)) if value else None
+
+
 # Cap on rows fed into percentile compute and tool-call aggregation
 # (#868). Counts and the daily timeline always use the unsampled rowset;
 # only the percentile / tool-call pool is bounded. Test-only override is
@@ -1422,6 +1436,52 @@ class ScheduleOperations:
             )
             return result.rowcount
 
+    def fail_all_nonterminal_for_agent(
+        self, agent_name: str, reason: str = "ghost_discarded"
+    ) -> int:
+        """Bulk-FAIL every non-terminal execution for an agent
+        (trinity-enterprise#69).
+
+        Discard step 1 for ephemeral agents: queued, running, AND
+        pending_retry rows are all doomed (the container is about to be
+        force-removed and the DB rows purged), so terminal-ize them first.
+        This keeps canary L-03/E-01 green through the purge — the KEEP-policy
+        ``schedule_executions`` rows that survive must never be non-terminal
+        rows referencing an agent absent from ``agent_ownership``. It also
+        means a late in-flight ``apply_result`` for one of these rows loses
+        its CAS and records no side effects (no breaker-key resurrection).
+
+        The status filter doubles as the CAS guard: a row that reached a real
+        terminal (e.g. SUCCESS landing between our read and write) is not
+        overwritten.
+
+        Returns:
+            Count of rows moved to FAILED.
+        """
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.agent_name == agent_name,
+                        schedule_executions.c.status.in_(
+                            [
+                                TaskExecutionStatus.QUEUED,
+                                TaskExecutionStatus.RUNNING,
+                                TaskExecutionStatus.PENDING_RETRY,
+                            ]
+                        ),
+                    )
+                )
+                .values(
+                    status=TaskExecutionStatus.FAILED,
+                    completed_at=now,
+                    error=reason,
+                )
+            )
+            return result.rowcount
+
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         """Mark queued executions older than max_age_hours as FAILED.
 
@@ -1688,7 +1748,16 @@ class ScheduleOperations:
             .limit(limit)
         )
         with get_engine().connect() as conn:
-            return [dict(row) for row in conn.execute(stmt).mappings()]
+            rows = []
+            for row in conn.execute(stmt).mappings():
+                d = dict(row)
+                # #1474: normalize naive scheduler-written timestamps to UTC 'Z'
+                # so the ExecutionSummary response never serializes naive (the
+                # reported TasksPanel relative-time shift).
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                rows.append(d)
+            return rows
 
     def get_execution(self, execution_id: str) -> Optional[ScheduleExecution]:
         """Get a specific execution by ID."""
@@ -2200,7 +2269,10 @@ class ScheduleOperations:
                 "cost_total": cost_total,
                 "context_avg": context_avg,
                 "tool_call_total": tool_total_by_sched.get(sid, 0),
-                "last_run_at": last["last_run_at"] if last else None,
+                # #1474: normalize to UTC 'Z' — ScheduleSummaryRow.last_run_at is
+                # a str field, so a naive scheduler-written value would pass
+                # through unshifted and render wrong in a non-UTC browser.
+                "last_run_at": _norm_ts(last["last_run_at"]) if last else None,
                 "last_run_status": last["last_status"] if last else None,
             })
 
@@ -3114,10 +3186,30 @@ class ScheduleOperations:
             return result.rowcount > 0
 
     def list_git_enabled_agents(self) -> List[AgentGitConfig]:
-        """List all agents with git sync enabled."""
+        """List all agents with git sync enabled.
+
+        Joins `agent_ownership` and excludes soft-deleted agents (#1561).
+        `agent_git_config` rows survive soft delete by design, so without this
+        filter the 60s `SyncHealthService` poller (and `GET /api/fleet/sync-audit`)
+        keeps hitting removed containers forever — each `httpx.ConnectError`
+        poisons the transport circuit breaker and eventually drives it to
+        DORMANT + a bogus `circuit_breaker_dormant` alert for an agent that no
+        longer exists. Mirrors the #834 hardening on `list_all_enabled_schedules()`.
+        """
         stmt = (
             select(agent_git_config)
-            .where(agent_git_config.c.sync_enabled == 1)
+            .select_from(
+                agent_git_config.join(
+                    agent_ownership,
+                    agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+                )
+            )
+            .where(
+                and_(
+                    agent_git_config.c.sync_enabled == 1,
+                    agent_ownership.c.deleted_at.is_(None),
+                )
+            )
             .order_by(agent_git_config.c.agent_name)
         )
         with get_engine().connect() as conn:
@@ -3428,7 +3520,17 @@ class ScheduleOperations:
                 ORDER BY started_at DESC
                 LIMIT :lim OFFSET :off
             """), bind).mappings().all()
-            return [dict(row) for row in rows]
+            out = []
+            for row in rows:
+                d = dict(row)
+                # #1474: normalize naive scheduler-written timestamps to UTC 'Z'
+                # so the FleetExecutionSummary response (ExecutionsPanel) never
+                # serializes naive.
+                d["started_at"] = _norm_ts(d.get("started_at"))
+                d["completed_at"] = _norm_ts(d.get("completed_at"))
+                d["queued_at"] = _norm_ts(d.get("queued_at"))
+                out.append(d)
+            return out
 
     def get_fleet_execution_stats(
         self,

@@ -23,6 +23,7 @@ from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
 from services.agent_service.helpers import validate_base_image
+from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
@@ -269,6 +270,27 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_agent_auth_token_env_matches(container, agent_name)
     )
 
+    # #1560: the heartbeat markers and both circuit breakers are keyed by agent
+    # NAME, not by container identity, so a recreated container inherits the
+    # verdict recorded against its predecessor — a fresh, healthy agent is
+    # fast-failed with "agent is unhealthy" without ever being contacted. Any
+    # config drift above (subscription switch, resource change, auth-token
+    # rotation, guardrails edit) recreates the container, and a fleet-wide
+    # rotation recreates every agent at once, so this is the load-bearing clear.
+    #
+    # Runs BEFORE the recreate/start below, not after: `recreate_container_with_
+    # updated_config` starts the replacement via `containers_run(detach=True)`, so
+    # clearing afterwards would leave a window in which a concurrent dispatch
+    # reads the predecessor's verdict against a container that is already up.
+    #
+    # Gated on the container having actually changed or come up: a no-op start of
+    # an already-running agent must NOT reset a breaker, otherwise re-issuing
+    # `start` would let an operator defeat the breaker protecting a genuinely
+    # wedged agent. Slots are deliberately untouched here — the container is live
+    # (see services/agent_runtime_state.py).
+    if needs_recreation or not was_already_running:
+        clear_agent_breakers(agent_name)
+
     if needs_recreation:
         # Recreate container with updated config
         # Use system user for internal operations
@@ -305,8 +327,21 @@ async def start_agent_internal(agent_name: str) -> dict:
         # retry window is too short under multi-agent deploys (#406).
         await wait_for_agent_ready(agent_name)
 
-        # Inject assigned credentials from the Credentials page
-        credentials_result = await inject_assigned_credentials(agent_name)
+        # Inject assigned credentials from the Credentials page.
+        # trinity-enterprise#69: ephemeral ghosts get NO automatic credential
+        # injection (no-credentials-by-default for arbitrary/untrusted
+        # workspaces); a human can still inject explicitly via the
+        # credentials endpoint, which is human-only under Part 2.
+        # isinstance-dict guard: the accessor's contract is Optional[Dict] —
+        # anything else (incl. a test double) must take the normal inject path.
+        try:
+            _eph_info = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            _eph_info = None
+        if isinstance(_eph_info, dict) and _eph_info.get("is_ephemeral"):
+            credentials_result = {"status": "skipped", "reason": "ephemeral_agent"}
+        else:
+            credentials_result = await inject_assigned_credentials(agent_name)
         credentials_status = credentials_result.get("status", "unknown")
 
         # Inject assigned skills from the Skills page

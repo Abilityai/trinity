@@ -103,6 +103,11 @@ TABLES = {
             tts_voice_slack_enabled INTEGER DEFAULT 1,
             tts_voice_whatsapp_enabled INTEGER DEFAULT 1,
             deleted_at TEXT,
+            is_ephemeral INTEGER DEFAULT 0,
+            ephemeral_max_executions INTEGER,
+            ephemeral_expires_at TEXT,
+            spawned_by_agent TEXT,
+            spawned_by_key_id TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )

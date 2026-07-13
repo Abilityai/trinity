@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import RenameAgentRequest, User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, reject_agent_principal
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
@@ -50,6 +50,8 @@ async def rename_agent_endpoint(
     Body:
     - new_name: The new name for the agent
 
+    trinity-enterprise#69 Part 2: rename is human-only (agent-scoped keys 403).
+
     Returns:
     - message: Success message
     - old_name: Previous agent name
@@ -57,6 +59,8 @@ async def rename_agent_endpoint(
 
     Note: The agent will be briefly stopped and restarted during rename.
     """
+    # trinity-enterprise#69 Part 2: rename is a human-only operation.
+    reject_agent_principal(current_user)
     # Check if user can rename this agent
     if not db.can_user_rename_agent(current_user.username, agent_name):
         # Check if it's a system agent for better error message
@@ -138,15 +142,21 @@ async def rename_agent_endpoint(
                 detail="Failed to update database. Agent name may already be taken."
             )
 
-        # RELIABILITY-004 / #307: the heartbeat `seen` marker has no TTL and is
-        # keyed by agent name, so a rename would orphan the old name's key
-        # forever. Clear the old name's heartbeat keys; the renamed container
-        # re-sets `seen` under the new name on its next beat. Best-effort.
+        # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
+        # by name, so a rename orphans all of them under the old name — the
+        # heartbeat `seen` marker (no TTL), both circuit breakers, and the slot
+        # ZSET. The new name is swept too: it may have been used by an agent that
+        # the retention purge has since removed, whose breaker verdict would
+        # otherwise be inherited here. The container is stopped for the whole
+        # rename, so neither sweep can race an in-flight execution's slot. The
+        # renamed container re-establishes its own state on next beat/dispatch.
+        # Best-effort.
         try:
-            from services import heartbeat_service
-            heartbeat_service.clear_heartbeat(agent_name)
+            from services.agent_runtime_state import clear_agent_runtime_state
+            await clear_agent_runtime_state(agent_name)
+            await clear_agent_runtime_state(sanitized_name)
         except Exception as e:
-            logger.warning(f"Failed to clear heartbeat keys for old name {agent_name}: {e}")
+            logger.warning(f"Failed to clear Redis runtime state on rename {agent_name} -> {sanitized_name}: {e}")
 
         # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
         try:

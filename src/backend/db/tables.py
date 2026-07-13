@@ -107,6 +107,11 @@ agent_ownership = Table(
     Column("tts_voice_slack_enabled", Integer),      # ent#117: per-channel voice-allowed flag
     Column("tts_voice_whatsapp_enabled", Integer),   # ent#117: per-channel voice-allowed flag
     Column("deleted_at", Text),
+    Column("is_ephemeral", Integer),               # trinity-enterprise#69: 1 = ghost agent (budgeted, hard-discarded)
+    Column("ephemeral_max_executions", Integer),   # trinity-enterprise#69: NULL = no exec budget
+    Column("ephemeral_expires_at", Text),          # trinity-enterprise#69: ALWAYS set for ghosts (no immortal ghost)
+    Column("spawned_by_agent", Text),              # trinity-enterprise#69 Part 2: parent agent name (provenance)
+    Column("spawned_by_key_id", Text),             # trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
 )
 
 agent_sharing = Table(

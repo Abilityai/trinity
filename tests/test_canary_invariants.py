@@ -310,16 +310,26 @@ _CANARY_SCHEMA_SQL = """
             status TEXT NOT NULL,
             started_at TEXT NOT NULL,
             completed_at TEXT,
+            duration_ms INTEGER,          -- #1077 E-03: terminal-row timing
+            queued_at TEXT,               -- #1077 E-04: backlog enqueue time
+            backlog_metadata TEXT,        -- #1077 E-04/G-04: JSON drain-replay identity
             message TEXT NOT NULL DEFAULT '',
             triggered_by TEXT NOT NULL DEFAULT 'test'
         );
+        -- Mirrors the production agent_schedules columns the canary reads
+        -- (E-06 reads next_run_at/enabled/deleted_at; L-03 reads agent_name).
+        -- NOTE: a single definition — a stray second `CREATE TABLE
+        -- agent_schedules` here (from a #1472 merge) made executescript raise
+        -- `table already exists`, reddening the whole file (#1077 baseline fix).
         CREATE TABLE agent_schedules (
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
-            name TEXT DEFAULT '',
-            cron_expression TEXT DEFAULT '0 4 * * *',
+            name TEXT NOT NULL DEFAULT '',
+            cron_expression TEXT NOT NULL DEFAULT '0 4 * * *',
+            message TEXT NOT NULL DEFAULT '',
             enabled INTEGER DEFAULT 1,
             next_run_at TEXT,
+            owner_id INTEGER NOT NULL DEFAULT 0,
             deleted_at TEXT
         );
         CREATE TABLE agent_sharing (
@@ -731,11 +741,32 @@ def _add_agent(path, name, max_parallel=3, timeout=900, is_system=0):
     c.close()
 
 
-def _add_execution(path, eid, agent_name, status, started_at=None, completed_at=None):
+def _add_execution(
+    path,
+    eid,
+    agent_name,
+    status,
+    started_at=None,
+    completed_at=None,
+    duration_ms=None,
+    queued_at=None,
+    backlog_metadata=None,
+):
     c = _conn(path)
     c.execute(
-        "INSERT INTO schedule_executions (id, agent_name, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?)",
-        (eid, agent_name, status, started_at or "2026-04-30T00:00:00Z", completed_at),
+        "INSERT INTO schedule_executions "
+        "(id, agent_name, status, started_at, completed_at, duration_ms, "
+        "queued_at, backlog_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            eid,
+            agent_name,
+            status,
+            started_at or "2026-04-30T00:00:00Z",
+            completed_at,
+            duration_ms,
+            queued_at,
+            backlog_metadata,
+        ),
     )
     c.commit()
     c.close()
@@ -900,6 +931,30 @@ class TestSnapshotCollector:
         assert "e-recent" in snap.terminal_exec_statuses
         assert snap.terminal_exec_statuses["e-recent"] == "success"
         assert "e-old" not in snap.terminal_exec_statuses
+
+    def test_queued_meta_collected_for_queued_rows_only(self, canary_db, reload_canary):
+        # #1077 E-04/G-04: queued rows expose queued_at + backlog_metadata via
+        # `queued_meta`, keyed by execution_id and scoped STRICTLY to queued
+        # rows — a terminal row's metadata must NOT appear (so #1449's future
+        # terminal-row NULL-out can't false-fire E-04).
+        _add_agent(canary_db, "a1")
+        _add_execution(
+            canary_db, "e-q", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"trigger": "schedule"}',
+        )
+        # A terminal row that also carries backlog_metadata — must be excluded.
+        _add_execution(
+            canary_db, "e-done", "a1", "success",
+            completed_at="2026-05-18T10:05:00Z",
+            queued_at="2026-05-18T09:00:00Z",
+            backlog_metadata='{"trigger": "schedule"}',
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        agent = snap.agents[0]
+        assert set(agent.queued_meta.keys()) == {"e-q"}
+        assert agent.queued_meta["e-q"]["queued_at"] == "2026-05-18T10:00:00Z"
+        assert agent.queued_meta["e-q"]["backlog_metadata"] == '{"trigger": "schedule"}'
 
 
 # ---------------------------------------------------------------------------
@@ -1275,7 +1330,8 @@ class TestRunner:
 
         assert set(results.keys()) == {
             "S-01", "S-02", "S-03",
-            "E-01", "E-02", "E-05", "E-06",
+            "E-01", "E-02", "E-03", "E-04", "E-05", "E-06",
+            "G-03", "G-04",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1285,7 +1341,14 @@ class TestRunner:
         assert results["S-03"] == []
         assert results["E-01"] == []
         assert results["E-02"] == []
+        # E-03/G-03/E-04/G-04 (#1077) hold on a clean platform — no terminal or
+        # queued rows seeded.
+        assert results["E-03"] == []
+        assert results["E-04"] == []
         assert results["E-05"] == []
+        assert results["E-06"] == []
+        assert results["G-03"] == []
+        assert results["G-04"] == []
         assert len(results["L-03"]) == 1
         # B-01 now reads the SAME temp DB on both sides via reload_canary's
         # controlled `database` stub (get_queued_count over the temp
@@ -2700,3 +2763,532 @@ class TestE06OverdueNextRun:
         from canary.invariants import e06_no_overdue_next_run as e06
         fired = [v.observed_state["schedule_id"] for v in e06.check(snap)]
         assert fired == ["sch-stale"]
+
+
+# ---------------------------------------------------------------------------
+# Terminal-row collector (#1077 — shared by E-03 / G-03)
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalRowCollector:
+    def test_window_in_vs_out(self, canary_db, reload_canary):
+        # Agent timeout 900s → window = 900 + 300 = 1200s (20 min).
+        _add_agent(canary_db, "a1", timeout=900)
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-in", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=60)),
+            completed_at=_iso_z(now),
+        )
+        _add_execution(
+            canary_db, "e-out", "a1", "success",
+            started_at=_iso_z(now - _td(hours=3)),
+            completed_at=_iso_z(now - _td(hours=3) + _td(seconds=5)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        ids = {r["id"] for r in snap.terminal_rows}
+        assert "e-in" in ids
+        assert "e-out" not in ids
+        assert snap.sources_unavailable == []
+
+    def test_null_completed_at_still_collected(self, canary_db, reload_canary):
+        # Windowed on started_at, so a half-written row (NULL completed_at) is
+        # still collected — E-03 must be able to see it.
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-halfwritten", "a1", "failed",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        rows = {r["id"]: r for r in snap.terminal_rows}
+        assert "e-halfwritten" in rows
+        assert rows["e-halfwritten"]["completed_at"] is None
+
+    def test_skipped_status_excluded(self, canary_db, reload_canary):
+        # A `skipped` row legitimately has NULL completed_at/duration_ms — it
+        # must NOT be pulled into terminal_rows (else E-03 false-fires).
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-skip", "a1", "skipped",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=None, duration_ms=None,
+        )
+        _add_execution(
+            canary_db, "e-ok", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=_iso_z(now),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        ids = {r["id"] for r in snap.terminal_rows}
+        assert "e-ok" in ids
+        assert "e-skip" not in ids
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_column_absent_skips_collection(self, monkeypatch):
+        # An ABSENT completed_at/duration_ms column (minimal/older DDL) must
+        # skip the source (recorded in `unavailable`) rather than default the
+        # column to None and false-fire E-03 on every row.
+        import tempfile as _tf
+
+        db_file = _tf.NamedTemporaryFile(suffix="_ta.db", delete=False)
+        db_file.close()
+        c = sqlite3.connect(db_file.name)
+        c.row_factory = sqlite3.Row
+        c.executescript(
+            """
+            CREATE TABLE schedule_executions (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL
+            );
+            """
+        )
+        c.execute(
+            "INSERT INTO schedule_executions (id, agent_name, status, started_at) "
+            "VALUES ('e1', 'a1', 'success', ?)",
+            (_iso_z(datetime.utcnow()),),
+        )
+        c.commit()
+        c.close()
+
+        class _Ctx:
+            def __enter__(self_):
+                self_._c = sqlite3.connect(db_file.name)
+                self_._c.row_factory = sqlite3.Row
+                return self_._c
+
+            def __exit__(self_, *a):
+                self_._c.close()
+
+        fake = types.ModuleType("db.connection")
+        fake.get_db_connection = lambda: _Ctx()
+        monkeypatch.setitem(sys.modules, "db.connection", fake)
+
+        from canary.snapshot import _collect_terminal_rows
+
+        res = _collect_terminal_rows(1200)
+        assert res["rows"] == []
+        assert res["unavailable"] and (
+            "completed_at" in res["unavailable"]
+            or "duration_ms" in res["unavailable"]
+        )
+        os.unlink(db_file.name)
+
+    def test_cap_and_sampled_flag(self, canary_db, reload_canary, monkeypatch):
+        _add_agent(canary_db, "a1")
+        from canary import snapshot as snap_mod
+
+        monkeypatch.setattr(snap_mod, "_TERMINAL_ROWS_CAP", 2)
+        now = datetime.utcnow()
+        for i in range(3):
+            _add_execution(
+                canary_db, f"e{i}", "a1", "success",
+                started_at=_iso_z(now - _td(seconds=i)),
+                completed_at=_iso_z(now),
+            )
+        res = snap_mod._collect_terminal_rows(3600)
+        assert res["sampled"] is True
+        assert len(res["rows"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# E-03 — completed rows fully populated (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE03:
+    @staticmethod
+    def _snap(rows):
+        from canary.snapshot import Snapshot
+        return Snapshot(snapshot_time="2026-05-18T12:00:00Z", terminal_rows=rows)
+
+    def test_holds_when_completed_at_populated(self):
+        snap = self._snap([
+            {"id": "e1", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:05:00Z", "duration_ms": 300000},
+            # cancelled-from-queue: completed_at set, duration_ms NULL — healthy.
+            {"id": "e2", "agent_name": "a1", "status": "cancelled",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:00:01Z", "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_fires_when_completed_at_null(self):
+        snap = self._snap([
+            {"id": "e-bad", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": None, "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        v = e03.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "E-03"
+        assert v[0].tier == "A"
+        assert v[0].severity == "major"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["completed_at"] is None
+
+    def test_null_duration_ms_alone_does_not_fire(self):
+        # C1: duration_ms NULL is legitimate on queue-terminated rows; E-03
+        # asserts completed_at only.
+        snap = self._snap([
+            {"id": "e-cancel", "agent_name": "a1", "status": "cancelled",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:00:00Z", "duration_ms": None},
+        ])
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_e2e_cancelled_from_queue_holds_clean(self, canary_db, reload_canary):
+        # C1 regression guard through the REAL collector: a cancelled-from-queue
+        # row (completed_at set, duration_ms NULL) must produce zero E-03
+        # violations.
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-cancel", "a1", "cancelled",
+            started_at=_iso_z(now - _td(seconds=30)),
+            completed_at=_iso_z(now), duration_ms=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e03_completed_rows_populated as e03
+        assert e03.check(snap) == []
+
+    def test_e2e_half_written_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-half", "a1", "success",
+            started_at=_iso_z(now - _td(seconds=30)), completed_at=None,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e03_completed_rows_populated as e03
+        fired = [x.observed_state["execution_id"] for x in e03.check(snap)]
+        assert fired == ["e-half"]
+
+
+# ---------------------------------------------------------------------------
+# G-03 — clock sanity on terminal rows (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantG03:
+    @staticmethod
+    def _snap(rows):
+        from canary.snapshot import Snapshot
+        return Snapshot(snapshot_time="2026-05-18T12:00:00Z", terminal_rows=rows)
+
+    def test_holds_when_started_le_completed(self):
+        snap = self._snap([
+            {"id": "e1", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00Z",
+             "completed_at": "2026-05-18T11:05:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_fires_when_started_after_completed(self):
+        snap = self._snap([
+            {"id": "e-bad", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:05:00Z",
+             "completed_at": "2026-05-18T11:00:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        v = g03.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "G-03"
+        assert v[0].tier == "A"
+        assert v[0].severity == "minor"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["skew_seconds"] == 300.0
+
+    def test_sub_second_skew_does_not_fire(self):
+        # 0.5s backward step is clock jitter (< 1s tolerance), not a bug.
+        snap = self._snap([
+            {"id": "e-jitter", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00.500000Z",
+             "completed_at": "2026-05-18T11:00:00.000000Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_1474_naive_vs_z_compares_without_raising(self):
+        # #1474: a legacy naive started_at beside a Z completed_at must compare
+        # without raising and not false-fire when started <= completed.
+        snap = self._snap([
+            {"id": "e-mixed", "agent_name": "a1", "status": "success",
+             "started_at": "2026-05-18T11:00:00",
+             "completed_at": "2026-05-18T11:05:00Z"},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_skips_null_completed_at(self):
+        # E-03 owns the NULL-completed_at case; G-03 skips it (no double-fire).
+        snap = self._snap([
+            {"id": "e-null", "agent_name": "a1", "status": "failed",
+             "started_at": "2026-05-18T11:00:00Z", "completed_at": None},
+        ])
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+    def test_e2e_bad_clock_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-badclock", "a1", "success",
+            started_at=_iso_z(now),
+            completed_at=_iso_z(now - _td(seconds=10)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g03_clock_sanity as g03
+        fired = [x.observed_state["execution_id"] for x in g03.check(snap)]
+        assert fired == ["e-badclock"]
+
+    def test_e2e_sub_second_skew_does_not_fire(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        now = datetime.utcnow()
+        _add_execution(
+            canary_db, "e-jitter", "a1", "success",
+            started_at=_iso_z(now),
+            completed_at=_iso_z(now - _td(milliseconds=500)),
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g03_clock_sanity as g03
+        assert g03.check(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# E-04 — queued rows carry valid backlog metadata (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantE04:
+    @staticmethod
+    def _snap(queued_meta):
+        """One-agent snapshot whose queued_exec_ids == queued_meta.keys()."""
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_meta.keys()),
+                    queued_meta=queued_meta,
+                )
+            ],
+        )
+
+    def test_holds_when_queued_at_and_json_metadata_present(self):
+        snap = self._snap({
+            "e1": {"queued_at": "2026-05-18T11:00:00Z",
+                   "backlog_metadata": '{"trigger": "schedule", "request_id": "r-1"}'},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_fires_when_queued_at_null(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": None,
+                      "backlog_metadata": '{"trigger": "schedule"}'},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "E-04"
+        assert v[0].tier == "A"
+        assert v[0].severity == "major"
+        assert v[0].observed_state["execution_id"] == "e-bad"
+        assert v[0].observed_state["reason"] == "queued_at_null"
+
+    def test_fires_when_backlog_metadata_null(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": "2026-05-18T11:00:00Z",
+                      "backlog_metadata": None},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["reason"] == "backlog_metadata_null"
+
+    def test_fires_when_backlog_metadata_not_json(self):
+        snap = self._snap({
+            "e-bad": {"queued_at": "2026-05-18T11:00:00Z",
+                      "backlog_metadata": "not-a-json-blob {oops"},
+        })
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        v = e04.check(snap)
+        assert len(v) == 1
+        assert v[0].observed_state["reason"] == "backlog_metadata_invalid_json"
+        # SECURITY: the raw (malformed) metadata value must NEVER be echoed.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert "not-a-json-blob" not in blob
+
+    def test_skips_eid_missing_from_queued_meta(self):
+        # Older-image snapshot: eid queued but no metadata observed → skip
+        # (fail-open), don't fire.
+        from canary.snapshot import Snapshot, AgentSnapshot
+        snap = Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1", is_system=False, max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids={"e-legacy"},
+                    queued_meta={},  # column absent → no entry
+                )
+            ],
+        )
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_e2e_valid_queued_row_holds_clean(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        _add_execution(
+            canary_db, "e-q", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"trigger": "schedule", "request_id": "r-1"}',
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        assert e04.check(snap) == []
+
+    def test_e2e_malformed_queued_metadata_fires(self, canary_db, reload_canary):
+        _add_agent(canary_db, "a1")
+        # NULL queued_at
+        _add_execution(
+            canary_db, "e-noqa", "a1", "queued",
+            queued_at=None, backlog_metadata='{"ok": true}',
+        )
+        # NULL backlog_metadata
+        _add_execution(
+            canary_db, "e-nometa", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z", backlog_metadata=None,
+        )
+        # Non-JSON backlog_metadata
+        _add_execution(
+            canary_db, "e-badjson", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z", backlog_metadata="{broken",
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import e04_queued_rows_have_metadata as e04
+        fired = {v.observed_state["execution_id"]: v.observed_state["reason"]
+                 for v in e04.check(snap)}
+        assert fired == {
+            "e-noqa": "queued_at_null",
+            "e-nometa": "backlog_metadata_null",
+            "e-badjson": "backlog_metadata_invalid_json",
+        }
+
+
+# ---------------------------------------------------------------------------
+# G-04 — no raw credentials in backlog metadata (#1077)
+# ---------------------------------------------------------------------------
+
+
+class TestInvariantG04:
+    @staticmethod
+    def _snap(queued_meta):
+        from canary.snapshot import Snapshot, AgentSnapshot
+        return Snapshot(
+            snapshot_time="2026-05-18T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name="a1",
+                    is_system=False,
+                    max_parallel=3,
+                    execution_timeout_seconds=900,
+                    queued_exec_ids=set(queued_meta.keys()),
+                    queued_meta=queued_meta,
+                )
+            ],
+        )
+
+    def test_holds_when_no_secret_pattern(self):
+        # Benign metadata whose text includes "task-" (contains "sk-") must NOT
+        # false-fire — the patterns are word-boundary anchored.
+        snap = self._snap({
+            "e1": {"queued_at": "2026-05-18T11:00:00Z",
+                   "backlog_metadata":
+                       '{"trigger": "schedule", "task-name": "risky-task-42"}'},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        assert g04.check(snap) == []
+
+    def test_fires_on_github_pat(self):
+        secret = "ghp_ABCDEFghij0123456789KLMNOPqrstuv"
+        snap = self._snap({
+            "e-leak": {"queued_at": "2026-05-18T11:00:00Z",
+                       "backlog_metadata": '{"token": "%s"}' % secret},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert len(v) == 1
+        assert v[0].invariant_id == "G-04"
+        assert v[0].tier == "A"
+        assert v[0].severity == "critical"
+        assert v[0].observed_state["execution_id"] == "e-leak"
+        assert v[0].observed_state["matched_pattern"] == "github_pat"
+        # SECURITY: the secret value must appear NOWHERE in the violation record.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert secret not in blob
+        assert "ABCDEFghij" not in blob
+
+    def test_fires_on_openai_and_slack_and_aws(self):
+        cases = {
+            "e-openai": "sk-proj-ABCDEFGHIJ0123456789abcdefghij",
+            "e-slack": "xoxb-1234-5678-abcdEFGHijklMNOP",
+            "e-aws": "AKIAIOSFODNN7EXAMPLE",
+        }
+        meta = {
+            eid: {"queued_at": "2026-05-18T11:00:00Z",
+                  "backlog_metadata": '{"cred": "%s"}' % val}
+            for eid, val in cases.items()
+        }
+        snap = self._snap(meta)
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert len(v) == 3
+        # No secret bytes leak into any record.
+        for viol in v:
+            blob = json.dumps(viol.observed_state) + (viol.signal_query or "")
+            for secret in cases.values():
+                assert secret not in blob
+
+    def test_skips_null_metadata(self):
+        # E-04 owns the NULL case; G-04 has nothing to scan.
+        snap = self._snap({
+            "e-null": {"queued_at": "2026-05-18T11:00:00Z",
+                       "backlog_metadata": None},
+        })
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        assert g04.check(snap) == []
+
+    def test_e2e_credential_in_backlog_metadata_fires_no_leak(
+        self, canary_db, reload_canary
+    ):
+        _add_agent(canary_db, "a1")
+        secret = "ghp_zzzzYYYYxxxx0000111122223333WWWW"
+        _add_execution(
+            canary_db, "e-leak", "a1", "queued",
+            queued_at="2026-05-18T10:00:00Z",
+            backlog_metadata='{"github_pat": "%s"}' % secret,
+        )
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import g04_no_creds_in_backlog_metadata as g04
+        v = g04.check(snap)
+        assert [x.observed_state["execution_id"] for x in v] == ["e-leak"]
+        assert v[0].observed_state["matched_pattern"] == "github_pat"
+        # SECURITY end-to-end: the persisted violation carries no secret bytes.
+        blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
+        assert secret not in blob

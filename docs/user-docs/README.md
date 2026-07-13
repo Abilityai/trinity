@@ -1,10 +1,14 @@
 # Trinity User Documentation
 
-> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-07-03.
+> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-07-11.
 
 ## What's New
 
 - [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.8.0](whats-new/v0.8.0.md))
+
+## FAQ
+
+- [Trinity FAQ](faq/README.md) — 260+ grounded answers to common questions, organized by topic ([troubleshooting](faq/troubleshooting.md) for symptom → fix)
 
 ## Watch
 

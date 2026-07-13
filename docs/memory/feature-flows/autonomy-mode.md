@@ -7,6 +7,8 @@
 ## Overview
 Autonomy Mode enables or disables all scheduled tasks for an agent with a single toggle. When autonomy is enabled, all schedules run automatically. When disabled, all schedules are paused.
 
+**Scope (autonomy governs proactive work ONLY, #1557):** the toggle acts solely by enabling/disabling the agent's schedules (`db.set_schedule_enabled`). It deliberately does **not** touch the transport circuit breaker or any inbound path — a paused agent still answers manual chat, Telegram/Slack/public, and webhooks normally. An earlier hook (#631 AC#5) forced the transport breaker `dormant` on autonomy-off; because the `execute_task` gate consults that breaker for every trigger, it fast-failed all inbound chat on a healthy paused agent with "circuit breaker open — agent is unhealthy". That coupling was removed — see [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md). #631's flood protection does not depend on it (the breaker's own failure-driven backoff/dormant path plus the #1464 leader lock and #1121 monitoring-default-off throttle a genuinely-down agent).
+
 ## User Story
 As an agent owner, I want to toggle autonomous operation for my agent so that I can quickly enable or disable all scheduled tasks without managing each schedule individually.
 
@@ -708,6 +710,7 @@ Response:
 
 | Date | Change |
 |------|--------|
+| 2026-07-10 | **Decoupled from the circuit breaker (#1557)**: removed the #631 AC#5 hook that forced the transport circuit breaker `dormant` on autonomy-off (and reset it on autonomy-on). Pausing autonomy no longer blocks inbound chat — it acts only via `set_schedule_enabled`. The misleading "agent is unhealthy" fast-fail message was also split to name the real cause (transport-unreachable vs dispatch-auth-dead). See `services/agent_service/autonomy.py` and `services/task_execution_service.py::_circuit_breaker_error`. |
 | 2026-02-22 | **Dashboard Visual Indication**: AgentNode.vue (lines 138-155) now shows "(paused)" text in italics next to schedule count when autonomy is disabled. Schedule stats row grayed out (text-gray-300) when autonomy off vs normal gray (text-gray-500) when on. Schedule count fetched via `/api/agents/execution-stats` which now includes `schedules_total` and `schedules_enabled` fields. |
 | 2026-02-12 | **UI Standardization**: Extracted `AutonomyToggle.vue` reusable component (151 lines) used in 4 locations: AgentNode.vue, ReplayTimeline.vue, AgentHeader.vue, Agents.vue. Running and Autonomy toggles now on same row in Dashboard Graph (AgentNode.vue:57-86) and Agents page (Agents.vue:108-123). Created dedicated [autonomy-toggle-component.md](autonomy-toggle-component.md) for component documentation. |
 | 2026-02-11 | **Scheduler Consolidation**: Updated to reflect removal of embedded scheduler. Schedule toggling now uses database only; dedicated scheduler syncs changes within 60s. Scheduler enforcement section updated to reference `src/scheduler/service.py`. |

@@ -405,8 +405,31 @@ class DatabaseManager:
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================
 
-    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False):
-        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email)
+    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False, **kwargs):
+        # **kwargs carries the trinity-enterprise#69 ephemeral/provenance
+        # fields (is_ephemeral, ephemeral_max_executions, ephemeral_expires_at,
+        # spawned_by_agent, spawned_by_key_id, max_parallel_tasks).
+        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email, **kwargs)
+
+    # --- Ephemeral "ghost" agents (trinity-enterprise#69) ---
+
+    def get_agent_ephemeral_info(self, agent_name: str):
+        return self._agent_ops.get_agent_ephemeral_info(agent_name)
+
+    def mark_ephemeral_discard_intent(self, agent_name: str):
+        return self._agent_ops.mark_ephemeral_discard_intent(agent_name)
+
+    def count_ephemeral_budget_usage(self, agent_name: str):
+        return self._agent_ops.count_ephemeral_budget_usage(agent_name)
+
+    def find_discardable_ephemeral_agents(self, limit: int = 50):
+        return self._agent_ops.find_discardable_ephemeral_agents(limit)
+
+    def count_live_ephemeral_agents_for_owner(self, owner_id: int):
+        return self._agent_ops.count_live_ephemeral_agents_for_owner(owner_id)
+
+    def purge_ephemeral_agent_ownership(self, agent_name: str):
+        return self._agent_ops.purge_ephemeral_agent_ownership(agent_name)
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
@@ -751,6 +774,9 @@ class DatabaseManager:
 
     def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
         return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
+
+    def fail_all_nonterminal_for_agent(self, agent_name: str, reason: str = "ghost_discarded") -> int:
+        return self._schedule_ops.fail_all_nonterminal_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)
