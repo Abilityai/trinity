@@ -8,8 +8,19 @@ git submodule** at `src/backend/enterprise/`.
 
 This document covers the *generic installation mechanism only*: how the
 optional submodule mounts, how the backend detects it, and how to verify which
-edition an instance is running. The catalog of enterprise capabilities and
-their designs are documented privately in the enterprise repository.
+edition an instance is running.
+
+**Why there's no feature catalog here.** By a standing open-core rule
+(trinity-enterprise#45, enforced by
+`.github/workflows/enterprise-docs-guard.yml`), this public repo documents the
+*seam* — never the *catalog* of which capabilities are paid, their private
+`enterprise_*` schema, or the monetization rationale. Entitled customers and
+core-team members find the per-module catalog and designs in the private
+enterprise repository (`docs/memory/ENTERPRISE_DOCS.md` there). For a live,
+edition-specific answer to "what's actually enabled on this instance," ask the
+running backend: `GET /api/version` and `GET /api/settings/feature-flags` both
+report the enterprise feature-ids *your* build has registered (empty in an
+OSS-only build).
 
 ## How the seam works
 

@@ -22,6 +22,49 @@ A GitHub PAT is required for:
 | Clone from public templates | No |
 | Pull from public repos (read-only) | No |
 
+> **"Requires PAT" ≠ "auto-wired."** The token needs the right scopes for each row above — but for Issues, PRs, and other **GitHub CLI / REST-API** work, Trinity does **not** wire the token the way it does for `git`. See [What the PAT Authenticates](#what-the-pat-authenticates-git-vs-the-gh-cli) below before you rely on `gh`.
+
+## What the PAT Authenticates: Git vs. the `gh` CLI
+
+Trinity wires the token for **git transport only**. When an agent has a GitHub repo and a resolved PAT (per-agent override or the platform PAT), Trinity:
+
+- bakes the token into the agent repo's `origin` remote URL (`https://oauth2:<token>@github.com/...`), and
+- exposes it inside the container as the **`GITHUB_PAT`** environment variable (and in the agent's `.env`).
+
+That is enough for `git clone`, `git push`, and `git pull` against the agent's own repo to work automatically — which is what Source Mode, Working Branch Mode, and scheduled commits rely on.
+
+It is **not** enough for the GitHub CLI or the REST API:
+
+| Operation | Auto-authenticated by Trinity's token? |
+|-----------|----------------------------------------|
+| `git` push / pull / clone (agent's own repo) | **Yes** — token is in the remote URL |
+| `gh issue`, `gh pr`, `gh api`, `gh repo` … | **No** — see below |
+| GitHub REST API via `curl` / a github MCP server | **Only if the agent passes `$GITHUB_PAT` itself** |
+
+Two reasons `gh` doesn't "just work":
+
+1. **`gh` reads `GH_TOKEN` / `GITHUB_TOKEN`, not `GITHUB_PAT`.** Trinity sets `GITHUB_PAT`; it does not set the variables `gh` looks for, and it does not run `gh auth login`. The token isn't in a `.git-credentials` file either — it lives only in the remote URL — so `gh` can't discover it from git config.
+2. **`gh` is not installed in the default agent base image.** An agent that wants it must install it, or its template must add it.
+
+> **Setting the PAT will not fix a `gh` failure.** The `set_agent_github_pat` MCP tool and the **Settings → GitHub Personal Access Token** field only change which token **`git`** uses. They do not install `gh`, set `GH_TOKEN`, or authenticate the CLI/REST API. A `gh: not logged in` error, or a 401/403 from `gh`/the REST API, is **not** solved by setting or rotating the PAT.
+
+### Making an agent's `gh` / API calls work today
+
+The token is already present as `$GITHUB_PAT`, so an agent (or its template) can use it explicitly:
+
+```bash
+# GitHub CLI — install gh once, then authenticate from the env var
+gh auth login --with-token <<< "$GITHUB_PAT"
+# ...or per-command, no persistent login:
+GH_TOKEN="$GITHUB_PAT" gh issue list
+
+# REST API directly — no gh needed
+curl -H "Authorization: Bearer $GITHUB_PAT" \
+  https://api.github.com/repos/OWNER/REPO/issues
+```
+
+**The token still needs the right scopes for the operation.** A PAT scoped only for git contents can push code but will 403 on Issues/PRs. For issue management, make sure the token carries `repo` (classic) or **Issues: Read and write** (fine-grained) — see the scope tables above.
+
 ## Who Owns the Platform PAT
 
 Trinity stores a single **platform-wide PAT** that every agent inherits unless an agent has its own per-agent override. In the standard setup, the **Trinity admin** creates this token in their own GitHub account — which means:
