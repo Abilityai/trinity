@@ -258,6 +258,9 @@ class ScheduleOperations:
             compact_metadata=row["compact_metadata"] if "compact_metadata" in row_keys else None,
             # Reader-race auto-retry (#678)
             retry_count=row["retry_count"] if "retry_count" in row_keys and row["retry_count"] is not None else 0,
+            # Lease-reaper re-delivery counter (#1081 Phase 3, #429/#1402)
+            redelivery_count=row["redelivery_count"]
+                if "redelivery_count" in row_keys and row["redelivery_count"] is not None else 0,
             # Channel delivery target (ent#117)
             source_channel=row["source_channel"] if "source_channel" in row_keys else None,
             source_channel_chat_id=row["source_channel_chat_id"] if "source_channel_chat_id" in row_keys else None,
@@ -1264,7 +1267,12 @@ class ScheduleOperations:
             )
             return result.rowcount > 0
 
-    def claim_next_queued(self, agent_name: str) -> Optional[Dict]:
+    def claim_next_queued(
+        self,
+        agent_name: str,
+        worker_id: Optional[str] = None,
+        lease_seconds: Optional[int] = None,
+    ) -> Optional[Dict]:
         """Atomically claim the oldest QUEUED execution for an agent.
 
         Uses a single SQL UPDATE with a subquery that selects the oldest row
@@ -1272,12 +1280,38 @@ class ScheduleOperations:
         full row so the caller can reconstruct the request. This is race-safe
         under concurrent drain callbacks — only one caller wins the update.
 
+        Pull / work-stealing extension (#1081 Phase 1 — **DARK**): when
+        ``worker_id`` is provided, the SAME atomic UPDATE additionally stamps
+        the dark pull-coordination columns — a fresh ``claim_token``, the
+        ``lease_expires_at`` deadline (now + ``lease_seconds``, ISO-Z), and
+        ``claimed_by_worker`` — and RETURNING carries them back. When
+        ``worker_id`` is None (the existing push/backlog-drain caller) the
+        behavior is byte-for-byte what it was: those columns stay NULL and no
+        production caller passes a worker yet. One claim path, no fork.
+
+        Args:
+            agent_name: Agent whose backlog head to claim.
+            worker_id: Opaque pull-worker identity. None ⇒ legacy push claim.
+            lease_seconds: Lease TTL in seconds (worker path only). The caller
+                supplies ``execution_timeout_seconds + SLOT_TTL_BUFFER`` to match
+                the slot-TTL convention.
+
         Returns:
-            Dict of the claimed row (id, agent_name, message, backlog_metadata, ...)
-            or None if the backlog is empty for this agent.
+            Dict of the claimed row (id, agent_name, message, backlog_metadata,
+            source_*, and — on the worker path — claim_token / lease_expires_at /
+            claimed_by_worker) or None if the backlog is empty for this agent.
         """
-        now = utc_now_iso()
-        oldest_queued = (
+        now_dt = datetime.now(timezone.utc)
+        now = to_utc_iso(now_dt)
+        # C1 fix (#1081): under Postgres READ COMMITTED the uncorrelated scalar
+        # subquery compiled to a once-evaluated InitPlan whose id every blocked
+        # updater re-applied (its EvalPlanQual re-check passed because the outer
+        # WHERE had no status predicate), so a single queued row was claimed by
+        # up to N workers and double-RAN. FOR UPDATE SKIP LOCKED makes concurrent
+        # claimers lock DISTINCT head rows; SQLite serialises writers and does
+        # not support the clause, so it is applied on Postgres only — the outer
+        # status re-check below is the cross-dialect backstop.
+        oldest_queued_select = (
             select(schedule_executions.c.id)
             .where(
                 and_(
@@ -1287,16 +1321,37 @@ class ScheduleOperations:
             )
             .order_by(schedule_executions.c.queued_at.asc())
             .limit(1)
-            .scalar_subquery()
         )
+        if get_engine().dialect.name == "postgresql":
+            oldest_queued_select = oldest_queued_select.with_for_update(
+                skip_locked=True
+            )
+        oldest_queued = oldest_queued_select.scalar_subquery()
+        values = {
+            "status": TaskExecutionStatus.RUNNING,
+            "started_at": now,
+            "queued_at": None,
+        }
+        if worker_id is not None:
+            # Pull claim (#1081): stamp the lease columns in the SAME atomic
+            # UPDATE so claim + lease are indivisible (no read-then-write race).
+            values["claim_token"] = secrets.token_urlsafe(32)
+            values["lease_expires_at"] = to_utc_iso(
+                now_dt + timedelta(seconds=int(lease_seconds or 0))
+            )
+            values["claimed_by_worker"] = worker_id
         stmt = (
             update(schedule_executions)
-            .where(schedule_executions.c.id == oldest_queued)
-            .values(
-                status=TaskExecutionStatus.RUNNING,
-                started_at=now,
-                queued_at=None,
+            .where(
+                and_(
+                    schedule_executions.c.id == oldest_queued,
+                    # Re-check status in the OUTER update so a losing updater is
+                    # a no-op even if two ever resolve the same id (C1 backstop,
+                    # cross-dialect — also covers SQLite, which has no SKIP LOCKED).
+                    schedule_executions.c.status == TaskExecutionStatus.QUEUED,
+                )
             )
+            .values(**values)
             .returning(
                 schedule_executions.c.id,
                 schedule_executions.c.agent_name,
@@ -1308,6 +1363,14 @@ class ScheduleOperations:
                 schedule_executions.c.source_mcp_key_id,
                 schedule_executions.c.source_mcp_key_name,
                 schedule_executions.c.subscription_id,
+                schedule_executions.c.triggered_by,
+                schedule_executions.c.claude_session_id,
+                schedule_executions.c.model_used,
+                schedule_executions.c.started_at,
+                schedule_executions.c.claim_token,
+                schedule_executions.c.lease_expires_at,
+                schedule_executions.c.claimed_by_worker,
+                schedule_executions.c.redelivery_count,
             )
         )
         with get_engine().begin() as conn:
@@ -1339,6 +1402,235 @@ class ScheduleOperations:
                 )
             )
             return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Lease reaper (#1081 Phase 3 — #429 / #1402). The pull-coordination
+    # recovery path: a worker that dies/hangs leaves a `running` row with a
+    # past `lease_expires_at`. These three methods are the DB half of the
+    # single lease-reaper — find the expired leases, then either re-queue the
+    # SAME row (under cap) or poison-park it (at cap). Each transition carries
+    # a status + lease CAS precondition (#1082) so two reaper passes (or a late
+    # worker result) can never double-act. Additive: they key off
+    # `lease_expires_at IS NOT NULL`, so they touch ONLY pull-claimed rows and
+    # never the #1083 async-dispatch / push rows (which leave that column NULL).
+    # ------------------------------------------------------------------
+
+    def find_expired_leases(
+        self, now_iso: Optional[str] = None, limit: int = 500
+    ) -> List[Dict]:
+        """Return pull-claimed executions whose lease has expired.
+
+        A row is a lease-reaper candidate when it is still ``running`` AND
+        carries a non-NULL ``lease_expires_at`` that is now in the past. The
+        ``lease_expires_at IS NOT NULL`` filter is what keeps this disjoint from
+        every non-pull row (push / #1083 fire-and-forget leave it NULL), so the
+        reaper never double-acts with the existing stale-slot sweeps.
+
+        Read-only. The re-queue / park decision (against ``MAX_REDELIVERY``) is
+        made by the reaper service; the CAS lives in the transition methods
+        below, so a candidate that a concurrent pass already actioned simply
+        fails its CAS there (rowcount 0) rather than being filtered here.
+
+        Returns:
+            List of ``{id, agent_name, redelivery_count}`` dicts, oldest lease
+            first, capped at ``limit``.
+        """
+        now = now_iso or utc_now_iso()
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.redelivery_count,
+            )
+            .where(
+                and_(
+                    schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                    schedule_executions.c.lease_expires_at.isnot(None),
+                    schedule_executions.c.lease_expires_at < now,
+                )
+            )
+            .order_by(schedule_executions.c.lease_expires_at.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [
+                {
+                    "id": row["id"],
+                    "agent_name": row["agent_name"],
+                    "redelivery_count": row["redelivery_count"] or 0,
+                }
+                for row in conn.execute(stmt).mappings()
+            ]
+
+    def requeue_expired_lease(
+        self, execution_id: str, now_iso: Optional[str] = None
+    ) -> bool:
+        """Re-queue an expired-lease pull row (under the re-delivery cap).
+
+        **Preserves ``execution_id`` (HARD invariant #1084/#525):** this
+        re-queues the SAME row — status → ``queued``, ``redelivery_count``
+        incremented **in the same atomic UPDATE** (``+ 1`` column expression, no
+        read-then-write), and the lease/worker columns cleared (``claim_token``
+        KEPT — #1081 B2/B5 — so a genuinely-late result from the original worker
+        can still CAS-match; a fresh claim re-stamps a new token). It NEVER mints
+        a new row/id — a new id would defeat the
+        ``execution_id``-scoped effect_guard (#1084) and idempotency (#525) dedup
+        (the agent would re-send a message / re-charge on the retry).
+
+        CAS guard (#1082): the WHERE requires the row is still ``running`` with a
+        past lease, so a second reaper pass (or a worker result that already
+        finalized the row) finds nothing to write. Indivisible with the
+        increment — no double-count.
+
+        Returns:
+            True if this call performed the re-queue, False if the CAS lost.
+        """
+        now = now_iso or utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.isnot(None),
+                        schedule_executions.c.lease_expires_at < now,
+                    )
+                )
+                .values(
+                    status=TaskExecutionStatus.QUEUED,
+                    queued_at=now,
+                    # reset the run window so the next drain/claim records cleanly
+                    started_at=now,
+                    redelivery_count=schedule_executions.c.redelivery_count + 1,
+                    # #1081 B2/B5: clear the lease/worker but DELIBERATELY KEEP
+                    # claim_token — a genuinely-late SUCCESS from the original
+                    # worker (which still holds this token) must still CAS-match
+                    # and win while the row sits queued-not-yet-reclaimed (the
+                    # documented "late SUCCESS overwrites a reaper LEASE_EXPIRED"
+                    # guarantee). A fresh claim overwrites the token anyway, so a
+                    # re-claiming worker owns it and the stale token can't match.
+                    lease_expires_at=None,
+                    claimed_by_worker=None,
+                )
+            )
+            return result.rowcount > 0
+
+    def park_expired_lease(
+        self,
+        execution_id: str,
+        error: str,
+        now_iso: Optional[str] = None,
+    ) -> bool:
+        """Poison-park an expired-lease pull row (at the re-delivery cap).
+
+        Terminal: status → ``failed`` with the poison ``error`` text and the
+        lease/worker columns cleared (``claim_token`` KEPT — #1081 B2 — so a
+        genuinely-late SUCCESS from the original worker can still CAS-overwrite
+        this FAILED row; the token-gated CAS treats a NULL token as unmatchable).
+        ``redelivery_count`` is deliberately left intact so the audit trail shows
+        the row hit the cap. Operator-queue park + activity-close are the reaper
+        service's job (this is the DB transition only).
+
+        CAS guard (#1082): same ``running`` + past-lease precondition as
+        ``requeue_expired_lease``, so a second pass / late worker result can
+        never double-park.
+
+        Returns:
+            True if this call performed the park, False if the CAS lost.
+        """
+        now = now_iso or utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.isnot(None),
+                        schedule_executions.c.lease_expires_at < now,
+                    )
+                )
+                .values(
+                    status=TaskExecutionStatus.FAILED,
+                    completed_at=now,
+                    error=error,
+                    # #1081 B2: clear the lease/worker but KEEP claim_token so a
+                    # genuinely-late SUCCESS from the original worker can still
+                    # CAS-overwrite this poison-parked FAILED row (the token-gated
+                    # CAS treats a NULL token as unmatchable — nulling it here was
+                    # exactly what swallowed the late SUCCESS as `replayed`).
+                    lease_expires_at=None,
+                    claimed_by_worker=None,
+                )
+            )
+            return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Physical-occupancy meter (#1081 Phase 3 — "capacity becomes physical").
+    # Read-only counters of pull-claimed ("leased") `running` rows. A pull
+    # pilot's capacity claim is a pure SQL UPDATE (no Redis ZSET ZADD), so the
+    # ZSET-derived slot meter reads 0 for it. The CapacityManager facade adds
+    # this physical term into its TWO meter methods so occupancy reflects real
+    # rows. Disjoint-by-construction from the ZSET term: push/#1083 rows leave
+    # `lease_expires_at` NULL, pull-leased rows set it — the same
+    # `lease_expires_at IS NOT NULL` idiom `find_expired_leases` keys off. This
+    # is metering only — admission (acquire/acquire_slot/release) never reads it.
+    # ------------------------------------------------------------------
+
+    def count_active_leased_by_agent(
+        self, agent_names: List[str]
+    ) -> Dict[str, int]:
+        """Count active pull-leased `running` rows per agent (one grouped query).
+
+        A row counts when it is ``status='running'`` AND carries a non-NULL
+        ``lease_expires_at`` (a live pull claim). Rows with an already-past lease
+        are still counted — the lease-reaper converges those, and excluding them
+        would make the meter briefly under-report. Read-only.
+
+        Returns:
+            ``{agent_name: count}`` for agents in ``agent_names`` that have at
+            least one leased row; agents with none are absent (caller treats
+            absent as 0). Empty input ⇒ ``{}``.
+        """
+        if not agent_names:
+            return {}
+        stmt = (
+            select(
+                schedule_executions.c.agent_name,
+                func.count().label("c"),
+            )
+            .where(
+                and_(
+                    schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                    schedule_executions.c.lease_expires_at.isnot(None),
+                    schedule_executions.c.agent_name.in_(agent_names),
+                )
+            )
+            .group_by(schedule_executions.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return {
+                row["agent_name"]: int(row["c"])
+                for row in conn.execute(stmt).mappings()
+            }
+
+    def count_active_leased(self, agent_name: str) -> int:
+        """Scalar single-agent variant of ``count_active_leased_by_agent``.
+
+        Used by the per-agent meter path (``CapacityManager.get_slot_state``).
+        Returns 0 when the agent has no leased rows. Read-only.
+        """
+        stmt = select(func.count().label("c")).where(
+            and_(
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                schedule_executions.c.lease_expires_at.isnot(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return int(row["c"]) if row else 0
 
     def get_queued_count(self, agent_name: str) -> int:
         """Count queued backlog items for an agent."""
@@ -1542,6 +1834,7 @@ class ScheduleOperations:
         claude_session_id: str = None,
         compact_metadata: str = None,
         retry_count: Optional[int] = None,
+        claim_token: Optional[str] = None,
     ) -> bool:
         """Update execution status when completed.
 
@@ -1560,6 +1853,12 @@ class ScheduleOperations:
             retry_count: #678 — number of in-line auto-retries used to produce
                 this terminal write. None leaves the column unchanged (default
                 0 from migration). 1 means the reader-race retry fired once.
+            claim_token: #1081 Phase 1 (**DARK**) — when provided, the CAS WHERE
+                additionally requires ``claim_token == <token>`` so ONLY the
+                pull-worker holding the matching lease token can finalize the
+                row. A stale/duplicate/wrong-token result finds no row to write
+                (rowcount 0) and cannot clobber a terminal. None (every existing
+                caller) adds no precondition — dark by default.
         """
         # Terminal states that a non-success write must not overwrite.
         _TERMINAL = (
@@ -1609,17 +1908,28 @@ class ScheduleOperations:
                 # after the operator pulled the plug must not flip the row to
                 # success — that hides incomplete deliverables and silently
                 # advances the schedule's next_run_at.
-                where_clause = and_(
+                conds = [
                     schedule_executions.c.id == execution_id,
                     schedule_executions.c.status != TaskExecutionStatus.CANCELLED,
-                )
+                ]
             else:
                 # Non-success terminal write: block if already terminal so cleanup
                 # paths cannot overwrite a real completion (RELIABILITY-005).
-                where_clause = and_(
+                conds = [
                     schedule_executions.c.id == execution_id,
                     schedule_executions.c.status.notin_(_TERMINAL),
-                )
+                ]
+
+            # #1081 Phase 1 (DARK): pull-worker lease-token gate. When a
+            # claim_token is supplied the CAS ALSO requires it to match the row's
+            # stamped token, so only the worker holding the current lease can
+            # finalize. Folds into the SAME atomic UPDATE as the status
+            # precondition — no separate read-then-write. Dark: every existing
+            # caller passes None and this clause never engages.
+            if claim_token is not None:
+                conds.append(schedule_executions.c.claim_token == claim_token)
+
+            where_clause = and_(*conds)
 
             result = conn.execute(
                 update(schedule_executions).where(where_clause).values(**values)
@@ -2755,12 +3065,23 @@ class ScheduleOperations:
         Returns:
             List of dicts with id, agent_name, started_at, schedule_id.
         """
+        # #1081 Phase 3: startup orphan-recovery reconciles these rows against
+        # the agent registry and FAILs any missing one. A pull-claimed row is
+        # `running` with a lease but not yet in the agent registry (its worker
+        # hasn't begun the turn), so it would be false-orphaned here. Leased rows
+        # (lease_expires_at IS NOT NULL) are owned EXCLUSIVELY by the lease-reaper
+        # — exclude them; NULL-lease (non-pull) rows recover as before.
         stmt = select(
             schedule_executions.c.id,
             schedule_executions.c.agent_name,
             schedule_executions.c.started_at,
             schedule_executions.c.schedule_id,
-        ).where(schedule_executions.c.status == TaskExecutionStatus.RUNNING)
+        ).where(
+            and_(
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                schedule_executions.c.lease_expires_at.is_(None),
+            )
+        )
         with get_engine().connect() as conn:
             return [dict(row) for row in conn.execute(stmt).mappings()]
 
@@ -2821,6 +3142,12 @@ class ScheduleOperations:
                     and_(
                         schedule_executions.c.status == TaskExecutionStatus.RUNNING,
                         schedule_executions.c.started_at < prefilter,
+                        # #1081 Phase 3: leased pull rows (lease_expires_at IS NOT
+                        # NULL) are owned EXCLUSIVELY by the lease-reaper — its
+                        # lease window, not this generic stale window, decides when
+                        # they die. Exclude them so this sweep never FAILs a live
+                        # lease. NULL-lease (non-pull) rows still swept as before.
+                        schedule_executions.c.lease_expires_at.is_(None),
                     )
                 )
             ).mappings().all()
@@ -2900,6 +3227,14 @@ class ScheduleOperations:
                             schedule_executions.c.claude_session_id == "",
                         ),
                         schedule_executions.c.started_at < threshold,
+                        # #1081 Phase 3: a pull-claimed row is `running` with a
+                        # NULL claude_session_id until its worker begins the turn.
+                        # Leased rows (lease_expires_at IS NOT NULL) are owned
+                        # EXCLUSIVELY by the lease-reaper — exclude them here so
+                        # this no-session sweep never FAILs a legitimate lease
+                        # before it expires. NULL-lease (non-pull) rows are
+                        # unaffected: this sweep still owns them.
+                        schedule_executions.c.lease_expires_at.is_(None),
                     )
                 )
             ).mappings().all()
@@ -2948,11 +3283,18 @@ class ScheduleOperations:
         """
         now = utc_now_iso()
         with get_engine().begin() as conn:
+            # #1081 Phase 3: never fail a leased pull row (lease_expires_at IS NOT
+            # NULL) — those are owned EXCLUSIVELY by the lease-reaper. The #1083
+            # stale-slot reaper reclaims a Redis slot by TTL and calls this to
+            # FAIL the matching execution; a pull-claimed row could hold a slot,
+            # so gate both the read and the CAS on a NULL lease. NULL-lease
+            # (push / async-dispatch) rows are failed exactly as before.
             row = conn.execute(
                 select(schedule_executions.c.started_at).where(
                     and_(
                         schedule_executions.c.id == execution_id,
                         schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.is_(None),
                     )
                 )
             ).mappings().first()
@@ -2969,6 +3311,7 @@ class ScheduleOperations:
                     and_(
                         schedule_executions.c.id == execution_id,
                         schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.lease_expires_at.is_(None),
                     )
                 )
                 .values(
@@ -3134,6 +3477,12 @@ class ScheduleOperations:
                 LEFT JOIN agent_schedules s ON e.schedule_id = s.id
                 LEFT JOIN agent_ownership ao ON e.agent_name = ao.agent_name
                 WHERE e.status = :status
+                  -- #1081 Phase 3: leased pull rows (lease_expires_at IS NOT NULL)
+                  -- are owned EXCLUSIVELY by the lease-reaper. The periodic
+                  -- watchdog reconciles against the agent registry and would
+                  -- false-orphan a claimed-but-not-yet-started lease; exclude it.
+                  -- NULL-lease (non-pull) rows are reconciled as before.
+                  AND e.lease_expires_at IS NULL
                 """),
                 {"status": TaskExecutionStatus.RUNNING},
             ).mappings().all()

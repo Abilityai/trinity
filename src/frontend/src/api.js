@@ -36,9 +36,15 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Token expired or invalid - redirect to login
-      localStorage.removeItem('token')
-      window.location.href = '/login'
+      // #138: the client portal manages its own (verified-email) session and
+      // must never be bounced to the operator /login by a stale operator JWT —
+      // let portal code handle its own 401 (drop the portal token, show sign-in).
+      const path = window.location.pathname
+      if (!path.startsWith('/portal')) {
+        // Token expired or invalid - redirect to login
+        localStorage.removeItem('token')
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }

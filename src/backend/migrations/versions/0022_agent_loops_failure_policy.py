@@ -14,15 +14,15 @@ Fresh PG builds already get the columns because ``0001_baseline`` iterates
 stamped at an earlier revision and never re-running baseline — also picks the
 columns up on ``alembic upgrade head``.
 
-Revision ID: 0019_agent_loops_failure_policy
-Revises: 0018_schedule_executions_source_channel
+Revision ID: 0022_agent_loops_failure_policy
+Revises: 0021_schedule_executions_redelivery_count
 Create Date: 2026-06-30
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0019_agent_loops_failure_policy"
-down_revision = "0018_schedule_executions_source_channel"
+revision = "0022_agent_loops_failure_policy"
+down_revision = "0021_schedule_executions_redelivery_count"
 branch_labels = None
 depends_on = None
 

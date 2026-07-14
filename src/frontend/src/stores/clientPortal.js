@@ -177,6 +177,29 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // #138: unified history across ALL rostered agents for the sidebar. The
+    // per-agent /sessions endpoint is the source; a small roster makes merging
+    // N calls cheap (a single all-agents endpoint is a later optimization). Each
+    // thread is tagged with its agent so the sidebar can show the color dot and
+    // route to the right conversation. Best-effort per agent (one down agent
+    // never blanks the whole list); sorted most-recently-active first.
+    async fetchAllSessions() {
+      const agents = this.agents || []
+      const lists = await Promise.all(agents.map(async (a) => {
+        try {
+          const sessions = await this.fetchSessions(a.name)
+          return sessions.map((s) => ({ ...s, agent_name: a.name }))
+        } catch { return [] }
+      }))
+      const merged = lists.flat()
+      merged.sort((x, y) => {
+        const tx = x.last_message_at || x.created_at || ''
+        const ty = y.last_message_at || y.created_at || ''
+        return ty.localeCompare(tx)
+      })
+      return merged
+    },
+
     async fetchRoster() {
       this.loading = true
       this.error = null
@@ -185,6 +208,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
+        // Roster carries per-agent briefing (#138): description + client-visible
+        // playbooks[]{title,description,starter_prompt}, shipped at sign-in so the
+        // new-chat screen renders with zero extra fetches.
         this.agents = data.agents || []
       } catch (err) {
         // An expired/invalid portal token → drop it so the sign-in form returns.

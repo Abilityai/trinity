@@ -1,268 +1,280 @@
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
-    <!-- Top bar -->
-    <header class="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
-      <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <span class="text-xl">🪟</span>
-          <span class="font-semibold">Client Portal</span>
+  <div class="h-screen flex flex-col bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 overflow-hidden">
+    <!-- ============================ SIGN-IN ============================ -->
+    <div v-if="!store.isClientSignedIn" class="flex-1 flex items-center justify-center px-4">
+      <div class="w-full max-w-sm">
+        <div class="flex items-center gap-2 mb-6">
+          <svg class="w-7 h-7 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+          <span class="font-semibold text-lg">Client Portal</span>
         </div>
-        <button
-          v-if="store.isClientSignedIn"
-          class="text-sm text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
-          @click="store.signOut()"
-        >Sign out</button>
-      </div>
-    </header>
 
-    <main class="max-w-4xl mx-auto px-4 py-10">
-      <!-- ============ SIGN-IN ============ -->
-      <div v-if="!store.isClientSignedIn" class="max-w-sm mx-auto">
-        <h1 class="text-xl font-semibold mb-1">Sign in to your agents</h1>
-        <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
-          Enter the email an operator shared agents with. We'll send you a 6-digit code.
-        </p>
-
-        <!-- Step 1: email -->
-        <form v-if="step === 'email'" @submit.prevent="onRequest" class="space-y-3">
-          <input
-            v-model="email"
-            type="email"
-            required
-            placeholder="you@example.com"
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm focus:ring-action-primary-500 focus:border-action-primary-500"
-          />
-          <button
-            type="submit"
-            :disabled="busy || !email"
-            class="w-full rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm px-4 py-2 disabled:opacity-50"
-          >{{ busy ? 'Sending…' : 'Send code' }}</button>
-        </form>
-
-        <!-- Step 2: code -->
-        <form v-else @submit.prevent="onVerify" class="space-y-3">
-          <p class="text-sm text-gray-500 dark:text-gray-400">
-            If <span class="font-medium text-gray-700 dark:text-gray-300">{{ email }}</span> has access,
-            a code is on its way. Enter it below.
+        <template v-if="step === 'email'">
+          <h1 class="text-xl font-semibold mb-1">Sign in to your agents</h1>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
+            Enter the email an operator shared agents with — we'll send a 6-digit code.
           </p>
-          <input
-            v-model="code"
-            inputmode="numeric"
-            maxlength="6"
-            placeholder="6-digit code"
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm tracking-widest text-center focus:ring-action-primary-500 focus:border-action-primary-500"
-          />
+          <form @submit.prevent="onRequest" class="space-y-3">
+            <input
+              v-model="email"
+              type="email"
+              required
+              placeholder="you@example.com"
+              class="w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none"
+            />
+            <button
+              type="submit"
+              :disabled="busy || !email"
+              class="w-full rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium px-4 py-2.5 disabled:opacity-50"
+            >{{ busy ? 'Sending…' : 'Send code' }}</button>
+          </form>
+        </template>
+
+        <template v-else>
+          <h1 class="text-xl font-semibold mb-1">Enter your code</h1>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mb-6">
+            If <span class="font-medium text-gray-700 dark:text-gray-300">{{ email }}</span> has access, a 6-digit code is on its way.
+          </p>
+          <PortalCodeInput ref="codeInput" v-model="code" @complete="onVerify" />
+          <div class="mt-3 flex items-center justify-between text-xs">
+            <button class="text-gray-400 hover:text-gray-600" @click="backToEmail">← different email</button>
+            <button
+              :disabled="resendIn > 0 || busy"
+              class="text-action-primary-600 dark:text-action-primary-400 hover:underline disabled:opacity-50 disabled:no-underline"
+              @click="onResend"
+            >{{ resendIn > 0 ? `Resend in ${resendIn}s` : 'Resend code' }}</button>
+          </div>
+          <p class="mt-2 text-xs text-gray-400">Codes expire after a few minutes.</p>
           <button
-            type="submit"
+            type="button"
             :disabled="busy || code.length < 6"
-            class="w-full rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm px-4 py-2 disabled:opacity-50"
+            class="mt-4 w-full rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium px-4 py-2.5 disabled:opacity-50"
+            @click="onVerify"
           >{{ busy ? 'Verifying…' : 'Verify & continue' }}</button>
-          <button type="button" class="w-full text-xs text-gray-400 hover:text-gray-600" @click="step = 'email'; code = ''">
-            ← use a different email
-          </button>
-        </form>
+        </template>
 
         <p v-if="error" class="mt-3 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
       </div>
+    </div>
 
-      <!-- ============ ROSTER ============ -->
-      <div v-else>
-        <div class="mb-5">
-          <h1 class="text-2xl font-semibold tracking-tight">Your Agents</h1>
-          <p class="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-            Shared with <span class="font-medium text-gray-700 dark:text-gray-300">{{ store.clientEmail }}</span>.
-          </p>
-        </div>
-
-        <!-- Search across all your conversations (thread title + message content). -->
-        <div class="mb-4 relative">
-          <svg class="w-4 h-4 text-gray-400 absolute left-3 top-2.5 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" /></svg>
-          <input
-            v-model="searchQuery"
-            type="search"
-            placeholder="Search your chats…"
-            class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm pl-9 pr-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500"
+    <!-- ============================ APP SHELL ============================ -->
+    <div v-else class="flex-1 flex min-h-0">
+      <!-- Sidebar: persistent on desktop, drawer on mobile -->
+      <div class="hidden sm:flex shrink-0">
+        <PortalSidebar
+          :roster="store.agents"
+          :threads="threads"
+          :client-email="store.clientEmail"
+          :current-session-id="activeSessionId"
+          v-model:search="search"
+          :searching="searching"
+          :search-results="searchResults"
+          @new-chat="newChat"
+          @new-chat-with-agent="newChatWithAgent"
+          @open-thread="openThread"
+          @sign-out="onSignOut"
+        />
+      </div>
+      <div v-if="mobileNav" class="sm:hidden fixed inset-0 z-40">
+        <div class="absolute inset-0 bg-black/40" @click="mobileNav = false"></div>
+        <div class="absolute inset-y-0 left-0">
+          <PortalSidebar
+            :roster="store.agents"
+            :threads="threads"
+            :client-email="store.clientEmail"
+            :current-session-id="activeSessionId"
+            v-model:search="search"
+            :searching="searching"
+            :search-results="searchResults"
+            @new-chat="() => { mobileNav = false; newChat() }"
+            @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
+            @open-thread="(t) => { mobileNav = false; openThread(t) }"
+            @sign-out="onSignOut"
           />
         </div>
-
-        <!-- Results replace the roster while searching (main-page-style search). -->
-        <div v-if="isSearching">
-          <div v-if="searching" class="text-center py-10 text-sm text-gray-400">Searching…</div>
-          <div v-else-if="searchResults.length === 0" class="text-center py-10 text-sm text-gray-400">
-            No chats match “{{ searchQuery.trim() }}”.
-          </div>
-          <ul v-else class="space-y-2">
-            <li
-              v-for="r in searchResults"
-              :key="r.session_id"
-              class="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 cursor-pointer hover:border-action-primary-400 dark:hover:border-action-primary-600 transition-colors"
-              @click="openResult(r)"
-            >
-              <div class="flex items-center justify-between gap-2">
-                <div class="font-medium text-sm truncate">{{ r.title || 'Untitled chat' }}</div>
-                <span class="shrink-0 text-[11px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">{{ r.agent_name }}</span>
-              </div>
-              <div v-if="r.snippet" class="mt-1 text-xs text-gray-500 dark:text-gray-400 line-clamp-2">{{ r.snippet }}</div>
-              <div v-if="r.last_message_at" class="mt-1 text-[11px] text-gray-400">{{ formatDate(r.last_message_at) }}</div>
-            </li>
-          </ul>
-        </div>
-
-        <div v-show="!isSearching">
-        <div v-if="store.loading" class="text-center py-16">
-          <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
-        </div>
-
-        <div v-else-if="store.agents.length === 0" class="text-center py-16 border border-dashed border-gray-300 dark:border-gray-700 rounded-lg">
-          <div class="text-4xl mb-3">🗂️</div>
-          <p class="text-sm text-gray-600 dark:text-gray-300 font-medium">No agents shared with you yet</p>
-        </div>
-
-        <div v-else class="grid grid-cols-1 sm:grid-cols-2 gap-5">
-          <div
-            v-for="a in store.agents"
-            :key="a.name"
-            class="group rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 cursor-pointer transition-all duration-150 hover:shadow-lg hover:border-action-primary-300 dark:hover:border-action-primary-700 hover:-translate-y-0.5"
-            @click="openChat(a)"
-          >
-            <div class="flex items-center gap-4">
-              <div
-                class="h-16 w-16 shrink-0 rounded-full flex items-center justify-center text-white font-semibold text-xl shadow-sm ring-2 ring-white/40 dark:ring-black/20"
-                :style="{ background: tint(a.name) }"
-              >{{ initials(a.name) }}</div>
-              <div class="min-w-0">
-                <div class="font-semibold text-lg truncate">{{ a.name }}</div>
-                <div class="text-sm text-gray-500 dark:text-gray-400 truncate"><span v-if="a.owner">by {{ a.owner }}</span></div>
-                <div class="text-[11px] text-gray-400 mt-0.5"><span v-if="a.shared_at">shared {{ formatDate(a.shared_at) }}</span></div>
-              </div>
-            </div>
-            <div class="mt-5 flex items-center justify-between">
-              <button
-                class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
-                @click.stop="docsAgent = a"
-              >Files</button>
-              <span class="text-sm font-medium text-gray-400 group-hover:text-action-primary-600 dark:group-hover:text-action-primary-400 transition-colors">Open chat →</span>
-            </div>
-          </div>
-        </div>
-        </div>
       </div>
-    </main>
 
-    <!-- Chat drawer over the portal session (roster-scoped, gated endpoint) -->
-    <PortalChat
-      v-if="chatAgent"
-      :agent="chatAgent"
-      :initial-session-id="chatInitialSession"
-      :send-message="(name, msg, sid) => store.sendPortalChat(name, msg, sid)"
-      :load-history="(name, sid) => store.fetchHistory(name, sid)"
-      :list-sessions="(name) => store.fetchSessions(name)"
-      :create-session="(name) => store.createSession(name)"
-      :synthesize="(name, text) => store.synthesizeTts(name, text)"
-      :transcribe="(name, blob) => store.transcribeStt(name, blob)"
-      :upload-document="(name, file) => store.uploadDocument(name, file)"
-      :voice-available="!!chatAgent.voice_available"
-      @close="chatAgent = null; chatInitialSession = null"
-    />
+      <!-- Main stage -->
+      <main class="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900">
+        <PortalConversation
+          v-if="activeAgent"
+          :key="convKey"
+          :agent="activeAgent"
+          :roster="store.agents"
+          :session-id="pendingSession"
+          :prefill="prefill"
+          @switch-agent="switchAgent"
+          @session-adopted="onSessionAdopted"
+          @sessions-changed="refreshThreads"
+          @open-files="filesOpen = true"
+          @open-menu="mobileNav = true"
+        >
+          <template #empty>
+            <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
+          </template>
+        </PortalConversation>
 
-    <!-- Documents drawer — files a rostered agent has shared -->
-    <PortalDocuments
-      v-if="docsAgent"
-      :agent="docsAgent"
-      @close="docsAgent = null"
-    />
+        <div v-else class="flex-1 flex flex-col items-center justify-center text-center px-6">
+          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+          <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">No agents shared with you yet</p>
+          <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
+        </div>
+      </main>
+    </div>
+
+    <!-- Files panel -->
+    <PortalFilesPanel v-if="filesOpen && activeAgent" :agent="activeAgent" @close="filesOpen = false" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import PortalChat from '@/views/enterprise/PortalChat.vue'
-import PortalDocuments from '@/views/enterprise/PortalDocuments.vue'
+import PortalSidebar from '@/components/portal/PortalSidebar.vue'
+import PortalConversation from '@/components/portal/PortalConversation.vue'
+import PortalBriefing from '@/components/portal/PortalBriefing.vue'
+import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
+import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 
 const store = useClientPortalStore()
-const chatAgent = ref(null)
-const chatInitialSession = ref(null)
-const docsAgent = ref(null)
+const route = useRoute()
+const router = useRouter()
 
-// --- Cross-chat search (title + message content, across all rostered agents) ---
-const searchQuery = ref('')
-const searchResults = ref([])
-const searching = ref(false)
-const isSearching = computed(() => searchQuery.value.trim().length >= 2)
-let searchTimer = null
-
-watch(searchQuery, (q) => {
-  clearTimeout(searchTimer)
-  if (q.trim().length < 2) { searchResults.value = []; searching.value = false; return }
-  searching.value = true
-  searchTimer = setTimeout(async () => {
-    try { searchResults.value = await store.searchChats(q.trim()) }
-    catch { searchResults.value = [] }
-    finally { searching.value = false }
-  }, 250)   // debounce keystrokes
-})
-
-// Open a rostered agent's chat at its most-recent thread (roster "Chat" button).
-function openChat(a) {
-  chatInitialSession.value = null
-  chatAgent.value = a
-}
-
-// Open a search result on its specific conversation. Reuse the roster card for
-// the owner label when we have it; otherwise fall back to name-only.
-function openResult(r) {
-  const known = store.agents.find((a) => a.name === r.agent_name)
-  chatInitialSession.value = r.session_id
-  chatAgent.value = known || { name: r.agent_name }
-}
+// ---- Sign-in ------------------------------------------------------------------
 const step = ref('email')
 const email = ref('')
 const code = ref('')
 const busy = ref(false)
 const error = ref(null)
+const codeInput = ref(null)
+const resendIn = ref(0)
+let resendTimer = null
 
+function startResendCooldown() {
+  resendIn.value = 30
+  clearInterval(resendTimer)
+  resendTimer = setInterval(() => { if (--resendIn.value <= 0) clearInterval(resendTimer) }, 1000)
+}
 async function onRequest() {
-  busy.value = true
-  error.value = null
+  busy.value = true; error.value = null
   try {
     await store.requestCode(email.value.trim().toLowerCase())
-    step.value = 'code'
-  } catch (err) {
-    error.value = err.response?.data?.detail || 'Could not send a code. Try again.'
-  } finally {
-    busy.value = false
-  }
+    step.value = 'code'; code.value = ''
+    startResendCooldown()
+    await nextTick(); codeInput.value?.focusFirst()
+  } catch (err) { error.value = err.response?.data?.detail || 'Could not send a code. Try again.' }
+  finally { busy.value = false }
 }
-
+async function onResend() {
+  if (resendIn.value > 0) return
+  await onRequest()
+}
+function backToEmail() { step.value = 'email'; code.value = ''; error.value = null }
 async function onVerify() {
-  busy.value = true
-  error.value = null
+  if (code.value.length < 6 || busy.value) return
+  busy.value = true; error.value = null
   try {
     await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
-    await store.fetchRoster()
+    await bootstrap()
   } catch (err) {
-    error.value = err.response?.status === 401
-      ? 'Invalid or expired code.'
-      : (err.response?.data?.detail || 'Verification failed.')
-  } finally {
-    busy.value = false
+    error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
+    code.value = ''
+    await nextTick(); codeInput.value?.focusFirst()
+  } finally { busy.value = false }
+}
+
+// ---- Shell state --------------------------------------------------------------
+const threads = ref([])
+const activeAgentName = ref(null)
+const pendingSession = ref(null)      // session to load when the conversation (re)mounts
+const prefill = ref('')
+const filesOpen = ref(false)
+const mobileNav = ref(false)
+const convGen = ref(0)                // bumps on explicit thread switches → remount
+
+const activeSessionId = computed(() => route.params.sessionId || null)
+const activeAgent = computed(() => {
+  if (!activeAgentName.value) return store.agents[0] || null
+  return store.agents.find((a) => a.name === activeAgentName.value) || { name: activeAgentName.value }
+})
+// Remount the conversation on agent/thread switches, but NOT when a session-less
+// first turn adopts an id (that just updates the route in place).
+const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.name) || ''}#${convGen.value}`)
+
+// ---- Navigation handlers ------------------------------------------------------
+function newChat() {
+  pendingSession.value = null; prefill.value = ''; convGen.value++
+  if (route.params.sessionId) router.push('/portal')
+}
+function newChatWithAgent(name) {
+  activeAgentName.value = name
+  pendingSession.value = null; prefill.value = ''; convGen.value++
+  if (route.params.sessionId) router.push('/portal')
+}
+function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
+function openThread(t) {
+  const sid = t.id || t.session_id
+  activeAgentName.value = t.agent_name || activeAgentName.value
+  pendingSession.value = sid; prefill.value = ''; convGen.value++
+  search.value = ''
+  router.push(`/portal/c/${sid}`)
+}
+function onSessionAdopted(id) {
+  pendingSession.value = id
+  if (route.params.sessionId !== id) router.replace(`/portal/c/${id}`)
+  refreshThreads()
+}
+function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
+
+async function refreshThreads() {
+  threads.value = await store.fetchAllSessions()
+}
+
+// ---- Cross-chat search (sidebar) ----------------------------------------------
+const search = ref('')
+const searchResults = ref([])
+const searching = ref(false)
+let searchTimer = null
+watch(search, (q) => {
+  clearTimeout(searchTimer)
+  if ((q || '').trim().length < 2) { searchResults.value = []; searching.value = false; return }
+  searching.value = true
+  searchTimer = setTimeout(async () => {
+    try { searchResults.value = await store.searchChats(q.trim()) } catch { searchResults.value = [] }
+    finally { searching.value = false }
+  }, 250)
+})
+
+// ---- Deep-link / refresh resolution -------------------------------------------
+// On a /portal/c/:id load (or refresh), resolve which agent that thread belongs
+// to from the merged thread list so the shell opens the right conversation.
+watch([() => route.params.sessionId, () => threads.value.length], () => {
+  const sid = route.params.sessionId
+  if (!sid || !store.isClientSignedIn) return
+  if (pendingSession.value === sid && activeAgentName.value) return
+  const known = threads.value.find((t) => (t.id || t.session_id) === sid)
+  if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
+})
+
+async function bootstrap() {
+  await store.fetchRoster()
+  await refreshThreads()
+  const sid = route.params.sessionId
+  if (sid) {
+    const known = threads.value.find((t) => (t.id || t.session_id) === sid)
+    if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
+    else pendingSession.value = sid   // let the conversation resolve/load it
+    convGen.value++
   }
 }
 
-function initials(name) {
-  const p = (name || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim().split(' ')
-  return ((p[0]?.[0] || '') + (p[1]?.[0] || p[0]?.[1] || '')).toUpperCase() || '?'
-}
-function tint(name) {
-  let h = 0
-  for (let i = 0; i < (name || '').length; i++) h = (h * 31 + name.charCodeAt(i)) % 360
-  return `hsl(${h}, 45%, 45%)`
-}
-function formatDate(iso) {
-  try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) }
-  catch { return iso }
-}
+onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })
+onBeforeUnmount(() => { clearInterval(resendTimer); clearTimeout(searchTimer) })
 
-onMounted(() => { if (store.isClientSignedIn) store.fetchRoster() })
+function onSignOut() {
+  store.signOut()
+  threads.value = []; activeAgentName.value = null; pendingSession.value = null
+  step.value = 'email'; email.value = ''; code.value = ''
+  if (route.params.sessionId) router.push('/portal')
+}
 </script>

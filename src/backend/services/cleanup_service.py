@@ -210,6 +210,9 @@ class CleanupReport:
     idempotency_keys_purged: int = 0
     # Issue #918: agent_reports rows pruned past their retention window
     agent_reports_pruned: int = 0
+    # #1081 Phase 3 (#429/#1402): lease-reaper — pull rows re-queued / poison-parked
+    expired_leases_requeued: int = 0
+    expired_leases_parked: int = 0
     # Issue #1581: Docker data volumes removed at retention hard-purge +
     # orphan volumes (no ownership row, past grace) reclaimed by the sweep
     agent_volumes_removed: int = 0
@@ -230,9 +233,11 @@ class CleanupReport:
                 self.execution_logs_pruned + self.execution_rows_pruned +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
-                self.agent_reports_pruned + self.agent_volumes_removed +
-                self.orphan_agent_volumes_reclaimed + self.ephemeral_agents_discarded +
-                self.ephemeral_orphans_reclaimed + self.operator_queue_pruned)
+                self.agent_reports_pruned +
+                self.expired_leases_requeued + self.expired_leases_parked +
+                self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
+                self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
+                self.operator_queue_pruned)
 
     def to_dict(self) -> Dict:
         return {
@@ -252,6 +257,8 @@ class CleanupReport:
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
             "idempotency_keys_purged": self.idempotency_keys_purged,
             "agent_reports_pruned": self.agent_reports_pruned,
+            "expired_leases_requeued": self.expired_leases_requeued,
+            "expired_leases_parked": self.expired_leases_parked,
             "agent_volumes_removed": self.agent_volumes_removed,
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
             "operator_queue_pruned": self.operator_queue_pruned,
@@ -314,6 +321,12 @@ class CleanupService:
         report = CleanupReport()
 
         confirmed_running_ids = await self._sweep_watchdog(report)
+        # #1081 Phase 3 (#429/#1402): additive lease-reaper. Runs BEFORE the
+        # generic stale/no-session sweeps so a pull-claimed expired-lease row is
+        # re-queued (or poison-parked) — preserving execution_id — rather than
+        # blanket-FAILED by them; those sweeps then skip it (no longer `running`).
+        # Inert until a PULL_MODE_PILOT_AGENTS agent is opted in.
+        await self._sweep_expired_leases(report)
         self._sweep_stale_executions(report)
         self._sweep_no_session_executions(report)
         self._sweep_orphaned_skipped(report)
@@ -368,6 +381,77 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Watchdog] Reconciliation error: {e}")
             return set()
+
+    async def _sweep_expired_leases(self, report: CleanupReport) -> None:
+        """0b. Lease reaper for pull-claimed tasks (#1081 Phase 3 — #429/#1402).
+
+        Additive path: recovers a pull worker's expired lease (a `running` row
+        with a past `lease_expires_at`) by re-queuing the SAME execution_id under
+        the re-delivery cap, or poison-parking it (FAILED + operator-queue item)
+        at the cap. Disjoint from the #1083 stale-slot sweep by construction —
+        that keys off Redis slot TTL; this keys off the `lease_expires_at` column
+        (NULL on every non-pull row). Owns its try/except (never aborts the
+        cycle). Inert when no agent is opted in.
+
+        #1085: honor the re-delivery governor's shared-cause pause — during a
+        fleet outage the worker's result callback is throttled/held (not lost);
+        re-queuing or parking now would race the throttled-then-resumed result.
+        Fail-open: a gate error degrades to running the reaper.
+        """
+        try:
+            import config as _config
+
+            if _config.REDELIVERY_GOVERNOR_ENABLED:
+                from services.redelivery_governor import get_redelivery_governor
+
+                if get_redelivery_governor().should_hold_reaper():
+                    logger.info(
+                        "[Cleanup] lease reaper held — re-delivery paused (#1085)"
+                    )
+                    return
+        except Exception as e:  # noqa: BLE001 — never block the sweep on a gate error
+            logger.debug("[Cleanup] governor lease-reaper gate skipped: %s", e)
+
+        try:
+            from services import lease_reaper_service
+
+            result = lease_reaper_service.reap_expired_leases(db)
+            report.expired_leases_requeued = result.requeued
+            report.expired_leases_parked = result.parked
+            # Close the open dispatch activity for each poison-parked execution
+            # (its worker never reported a terminal, so nothing else closes it).
+            for execution_id in result.parked_execution_ids:
+                await self._close_reaped_activity(execution_id)
+            if result.requeued or result.parked:
+                logger.info(
+                    "[Cleanup] lease reaper: re-queued=%d parked=%d",
+                    result.requeued, result.parked,
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reaping expired leases: {e}")
+
+    async def _close_reaped_activity(self, execution_id: str) -> None:
+        """Close the open dispatch activity for a poison-parked execution (#429).
+
+        Mirror of ``_close_stale_slot_activity`` (#1083) for the lease-reaper
+        park path — uses the filtered ``get_open_activity_id_for_execution`` so a
+        shared-eid tool_call row is never cross-closed. Best-effort.
+        """
+        try:
+            activity_id = db.get_open_activity_id_for_execution(execution_id)
+            if not activity_id:
+                return
+            from services.activity_service import activity_service
+            await activity_service.complete_activity(
+                activity_id=activity_id,
+                status=ActivityState.FAILED,
+                error=f"{_LEASE_EXPIRED_TAG}: pull lease expired, poison-parked (#429)",
+            )
+        except Exception as e:  # pragma: no cover - best-effort
+            logger.debug(
+                f"[Cleanup] Could not close activity for poison-parked execution "
+                f"{execution_id}: {e}"
+            )
 
     def _sweep_stale_executions(self, report: CleanupReport) -> None:
         """1. Mark stale executions failed (agent-unreachable safety net).

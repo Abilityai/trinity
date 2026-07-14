@@ -65,6 +65,7 @@ def _configure_db(db):
     db.purge_schedule.return_value = True
     db.idempotency_purge_expired.return_value = 11  # RELIABILITY-006 / #525
     db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
+    db.find_expired_leases.return_value = []  # #1081 Phase 3 lease reaper — inert by default
     db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
 
 

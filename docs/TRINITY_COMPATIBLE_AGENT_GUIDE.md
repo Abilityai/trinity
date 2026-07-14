@@ -162,6 +162,24 @@ credentials.json
 # Large generated content - DO NOT COMMIT
 content/
 
+# Bulk data / deps / cache / index dirs - DO NOT COMMIT (#1596)
+# These churn on every run and bloat .git unboundedly under auto-sync.
+# Git sync is for code + state, not datasets/indexes/deps — those belong
+# in data_paths (#1169). Negate per-repo if genuinely needed (e.g. !keep.db).
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.sqlite
+*.sqlite3
+*.db
+
 # Claude Code - commit commands/skills/agents, exclude runtime data
 .claude.json
 .claude.json.backup

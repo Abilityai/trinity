@@ -172,6 +172,29 @@ ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
 # can't drift.
 MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
 
+# Pull-pilot CONSUMER opt-in for the agent-side worker pool (#946 Phase 2, Epic
+# #1045 / umbrella #1081). ORTHOGONAL to MCP_AGENT_CHAT_PULL_ENABLED above: that
+# flag is the global PRODUCER switch (how agent→agent chat is enqueued, decided
+# in the MCP server); this is a per-agent CONSUMER allowlist (which agents PULL
+# their queued work via GET /api/internal/next-task instead of being pushed to).
+# Comma-separated agent names; empty ⇒ no agent pulls (default). An allowlisted
+# agent gets TRINITY_PULL_MODE / TRINITY_MAX_PARALLEL_TASKS injected at
+# create/recreate (services/agent_service/pull_mode.py) — NOT the master internal
+# secret: the worker authenticates with the agent's own scoped TRINITY_MCP_API_KEY
+# (#307/#1159). Every other
+# agent's push path is unchanged. Default OFF — clearing the list is the rollback.
+PULL_MODE_PILOT_AGENTS = os.getenv("PULL_MODE_PILOT_AGENTS", "")
+
+# Lease-reaper poison-task cap (#1081 Phase 3 — #429 / #1402). MAX_REDELIVERY is
+# how many times a pull-claimed task whose worker died/hung (a `running` row with
+# a past `lease_expires_at`) is re-delivered — the reaper re-queues the SAME
+# execution_id and bumps `schedule_executions.redelivery_count` — before it is
+# poison-parked to the operator queue (FAILED + a human-facing park item). The
+# fleet-wide default; a per-agent override is a deferred follow-up (see
+# services/lease_reaper_service.py). Inert until a PULL_MODE_PILOT_AGENTS agent is
+# opted in (no non-pull row ever carries a lease).
+MAX_REDELIVERY = int(os.getenv("MAX_REDELIVERY", "3"))
+
 # Correlated-Failure / Thundering-Herd Controls (#1085) — re-delivery governor.
 # These guard the live #1083 fire-and-forget callback path (and, unchanged, the
 # future pull-mode re-delivery path) against a fleet-wide retry storm: a backend

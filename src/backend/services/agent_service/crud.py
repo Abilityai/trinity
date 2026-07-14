@@ -885,6 +885,12 @@ async def create_agent_internal(
     # - inject_credentials endpoint (Quick Inject)
     # - .credentials.enc import on agent startup
 
+    # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
+    # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
+    # behavior is unchanged. See services/agent_service/pull_mode.py.
+    from services.agent_service.pull_mode import pull_mode_env_vars
+    env_vars.update(pull_mode_env_vars(config.name))
+
     # trinity-enterprise#69: atomic ephemeral quota reservation (Redis
     # INCR-with-cap; DB-count fallback when Redis is down). Placed immediately
     # before the docker block so every later failure path releases it via the

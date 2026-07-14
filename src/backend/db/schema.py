@@ -264,6 +264,10 @@ TABLES = {
             fan_out_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
+            claim_token TEXT,
+            lease_expires_at TEXT,
+            claimed_by_worker TEXT,
+            redelivery_count INTEGER DEFAULT 0,
             source_channel TEXT,
             source_channel_chat_id TEXT,
             source_channel_thread TEXT,
@@ -684,6 +688,7 @@ TABLES = {
             behind_main INTEGER DEFAULT 0,
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
+            git_dir_bytes INTEGER,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

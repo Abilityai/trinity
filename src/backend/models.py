@@ -1006,6 +1006,67 @@ class ExecutionResultEnvelope(BaseModel):
 
 
 # =============================================================================
+# Pull / work-stealing coordination (#1081 Phase 1 — DARK)
+# =============================================================================
+
+# The pinned typed terminal-reason taxonomy (MESSAGE_ENVELOPE_SCHEMA.md §4):
+# the TaskExecutionErrorCode code-enum values plus the two contract additions
+# (OOM, MAX_TURNS). Lower-case, matching the code enum's string values.
+_PULL_ERROR_CODES = frozenset({
+    "timeout", "capacity", "auth", "billing", "agent_error", "network",
+    "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
+})
+# reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
+# live #1083 3-way map — OPEN-1).
+_PULL_RESULT_STATUSES = frozenset({"success", "failed", "cancelled"})
+
+
+class PullTaskResultRequest(BaseModel):
+    """Body for ``POST /api/internal/tasks/{id}/result`` (#1081 Phase 1, DARK).
+
+    The ``reply`` payload per ``MESSAGE_ENVELOPE_SCHEMA.md`` §3.3 (which cites
+    §2.4) plus the ``claim_token`` the worker received from the §3.1 claim
+    response. The token is validated INSIDE the atomic CAS terminal write
+    (``db/schedules.py`` ``update_execution_status(claim_token=…)``) — a
+    stale / duplicate / wrong-token POST can never clobber a terminal row
+    (#1082 status-as-projection). ``status`` + ``error_code`` are the pinned
+    typed taxonomy (§4); unknown values are rejected at the boundary (422).
+    """
+    claim_token: str = Field(..., min_length=1, description="Token from the §3.1 claim response")
+    status: str = Field(..., description="'success' | 'failed' | 'cancelled' (§2.4/§4)")
+    content: Optional[str] = Field(None, description="Result text (§2.4 reply.content)")
+    error_code: Optional[str] = Field(None, description="Typed failure class (§4); required on failed")
+    cost: Optional[float] = None
+    tokens: Optional[int] = None
+    session_id: Optional[str] = None
+    execution_log: Optional[List] = None
+    metadata: Optional[Dict] = None
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, v: str) -> str:
+        if v not in _PULL_RESULT_STATUSES:
+            raise ValueError(
+                f"status must be one of {sorted(_PULL_RESULT_STATUSES)} "
+                "(MESSAGE_ENVELOPE_SCHEMA §2.4/§4)"
+            )
+        return v
+
+    @field_validator("error_code")
+    @classmethod
+    def _check_error_code(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        norm = v.strip().lower()
+        if norm not in _PULL_ERROR_CODES:
+            raise ValueError(
+                f"error_code must be one of {sorted(_PULL_ERROR_CODES)} "
+                "(MESSAGE_ENVELOPE_SCHEMA §4)"
+            )
+        return norm
+
+
+# =============================================================================
 # Soft-Delete Admin Recovery (#834 Phase 1c)
 # =============================================================================
 
