@@ -22,7 +22,9 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "90"))
+# #1039: 5-day community retention floor (was 90). Enterprise `retention`
+# license unlocks longer windows; LOG_* env remains a self-host escape hatch.
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "5"))
 LOG_ARCHIVE_ENABLED = os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true"
 LOG_CLEANUP_HOUR = int(os.getenv("LOG_CLEANUP_HOUR", "3"))
 

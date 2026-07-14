@@ -103,6 +103,14 @@ services:
       - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
       - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
       - GITHUB_PAT=${GITHUB_PAT}
+      # Log Retention & Archival Configuration (#1039)
+      # These were MISSING from prod — prod launches standalone (no base-compose
+      # merge), so an operator-set LOG_RETENTION_DAYS never reached the
+      # container and retention silently fell back to the code default. Default
+      # is the 5-day community floor; enterprise `retention` unlocks longer.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
+      - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
+      - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the

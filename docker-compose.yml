@@ -95,7 +95,9 @@ services:
       # SendGrid transport (EMAIL_PROVIDER=sendgrid) — read by src/backend/config.py (#771)
       - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
       # Log Retention & Archival Configuration
-      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
+      # #1039: 5-day community retention floor (was 90). Enterprise `retention`
+      # license unlocks longer windows; this env is the self-host escape hatch.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       - LOG_ARCHIVE_PATH=/data/archives  # Local path for archived logs
