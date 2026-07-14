@@ -1570,7 +1570,10 @@ async def update_proactive_rate_limits_setting(
     """
     require_admin(current_user)
 
-    updated, warnings = [], []
+    # Validate ALL provided fields BEFORE writing any — a mixed valid/invalid body
+    # must be all-or-nothing (a 422 leaves every cap unchanged), not partially
+    # applied.
+    pending = {}
     for key in PROACTIVE_RATE_LIMIT_DEFAULTS:
         value = getattr(body, key, None)
         if value is None:
@@ -1580,6 +1583,10 @@ async def update_proactive_rate_limits_setting(
                 status_code=422,
                 detail=f"{key} must be an integer between 0 and {PROACTIVE_RATE_LIMIT_MAX} (0 = unlimited)",
             )
+        pending[key] = value
+
+    updated, warnings = [], []
+    for key, value in pending.items():
         db.set_setting(key, str(value))
         updated.append(key)
         if value == 0:
