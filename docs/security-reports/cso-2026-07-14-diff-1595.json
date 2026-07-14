@@ -1,0 +1,85 @@
+{
+  "version": "1.1",
+  "date": "2026-07-14",
+  "mode": "daily",
+  "scope": "--diff feature/1595-agent-git-gc vs dev",
+  "phases_run": [
+    0,
+    1,
+    2,
+    5,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 3,
+    "new_data_flows": 1,
+    "new_env_knobs": 3
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "VERIFIED_RESOLVED_IN_BRANCH",
+      "category": "credential-exposure",
+      "title": "PAT-bearing remote URL persisted in git stderr sinks (sync-state summary + push-collision operator-queue entry)",
+      "file": "docker/base-image/agent_server/routers/git.py",
+      "fingerprint": "c8393da1a79feeea",
+      "resolution": "_redact_url_userinfo at both exits + regression tests; ops advisory for retained operator_queue rows"
+    },
+    {
+      "id": 2,
+      "severity": "MEDIUM",
+      "confidence": 8,
+      "status": "VERIFIED_RESOLVED_IN_BRANCH",
+      "category": "robustness",
+      "title": "Unclamped 2**N backoff on agent-writable maintenance_failures (bignum memory bomb)",
+      "file": "docker/base-image/agent_server/routers/git.py",
+      "fingerprint": "46456e6a357ec9bb",
+      "resolution": "isinstance guard + exponent clamp"
+    },
+    {
+      "id": 3,
+      "severity": "MEDIUM",
+      "confidence": 7,
+      "status": "VERIFIED_RESOLVED_IN_BRANCH",
+      "category": "availability",
+      "title": "Unbounded post-kill communicate() can wedge worker thread holding _REPO_LOCK",
+      "file": "docker/base-image/agent_server/utils/registered_run.py",
+      "fingerprint": "ad3aa61cbe162afb",
+      "resolution": "bounded communicate(timeout=10) + kill fallback"
+    },
+    {
+      "id": 4,
+      "severity": "LOW",
+      "confidence": 8,
+      "status": "VERIFIED_RESOLVED_IN_BRANCH",
+      "category": "correctness",
+      "title": "Backoff timestamp parse missed TypeError (naive vs aware comparison)",
+      "file": "docker/base-image/agent_server/routers/git.py",
+      "fingerprint": "f80ad44595b6f9a7",
+      "resolution": "catch (ValueError, TypeError)"
+    }
+  ],
+  "supply_chain_summary": "no dependency or workflow changes in diff",
+  "filter_stats": {
+    "raw_candidates": 9,
+    "discarded_by_fp_rules": 5,
+    "reported": 4
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 1,
+    "open": 0,
+    "resolved_in_branch": 4
+  },
+  "trend": "diff-scoped; not comparable to full-repo baselines"
+}

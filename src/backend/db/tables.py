@@ -608,6 +608,9 @@ agent_sync_state = Table(
     Column("ahead_working", Integer),
     Column("behind_working", Integer),
     Column("git_dir_bytes", Integer),  # #1596: agent .git on-disk size
+    Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
+    Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
+    Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )

@@ -69,6 +69,10 @@ ahead_main INTEGER DEFAULT 0
 behind_main INTEGER DEFAULT 0
 ahead_working INTEGER DEFAULT 0
 behind_working INTEGER DEFAULT 0
+git_dir_bytes INTEGER                    -- #1596: .git on-disk size
+pack_count INTEGER                       -- #1595: packs (count-objects -v)
+loose_objects INTEGER                    -- #1595: loose objects
+maintenance_failures INTEGER DEFAULT 0   -- #1595: failed maintenance streak
 last_check_at TEXT
 updated_at TEXT NOT NULL
 FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
@@ -127,6 +131,62 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
   clobber protected branches).
 - Loop swallows every exception so a single bad tick can't kill the
   heartbeat.
+- **#1595:** the cycle runs in a worker thread (`asyncio.to_thread`) so a
+  long maintenance pass can't starve `/health`, the 5s liveness heartbeat,
+  or chat. A non-blocking module-level repo lock (`_REPO_LOCK`) replaces
+  the serialization the blocking loop used to provide by accident: the
+  cycle skips (`{"status": "skipped", "reason": "repo_busy"}`) when an
+  operator git op is in flight, and the mutating endpoints
+  (`/api/git/sync`, `/api/git/pull`, reset) return `409 X-Conflict-Type:
+  agent_busy` while a cycle/maintenance runs (`_with_repo_lock`).
+
+### 1a. Survivable maintenance pass (#1596, hardened by #1595)
+
+```
+_run_auto_sync_once (worker thread, repo lock held)
+    ├── _reap_stale_git_litter          gc.pid / index.lock >1h;
+    │                                   tmp_pack_* > repack budget + 300s
+    ├── _collect_git_object_stats       one `git count-objects -v`
+    ├── _git_dir_bytes                  `du -sb .git`
+    ├── add / status / commit / push    ALL via run_registered(...)
+    ├── _maybe_run_git_maintenance(stats)
+    │     ├── trigger: packs ≥ 20 OR loose ≥ 6700
+    │     ├── guards: backoff gate → disk preflight (free < 1.1× pack bytes)
+    │     ├── git -c pack.threads=1 -c pack.windowMemory=128m \
+    │     │     repack -A -d -l -q --unpack-unreachable=1.hour.ago
+    │     └── git gc --quiet --prune=1.hour.ago
+    └── _write_sync_state_file          atomic (tmp + os.replace); metrics on
+                                        EVERY terminal path; maintenance
+                                        backoff bookkeeping (1h→24h)
+```
+
+- **Why registered:** any bare agent-server child is indistinguishable from
+  a leaked orphan — the sweep's hard-protect walk goes UP to PID 1, never
+  down (#1501). `utils/registered_run.py` wraps Popen with
+  `ProcessRegistry.add_transient_pid` (TTL derived from the call-time
+  timeout) and kills the **process group** on timeout (`start_new_session`
+  + `killpg`): killing only `git repack` orphans its `pack-objects` child
+  holding the stderr pipe, wedging `communicate()` and recreating the
+  tmp_pack litter.
+- **Why auto-gc is off:** a detached `gc --auto` reparents to PID 1 and is
+  SIGKILLed by the sweep within one tick — it never once completed in
+  production (#1595: 44 GB / 97%-garbage repos, stale `gc.pid`, no
+  `gc.log`). Base image bakes `gc.auto=0`, `gc.autoDetach=false`,
+  `maintenance.auto=false`, `maintenance.autoDetach=false` into
+  `/etc/gitconfig`; `git_service.setup_git_in_container` mirrors them into
+  `~/.gitconfig` for older images. With auto-gc off, garbage accumulates
+  as LOOSE objects — hence the loose-count trigger condition.
+- **Prune grace:** Claude executions run git concurrently by design;
+  `--prune=now` would delete their just-written, not-yet-referenced
+  objects (repo corruption). 1h grace > any single git op and still
+  reclaims the aged garbage that matters.
+- **Startup reap:** `startup.sh` removes `index.lock`, `gc.pid`,
+  `objects/maintenance.lock`, and ref/reflog `*.lock` at container start
+  (provably no live git process) — a stale `index.lock` from a killed op
+  froze three production agents for ~12 days.
+- **Rollout:** everything ships in the base image — existing fleets need a
+  base-image rebuild + agent recreate; pre-existing bloat recovery is
+  ops-side (trinity-ops-agent#127) using `GIT_MAINTENANCE_TIMEOUT_SECONDS`.
 
 ### 2. Backend poller
 
@@ -135,16 +195,23 @@ SyncHealthService._poll_loop (60 s)
     ├── for each git-enabled agent:
     │     ├── GET http://agent:8000/api/git/status (via AgentClient)
     │     │     response contains sync_state + dual ahead/behind
+    │     ├── coerce agent-supplied ints (#1595): git_dir_bytes /
+    │     │     pack_count / loose_objects / maintenance_failures →
+    │     │     _coerce_nonneg_int (sync-state.json is agent-writable;
+    │     │     reject strings/bools/objects/out-of-range at the boundary)
     │     ├── db.upsert_sync_state(...)
-    │     └── if consecutive_failures crossed 3:
-    │           └── db.create_operator_queue_item(
-    │                 type='sync_failing', priority='high', …)
+    │     ├── if consecutive_failures crossed 3:
+    │     │     └── db.create_operator_queue_item(
+    │     │           type='sync_failing', priority='high', …)
+    │     └── #1595 git_bloat alerts (same edge-trigger pattern):
+    │           ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
+    │           └── maintenance_failures crossed 3
 ```
 
 Emission is **edge-triggered** — a new entry appears only on the
-transition from `N-1 < 3` to `N >= 3`. A fresh failure series after a
-`success` reset produces a distinct entry (the ID embeds the emission
-timestamp).
+transition from `N-1 < 3` to `N >= 3` (or below-ceiling → above-ceiling
+for `git_bloat`). A fresh failure series after a `success` reset produces
+a distinct entry (the ID embeds the emission timestamp).
 
 ### 3. Dual ahead/behind (P6 fix)
 
@@ -281,6 +348,24 @@ Baseline: 75 passing tests added across the two PRs.
   tracks `main`, and auto-pushing to `main` would clobber protected
   branches. Source-mode agents still get sync-state tracking via the
   backend poller, they just don't run the heartbeat.
+- **Sub-repos get no maintenance (#1595)**. `gc.auto=0` is system-wide but
+  the maintenance pass targets only `/home/developer/.git`; a project repo
+  cloned into a subdirectory has auto-gc off with no replacement. Not a
+  regression (its detached auto-gc was always sweep-killed too), but the
+  blind spot is now by design — revisit if sub-repo bloat surfaces.
+- **Agents with auto-sync OFF get no maintenance (#1595)**. Deliberate:
+  they previously had zero *effective* maintenance anyway (auto-gc never
+  completed), and `gc.auto=0` at least stops their tmp_pack garbage
+  ratchet.
+- **Maintenance bounds garbage, not history (#1595)**. Every repack still
+  rewrites full history, whose size grows without bound under auto-commit
+  churn — the opt-in history-squash policy and/or geometric repack
+  (`--geometric=2` + midx) remain the deferred follow-up that fixes the
+  long-run cost curve.
+- **`/api/git/status` still blocks the agent event loop** (~30s worst case
+  per 60s poll on a bloated repo — `git fetch` + ~8 subprocesses on the
+  loop thread). Pre-existing; evidence filed to #1505 rather than threading
+  it here (a threaded status needs a busy-path design vs the repo lock).
 
 ## Related Flows
 

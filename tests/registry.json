@@ -872,14 +872,25 @@
       "file": "unit/test_1557_autonomy_breaker_decoupled.py",
       "feature": "#1557",
       "added": "2026-07-10",
-      "categories": ["backend", "unit", "circuit-breaker", "autonomy"],
-      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
+      "categories": [
+        "backend",
+        "unit",
+        "circuit-breaker",
+        "autonomy"
+      ],
+      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard \u2014 fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
     },
     {
       "file": "integration/test_1557_autonomy_inbound.py",
       "feature": "#1557",
       "added": "2026-07-10",
-      "categories": ["backend", "integration", "circuit-breaker", "autonomy", "real-redis"],
+      "categories": [
+        "backend",
+        "integration",
+        "circuit-breaker",
+        "autonomy",
+        "real-redis"
+      ],
       "description": "Opt-in live-agent leg (TRINITY_AUTONOMY_TEST_AGENT): disabling autonomy on a running healthy agent leaves the transport circuit not-dormant (allow_request True) and an inbound POST /task returns 200 instead of fast-failing 'circuit breaker open'. Restores autonomy in finally. Needs real Redis + API."
     },
     {
@@ -895,6 +906,28 @@
         "database"
       ],
       "description": "Ephemeral ghost agents (ent#69) on db_harness: 5 new agent_ownership columns live-select; Ephemeral mixin accessors (register/read-back, discard-intent marker, budget usage counting terminal+active, find-discardable by TTL/budget, purge allows live ephemeral REFUSES live durable, cascade cleans permission edges, per-owner count); fail_all_nonterminal_for_agent CAS-style; DatabaseManager facade delegations; CapacityManager acquire gate (expired/exhausted deny BEFORE slot work, counts active, fail-open on DB error); ephemeral key fence allow/deny matrix + fail-open; Part 2 guards (reject_agent_principal, enforce_agent_spawn_scope name+key-id matrix); apply_result budget hook (fail-open, triggers discard at budget, no-op under budget); discard primitive (full path + idempotent rerun + audit row read-back, half-discarded resume, refuses durable, lock contention skip); atomic quota INCR-with-cap + Redis-down DB fallback."
+    },
+    {
+      "file": "unit/test_1595_git_maintenance.py",
+      "feature": "#1595",
+      "added": "2026-07-14",
+      "categories": [
+        "agent-server",
+        "git-sync",
+        "reliability"
+      ],
+      "description": "Survivable git maintenance (#1595, agent-server): run_registered sweep-registration pairing + call-time TTL + process-GROUP timeout kill; stale gc.pid/index.lock/tmp_pack hygiene age gates; maintenance pack-OR-loose trigger, backoff gate, disk preflight, 1h prune grace; sync-state maintenance bookkeeping + atomic write; cycle repo-lock skip, failure-path metrics, swept-status fails loudly; _with_repo_lock 409 agent_busy; auto_sync loop dispatches via asyncio.to_thread. Real git fixture repos, no Docker."
+    },
+    {
+      "file": "unit/test_1595_sync_health_signals.py",
+      "feature": "#1595",
+      "added": "2026-07-14",
+      "categories": [
+        "backend",
+        "git-sync",
+        "observability"
+      ],
+      "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
     }
   ]
 }

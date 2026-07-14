@@ -1131,6 +1131,14 @@ async def initialize_git_in_container(
         ('git config --global user.email "trinity@agent.local"', True),
         ('git config --global user.name "Trinity Agent"', True),
         ('git config --global init.defaultBranch main', True),
+        # #1595: auto-gc always detaches to PID 1 and is SIGKILLed by the
+        # orphan sweep — disable it; the agent-server's registered maintenance
+        # pass owns repo upkeep. Global (volume-persisted ~/.gitconfig) so
+        # agents on older base images pick it up on the next sync init.
+        ('git config --global gc.auto 0', True),
+        ('git config --global gc.autoDetach false', True),
+        ('git config --global maintenance.auto false', True),
+        ('git config --global maintenance.autoDetach false', True),
         ('git init', True),
         (_remote_seturl_subcommand(_git_remote_url(github_pat, github_repo)), True),
         ('git fetch origin', False),  # Optional — remote may be empty

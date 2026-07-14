@@ -56,6 +56,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | g
     apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
+# #1595: git auto-maintenance can never complete inside agent containers — a
+# detached `git gc --auto` reparents to PID 1 and the orphan sweep SIGKILLs it
+# within one tick, every time, leaving tmp_pack litter and unbounded .git
+# growth (44GB / 97%-garbage repos observed). Disable it system-wide; the
+# agent-server's registered maintenance pass (auto-sync loop, routers/git.py)
+# owns repo maintenance instead. autoDetach=false is the belt: if a repo-local
+# config re-enables auto gc/maintenance, it runs foreground as a child of its
+# triggering command and inherits that command's sweep protection rather than
+# detaching to PID 1.
+RUN git config --system gc.auto 0 && \
+    git config --system gc.autoDetach false && \
+    git config --system maintenance.auto false && \
+    git config --system maintenance.autoDetach false
+
 RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Install Gemini CLI for multi-runtime support
