@@ -24,7 +24,7 @@ from models import SlackChannelMessageRequest, SlackEventResponse, User
 from services import rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
-from services.settings_service import get_slack_signing_secret
+from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -612,10 +612,9 @@ async def set_agent_as_slack_dm_default(
 # Proactive channel messaging (#350 Phase 3) — parallels Telegram #349
 # =============================================================================
 
-# Mirror the Telegram proactive caps (10/hr/channel, 100/hr/agent) via the
-# shared sliding-window limiter (#1023) rather than a bespoke bucket.
-_SLACK_PROACTIVE_PER_CHANNEL = 10
-_SLACK_PROACTIVE_PER_AGENT = 100
+# Proactive caps via the shared sliding-window limiter (#1023). The per-channel /
+# per-agent limits are admin-configurable (#1609) — sourced from settings at
+# request time (0 = unlimited). Window is fixed at 1 hour.
 _SLACK_PROACTIVE_WINDOW = 3600
 _SLACK_MESSAGE_MAX = 4000
 
@@ -682,17 +681,22 @@ async def send_agent_slack_channel_message(
     if not target:
         raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
 
-    # Rate limit: per-channel then per-agent (fail-open inside the limiter).
-    rate_limiter.enforce(
-        f"slack_proactive:{name}:{channel_id}",
-        _SLACK_PROACTIVE_PER_CHANNEL, _SLACK_PROACTIVE_WINDOW,
-        detail="Too many messages to this channel.",
-    )
-    rate_limiter.enforce(
-        f"slack_proactive:{name}",
-        _SLACK_PROACTIVE_PER_AGENT, _SLACK_PROACTIVE_WINDOW,
-        detail="Too many proactive messages from this agent.",
-    )
+    # Rate limit: per-channel then per-agent, caps sourced from settings (#1609;
+    # 0 = unlimited → skip). Fail-open inside the limiter.
+    per_channel = get_proactive_rate_limit("slack_proactive_per_channel")
+    per_agent = get_proactive_rate_limit("slack_proactive_per_agent")
+    if per_channel > 0:
+        rate_limiter.enforce(
+            f"slack_proactive:{name}:{channel_id}",
+            per_channel, _SLACK_PROACTIVE_WINDOW,
+            detail=f"Too many messages to this channel (cap {per_channel}/hour).",
+        )
+    if per_agent > 0:
+        rate_limiter.enforce(
+            f"slack_proactive:{name}",
+            per_agent, _SLACK_PROACTIVE_WINDOW,
+            detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
+        )
 
     bot_token = db.get_slack_workspace_bot_token(target["team_id"])
     if not bot_token:

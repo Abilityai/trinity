@@ -18,6 +18,7 @@ from models import (
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
     AgentQuotaUpdate,
+    ProactiveRateLimitsUpdate,
     ApiKeyTest,
     ApiKeyUpdate,
     BrainOrbSettingsUpdate,
@@ -57,6 +58,10 @@ from services.settings_service import (
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
     get_max_parallel_tasks_ceiling,
+    PROACTIVE_RATE_LIMIT_DEFAULTS,
+    PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
+    PROACTIVE_RATE_LIMIT_MAX,
+    get_proactive_rate_limit,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -1526,6 +1531,80 @@ async def update_max_parallel_tasks_ceiling_setting(
     }
 
 
+@router.get("/proactive-rate-limits")
+async def get_proactive_rate_limits_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Effective proactive channel-message caps (#1609).
+
+    Admin-only. The five agent-INITIATED anti-spam caps (Slack per-channel /
+    per-agent, Telegram per-group / per-agent, proactive-DM per-recipient),
+    per hour. ``0`` = unlimited. Inbound replies are never subject to these.
+    """
+    require_admin(current_user)
+    limits = {
+        key: {
+            "value": get_proactive_rate_limit(key),
+            "default": default,
+            "is_default": get_proactive_rate_limit(key) == default
+                          and settings_service.get_setting(key) is None,
+            "description": PROACTIVE_RATE_LIMIT_DESCRIPTIONS.get(key, ""),
+        }
+        for key, default in PROACTIVE_RATE_LIMIT_DEFAULTS.items()
+    }
+    return {"limits": limits, "max": PROACTIVE_RATE_LIMIT_MAX, "window_hours": 1}
+
+
+@router.put("/proactive-rate-limits")
+async def update_proactive_rate_limits_setting(
+    body: ProactiveRateLimitsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set proactive channel-message caps (#1609).
+
+    Admin-only. Only provided fields change; each must be an int in
+    ``[0, MAX]`` (``0`` = unlimited, which is warned in the response). Named
+    422 on bad input. Audit-logged. Runtime-resolved — no restart.
+    """
+    require_admin(current_user)
+
+    updated, warnings = [], []
+    for key in PROACTIVE_RATE_LIMIT_DEFAULTS:
+        value = getattr(body, key, None)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > PROACTIVE_RATE_LIMIT_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} must be an integer between 0 and {PROACTIVE_RATE_LIMIT_MAX} (0 = unlimited)",
+            )
+        db.set_setting(key, str(value))
+        updated.append(key)
+        if value == 0:
+            warnings.append(f"{key} is now UNLIMITED — the anti-spam guardrail is disabled for it.")
+
+    if updated:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "proactive_rate_limits", "action": "update", "updated": updated},
+        )
+
+    return {
+        "success": True,
+        "updated": updated,
+        "warnings": warnings,
+        "limits": {key: get_proactive_rate_limit(key) for key in PROACTIVE_RATE_LIMIT_DEFAULTS},
+    }
+
+
 # ============================================================================
 # Brain Orb Feature Flags (trinity-enterprise#85 — admin-configurable)
 # ============================================================================
@@ -1811,6 +1890,16 @@ async def update_setting(
             detail=(
                 "max_parallel_tasks_ceiling must be set via "
                 "PUT /api/settings/max-parallel-tasks-ceiling (range-validated 1–32)"
+            ),
+        )
+
+    # #1609: proactive caps go through the dedicated range-validated route.
+    if key in PROACTIVE_RATE_LIMIT_DEFAULTS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/proactive-rate-limits "
+                f"(range-validated 0–{PROACTIVE_RATE_LIMIT_MAX}, 0 = unlimited)"
             ),
         )
 

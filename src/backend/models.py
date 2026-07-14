@@ -743,6 +743,19 @@ class MaxParallelTasksCeilingUpdate(BaseModel):
     value: int
 
 
+class ProactiveRateLimitsUpdate(BaseModel):
+    """Body for PUT /api/settings/proactive-rate-limits (#1609).
+
+    All optional — only provided caps change. Each is an int per hour; ``0`` =
+    unlimited. Range ([0, MAX]) is enforced in the router with a named 422.
+    """
+    slack_proactive_per_channel: Optional[int] = None
+    slack_proactive_per_agent: Optional[int] = None
+    telegram_proactive_per_group: Optional[int] = None
+    telegram_proactive_per_agent: Optional[int] = None
+    proactive_dm_per_recipient: Optional[int] = None
+
+
 class AgentCapacityUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
     max_parallel_tasks: int
