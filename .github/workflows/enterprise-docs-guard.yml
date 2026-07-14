@@ -44,14 +44,44 @@ jobs:
       - name: Scan live public docs + open-core seam files for enterprise disclosure
         run: |
           set -uo pipefail
-          # Genuinely-private identifiers: named paid features + private schema +
-          # per-module paths. Word-boundaried where the token is also a common word.
-          PATTERN='\bSIEM\b|\bSCIM\b|enterprise_siem|enterprise_user_2fa|enterprise_2fa|enterprise_sso|two_factor|2fa_recovery_codes'
+          # Genuinely-private identifiers. Two families:
+          #
+          #  1. Private module names with no OSS meaning (SIEM, SCIM, client_portal,
+          #     permissions_matrix, two_factor). NOTE: a guard must name what it
+          #     forbids, and this file is public — so every token here is one that is
+          #     ALREADY public elsewhere (client_portal + permissions_matrix + SIEM +
+          #     SCIM ship in the OSS Vue bundle; two_factor was in this guard's
+          #     previous pattern). Adding a token that is *not* already public would
+          #     make the guard itself the disclosure — don't. Deliberately ABSENT:
+          #     `SSO` (public GitHub-PAT docs legitimately say "SSO authorization
+          #     required"), `retention` / `audit` / `user management` (all name OSS
+          #     subsystems — the cleanup sweeps, the OSS audit log, the Settings
+          #     role UI). Guarding those would false-fire on core docs.
+          #  2. Private SCHEMA — any `enterprise_*` identifier. Generic on purpose
+          #     (trinity-enterprise#151): the previous explicit list could not see a
+          #     table that shipped after it was written. Four names are OSS-legitimate
+          #     and allowlisted below; add to the allowlist only with a reason.
+          #
+          # Allowlist rationale:
+          #   enterprise_features         — the OSS feature-flag field (/api/version,
+          #                                 /api/settings/feature-flags). Public by design.
+          #   enterprise_schema_migrations— the two-track migration runner's tracking
+          #                                 table. Invariant #3 documents the MECHANISM.
+          #   enterprise_connectors*      — an OSS table. The MCP connector went
+          #                                 OSS-core in #118; the name was kept to avoid
+          #                                 a migration.
+          #   enterprise_docs             — the ENTERPRISE_DOCS.md filename in pointers.
+          #   enterprise_registered       — the OSS `app.state` seam flag in main.py.
+          #
+          # PCRE (-P) is required for the negative lookahead.
+          PATTERN='\bSIEM\b|\bSCIM\b|\bclient_portal\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b)[a-z_]+'
           # The open-core seam files: public code whose comments must stay generic
           # (the entitlement mechanism), never naming the paid catalog (#1461).
           SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py'
           # Live docs only — exclude historical/point-in-time trees and this guard.
-          HITS=$(grep -rniE "$PATTERN" docs/ CLAUDE.md $SEAM_FILES \
+          # docs/ is recursive, so docs/user-docs/** (which auto-publishes to a public
+          # search index via sync-docs-to-vertex.yml) is covered here too.
+          HITS=$(grep -rniP "$PATTERN" docs/ CLAUDE.md $SEAM_FILES \
                    --exclude-dir=archive \
                    --exclude-dir=releases \
                    --exclude-dir=security-reports \

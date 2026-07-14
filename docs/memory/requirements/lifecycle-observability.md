@@ -282,10 +282,10 @@ endpoint — reports flow agent → MCP → backend.
 the budget is exhausted: container removed, DB rows purged via the cascade
 primitive, Redis runtime state cleared. Ghosts never enter soft-delete/retention
 (no 180-day name reservation) and are volume-less (container writable layer only —
-they never recreate, so nothing needs to survive a recreate). Creation with an
-ephemeral budget is **entitlement-gated** (the `ephemeral_agents` module exposes
-it; the lifecycle mechanics below are edition-agnostic OSS primitives — the
-`suspended_at` core-primitive pattern). Scoped to **heterogeneous-workspace jobs**
+they never recreate, so nothing needs to survive a recreate). Every requirement
+below is OSS code; creating an agent *with a budget* additionally requires the
+`ephemeral_agents` entitlement (registry read — the registering module is
+private). Scoped to **heterogeneous-workspace jobs**
 (different repo/config per ghost); same-agent burst parallelism stays with
 `fan_out` and, post-pull, replica groups.
 
