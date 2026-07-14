@@ -543,9 +543,9 @@ Declared runtime data (SQLite DBs, datasets) over the **existing durable home vo
 
 ### Git Sync Health (#389/#390)
 
-**Agent side:** 15-min `auto_sync` heartbeat loop in the agent server (gated by `GIT_SYNC_AUTO`; default-on for non-source-mode GitHub-template agents) stages/commits/pushes in-container changes and writes the outcome to `.trinity/sync-state.json` (S1a).
+**Agent side:** 15-min `auto_sync` heartbeat loop in the agent server (gated by `GIT_SYNC_AUTO`; default-on for non-source-mode GitHub-template agents) stages/commits/pushes in-container changes and writes the outcome to `.trinity/sync-state.json` (S1a). **Bloat controls (#1596):** after a successful push the loop runs a self-throttling consolidating **repack** (`git repack -adl` + `git gc --prune=now`) once the pack count crosses `GIT_MAINTENANCE_PACK_THRESHOLD` (default 20) — bounding the pack/loose/garbage growth that let one agent's `.git` reach 44 GB (non-destructive; does NOT rewrite reachable history). It also measures `.git` on-disk size (`du -sb`) into `sync-state.json.git_dir_bytes`. The fleet-wide default `.gitignore` (`git_service._GITIGNORE_PATTERNS`, merged into each agent on sync) now also excludes bulk data/deps/caches (`node_modules/`, `.venv/`, `__pycache__/`, `*.sqlite`/`*.db`, …) so churny non-source files aren't auto-committed going forward (an opt-in history-squash policy for existing bloat is a deferred follow-up).
 
-**Backend side** (details in [git-sync-health.md](feature-flows/git-sync-health.md)): `SyncHealthService` polls git-enabled agents every 60s, upserts `agent_sync_state` (`consecutive_failures` ++ on fail / reset on success; `ahead_working`/`behind_working` expose working-branch divergence, P6), emits `sync_failing` operator-queue entries at ≥3 failures (S1). Powers the dashboard sync dot, `GET /api/agents/sync-health`, and `GET /api/fleet/sync-audit` — whose `duplicate_binding` flag marks agents sharing a `(github_repo, working_branch)` pair (§P5 silent-clobber setup) (S6, #390).
+**Backend side** (details in [git-sync-health.md](feature-flows/git-sync-health.md)): `SyncHealthService` polls git-enabled agents every 60s, upserts `agent_sync_state` (`consecutive_failures` ++ on fail / reset on success; `ahead_working`/`behind_working` expose working-branch divergence, P6; `git_dir_bytes` carries the agent's `.git` size for the bloat curve, #1596), emits `sync_failing` operator-queue entries at ≥3 failures (S1). Powers the dashboard sync dot, `GET /api/agents/sync-health` (now incl. `git_dir_bytes`), and `GET /api/fleet/sync-audit` — whose `duplicate_binding` flag marks agents sharing a `(github_repo, working_branch)` pair (§P5 silent-clobber setup) (S6, #390).
 
 **Recovery (S3, #384):** `POST /api/agents/{name}/git/reset-to-main-preserve-state` adopts `origin/main`, snapshots the S4 persistent-state allowlist first, overlays it back, force-with-lease pushes — safe recovery for parallel-history deadlock (P2/P3). 409 with `X-Conflict-Type: agent_busy | no_git_config | no_remote_main`. Per-agent toggles: auto-sync flag and freeze-schedules-if-sync-failing flag (see API Endpoints).
 
@@ -1667,6 +1667,7 @@ CREATE TABLE agent_sync_state (
     behind_main INTEGER DEFAULT 0,
     ahead_working INTEGER DEFAULT 0,       -- #389 P6: working-branch divergence
     behind_working INTEGER DEFAULT 0,
+    git_dir_bytes INTEGER,                 -- #1596: agent .git on-disk size (bloat curve)
     last_check_at TEXT,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

@@ -135,6 +135,7 @@ class SyncHealthService:
             behind_main=payload.get("behind_main") or payload.get("behind") or 0,
             ahead_working=payload.get("ahead_working") or 0,
             behind_working=payload.get("behind_working") or 0,
+            git_dir_bytes=sync_state.get("git_dir_bytes"),  # #1596 bloat observability
             last_check_at=utc_now_iso(),
         )
 

@@ -95,6 +95,7 @@ _SYNC_STATE_DEFAULT: Dict = {
     "last_sync_at": None,
     "last_error_summary": None,
     "consecutive_failures": 0,
+    "git_dir_bytes": None,  # #1596: last-measured .git on-disk size
 }
 
 
@@ -124,11 +125,14 @@ def _write_sync_state_file(
     last_sync_status: str,
     last_sync_at: Optional[str] = None,
     last_error_summary: Optional[str] = None,
+    git_dir_bytes: Optional[int] = None,
 ) -> Dict:
     """Persist one sync outcome.
 
     consecutive_failures is bumped on `failed`, reset on `success`, untouched
     on `never`. last_error_summary is cleared on success, kept on never.
+    git_dir_bytes (#1596) is updated when measured; a None here preserves the
+    last known value.
     """
     prior = _read_sync_state_file(home_dir)
 
@@ -140,6 +144,9 @@ def _write_sync_state_file(
         prior["last_error_summary"] = None
     # else 'never' — leave counters alone
 
+    if git_dir_bytes is not None:
+        prior["git_dir_bytes"] = git_dir_bytes
+
     prior["last_sync_status"] = last_sync_status
     prior["last_sync_at"] = last_sync_at or datetime.now(timezone.utc).isoformat()
 
@@ -149,8 +156,68 @@ def _write_sync_state_file(
     return prior
 
 
+# #1596: auto-sync commits the workspace on every heartbeat and never ran git
+# maintenance, so `git gc --auto` (which only stacks incremental packs under this
+# write pattern) let one agent's .git reach 44GB / 2,267 packs. Consolidate when
+# the pack count crosses a threshold — bounded work, self-throttling (a healthy
+# repo with few packs is a no-op). Non-destructive: repack rewrites packs +
+# prunes redundant/unreachable objects; it does NOT rewrite reachable history
+# (an opt-in squash policy is a separate follow-up).
+_GIT_MAINTENANCE_PACK_THRESHOLD = int(os.getenv("GIT_MAINTENANCE_PACK_THRESHOLD", "20"))
+
+
+def _count_git_packs(home_dir: Path) -> int:
+    try:
+        return sum(1 for _ in (home_dir / ".git" / "objects" / "pack").glob("*.pack"))
+    except Exception:
+        return 0
+
+
+def _git_dir_bytes(home_dir: Path) -> Optional[int]:
+    """#1596: on-disk size of the agent's ``.git`` (observability). Uses ``du -sb``
+    (a fast C tree walk — safe even at millions of objects). None on any error."""
+    git_dir = home_dir / ".git"
+    if not git_dir.exists():
+        return None
+    try:
+        res = subprocess.run(
+            ["du", "-sb", str(git_dir)],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        return int(res.stdout.split()[0])
+    except Exception:
+        return None
+
+
+def _maybe_run_git_maintenance(home_dir: Path) -> Optional[str]:
+    """#1596: consolidate .git when packs pile up. Best-effort, non-fatal — a
+    failed/skipped maintenance never fails the sync. Returns a short status."""
+    packs = _count_git_packs(home_dir)
+    if packs < _GIT_MAINTENANCE_PACK_THRESHOLD:
+        return None
+    try:
+        # -a: repack ALL objects into a single pack; -d: delete now-redundant
+        # packs; -l: local only (don't pull remote packs). Then gc prunes loose
+        # + unreachable garbage immediately.
+        subprocess.run(
+            ["git", "repack", "-adl", "-q"],
+            cwd=str(home_dir), capture_output=True, text=True, timeout=1800, check=True,
+        )
+        subprocess.run(
+            ["git", "gc", "--quiet", "--prune=now"],
+            cwd=str(home_dir), capture_output=True, text=True, timeout=600, check=False,
+        )
+        after = _count_git_packs(home_dir)
+        logger.info("git maintenance: consolidated %d packs -> %d", packs, after)
+        return f"repacked {packs}->{after}"
+    except Exception as exc:  # never let maintenance break the sync loop
+        logger.warning("git maintenance failed (non-fatal): %s", exc)
+        return "failed"
+
+
 def _run_auto_sync_once(home_dir: Path) -> Dict:
-    """One auto-sync cycle: stage, commit if dirty, push. Records outcome.
+    """One auto-sync cycle: stage, commit if dirty, push, maybe consolidate .git.
+    Records outcome.
 
     Intentionally minimal — heavy conflict handling stays in the operator-
     initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
@@ -186,8 +253,17 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
                                     last_sync_at=now, last_error_summary=err)
             return {"status": "failed", "error": err}
 
-        _write_sync_state_file(home_dir, "success", last_sync_at=now)
-        return {"status": "success"}
+        # #1596: consolidate .git when packs pile up (self-throttling, non-fatal),
+        # then record the resulting .git size so operators can watch the curve.
+        maintenance = _maybe_run_git_maintenance(home_dir)
+        _write_sync_state_file(
+            home_dir, "success", last_sync_at=now,
+            git_dir_bytes=_git_dir_bytes(home_dir),
+        )
+        result = {"status": "success"}
+        if maintenance:
+            result["maintenance"] = maintenance
+        return result
 
     except subprocess.CalledProcessError as exc:
         err = _summarize_git_error(exc.stderr or exc.stdout or str(exc))
