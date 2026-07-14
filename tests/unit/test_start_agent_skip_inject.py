@@ -225,3 +225,72 @@ class TestStartAgentSkipInject:
         recreate.assert_awaited_once()
         inject_creds.assert_awaited_once_with("agent-c")
         inject_skills.assert_awaited_once_with("agent-c")
+
+
+# ── #1559: soft-delete recovery rebuilds the missing container ─────────────
+class TestRecoverRecreate1559:
+    """start_agent_internal must rebuild a missing container for a recovered
+    (live, non-soft-deleted) agent instead of dead-ending on 404 — and still
+    404 for a genuinely nonexistent agent.
+    Issue: https://github.com/abilityai/trinity/issues/1559
+    """
+    pytestmark = pytest.mark.unit
+
+    def test_start_404s_when_no_container_and_no_owner(self):
+        _mock_docker_service.get_agent_container.return_value = None
+        _mock_db.get_agent_owner.return_value = None
+        try:
+            _run(_mod.start_agent_internal("ghost"))
+            assert False, "expected 404"
+        except _HTTPException as e:
+            assert e.status_code == 404
+
+    def test_start_rebuilds_when_container_missing_but_live(self):
+        # First lookup: no container. Recovered agent → ownership row exists.
+        _mock_docker_service.get_agent_container.return_value = None
+        _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
+
+        rebuilt = _make_container("created")  # fresh → injection should run
+        recreate = AsyncMock(return_value=rebuilt)
+        inject_creds = AsyncMock(return_value={"status": "success"})
+        inject_skills = AsyncMock(return_value={"status": "success"})
+
+        with patch.object(_mod, "recreate_missing_container", recreate), \
+             patch.object(_mod, "wait_for_agent_ready", AsyncMock()), \
+             patch.object(_mod, "inject_assigned_credentials", inject_creds), \
+             patch.object(_mod, "inject_assigned_skills", inject_skills):
+            result = _run(_mod.start_agent_internal("revived"))
+
+        recreate.assert_awaited_once_with("revived")
+        _mock_docker_utils.container_start.assert_awaited()  # actually started
+        assert result["message"] == "Agent revived started"
+
+    def test_recreate_missing_container_reconstructs_spec_from_volume(self):
+        _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
+        _mock_db.get_resource_limits.return_value = {}
+        _mock_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
+
+        provision = AsyncMock(return_value=_make_container("created"))
+        tmpl = AsyncMock(return_value={"type": "researcher", "runtime": {"type": "codex"}})
+
+        with patch.object(_mod, "_provision_folders_and_run_agent_container", provision), \
+             patch.object(_mod, "_read_template_yaml_from_volume", tmpl), \
+             patch.object(_mod, "_apply_persisted_auth_env", Mock()), \
+             patch.object(_mod, "get_next_available_port", Mock(return_value=2245)), \
+             patch.object(_mod, "get_agent_full_capabilities", Mock(return_value=False)), \
+             patch.object(_mod, "get_agent_default_resources",
+                          Mock(return_value={"cpu": "2", "memory": "4g"})), \
+             patch.object(_mod, "validate_base_image", Mock()):
+            _run(_mod.recreate_missing_container("proj"))
+
+        provision.assert_awaited_once()
+        kwargs = provision.call_args.kwargs
+        # Existing workspace volume reused (never recreated), mounted at home.
+        assert kwargs["base_volumes"] == {
+            "agent-proj-workspace": {"bind": "/home/developer", "mode": "rw"}
+        }
+        # type + runtime recovered from the volume's template.yaml.
+        assert kwargs["labels"]["trinity.agent-type"] == "researcher"
+        assert kwargs["labels"]["trinity.agent-runtime"] == "codex"
+        assert kwargs["env_vars"]["AGENT_RUNTIME"] == "codex"
+        assert kwargs["env_vars"]["AGENT_NAME"] == "proj"

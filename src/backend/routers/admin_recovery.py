@@ -144,13 +144,14 @@ async def recover_agent(
             f"Agent {agent_name} recovered: all relational state "
             f"(chat history, schedules, sharing, permissions, "
             f"credentials config) is restored and the agent is visible "
-            f"again. The Docker container was removed at soft-delete and "
-            f"is NOT recreated by recovery — bringing the agent back "
-            f"online (container recreate from the preserved workspace "
-            f"volume) is tracked as #834 Phase 2. Until then the agent "
-            f"shows status=stopped with needs_start=true."
+            f"again. The Docker container was removed at soft-delete; "
+            f"call POST /api/agents/{agent_name}/start to bring it back "
+            f"online — start now rebuilds the missing container from the "
+            f"preserved workspace volume and persisted config (#1559)."
         ),
         "agent_name": agent_name,
+        # #1559: honored by start_agent_internal, which rebuilds the container
+        # from persisted state when it finds a live agent with no container.
         "needs_container_recreate": True,
     }
 
