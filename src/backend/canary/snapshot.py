@@ -187,6 +187,14 @@ class AgentSnapshot:
     running_exec_ids: Set[str] = field(default_factory=set)
     # `started_at` per running id (ISO); used by S-01 grace + E-01 / E-05 age.
     running_started_at: Dict[str, str] = field(default_factory=dict)
+    # `lease_expires_at` per running id (ISO str, or None). A non-NULL value
+    # marks a #1081-Phase-3 pull-CLAIMED row: it is `status='running'` but is
+    # owned EXCLUSIVELY by the lease-reaper and NEVER enters the slot ZSET (a
+    # claim is a pure SQL UPDATE with no ZADD). S-01 uses this to exclude leased
+    # rows from the SQL side of its slot–row bijection, so a legitimately-
+    # unslotted pull row is not flagged `in_sql_only`. Only S-01 reads this;
+    # E-01/E-02/E-05 keep seeing the full `running_exec_ids` unchanged.
+    running_lease_expires_at: Dict[str, Optional[str]] = field(default_factory=dict)
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
     running_claude_session_ids: Dict[str, Optional[str]] = field(default_factory=dict)
@@ -350,6 +358,10 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         cursor.execute("PRAGMA table_info(schedule_executions)")
         cols = {c["name"] for c in cursor.fetchall()}
         has_session_col = "claude_session_id" in cols
+        # #1081 Phase 3: `lease_expires_at` marks a pull-claimed row. Guarded
+        # like `claude_session_id` so minimal test DDLs (or a pre-migration DB)
+        # that lack the column still collect — absent ⇒ every row is non-leased.
+        has_lease_col = "lease_expires_at" in cols
         # E-04/G-04 (#1077): both queued-metadata columns must exist to observe
         # queued metadata at all. Guard on BOTH (they land together in
         # BACKLOG-001) so a partial DDL degrades to older-image fail-open.
@@ -357,6 +369,8 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
         select_cols = "id, status, started_at"
         if has_session_col:
             select_cols += ", claude_session_id"
+        if has_lease_col:
+            select_cols += ", lease_expires_at"
         if has_queued_meta:
             select_cols += ", queued_at, backlog_metadata"
         cursor.execute(
@@ -369,6 +383,7 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
             "queued": set(),
             "started_at": {},
             "claude_session_ids": {},
+            "lease_expires_at": {},
             "queued_meta": {},
         }
         for row in cursor.fetchall():
@@ -378,6 +393,9 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                     out["started_at"][row["id"]] = row["started_at"]
                 out["claude_session_ids"][row["id"]] = (
                     row["claude_session_id"] if has_session_col else None
+                )
+                out["lease_expires_at"][row["id"]] = (
+                    row["lease_expires_at"] if has_lease_col else None
                 )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
@@ -861,6 +879,7 @@ def collect_snapshot() -> Snapshot:
                 "queued": set(),
                 "started_at": {},
                 "claude_session_ids": {},
+                "lease_expires_at": {},
                 "queued_meta": {},
             }
 
@@ -923,6 +942,7 @@ def collect_snapshot() -> Snapshot:
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
+                running_lease_expires_at=execs.get("lease_expires_at", {}),
                 queued_exec_ids=execs["queued"],
                 queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,

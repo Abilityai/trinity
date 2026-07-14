@@ -759,11 +759,29 @@ class DatabaseManager:
     def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
         return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
 
-    def claim_next_queued(self, agent_name: str):
-        return self._schedule_ops.claim_next_queued(agent_name)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
+
+    # Lease reaper (#1081 Phase 3 — #429 / #1402)
+    def find_expired_leases(self, now_iso: str = None, limit: int = 500):
+        return self._schedule_ops.find_expired_leases(now_iso, limit)
+
+    def requeue_expired_lease(self, execution_id: str, now_iso: str = None) -> bool:
+        return self._schedule_ops.requeue_expired_lease(execution_id, now_iso)
+
+    def park_expired_lease(self, execution_id: str, error: str, now_iso: str = None) -> bool:
+        return self._schedule_ops.park_expired_lease(execution_id, error, now_iso)
+
+    # Physical-occupancy meter (#1081 Phase 3): read-only leased-row counters
+    # consumed by CapacityManager's two meter methods. Metering only.
+    def count_active_leased_by_agent(self, agent_names):
+        return self._schedule_ops.count_active_leased_by_agent(agent_names)
+
+    def count_active_leased(self, agent_name: str) -> int:
+        return self._schedule_ops.count_active_leased(agent_name)
 
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
@@ -1022,10 +1040,11 @@ class DatabaseManager:
 
     def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
                                 context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None):
+                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
+                                claim_token: str = None):
         return self._schedule_ops.update_execution_status(execution_id, status, response, error,
                                                           context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count)
+                                                          compact_metadata, retry_count, claim_token)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)

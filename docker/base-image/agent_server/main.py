@@ -32,6 +32,10 @@ from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
 from .services.result_callback import schedule_pending_result_resend
 from .services.orphan_sweeper import schedule_orphan_sweeper
+from .services.pull_worker import (
+    schedule_pull_workers,
+    schedule_pending_pull_result_resend,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,6 +86,19 @@ schedule_pending_result_resend(app)
 # scenario where Trinity-side CB termination skips drain_reader_threads
 # and subsequent tasks fast-fail before reaching the agent.
 schedule_orphan_sweeper(app)
+
+# #946 / #1081 Phase 2: agent-side pull worker pool. DEFAULT OFF — gated on the
+# per-agent TRINITY_PULL_MODE flag (allowlist-injected by the backend). When off
+# (every existing agent) this registers no startup handler and the push path is
+# unchanged; when on, a bounded pool pulls work via /api/internal/next-task.
+schedule_pull_workers(app)
+
+# B6 fix (#1081): on startup re-send any pull terminal left on disk by a
+# shutdown/deploy mid-delivery, so a completed-but-unreported turn isn't lost
+# (the row would otherwise stay `running` → the lease reaper re-runs the whole
+# turn from scratch). Mirrors schedule_pending_result_resend (#1083). Gated on
+# the same worker creds; a no-op for any agent that never ran the pull pool.
+schedule_pending_pull_result_resend(app)
 
 
 def run_server():

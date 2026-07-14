@@ -494,6 +494,30 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
 
+    # #1081 G2 / #307 / #1083: re-ensure the agent→backend callback URL on
+    # recreate. crud.py sets TRINITY_BACKEND_URL only at FRESH create (~#595);
+    # recreate seeds env from the OLD container and would otherwise DROP it for a
+    # legacy agent that predates it — leaving the heartbeat, the #1083 result
+    # callback, AND the #1081 pull worker with no backend URL (the worker logs
+    # "TRINITY_BACKEND_URL / TRINITY_MCP_API_KEY missing" and never starts).
+    # setdefault preserves any value already baked on the container (matching the
+    # #1098 TMPDIR idiom above).
+    env_vars.setdefault(
+        'TRINITY_BACKEND_URL',
+        os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000'),
+    )
+
+    # #946 / #1081 Phase 2: re-apply the pull worker opt-in on recreate. Clear
+    # any baked pull env FIRST (set-or-clear, mirroring the guardrails/stall-limit
+    # idiom above) so DE-piloting an agent actually stops its worker on recreate —
+    # pull_mode_env_vars returns {} for a non-pilot, so a bare .update() would
+    # leave a stale TRINITY_PULL_MODE=true baked in (#1081 B1). Empty (no-op) for
+    # every non-pilot agent, so default push behavior is unchanged.
+    from services.agent_service.pull_mode import pull_mode_env_vars, PULL_MODE_ENV_KEYS
+    for _pull_key in PULL_MODE_ENV_KEYS:
+        env_vars.pop(_pull_key, None)
+    env_vars.update(pull_mode_env_vars(agent_name))
+
     # Get port from labels
     ssh_port = int(labels.get("trinity.ssh-port", 2222))
 

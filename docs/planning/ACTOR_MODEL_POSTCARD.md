@@ -177,6 +177,10 @@ not needed for this pilot.
 
 ## See also
 
+- [`MESSAGE_ENVELOPE_SCHEMA.md`](MESSAGE_ENVELOPE_SCHEMA.md) — the field-level
+  payload schema for each message kind (chat/task/event/reply) and the two pull
+  transport messages (next-task claim, result POST). This postcard pins the
+  *taxonomy*; that doc is the *per-kind field contract* it details.
 - [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) §Coordination Model,
   §Message Envelope, §Key Open Questions #1
 - [`ACTOR_MODEL_TASK_DEMOTION_MAP.md`](ACTOR_MODEL_TASK_DEMOTION_MAP.md) — the

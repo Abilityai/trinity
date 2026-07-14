@@ -314,7 +314,8 @@ _CANARY_SCHEMA_SQL = """
             queued_at TEXT,               -- #1077 E-04: backlog enqueue time
             backlog_metadata TEXT,        -- #1077 E-04/G-04: JSON drain-replay identity
             message TEXT NOT NULL DEFAULT '',
-            triggered_by TEXT NOT NULL DEFAULT 'test'
+            triggered_by TEXT NOT NULL DEFAULT 'test',
+            lease_expires_at TEXT  -- #1081 Phase 3: non-NULL = pull-claimed row
         );
         -- Mirrors the production agent_schedules columns the canary reads
         -- (E-06 reads next_run_at/enabled/deleted_at; L-03 reads agent_name).
@@ -751,12 +752,14 @@ def _add_execution(
     duration_ms=None,
     queued_at=None,
     backlog_metadata=None,
+    lease_expires_at=None,
 ):
     c = _conn(path)
     c.execute(
         "INSERT INTO schedule_executions "
         "(id, agent_name, status, started_at, completed_at, duration_ms, "
-        "queued_at, backlog_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "queued_at, backlog_metadata, lease_expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             eid,
             agent_name,
@@ -766,6 +769,7 @@ def _add_execution(
             duration_ms,
             queued_at,
             backlog_metadata,
+            lease_expires_at,
         ),
     )
     c.commit()
@@ -1075,6 +1079,60 @@ class TestInvariantS01:
         obs = violations[0].observed_state
         assert obs["in_sql_only"] == ["e-stale-sql"]
         assert obs["in_redis_only"] == ["e-stale-redis"]
+
+    def test_leased_pull_rows_excluded_from_sql_side(self, canary_db, reload_canary):
+        """#1081 Phase 3: a pilot agent with an EMPTY ZSET and N running rows
+        that are pull-CLAIMED (lease_expires_at IS NOT NULL) must NOT fire S-01
+        — leased rows legitimately never enter the slot ZSET."""
+        _add_agent(canary_db, "pilot")
+        # Two leased pull rows, running but never slotted; ZSET stays empty.
+        _add_execution(
+            canary_db, "e-lease-1", "pilot", "running",
+            lease_expires_at="2026-12-31T00:00:00Z",
+        )
+        _add_execution(
+            canary_db, "e-lease-2", "pilot", "running",
+            lease_expires_at="2026-12-31T00:00:00Z",
+        )
+        # No Redis ZADD for either — the whole point of the pull path.
+
+        snap = reload_canary["canary"].collect_snapshot()
+        # Precondition: the SQL rows ARE running (so this isn't a vacuous pass).
+        agent = next(a for a in snap.agents if a.name == "pilot")
+        assert agent.running_exec_ids == {"e-lease-1", "e-lease-2"}
+        assert agent.slot_ids == set()
+
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        assert s01.check(snap) == [], (
+            "leased pull rows must not be counted on the SQL side of S-01"
+        )
+
+    def test_non_leased_orphan_fires_even_alongside_leased(
+        self, canary_db, reload_canary
+    ):
+        """No regression: a genuine slot–row mismatch on a NON-leased (push)
+        row still fires S-01, and the exclusion is selective — a co-resident
+        leased row is ignored while the real orphan is flagged."""
+        _add_agent(canary_db, "pilot")
+        # Leased pull row: running, no slot, must be ignored.
+        _add_execution(
+            canary_db, "e-lease", "pilot", "running",
+            lease_expires_at="2026-12-31T00:00:00Z",
+        )
+        # Non-leased (push) row: running, no slot → a real S-01 violation.
+        _add_execution(canary_db, "e-push-orphan", "pilot", "running")
+        # ZSET empty for both.
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        violations = s01.check(snap)
+        assert len(violations) == 1
+        obs = violations[0].observed_state
+        # Only the push row is flagged; the leased row is excluded entirely.
+        assert obs["in_sql_only"] == ["e-push-orphan"]
+        assert obs["sql_running_count"] == 1  # leased row not counted
 
 
 # ---------------------------------------------------------------------------
