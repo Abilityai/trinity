@@ -190,6 +190,27 @@ def test_budget_usage_counts_terminal_and_active(agent_ops):
     assert usage == {"terminal": 3, "active": 2}
 
 
+def test_budget_usage_excludes_admitted_row(agent_ops):
+    """#1601: the admission gate excludes the execution's own pre-created
+    RUNNING row so it never counts against the budget."""
+    _register_ghost(agent_ops)
+    seed_schedule("s1", agent_name="ghost-ab12")
+    seed_execution("s1", "ghost-ab12", exec_id="e1", status="success")
+    seed_execution("s1", "ghost-ab12", exec_id="e5", status="running")
+
+    # Own running row excluded → active drops to 0, terminal untouched.
+    usage = agent_ops.count_ephemeral_budget_usage(
+        "ghost-ab12", exclude_execution_id="e5"
+    )
+    assert usage == {"terminal": 1, "active": 0}
+
+    # Excluding an id not in the table is a no-op (acquire-before-create paths).
+    usage = agent_ops.count_ephemeral_budget_usage(
+        "ghost-ab12", exclude_execution_id="e-not-created-yet"
+    )
+    assert usage == {"terminal": 1, "active": 1}
+
+
 def test_find_discardable_by_ttl_and_budget(agent_ops):
     # Expired TTL ghost
     _register_ghost(agent_ops, name="ghost-old", max_executions=None,
@@ -287,7 +308,14 @@ def test_database_manager_delegations_exist():
     mgr.mark_ephemeral_discard_intent("a")
     mgr._agent_ops.mark_ephemeral_discard_intent.assert_called_once_with("a")
     mgr.count_ephemeral_budget_usage("a")
-    mgr._agent_ops.count_ephemeral_budget_usage.assert_called_once_with("a")
+    mgr._agent_ops.count_ephemeral_budget_usage.assert_called_once_with(
+        "a", exclude_execution_id=None
+    )
+    mgr._agent_ops.count_ephemeral_budget_usage.reset_mock()
+    mgr.count_ephemeral_budget_usage("a", exclude_execution_id="e9")
+    mgr._agent_ops.count_ephemeral_budget_usage.assert_called_once_with(
+        "a", exclude_execution_id="e9"
+    )
     mgr.find_discardable_ephemeral_agents(7)
     mgr._agent_ops.find_discardable_ephemeral_agents.assert_called_once_with(7)
     mgr.count_live_ephemeral_agents_for_owner(1)
@@ -364,7 +392,7 @@ async def test_acquire_denies_budget_exhausted_counting_active(gated_capacity, m
     # terminal+active >= max: 2 terminal + 1 running == 3 → deny (overshoot bound)
     monkeypatch.setattr(
         db, "count_ephemeral_budget_usage",
-        lambda name: {"terminal": 2, "active": 1},
+        lambda name, exclude_execution_id=None: {"terminal": 2, "active": 1},
     )
     with pytest.raises(EphemeralBudgetExhausted) as exc:
         await gated_capacity.acquire(
@@ -395,12 +423,58 @@ async def test_acquire_passes_durable_and_underbudget_ghost(gated_capacity, monk
     )
     monkeypatch.setattr(
         db, "count_ephemeral_budget_usage",
-        lambda name: {"terminal": 1, "active": 0},
+        lambda name, exclude_execution_id=None: {"terminal": 1, "active": 0},
     )
     result = await gated_capacity.acquire(
         agent_name="ghost-a", execution_id="e2", max_concurrent=1
     )
     assert result.state == "admitted"
+
+
+@pytest.mark.asyncio
+async def test_acquire_gate_excludes_own_precreated_row(gated_capacity, monkeypatch):
+    """#1601: the /task and scheduler paths pre-create a RUNNING row before
+    acquire — the gate must exclude that row or a max_executions=1 ghost
+    denies its first (only) run."""
+    from database import db
+    from services.capacity_manager import EphemeralBudgetExhausted
+
+    gated_capacity._slots.acquire_slot = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        db, "get_agent_ephemeral_info",
+        lambda name: {
+            "is_ephemeral": True,
+            "ephemeral_expires_at": "2099-01-01T00:00:00.000000Z",
+            "ephemeral_max_executions": 1,
+        },
+    )
+
+    seen = {}
+
+    def fake_count(name, exclude_execution_id=None):
+        seen["exclude"] = exclude_execution_id
+        # Simulates the real table: one active row (the caller's own,
+        # pre-created RUNNING) which vanishes from the count when excluded.
+        if exclude_execution_id == "e-self":
+            return {"terminal": 0, "active": 0}
+        return {"terminal": 0, "active": 1}
+
+    monkeypatch.setattr(db, "count_ephemeral_budget_usage", fake_count)
+
+    # Fresh max_executions=1 ghost admits its own first run.
+    result = await gated_capacity.acquire(
+        agent_name="ghost-a", execution_id="e-self", max_concurrent=1
+    )
+    assert result.state == "admitted"
+    assert seen["exclude"] == "e-self"  # gate passed its own id through
+
+    # A DIFFERENT execution racing the same last budget slot still denies:
+    # the first run's row is active and not its own.
+    with pytest.raises(EphemeralBudgetExhausted) as exc:
+        await gated_capacity.acquire(
+            agent_name="ghost-a", execution_id="e-other", max_concurrent=1
+        )
+    assert exc.value.reason == "budget_exhausted"
 
 
 @pytest.mark.asyncio

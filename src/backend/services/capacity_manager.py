@@ -298,7 +298,13 @@ class CapacityManager:
             _max_exec = _eph.get("ephemeral_max_executions")
             if _max_exec:
                 try:
-                    _usage = _db.count_ephemeral_budget_usage(agent_name)
+                    # #1601: exclude the row being admitted — the /task and
+                    # scheduler paths pre-create a RUNNING row before acquire,
+                    # and counting it against the budget denies a
+                    # max_executions=1 ghost its first (only) run.
+                    _usage = _db.count_ephemeral_budget_usage(
+                        agent_name, exclude_execution_id=execution_id
+                    )
                 except Exception as e:  # pragma: no cover - defensive
                     logger.warning(
                         f"[Capacity] ephemeral budget count failed for {agent_name}: {e}"
