@@ -18,6 +18,7 @@ from typing import Optional, Literal
 from database import db
 from services import idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,6 @@ class ProactiveMessageService:
     def _check_rate_limit(self, agent_name: str, recipient_email: str) -> bool:
         """Check if sending is allowed under rate limits. Returns True if OK."""
         # #1609: admin-configurable per-recipient cap; 0 = unlimited.
-        from services.settings_service import get_proactive_rate_limit
         limit = get_proactive_rate_limit("proactive_dm_per_recipient")
         if limit <= 0:
             return True

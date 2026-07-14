@@ -96,8 +96,11 @@ class TestProactiveDmEnforcement:
         return ProactiveMessageService()
 
     def _set_limit(self, monkeypatch, value):
-        import services.settings_service as ss
-        monkeypatch.setattr(ss, "get_proactive_rate_limit", lambda *_a, **_kw: value)
+        # Patch the name as bound in the CONSUMER module (proactive_message_service
+        # imports get_proactive_rate_limit at module level), which is robust to
+        # sys.modules identity quirks in the full suite.
+        import services.proactive_message_service as pms
+        monkeypatch.setattr(pms, "get_proactive_rate_limit", lambda *_a, **_kw: value)
 
     def test_zero_limit_is_unlimited_and_skips_redis(self, svc, monkeypatch):
         self._set_limit(monkeypatch, 0)
