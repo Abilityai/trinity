@@ -114,6 +114,8 @@ class LoopService:
         max_duration_seconds: Optional[int] = None,
         max_cost_usd: Optional[float] = None,
         no_progress_threshold: Optional[int] = None,
+        on_failure: str = "abort",
+        max_consecutive_failures: int = 3,
         model: Optional[str] = None,
         allowed_tools: Optional[list] = None,
         started_by_user_id: Optional[int] = None,
@@ -136,6 +138,8 @@ class LoopService:
             max_duration_seconds=max_duration_seconds,
             max_cost_usd=max_cost_usd,
             no_progress_threshold=no_progress_threshold,
+            on_failure=on_failure,
+            max_consecutive_failures=max_consecutive_failures,
             model=model,
             allowed_tools=allowed_tools,
             started_by_user_id=started_by_user_id,
@@ -235,6 +239,50 @@ class LoopService:
         last_fingerprint: Optional[str] = None
         repeat_count = 0
 
+        # #1167: per-loop failure policy. `abort` (default) keeps the original
+        # fail-fast behavior; `continue` tolerates a failed iteration and moves
+        # on, bounded by max_consecutive_failures so a fully-broken agent still
+        # terminates. `previous_response` only advances on success, so
+        # {{previous_response}} always carries the last *successful* response.
+        on_failure = loop.get("on_failure") or "abort"
+        max_consecutive_failures = loop.get("max_consecutive_failures") or 3
+        failed_runs = 0
+        consecutive_failures = 0
+
+        def _abort_after_failure(err_msg: str):
+            """Decide whether a failed iteration ends the loop. Returns
+            (terminal_status, stop_reason, error) to abort, or None to continue."""
+            if on_failure != "continue":
+                return ("failed", "error", err_msg)
+            if consecutive_failures >= max_consecutive_failures:
+                return (
+                    "failed",
+                    "max_consecutive_failures",
+                    f"{err_msg} (reached {max_consecutive_failures} consecutive failures)",
+                )
+            return None
+
+        async def _inter_run_delay(run_number: int) -> bool:
+            """Apply the inter-run pause. Returns True if the loop was stopped
+            (sleep cancelled) so the caller can break. Honored on every path
+            that proceeds to the next iteration — success AND tolerated failure
+            (#1167), so continue-mode pacing is consistent across surfaces."""
+            if loop["delay_seconds"] and run_number < loop["max_runs"]:
+                sleep_for = loop["delay_seconds"]
+                # #1156: never sleep past the deadline — cap to the remaining
+                # budget; if it has already passed, skip the sleep so the next
+                # iteration boundary check finalizes deadline_exceeded.
+                if deadline is not None:
+                    remaining = (deadline - datetime.utcnow()).total_seconds()
+                    if remaining <= 0:
+                        return False
+                    sleep_for = min(sleep_for, remaining)
+                try:
+                    await asyncio.sleep(sleep_for)
+                except asyncio.CancelledError:
+                    return True
+            return False
+
         try:
             for run_number in range(1, loop["max_runs"] + 1):
                 # Cooperative stop check BEFORE starting the next iteration.
@@ -295,13 +343,33 @@ class LoopService:
                         cost=None,
                         duration_ms=elapsed_ms,
                     )
-                    terminal_status = "failed"
-                    stop_reason = "error"
-                    terminal_error = f"Iteration {run_number}: {exc}"
-                    logger.exception(
-                        f"[Loop] {loop_id} iteration {run_number} raised; aborting loop"
+                    failed_runs += 1
+                    consecutive_failures += 1
+                    runs_completed = run_number
+                    db.update_loop_progress(
+                        loop_id,
+                        runs_completed=runs_completed,
+                        last_response=previous_response,  # keep last successful
+                        failed_runs=failed_runs,
                     )
-                    break
+                    err_msg = f"Iteration {run_number}: {exc}"
+                    decision = _abort_after_failure(err_msg)
+                    if decision is not None:
+                        terminal_status, stop_reason, terminal_error = decision
+                        logger.exception(
+                            f"[Loop] {loop_id} iteration {run_number} raised; aborting loop"
+                        )
+                        break
+                    logger.warning(
+                        f"[Loop] {loop_id} iteration {run_number} raised; "
+                        f"continuing (on_failure=continue, "
+                        f"{consecutive_failures}/{max_consecutive_failures} consecutive)"
+                    )
+                    if await _inter_run_delay(run_number):
+                        terminal_status = "stopped"
+                        stop_reason = "user_stopped"
+                        break
+                    continue
 
                 elapsed_ms = int(
                     (datetime.utcnow() - run_start).total_seconds() * 1000
@@ -318,6 +386,7 @@ class LoopService:
                         execution_id=result.execution_id,
                     )
                     previous_response = result.response
+                    consecutive_failures = 0  # #1167: success breaks the streak
                     runs_completed = run_number
 
                     # #1155: accumulate spend toward the budget. Only finite,
@@ -403,44 +472,50 @@ class LoopService:
                         duration_ms=elapsed_ms,
                         execution_id=result.execution_id,
                     )
+                    failed_runs += 1
+                    consecutive_failures += 1
                     runs_completed = run_number
                     db.update_loop_progress(
                         loop_id,
                         runs_completed=runs_completed,
-                        last_response=result.response,
+                        last_response=previous_response,  # keep last successful
+                        failed_runs=failed_runs,
                     )
-                    terminal_status = "failed"
-                    stop_reason = "error"
-                    terminal_error = (
+                    err_msg = (
                         f"Iteration {run_number}: {result.error or 'task failed'}"
                     )
+                    decision = _abort_after_failure(err_msg)
+                    if decision is not None:
+                        terminal_status, stop_reason, terminal_error = decision
+                        break
+                    logger.warning(
+                        f"[Loop] {loop_id} iteration {run_number} failed "
+                        f"({result.error_code or 'AGENT_ERROR'}); continuing "
+                        f"({consecutive_failures}/{max_consecutive_failures} consecutive)"
+                    )
+                    # fall through to the inter-run delay, then next iteration
+
+                # Inter-run delay — also a stop point (success + tolerated-failure
+                # paths; the exception path applies it inline before `continue`).
+                # The #1156 deadline cap lives inside _inter_run_delay; a passed
+                # deadline is finalized by the next iteration's boundary check.
+                if await _inter_run_delay(run_number):
+                    terminal_status = "stopped"
+                    stop_reason = "user_stopped"
                     break
 
-                # Inter-run delay — also a stop point.
-                if loop["delay_seconds"] and run_number < loop["max_runs"]:
-                    sleep_for = loop["delay_seconds"]
-                    # #1156: never sleep past the deadline — cap the delay to
-                    # the remaining budget; the next boundary check then stops
-                    # the loop with deadline_exceeded.
-                    if deadline is not None:
-                        remaining = (deadline - datetime.utcnow()).total_seconds()
-                        if remaining <= 0:
-                            terminal_status = "stopped"
-                            stop_reason = "deadline_exceeded"
-                            break
-                        sleep_for = min(sleep_for, remaining)
-                    try:
-                        await asyncio.sleep(sleep_for)
-                    except asyncio.CancelledError:
-                        terminal_status = "stopped"
-                        stop_reason = "user_stopped"
-                        break
+            # #1167: ran to max_runs (or stop-signal matched) in continue mode
+            # with tolerated failures → surface partial success. Only promotes
+            # the natural-completion path; stop/abort already set their status.
+            if terminal_status == "completed" and failed_runs > 0:
+                terminal_status = "completed_with_errors"
         finally:
             db.finalize_loop(
                 loop_id,
                 status=terminal_status,
                 stop_reason=stop_reason,
                 error=terminal_error,
+                failed_runs=failed_runs,
             )
             await _broadcast({
                 "type": "loop_completed",
@@ -449,6 +524,7 @@ class LoopService:
                 "status": terminal_status,
                 "stop_reason": stop_reason,
                 "runs_completed": runs_completed,
+                "failed_runs": failed_runs,
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             })
             async with self._lock:

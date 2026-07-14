@@ -144,6 +144,22 @@ export function createLoopTools(
               "Detection is exact-hash on the normalized response text. Set 0 for " +
               "loops that legitimately repeat identical confirmations."
           ),
+        on_failure: z
+          .enum(["abort", "continue"])
+          .optional()
+          .describe(
+            "Failure policy (default 'abort' = stop the whole loop on the first failed iteration). " +
+              "'continue' tolerates a failed iteration and proceeds to the next, bounded by max_consecutive_failures."
+          ),
+        max_consecutive_failures: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            "In 'continue' mode, abort the loop as failed after this many consecutive failed iterations (default 3)."
+          ),
         model: z
           .string()
           .optional()
@@ -164,6 +180,8 @@ export function createLoopTools(
           max_duration_seconds?: number;
           max_cost_usd?: number;
           no_progress_threshold?: number;
+          on_failure?: "abort" | "continue";
+          max_consecutive_failures?: number;
           model?: string;
           allowed_tools?: string[];
         },
@@ -188,6 +206,8 @@ export function createLoopTools(
             max_duration_seconds: params.max_duration_seconds,
             max_cost_usd: params.max_cost_usd,
             no_progress_threshold: params.no_progress_threshold,
+            on_failure: params.on_failure,
+            max_consecutive_failures: params.max_consecutive_failures,
             model: params.model,
             allowed_tools: params.allowed_tools,
           });

@@ -2489,14 +2489,16 @@ class DatabaseManager:
     def mark_loop_running(self, loop_id: str):
         return self._loop_ops.mark_loop_running(loop_id)
 
-    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response):
+    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response, failed_runs=None):
         return self._loop_ops.update_loop_progress(
             loop_id, runs_completed=runs_completed, last_response=last_response,
+            failed_runs=failed_runs,
         )
 
-    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None):
+    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None, failed_runs=None):
         return self._loop_ops.finalize_loop(
             loop_id, status=status, stop_reason=stop_reason, error=error,
+            failed_runs=failed_runs,
         )
 
     def list_loops_for_agent(self, agent_name: str, *, status=None, limit: int = 50):

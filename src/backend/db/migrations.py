@@ -2500,6 +2500,28 @@ def _migrate_agent_loops_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_loops_failure_policy(cursor, conn):
+    """Add per-loop failure-policy columns to agent_loops (#1167).
+
+    `on_failure` ('abort'|'continue', default 'abort' = current fail-fast
+    behavior), `max_consecutive_failures` (bounds continue mode), and a
+    `failed_runs` counter for the terminal summary.
+    """
+    _safe_add_column(
+        cursor, "agent_loops", "on_failure",
+        "ALTER TABLE agent_loops ADD COLUMN on_failure TEXT NOT NULL DEFAULT 'abort'",
+    )
+    _safe_add_column(
+        cursor, "agent_loops", "max_consecutive_failures",
+        "ALTER TABLE agent_loops ADD COLUMN max_consecutive_failures INTEGER NOT NULL DEFAULT 3",
+    )
+    _safe_add_column(
+        cursor, "agent_loops", "failed_runs",
+        "ALTER TABLE agent_loops ADD COLUMN failed_runs INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_users_suspended_at(cursor, conn):
     """#995 — user deactivation primitive.
 
@@ -2973,4 +2995,5 @@ MIGRATIONS = [
     ("agent_sync_state_git_dir_bytes", _migrate_agent_sync_state_git_dir_bytes),
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
+    ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
 ]

@@ -18,7 +18,11 @@ from utils.helpers import utc_now_iso
 
 
 # Terminal statuses for restart-recovery and stop_loop logic.
-TERMINAL_STATUSES = {"completed", "stopped", "failed", "interrupted"}
+# `completed_with_errors` (#1167): continue-mode loop that ran to max_runs with
+# at least one tolerated failed iteration.
+TERMINAL_STATUSES = {
+    "completed", "completed_with_errors", "stopped", "failed", "interrupted",
+}
 
 
 def _loop_row_to_dict(row) -> dict:
@@ -33,10 +37,13 @@ def _loop_row_to_dict(row) -> dict:
         "max_duration_seconds": row["max_duration_seconds"],
         "max_cost_usd": row["max_cost_usd"],
         "no_progress_threshold": row["no_progress_threshold"],
+        "on_failure": row["on_failure"],
+        "max_consecutive_failures": row["max_consecutive_failures"],
         "model": row["model"],
         "allowed_tools": json.loads(row["allowed_tools"]) if row["allowed_tools"] else None,
         "status": row["status"],
         "runs_completed": row["runs_completed"],
+        "failed_runs": row["failed_runs"],
         "stop_reason": row["stop_reason"],
         "last_response": row["last_response"],
         "error": row["error"],
@@ -84,6 +91,8 @@ class LoopOperations:
         max_duration_seconds: Optional[int] = None,
         max_cost_usd: Optional[float] = None,
         no_progress_threshold: Optional[int] = None,
+        on_failure: str = "abort",
+        max_consecutive_failures: int = 3,
         model: Optional[str] = None,
         allowed_tools: Optional[List[str]] = None,
         started_by_user_id: Optional[int] = None,
@@ -108,10 +117,13 @@ class LoopOperations:
             max_duration_seconds=max_duration_seconds,
             max_cost_usd=max_cost_usd,
             no_progress_threshold=no_progress_threshold,
+            on_failure=on_failure,
+            max_consecutive_failures=max_consecutive_failures,
             model=model,
             allowed_tools=allowed_tools_json,
             status="queued",
             runs_completed=0,
+            failed_runs=0,
             stop_reason=None,
             last_response=None,
             error=None,
@@ -138,10 +150,13 @@ class LoopOperations:
             "max_duration_seconds": max_duration_seconds,
             "max_cost_usd": max_cost_usd,
             "no_progress_threshold": no_progress_threshold,
+            "on_failure": on_failure,
+            "max_consecutive_failures": max_consecutive_failures,
             "model": model,
             "allowed_tools": allowed_tools,
             "status": "queued",
             "runs_completed": 0,
+            "failed_runs": 0,
             "stop_reason": None,
             "last_response": None,
             "error": None,
@@ -177,12 +192,22 @@ class LoopOperations:
         *,
         runs_completed: int,
         last_response: Optional[str],
+        failed_runs: Optional[int] = None,
     ) -> None:
-        """Bump runs_completed + last_response after each iteration."""
+        """Bump runs_completed + last_response after each iteration.
+
+        `failed_runs` (#1167) is written only when provided, so the success
+        path can omit it. `last_response` carries the last *successful* response
+        even on a tolerated-failure iteration (continue mode), preserving
+        `{{previous_response}}` semantics.
+        """
+        values: dict = {"runs_completed": runs_completed, "last_response": last_response}
+        if failed_runs is not None:
+            values["failed_runs"] = failed_runs
         stmt = (
             update(agent_loops)
             .where(agent_loops.c.id == loop_id)
-            .values(runs_completed=runs_completed, last_response=last_response)
+            .values(**values)
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
@@ -194,19 +219,27 @@ class LoopOperations:
         status: str,
         stop_reason: str,
         error: Optional[str] = None,
+        failed_runs: Optional[int] = None,
     ) -> None:
-        """Set terminal status + stop_reason + completed_at."""
+        """Set terminal status + stop_reason + completed_at.
+
+        `failed_runs` (#1167) writes the authoritative tolerated-failure count
+        when provided.
+        """
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"finalize_loop requires terminal status, got '{status}'")
+        values: dict = {
+            "status": status,
+            "stop_reason": stop_reason,
+            "error": error,
+            "completed_at": utc_now_iso(),
+        }
+        if failed_runs is not None:
+            values["failed_runs"] = failed_runs
         stmt = (
             update(agent_loops)
             .where(agent_loops.c.id == loop_id)
-            .values(
-                status=status,
-                stop_reason=stop_reason,
-                error=error,
-                completed_at=utc_now_iso(),
-            )
+            .values(**values)
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)

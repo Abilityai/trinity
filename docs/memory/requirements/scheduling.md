@@ -702,4 +702,29 @@
   response-identity (a tool-call/external-effect fingerprint); persisting
   the fingerprint/counter; retro-applying detection to in-flight loops.
 
+### 38.5 Configurable Loop Failure Policy (#1167)
+
+**Description**: A per-loop policy controls what happens when an iteration
+fails. Default is fail-fast (backward compatible); `continue` mode tolerates a
+failed iteration and proceeds, bounded so a fully-broken agent still terminates.
+
+- **FR-1 — `on_failure`**: `abort` (default — first failed iteration ends the
+  loop as `failed`/`stop_reason=error`, current behavior) or `continue`.
+- **FR-2 — `max_consecutive_failures`** (default 3, range 1–100): in `continue`
+  mode the loop aborts as `failed` with `stop_reason=max_consecutive_failures`
+  once this many iterations fail in a row; a success resets the streak.
+- **FR-3 — Both failure surfaces** honored: a raised exception from
+  `execute_task` AND a non-success `TaskExecutionResult` (TIMEOUT / AGENT_ERROR
+  / CIRCUIT_OPEN / AUTH). Each failed iteration finalizes its `agent_loop_runs`
+  row as `failed`, then (continue mode) the loop proceeds to the next run.
+- **FR-4 — Terminal status**: a continue-mode loop that reaches `max_runs` (or
+  matches its stop-signal) with ≥1 tolerated failure finalizes as
+  `completed_with_errors`; the `failed_runs` count is surfaced on the loop row
+  and API/UI.
+- **FR-5 — `{{previous_response}}`**: carries the last *successful* response — a
+  failed iteration does not overwrite it.
+- **FR-6 — Plumbed through all surfaces** (Invariant #13): `agent_loops` schema
+  + migration, `POST /api/agents/{name}/loops`, MCP `run_agent_loop`, and the
+  Loops panel UI. Unset = `abort`, a strict no-op for existing callers.
+
 ---

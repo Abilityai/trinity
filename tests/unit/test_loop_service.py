@@ -124,15 +124,19 @@ class _FakeDB:
             self.loops[loop_id]["status"] = "running"
             self.loops[loop_id]["started_at"] = "now"
 
-    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response):
+    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response, failed_runs=None):
         self.loops[loop_id]["runs_completed"] = runs_completed
         self.loops[loop_id]["last_response"] = last_response
+        if failed_runs is not None:
+            self.loops[loop_id]["failed_runs"] = failed_runs
 
-    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None):
+    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None, failed_runs=None):
         self.loops[loop_id]["status"] = status
         self.loops[loop_id]["stop_reason"] = stop_reason
         self.loops[loop_id]["error"] = error
         self.loops[loop_id]["completed_at"] = "now"
+        if failed_runs is not None:
+            self.loops[loop_id]["failed_runs"] = failed_runs
 
     def list_non_terminal_loops(self):
         return [
@@ -196,6 +200,9 @@ class _FakeTaskService:
         self.calls.append(kwargs)
         result = self.results[self._idx] if self._idx < len(self.results) else _Result()
         self._idx += 1
+        # A scripted Exception models the raised-exception failure surface.
+        if isinstance(result, BaseException):
+            raise result
         return result
 
 
@@ -282,6 +289,148 @@ class TestFixedMode:
         # triggered_by + loop_id wired through
         assert ts.calls[0]["triggered_by"] == "loop"
         assert ts.calls[0]["loop_id"] == loop_id
+
+
+# ---------------------------------------------------------------------------
+# Runner — failure policy (#1167)
+# ---------------------------------------------------------------------------
+
+def _drive(ls, **start_kwargs):
+    """Start a loop, await its background task, return its id."""
+    async def go():
+        service = ls.LoopService()
+        row = await service.start_loop(**start_kwargs)
+        handle = service._handles.get(row["id"])
+        if handle is not None:
+            await handle.task
+        return row["id"]
+    return _run(go())
+
+
+class TestFailurePolicy:
+    def test_abort_mode_default_stops_on_first_failure(self, loop_module):
+        """Default on_failure='abort' preserves fail-fast behavior."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(response="r1"),
+            _Result(status="failed", error="boom", error_code="AGENT_ERROR"),
+            _Result(response="r3"),
+        ]
+        loop_id = _drive(
+            ls, agent_name="a1", message_template="step {{run}}", max_runs=3,
+        )
+        loop = db.get_loop(loop_id)
+        assert loop["status"] == "failed"
+        assert loop["stop_reason"] == "error"
+        assert len(ts.calls) == 2  # stopped after the failed run, never ran #3
+        assert loop["failed_runs"] == 1
+
+    def test_continue_mode_proceeds_past_failure(self, loop_module):
+        """on_failure='continue' tolerates a failed run and finishes max_runs."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(response="r1"),
+            _Result(status="failed", error="boom", error_code="TIMEOUT"),
+            _Result(response="r3"),
+        ]
+        loop_id = _drive(
+            ls,
+            agent_name="a1",
+            message_template="step {{run}} prev={{previous_response}}",
+            max_runs=3,
+            on_failure="continue",
+            max_consecutive_failures=3,
+        )
+        loop = db.get_loop(loop_id)
+        assert len(ts.calls) == 3  # all three ran
+        assert loop["status"] == "completed_with_errors"
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert loop["failed_runs"] == 1
+        assert loop["runs_completed"] == 3
+        # {{previous_response}} carries the last *successful* response (r1),
+        # NOT the failed run-2 response.
+        assert ts.calls[2]["message"] == "step 3 prev=r1"
+
+    def test_continue_mode_consecutive_cutoff_aborts(self, loop_module):
+        """Continue mode still terminates once consecutive failures hit the cap."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(status="failed", error=f"boom{i}", error_code="AUTH")
+            for i in range(5)
+        ]
+        loop_id = _drive(
+            ls,
+            agent_name="a1",
+            message_template="step {{run}}",
+            max_runs=5,
+            on_failure="continue",
+            max_consecutive_failures=2,
+        )
+        loop = db.get_loop(loop_id)
+        assert len(ts.calls) == 2  # aborted at the 2nd consecutive failure
+        assert loop["status"] == "failed"
+        assert loop["stop_reason"] == "max_consecutive_failures"
+        assert loop["failed_runs"] == 2
+
+    def test_continue_mode_tolerates_raised_exception(self, loop_module):
+        """The raised-exception surface is honored by continue mode too."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(response="r1"),
+            RuntimeError("kaboom"),  # raised inside execute_task
+            _Result(response="r3"),
+        ]
+        loop_id = _drive(
+            ls, agent_name="a1", message_template="step {{run}}", max_runs=3,
+            on_failure="continue", max_consecutive_failures=3,
+        )
+        loop = db.get_loop(loop_id)
+        assert len(ts.calls) == 3
+        assert loop["status"] == "completed_with_errors"
+        assert loop["failed_runs"] == 1
+
+    def test_continue_mode_applies_delay_after_raised_exception(self, loop_module, monkeypatch):
+        """The exception surface honors delay_seconds too (surface parity)."""
+        ls, db, ts = loop_module
+        sleeps: list = []
+
+        async def _fake_sleep(secs):
+            sleeps.append(secs)
+
+        monkeypatch.setattr(ls.asyncio, "sleep", _fake_sleep)
+        ts.results = [
+            RuntimeError("boom"),       # run 1 raises → delay should still apply
+            _Result(response="ok2"),    # run 2 (last) → no trailing delay
+        ]
+        loop_id = _drive(
+            ls, agent_name="a1", message_template="step {{run}}", max_runs=2,
+            on_failure="continue", max_consecutive_failures=3, delay_seconds=5,
+        )
+        loop = db.get_loop(loop_id)
+        assert len(ts.calls) == 2
+        assert loop["status"] == "completed_with_errors"
+        # Delay applied once — after the raised run 1 (run 2 is last, no delay).
+        assert sleeps == [5]
+
+    def test_continue_mode_resets_streak_on_success(self, loop_module):
+        """A success resets the consecutive-failure counter (alternating runs)."""
+        ls, db, ts = loop_module
+        ts.results = [
+            _Result(status="failed", error="f1", error_code="AGENT_ERROR"),
+            _Result(response="ok2"),
+            _Result(status="failed", error="f3", error_code="AGENT_ERROR"),
+            _Result(response="ok4"),
+            _Result(status="failed", error="f5", error_code="AGENT_ERROR"),
+        ]
+        loop_id = _drive(
+            ls, agent_name="a1", message_template="step {{run}}", max_runs=5,
+            on_failure="continue", max_consecutive_failures=2,
+        )
+        loop = db.get_loop(loop_id)
+        # Never 2 in a row → runs all 5, completes with errors.
+        assert len(ts.calls) == 5
+        assert loop["status"] == "completed_with_errors"
+        assert loop["failed_runs"] == 3
 
 
 # ---------------------------------------------------------------------------
