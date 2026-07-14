@@ -88,8 +88,12 @@ recorded accepted-risk follow-up.
   `terminal+running+queued ≥ max_executions` raises
   `EphemeralBudgetExhausted` — nothing admitted or enqueued. Covers every
   admission surface through the one facade (`/chat` + `/task` + scheduler +
-  a2a + loop iterations). Fail-open on DB error. Routers map it to **410
-  Gone** (`ephemeral_budget_exhausted`); `execute_task` maps it to a FAILED
+  a2a + loop iterations). The count **excludes the row being admitted**
+  (#1601: `/task` + scheduler pre-create a RUNNING row before `acquire` —
+  counting it denied a `max_executions=1` ghost its first run; racing
+  sibling admissions still see each other, so the overshoot bound holds).
+  Fail-open on DB error. Routers map it to **410 Gone**
+  (`ephemeral_budget_exhausted`); `execute_task` maps it to a FAILED
   row with `TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED`.
 - **Terminal hook**: `_maybe_discard_exhausted_ephemeral` — spawned via
   `_spawn_bg` after a CAS-won terminal in `apply_result` (both branches,
@@ -168,11 +172,12 @@ database.py.
 
 ## Testing
 
-`tests/unit/test_69_ephemeral_agents.py` (40 tests, db_harness — real engine,
+`tests/unit/test_69_ephemeral_agents.py` (42 tests, db_harness — real engine,
 never a wholesale-mocked `database`): column live-select; mixin accessors
 round-trips incl. purge-refuses-durable + cascade read-back; facade
 delegations; acquire-gate deny matrix (expired/exhausted/active-counted,
-fail-open) proven to fire BEFORE slot work; key-fence allow/deny matrix;
+fail-open) proven to fire BEFORE slot work, incl. own-row exclusion at both
+the DB and gate layers (#1601); key-fence allow/deny matrix;
 Part 2 guard matrix (name+key-id); budget hook fail-open + trigger; discard
 full-path + idempotent re-run + half-discarded resume + lock contention +
 audit-row read-back; atomic quota INCR-with-cap + Redis-down fallback.
