@@ -4,10 +4,12 @@ Disposable agents with a hard budget — created for N executions and/or a TTL,
 then **hard-discarded**: container removed, DB rows purged via the cascade
 primitive, Redis runtime state cleared. Ghosts never enter soft-delete/retention
 (no 180-day name reservation) and are **volume-less** (container writable layer
-only — they never recreate, so nothing needs to survive a recreate). Creation
-with an ephemeral budget is **entitlement-gated** (`ephemeral_agents`); every
-lifecycle mechanic below is an edition-agnostic OSS primitive (the
-`suspended_at` core-primitive pattern).
+only — they never recreate, so nothing needs to survive a recreate).
+
+Every mechanic documented here is OSS code. Creating an agent *with a budget*
+additionally requires the `ephemeral_agents` entitlement — the registering
+module and its packaging are private; see the enterprise repo. This document
+covers the mechanism, not the entitlement.
 
 **Positioning**: heterogeneous-workspace jobs — a different repo/config per
 ghost. Burst parallelism on ONE agent belongs to `fan_out` today and replica
@@ -20,7 +22,8 @@ ttl_seconds?}` (≥1 required; Pydantic `EphemeralConfig`, models.py). In
 `create_agent_internal` (crud.py), BEFORE any side effect:
 
 1. Entitlement gate — `entitlement_service.is_entitled("ephemeral_agents")` →
-   403 `ephemeral_not_entitled`.
+   403 `ephemeral_not_entitled` (registry read; the module that registers the
+   id lives in the private submodule).
 2. `fork_to_own` conflict → 400; **ephemeral caller refusal** (an ephemeral
    agent cannot spawn ephemeral agents — chain-spawn depth-1 kill) → 403
    `ephemeral_spawn_recursion`.
