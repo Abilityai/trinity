@@ -736,6 +736,62 @@ def get_max_parallel_tasks_ceiling() -> int:
     return parsed
 
 
+# ============================================================================
+# Proactive channel-message rate limits (#1609)
+# ============================================================================
+#
+# Admin-tunable anti-spam caps on agent-INITIATED ("proactive") sends —
+# introduced hardcoded by #349/#350/#321. Inbound replies (DM/@mention/thread
+# via the channel adapters) are NEVER gated by these. All share a fixed 1-hour
+# window (as shipped). ``0`` = unlimited (disabled), matching the agent-quota
+# convention; the PUT warns when a cap is disabled. Runtime-resolved (no cache,
+# ``--workers 2``-consistent, no migration — same rationale as #506).
+
+PROACTIVE_RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour, fixed (matches #349/#350/#321)
+# key → shipped default (the pre-#1609 hardcoded value). Defaults reproduce
+# current behavior exactly.
+PROACTIVE_RATE_LIMIT_DEFAULTS = {
+    "slack_proactive_per_channel": 10,
+    "slack_proactive_per_agent": 100,
+    "telegram_proactive_per_group": 10,
+    "telegram_proactive_per_agent": 100,
+    "proactive_dm_per_recipient": 10,
+}
+PROACTIVE_RATE_LIMIT_DESCRIPTIONS = {
+    "slack_proactive_per_channel": "Max proactive Slack messages per hour to a single channel (0 = unlimited)",
+    "slack_proactive_per_agent": "Max proactive Slack messages per hour across all channels for one agent (0 = unlimited)",
+    "telegram_proactive_per_group": "Max proactive Telegram messages per hour to a single group (0 = unlimited)",
+    "telegram_proactive_per_agent": "Max proactive Telegram messages per hour across all groups for one agent (0 = unlimited)",
+    "proactive_dm_per_recipient": "Max proactive direct messages per hour to a single recipient (0 = unlimited)",
+}
+PROACTIVE_RATE_LIMIT_MAX = 1_000_000  # sanity upper bound
+
+
+def get_proactive_rate_limit(key: str) -> int:
+    """Fail-open read-through for a #1609 proactive cap (per hour).
+
+    Returns the configured integer (``0`` = unlimited → callers skip the limiter),
+    the shipped default on an absent/garbage value, clamped into ``[0, MAX]`` so
+    a stray store value can neither fail-closed the channel nor overflow. No
+    per-process cache (``--workers 2`` consistency), fail-open on a settings-read
+    failure so a proactive send is never blocked by a DB hiccup.
+    """
+    default = PROACTIVE_RATE_LIMIT_DEFAULTS.get(key, 0)
+    try:
+        raw = settings_service.get_setting(key)
+    except Exception:
+        return default
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return min(parsed, PROACTIVE_RATE_LIMIT_MAX)
+
+
 def clamp_to_ceiling(n: int) -> int:
     """Clamp a per-agent concurrency cap to the fleet ceiling (#506).
 

@@ -191,7 +191,7 @@
   - `GET /api/agents/{name}/telegram/groups` — List group configs
   - `PUT /api/agents/{name}/telegram/groups/{id}` — Update group config (trigger mode, welcome settings)
   - `DELETE /api/agents/{name}/telegram/groups/{id}` — Remove group config (deactivates)
-  - `POST /api/agents/{name}/telegram/groups/{chat_id}/messages` — Proactive group messaging (rate limited: 10/hr/group, 100/hr/agent)
+  - `POST /api/agents/{name}/telegram/groups/{chat_id}/messages` — Proactive group messaging (rate limited: 10/hr/group, 100/hr/agent by default — admin-configurable, #1609)
 - **MCP Tools**:
   - `list_channel_groups` — List Telegram groups the agent is connected to
   - `send_group_message` — Send proactive message to a group (supports Telegram HTML, max 4096 chars)
@@ -404,6 +404,15 @@
   converges the stored snapshot to settled. A divergent
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
+
+### Configurable Proactive Message Rate Limits (#1609)
+- **Status**: ✅ Implemented (2026-07-14)
+- **GitHub Issue**: #1609
+- **Description**: The anti-spam caps on **agent-initiated** ("proactive") channel sends — introduced hardcoded by #349/#350/#321 — are admin-configurable. **Inbound replies (DM/@mention/thread via the channel adapters) are NEVER subject to these caps**; only agent-initiated sends are.
+- **Five caps** (per hour, shipped defaults reproduce prior behavior exactly): Slack per-channel (10) / per-agent (100); Telegram per-group (10) / per-agent (100); proactive-DM per-recipient (10).
+- **Config**: `settings_service.get_proactive_rate_limit(key)` — runtime-resolved from `system_settings` (no cache, `--workers 2`-consistent, no migration; #506 shape), fail-open to the shipped default. `0 = unlimited` (disables that cap; the PUT warns). Read at request time by `routers/slack.py`, `routers/telegram.py`, and `services/proactive_message_service.py`.
+- **Endpoints**: `GET/PUT /api/settings/proactive-rate-limits` (admin; registered before the `/{key}` catch-all, which rejects these keys; range-validated `[0, 1000000]` with a named 422; audit-logged). Surfaced in Settings → General ("Proactive message limits" card).
+- **Limiter unification**: Telegram's bespoke per-process in-memory bucket migrated to the shared Redis sliding-window limiter (`services/rate_limiter.py`, #1023) — matching Slack and fixing multi-worker inconsistency. 429 messages name which cap fired.
 
 ### 23.4 Admin Configuration
 - **Status**: ✅ Implemented (2026-03-04)

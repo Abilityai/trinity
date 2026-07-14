@@ -18,11 +18,15 @@ from typing import Optional, Literal
 from database import db
 from services import idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
 
-# Rate limiting configuration
-RATE_LIMIT_MAX_PER_HOUR = 10  # messages per recipient per hour
+# Rate limiting configuration. The per-recipient cap is admin-configurable
+# (#1609) — sourced from settings at check time via
+# ``settings_service.get_proactive_rate_limit("proactive_dm_per_recipient")``
+# (0 = unlimited). RATE_LIMIT_MAX_PER_HOUR remains the shipped default there.
+RATE_LIMIT_MAX_PER_HOUR = 10  # messages per recipient per hour (default)
 RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour
 
 
@@ -94,6 +98,11 @@ class ProactiveMessageService:
 
     def _check_rate_limit(self, agent_name: str, recipient_email: str) -> bool:
         """Check if sending is allowed under rate limits. Returns True if OK."""
+        # #1609: admin-configurable per-recipient cap; 0 = unlimited.
+        limit = get_proactive_rate_limit("proactive_dm_per_recipient")
+        if limit <= 0:
+            return True
+
         redis = self._get_redis()
         if not redis:
             # Redis unavailable — allow (degraded mode)
@@ -105,7 +114,7 @@ class ProactiveMessageService:
             count = redis.get(key)
             if count is None:
                 return True
-            return int(count) < RATE_LIMIT_MAX_PER_HOUR
+            return int(count) < limit
         except Exception as e:
             logger.warning(f"Rate limit check failed: {e}")
             return True

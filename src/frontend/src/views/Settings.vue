@@ -349,6 +349,44 @@
                   </p>
                 </div>
 
+                <!-- Proactive message limits (#1609) — admin-tunable per-hour caps on agent-INITIATED channel sends -->
+                <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Proactive message limits</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Per-hour caps on messages an agent <span class="font-medium">initiates</span> to Slack, Telegram, and direct messages (anti-spam).
+                    Replies to inbound messages are never limited by these. Set <span class="font-medium">0</span> to disable a cap (unlimited).
+                  </p>
+                  <div class="mt-3 space-y-2.5">
+                    <div v-for="row in PROACTIVE_ROWS" :key="row.key" class="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min="0"
+                        :max="proactiveMax"
+                        v-model.number="proactiveLimits[row.key]"
+                        :disabled="savingProactive"
+                        class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      />
+                      <div class="min-w-0">
+                        <div class="text-sm text-gray-700 dark:text-gray-300">{{ row.label }}</div>
+                        <div class="text-xs text-gray-400">{{ row.hint }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mt-3 flex items-center gap-3">
+                    <button
+                      @click="saveProactiveLimits"
+                      :disabled="savingProactive"
+                      class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >Save</button>
+                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                      <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+                      Saved
+                    </span>
+                  </div>
+                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400">⚠ {{ w }}</p>
+                  <p v-if="proactiveError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">{{ proactiveError }}</p>
+                </div>
+
                 <!-- Brain Orb platform flags (trinity-enterprise#85) -->
                 <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
                   <h3 class="text-sm font-medium text-gray-900 dark:text-white">Brain Orb</h3>
@@ -2508,6 +2546,21 @@ const maxParallelTasksCeiling = ref(10)
 const ceilingMin = ref(1)
 const ceilingMax = ref(32)
 const savingCeiling = ref(false)
+
+// #1609: admin-tunable proactive channel-message caps (per hour; 0 = unlimited).
+const PROACTIVE_ROWS = [
+  { key: 'slack_proactive_per_channel', label: 'Slack — per channel', hint: 'Proactive messages/hour to one Slack channel' },
+  { key: 'slack_proactive_per_agent', label: 'Slack — per agent', hint: 'Across all Slack channels for one agent' },
+  { key: 'telegram_proactive_per_group', label: 'Telegram — per group', hint: 'Proactive messages/hour to one Telegram group' },
+  { key: 'telegram_proactive_per_agent', label: 'Telegram — per agent', hint: 'Across all Telegram groups for one agent' },
+  { key: 'proactive_dm_per_recipient', label: 'Direct messages — per recipient', hint: 'Proactive DMs/hour to one recipient' },
+]
+const proactiveLimits = ref({})
+const proactiveMax = ref(1000000)
+const savingProactive = ref(false)
+const proactiveSaveSuccess = ref(false)
+const proactiveError = ref('')
+const proactiveWarnings = ref([])
 const ceilingSaveSuccess = ref(false)
 const ceilingError = ref('')
 
@@ -2701,6 +2754,7 @@ async function loadSettings() {
       loadPlatformDefaultModel(),
       loadDefaultAccessPolicy(),
       loadMaxParallelTasksCeiling(),
+      loadProactiveLimits(),
       loadBrainOrbSettings(),
       loadElevenLabsSettings(),
       loadApiKeyStatus(),
@@ -2982,6 +3036,37 @@ async function saveMaxParallelTasksCeiling() {
     await loadMaxParallelTasksCeiling()
   } finally {
     savingCeiling.value = false
+  }
+}
+
+// #1609: proactive channel-message caps
+async function loadProactiveLimits() {
+  try {
+    const { data } = await axios.get('/api/settings/proactive-rate-limits', { headers: authStore.authHeader })
+    const next = {}
+    for (const key of Object.keys(data.limits || {})) next[key] = data.limits[key].value
+    proactiveLimits.value = next
+    if (data.max) proactiveMax.value = data.max
+  } catch {
+    // non-critical; card shows the shipped defaults
+  }
+}
+
+async function saveProactiveLimits() {
+  savingProactive.value = true
+  proactiveSaveSuccess.value = false
+  proactiveError.value = ''
+  proactiveWarnings.value = []
+  try {
+    const { data } = await axios.put('/api/settings/proactive-rate-limits', { ...proactiveLimits.value }, { headers: authStore.authHeader })
+    proactiveWarnings.value = data.warnings || []
+    proactiveSaveSuccess.value = true
+    setTimeout(() => { proactiveSaveSuccess.value = false }, 3000)
+    await loadProactiveLimits()
+  } catch (e) {
+    proactiveError.value = e.response?.data?.detail || 'Failed to save proactive message limits'
+  } finally {
+    savingProactive.value = false
   }
 }
 

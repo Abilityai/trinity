@@ -89,3 +89,9 @@ Calls are rate-limited to 5 per owner and destination number per 60 seconds, cap
 ## How does Trinity know who is messaging my agent from a channel?
 
 The verified email is the identity across every channel: a user verified on Telegram, WhatsApp, or a public link, or identified via Slack workspace OAuth, is the same person to Trinity everywhere. That email is checked against the agent's access policy — open access lets anyone chat, while restricted agents admit only the owner, admins, and emails on the shared-access list, with everyone else generating a pending access request. Approving a user once admits them on all channels. The Sharing tab also shows a client roster of external channel users who have messaged the agent. For the approval flow and policy details, see [Access Control](../sharing-and-access/access-control.md).
+
+## Can I change how many proactive messages my agent can send?
+
+Yes. An admin can tune the anti-spam caps on **agent-initiated** ("proactive") sends under **Settings → General → Proactive message limits**: Slack per-channel and per-agent, Telegram per-group and per-agent, and proactive direct messages per recipient — each a per-hour limit. The shipped defaults are 10/hour per channel/group/recipient and 100/hour per agent, so nothing changes until you raise them. Set a value to **0** to make that cap unlimited (the guardrail is disabled and the save warns you). Changes take effect immediately, with no restart. This is the setting to raise for a legitimate high-volume agent — for example, one that posts a Slack message for each inbound support request.
+
+Note: these caps apply only to messages the agent *starts*. **Replies to inbound messages** (a DM, an @mention, or a thread reply through a channel) are never limited by them.
