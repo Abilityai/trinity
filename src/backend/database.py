@@ -419,8 +419,10 @@ class DatabaseManager:
     def mark_ephemeral_discard_intent(self, agent_name: str):
         return self._agent_ops.mark_ephemeral_discard_intent(agent_name)
 
-    def count_ephemeral_budget_usage(self, agent_name: str):
-        return self._agent_ops.count_ephemeral_budget_usage(agent_name)
+    def count_ephemeral_budget_usage(self, agent_name: str, exclude_execution_id=None):
+        return self._agent_ops.count_ephemeral_budget_usage(
+            agent_name, exclude_execution_id=exclude_execution_id
+        )
 
     def find_discardable_ephemeral_agents(self, limit: int = 50):
         return self._agent_ops.find_discardable_ephemeral_agents(limit)

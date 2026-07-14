@@ -2811,6 +2811,20 @@ def _migrate_enterprise_connectors_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
+    """Add git_dir_bytes to agent_sync_state (#1596).
+
+    Records the agent's `.git` on-disk size (measured by the auto-sync heartbeat)
+    so operators can watch workspace-repo bloat before the disk fills. Nullable —
+    populated on the next sync of a git-enabled agent.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "git_dir_bytes",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
+    )
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -2824,7 +2838,7 @@ def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     "Dark" = the columns exist but nothing reads or writes them yet. This is
     pure schema groundwork for the pull-coordination phases (umbrella #1081);
     no endpoint, service, or runtime behavior changes here. Mirrored by the
-    Alembic revision 0019_schedule_executions_pull_claim_lease for PostgreSQL.
+    Alembic revision 0020_schedule_executions_pull_claim_lease for PostgreSQL.
     """
     new_columns = [
         ("claim_token", "TEXT"),
@@ -2854,7 +2868,7 @@ def _migrate_schedule_executions_redelivery_count(cursor, conn):
 
     DISTINCT from ``retry_count`` (#678 reader-race in-line retry) — that column
     is untouched. Mirrored by the Alembic revision
-    ``0020_schedule_executions_redelivery_count`` for PostgreSQL.
+    ``0021_schedule_executions_redelivery_count`` for PostgreSQL.
     """
     _safe_add_column(
         cursor,
@@ -2956,6 +2970,7 @@ MIGRATIONS = [
     ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
     ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
     ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
+    ("agent_sync_state_git_dir_bytes", _migrate_agent_sync_state_git_dir_bytes),
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
 ]

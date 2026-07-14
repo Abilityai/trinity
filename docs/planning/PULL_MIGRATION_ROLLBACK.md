@@ -42,7 +42,7 @@ on a live instance. Companion to `PULL_MIGRATION_STATUS.md` (what shipped) and `
 2. **Record the rollback target** — the currently-running backend image tag / commit SHA.
 3. **Confirm the deploy is inert:** `PULL_MODE_PILOT_AGENTS` empty in the backend env (default). A fresh
    deploy should change *no runtime behavior* until you opt an agent in.
-4. **Post-deploy, confirm migrations applied:** Alembic head reaches `0020_schedule_executions_redelivery_count`
+4. **Post-deploy, confirm migrations applied:** Alembic head reaches `0021_schedule_executions_redelivery_count`
    (Postgres) / the SQLite `schedule_executions_redelivery_count` migration is recorded, and the backend
    `/health` is 200.
 

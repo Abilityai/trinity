@@ -59,6 +59,7 @@ async def build_fleet_sync_audit(agent_names: Optional[List[str]] = None) -> Dic
             "unpushed_commits": unpushed,
             "dirty_tree": dirty_tree,
             "duplicate_binding": name in duplicates,
+            "git_dir_bytes": state.get("git_dir_bytes"),  # #1596 workspace .git size
         })
 
     entries.sort(key=lambda e: e["name"])

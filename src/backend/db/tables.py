@@ -604,6 +604,7 @@ agent_sync_state = Table(
     Column("behind_main", Integer),
     Column("ahead_working", Integer),
     Column("behind_working", Integer),
+    Column("git_dir_bytes", Integer),  # #1596: agent .git on-disk size
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )

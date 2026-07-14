@@ -4,10 +4,12 @@ Disposable agents with a hard budget — created for N executions and/or a TTL,
 then **hard-discarded**: container removed, DB rows purged via the cascade
 primitive, Redis runtime state cleared. Ghosts never enter soft-delete/retention
 (no 180-day name reservation) and are **volume-less** (container writable layer
-only — they never recreate, so nothing needs to survive a recreate). Creation
-with an ephemeral budget is **entitlement-gated** (`ephemeral_agents`); every
-lifecycle mechanic below is an edition-agnostic OSS primitive (the
-`suspended_at` core-primitive pattern).
+only — they never recreate, so nothing needs to survive a recreate).
+
+Every mechanic documented here is OSS code. Creating an agent *with a budget*
+additionally requires the `ephemeral_agents` entitlement — the registering
+module and its packaging are private; see the enterprise repo. This document
+covers the mechanism, not the entitlement.
 
 **Positioning**: heterogeneous-workspace jobs — a different repo/config per
 ghost. Burst parallelism on ONE agent belongs to `fan_out` today and replica
@@ -20,7 +22,8 @@ ttl_seconds?}` (≥1 required; Pydantic `EphemeralConfig`, models.py). In
 `create_agent_internal` (crud.py), BEFORE any side effect:
 
 1. Entitlement gate — `entitlement_service.is_entitled("ephemeral_agents")` →
-   403 `ephemeral_not_entitled`.
+   403 `ephemeral_not_entitled` (registry read; the module that registers the
+   id lives in the private submodule).
 2. `fork_to_own` conflict → 400; **ephemeral caller refusal** (an ephemeral
    agent cannot spawn ephemeral agents — chain-spawn depth-1 kill) → 403
    `ephemeral_spawn_recursion`.
@@ -88,8 +91,12 @@ recorded accepted-risk follow-up.
   `terminal+running+queued ≥ max_executions` raises
   `EphemeralBudgetExhausted` — nothing admitted or enqueued. Covers every
   admission surface through the one facade (`/chat` + `/task` + scheduler +
-  a2a + loop iterations). Fail-open on DB error. Routers map it to **410
-  Gone** (`ephemeral_budget_exhausted`); `execute_task` maps it to a FAILED
+  a2a + loop iterations). The count **excludes the row being admitted**
+  (#1601: `/task` + scheduler pre-create a RUNNING row before `acquire` —
+  counting it denied a `max_executions=1` ghost its first run; racing
+  sibling admissions still see each other, so the overshoot bound holds).
+  Fail-open on DB error. Routers map it to **410 Gone**
+  (`ephemeral_budget_exhausted`); `execute_task` maps it to a FAILED
   row with `TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED`.
 - **Terminal hook**: `_maybe_discard_exhausted_ephemeral` — spawned via
   `_spawn_bg` after a CAS-won terminal in `apply_result` (both branches,
@@ -168,11 +175,12 @@ database.py.
 
 ## Testing
 
-`tests/unit/test_69_ephemeral_agents.py` (40 tests, db_harness — real engine,
+`tests/unit/test_69_ephemeral_agents.py` (42 tests, db_harness — real engine,
 never a wholesale-mocked `database`): column live-select; mixin accessors
 round-trips incl. purge-refuses-durable + cascade read-back; facade
 delegations; acquire-gate deny matrix (expired/exhausted/active-counted,
-fail-open) proven to fire BEFORE slot work; key-fence allow/deny matrix;
+fail-open) proven to fire BEFORE slot work, incl. own-row exclusion at both
+the DB and gate layers (#1601); key-fence allow/deny matrix;
 Part 2 guard matrix (name+key-id); budget hook fail-open + trigger; discard
 full-path + idempotent re-run + half-discarded resume + lock contention +
 audit-row read-back; atomic quota INCR-with-cap + Redis-down fallback.

@@ -274,6 +274,7 @@ async def get_all_sync_health(
             "behind_main": (row or {}).get("behind_main") or 0,
             "ahead_working": (row or {}).get("ahead_working") or 0,
             "ahead_main": (row or {}).get("ahead_main") or 0,
+            "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
         })
     return {"agents": entries}
 

@@ -5,6 +5,14 @@
 >
 > For detailed change history, see `git log`.
 
+> **Scope — the doc follows the code.** This index covers flows whose
+> implementation is OSS code in this repository, regardless of which tracker the
+> issue was filed in. Flows for code that lives in the optional private
+> submodule (`src/backend/enterprise/`) are documented in that repository, not
+> here; see [docs/ENTERPRISE.md](../ENTERPRISE.md) for how the seam works.
+> Public docs never carry private-module design or schema
+> (trinity-enterprise#45, enforced by `.github/workflows/enterprise-docs-guard.yml`).
+
 ---
 
 ## Recent Updates

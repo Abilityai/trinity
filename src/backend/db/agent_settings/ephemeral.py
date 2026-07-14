@@ -95,12 +95,22 @@ class EphemeralMixin:
             )
             return result.rowcount > 0
 
-    def count_ephemeral_budget_usage(self, agent_name: str) -> Dict[str, int]:
+    def count_ephemeral_budget_usage(
+        self, agent_name: str, exclude_execution_id: Optional[str] = None
+    ) -> Dict[str, int]:
         """Budget usage counters for the admission gate + terminal hook.
 
         Single-pass conditional aggregation: ``terminal`` = consumed budget
         (success/failed/cancelled), ``active`` = queued/running/pending_retry
         (counted at admission so concurrency can't overshoot the budget).
+
+        ``exclude_execution_id`` (#1601): the admission gate passes the id of
+        the execution being admitted so its OWN pre-created row (the /task
+        and scheduler paths write a RUNNING row before ``acquire``) never
+        counts against the budget — otherwise a ``max_executions=1`` ghost
+        denies its first run. Paths that acquire before creating the row are
+        unaffected (the id isn't in the table yet). The terminal discard hook
+        omits it — the just-finished row must count.
         """
         terminal_statuses = [s.value for s in _BUDGET_TERMINAL_STATUSES]
         active_statuses = [s.value for s in _ACTIVE_STATUSES]
@@ -124,6 +134,8 @@ class EphemeralMixin:
                 0,
             ).label("active"),
         ).where(schedule_executions.c.agent_name == agent_name)
+        if exclude_execution_id:
+            stmt = stmt.where(schedule_executions.c.id != exclude_execution_id)
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return {

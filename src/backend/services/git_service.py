@@ -895,6 +895,26 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
     "content/",
+    # #1596: bulk data / dependency / cache / index dirs that churn on every
+    # run and bloat `.git` unboundedly under auto-sync. Git sync is for code +
+    # state, not datasets/indexes/deps — those belong in `data_paths` (#1169) or
+    # stay local. Merged into existing agents on sync, which also untracks any
+    # already-committed matches (stops future churn; doesn't shrink history).
+    # An agent that genuinely needs one committed can negate it in its own
+    # `.gitignore` (e.g. `!keep.db`).
+    "node_modules/",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".ipynb_checkpoints/",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.db",
     # Claude Code runtime — commit commands/skills/agents, exclude runtime data
     ".claude.json",
     ".claude.json.backup",
