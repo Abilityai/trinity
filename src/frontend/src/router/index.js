@@ -194,6 +194,15 @@ const routes = [
     // chat's Send button (and is meaningless to a client) — off here.
     meta: { title: 'Client Portal', hideHelpWidget: true }
   },
+  {
+    // #138: deep-linkable, refresh-safe conversation thread. The same shell as
+    // /portal (new-chat state); the :sessionId opens that thread. Back/forward
+    // navigate between new-chat and threads.
+    path: '/portal/c/:sessionId',
+    name: 'ClientPortalThread',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Client Portal', hideHelpWidget: true }
+  },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {
     path: '/m',

@@ -31,8 +31,11 @@ axios.interceptors.response.use(
       // Get the current route
       const currentPath = router.currentRoute.value.path
 
-      // Don't redirect if already on login or setup page
-      if (currentPath !== '/login' && currentPath !== '/setup' && currentPath !== '/m') {
+      // Don't redirect if already on login or setup page, or on the client
+      // portal (#138 — it owns a verified-email session and handles its own 401;
+      // a stale operator JWT must not bounce a signed-in client to /login).
+      if (currentPath !== '/login' && currentPath !== '/setup' && currentPath !== '/m'
+          && !currentPath.startsWith('/portal')) {
         console.log('🔐 Session expired - redirecting to login')
 
         // Clear auth state
