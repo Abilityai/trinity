@@ -485,7 +485,7 @@ Agents write to `~/.trinity/operator-queue.json`:
   "$schema": "operator-queue-v1",
   "requests": [
     {
-      "id": "req-20260307-001",
+      "id": "approval-<execution_id>-deploy",
       "type": "approval",
       "status": "pending",
       "priority": "high",
@@ -493,11 +493,26 @@ Agents write to `~/.trinity/operator-queue.json`:
       "question": "Full description. Markdown supported.",
       "options": ["approve", "reject"],
       "context": { "key": "value" },
-      "created_at": "2026-03-07T10:00:00Z"
+      "created_at": "2026-03-07T10:00:00Z",
+      "expires_at": "2026-03-09T10:00:00Z"
     }
   ]
 }
 ```
+
+**Request ids are a GLOBAL primary key** (`operator_queue.id`, `on_conflict_do_nothing` on create, id-only sync dedup) — a colliding id from another agent is silently swallowed. The #1402 contract therefore mandates execution-id-derived ids (`approval-{execution_id}-{slug}`), which also make a re-park under pull-mode re-delivery idempotent. Scoping uniqueness to `(agent_name, id)` is #1631; ingestion rate/size caps are #1632.
+
+### Async contract — fire-and-park (#1402)
+
+Operator communication is **asynchronous by design**: an agent parks a request and **ends its turn** — it never polls or blocks in-turn waiting for a human (a blocked turn would pin a worker/slot for its whole timeout budget). Responses are written back to the agent's file within ~5s of the operator responding (running agents only) and are processed at the start of a **later** turn. Consequences the contract documents to agents (platform prompt + `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`):
+
+- Agents with no future turn (one-shot triggers, no schedule/heartbeat) must embed resume instructions in the request; the respond→re-trigger dispatch path is a deferred follow-up (#1630).
+- `expires_at` is recommended on gating requests; `expired` ⇒ "not approved — do not proceed".
+- Irreversible-and-un-confineable effects (agent's own keys / `gh` / `curl`) are gated by parking an `approval` FIRST — an authored, honor-system contract (the agent owns its queue file), not a security boundary.
+
+### Platform-created items: poison-park (#1081 Phase 3 / #1402)
+
+The lease reaper (`services/lease_reaper_service.py`) creates operator-queue items **directly in the DB** (no agent-file leg) when a pull-claimed task exceeds `MAX_REDELIVERY`: type `alert`, priority `high`, id `poison-{execution_id}` (idempotent via `on_conflict_do_nothing`), created BEFORE the row is CAS-failed (alert-first ordering — a crash between the two leaves the row re-findable rather than invisibly parked). The sync service's write-back path delivers responses for DB-only items the same as file-originated ones.
 
 ### Status Lifecycle
 
@@ -509,21 +524,11 @@ Agent creates -> pending -> responded (by operator) -> acknowledged (by agent)
 
 Cancellations and expirations are propagated back to the agent on the next sync cycle (#1017): still-`pending` entries in the agent's file are flipped in place to their terminal DB status (`cancelled` or `expired`) so the agent stops waiting on them (entries missing from the file are never appended — there is nothing to deliver).
 
-### Meta-Prompt Integration
+### Prompt Integration
 
-**File**: `config/trinity-meta-prompt/prompt.md`
+The "Operator Communication" instructions agents receive — the queue-file protocol/schema, the three request types, the #1402 fire-and-park contract, derived request ids, and file hygiene — live in `src/backend/services/platform_prompt_service.py` (`PLATFORM_INSTRUCTIONS`), injected per invocation via `--append-system-prompt` on the push dispatch path. Sentinel phrases are test-locked by `tests/unit/test_1402_prompt_contract.py`.
 
-Contains "Operator Communication" section that instructs agents on:
-- The file-based queue protocol and JSON schema
-- Three request types and when to use them
-- How to check for and acknowledge responses
-- File hygiene rules (keep minimal items in JSON)
-
-**Stale prompt detection** (`docker/base-image/agent_server/routers/trinity.py:76-91`):
-
-The `/api/trinity/inject` endpoint compares the source `prompt.md` (at `/trinity-meta-prompt/prompt.md`) with the injected copy (at `~/.trinity/prompt.md`). If the contents differ, re-injection proceeds automatically even when `check_trinity_injection_status()` reports `injected=True`. This ensures that when `prompt.md` is updated (e.g., adding the Operator Communication section), existing agents receive the updated version on the next injection call rather than being stuck with a stale copy. The endpoint logs "Meta-prompt has changed, re-injecting" when staleness is detected (line 91).
-
-**Note**: This logic runs inside the agent's base image. A base image rebuild (`./scripts/deploy/build-base-image.sh`) is required for new containers to pick up this change.
+**Historical note**: the old file-based injection (`config/trinity-meta-prompt/prompt.md` → agent-side `/api/trinity/inject` with staleness re-injection) was removed in #136 — `docker/base-image/agent_server/routers/trinity.py` now serves only a static status endpoint. `prompt.md` remains as a reference copy kept in sync with the canonical section (parity-checked by the same test); deleting it is a candidate cleanup. **Known gap (#1629)**: pull-claimed turns bypass platform-prompt composition entirely and currently receive none of these instructions.
 
 ---
 
