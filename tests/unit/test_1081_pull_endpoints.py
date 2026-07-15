@@ -758,3 +758,91 @@ class TestClaimConcurrencyC1:
                 f"{sorted(claimed)} vs seeded {sorted(seeded)}"
             )
             assert schedule_ops.get_queued_count("alpha") == 0
+
+
+# ===========================================================================
+# #1629 — platform system-prompt composition on the pull path + re-delivery banner
+# ===========================================================================
+
+
+class TestPlatformPromptComposition:
+    """A pull-claimed turn must receive the same composed, runtime-aware platform
+    system prompt a push turn does (folding in the caller override), fail-open on
+    a composition error, and — for a re-delivered turn — a deterministic banner
+    prepended to the message at READ time only (stored message untouched)."""
+
+    def _enqueue(self, enqueue, *, caller_prompt=None, redelivery_count=0,
+                 message="run recon"):
+        import json
+        meta = {"kind": "task", "from": "system"}
+        if caller_prompt is not None:
+            meta["task_overrides"] = {"system_prompt": caller_prompt}
+        eid = enqueue("alpha", message=message, backlog_metadata=json.dumps(meta))
+        if redelivery_count:
+            _hrun(
+                "UPDATE schedule_executions SET redelivery_count = :rc WHERE id = :id",
+                rc=redelivery_count, id=eid,
+            )
+        return eid
+
+    def test_claim_carries_composed_platform_prompt(self, seed_agent, enqueue):
+        seed_agent("alpha")
+        self._enqueue(enqueue, caller_prompt="CALLER-PROMPT")
+        from services import pull_coordination_service as pcs
+
+        with patch.object(pcs, "is_execution_context_enabled", return_value=False), \
+             patch.object(pcs, "compose_system_prompt", return_value="PLATFORM::CALLER") as comp:
+            claim = pcs.claim_next_task("alpha", "alpha#w")
+
+        overrides = claim["envelope"]["payload"]["task_overrides"]
+        assert overrides["system_prompt"] == "PLATFORM::CALLER"
+        # The caller's override was threaded into the composition (not discarded).
+        assert comp.call_args.kwargs.get("caller_prompt") == "CALLER-PROMPT"
+
+    def test_composition_fails_open_to_caller_prompt(self, seed_agent, enqueue):
+        seed_agent("alpha")
+        self._enqueue(enqueue, caller_prompt="CALLER-ONLY")
+        from services import pull_coordination_service as pcs
+
+        with patch.object(pcs, "compose_system_prompt", side_effect=RuntimeError("boom")):
+            claim = pcs.claim_next_task("alpha", "alpha#w")  # must NOT raise
+
+        overrides = claim["envelope"]["payload"]["task_overrides"]
+        assert overrides["system_prompt"] == "CALLER-ONLY"  # parity with pre-#1629
+
+    def test_no_banner_when_not_redelivered(self, seed_agent, enqueue):
+        seed_agent("alpha")
+        self._enqueue(enqueue, message="original task", redelivery_count=0)
+        from services import pull_coordination_service as pcs
+
+        with patch.object(pcs, "compose_system_prompt", return_value="P"):
+            claim = pcs.claim_next_task("alpha", "alpha#w")
+
+        assert claim["redelivery_count"] == 0
+        assert claim["envelope"]["payload"]["message"] == "original task"
+
+    def test_banner_prepended_iff_redelivered(self, seed_agent, enqueue):
+        seed_agent("alpha")
+        self._enqueue(enqueue, message="original task", redelivery_count=2)
+        from services import pull_coordination_service as pcs
+
+        with patch.object(pcs, "compose_system_prompt", return_value="P"):
+            claim = pcs.claim_next_task("alpha", "alpha#w")
+
+        assert claim["redelivery_count"] == 2
+        msg = claim["envelope"]["payload"]["message"]
+        assert msg.startswith("[Trinity re-delivery notice]")
+        assert "attempt 3 of 3" in msg          # rc=2 → attempt 3, cap MAX_REDELIVERY=3
+        assert msg.endswith("original task")    # original preserved after the banner
+
+    def test_stored_message_never_mutated_by_banner(self, seed_agent, enqueue, schedule_ops):
+        seed_agent("alpha")
+        eid = self._enqueue(enqueue, message="original task", redelivery_count=1)
+        from services import pull_coordination_service as pcs
+
+        with patch.object(pcs, "compose_system_prompt", return_value="P"):
+            claim = pcs.claim_next_task("alpha", "alpha#w")
+
+        assert claim["envelope"]["payload"]["message"].startswith("[Trinity re-delivery notice]")
+        # The persisted row.message is the ORIGINAL — the banner is read-time only.
+        assert schedule_ops.get_execution(eid).message == "original task"
