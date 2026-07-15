@@ -2215,4 +2215,97 @@ export class TrinityClient {
       requestId,
     );
   }
+
+  // ==========================================================================
+  // A2A control plane (trinity-enterprise#160)
+  // The management endpoints (config/exposure/allow-list/endpoints) proxy the
+  // ENTITLEMENT-GATED enterprise router (`/api/enterprise/a2a/*`) — a 403 in an
+  // unentitled build, a 404 in an OSS-only build. The served card is the OSS
+  // #737 endpoint.
+  // ==========================================================================
+
+  /** Full A2A control state for one agent (exposure, card URL, allow-list, endpoints). */
+  async getA2AConfig(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/config`,
+    );
+  }
+
+  /** Toggle whether the agent is exposed over A2A. */
+  async setA2AExposure(name: string, enabled: boolean): Promise<unknown> {
+    return this.request<unknown>(
+      "PUT",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/exposure`,
+      { enabled },
+    );
+  }
+
+  /** The served A2A Agent Card JSON (OSS #737 endpoint). */
+  async getA2ACard(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/a2a/agent-card`,
+    );
+  }
+
+  /** Add and/or remove inbound identities on the agent's A2A allow-list. */
+  async updateA2AInboundAllowlist(
+    name: string,
+    body: { add?: string[]; remove?: string[] },
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/inbound-allowlist`,
+      body,
+    );
+  }
+
+  /** Register (or update by name) an outbound external A2A endpoint. */
+  async registerA2AEndpoint(
+    name: string,
+    body: { name: string; url: string; credentials?: string },
+  ): Promise<unknown> {
+    return this.request<unknown>(
+      "POST",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+      body,
+    );
+  }
+
+  /** List the agent's registered outbound endpoints (credentials never returned). */
+  async listA2AEndpoints(name: string): Promise<unknown> {
+    return this.request<unknown>(
+      "GET",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints`,
+    );
+  }
+
+  /** Remove one outbound endpoint by id. */
+  async removeA2AEndpoint(name: string, endpointId: string): Promise<unknown> {
+    return this.request<unknown>(
+      "DELETE",
+      `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints/${encodeURIComponent(endpointId)}`,
+    );
+  }
+
+  /**
+   * Best-effort {agent_name: a2a_exposed} map for surfacing on list_agents /
+   * get_agent. Returns {} on any failure (OSS-only 404, unentitled 403) so the
+   * caller simply omits the field.
+   */
+  async getA2AExposedMap(agentNames?: string[]): Promise<Record<string, boolean>> {
+    try {
+      const q = agentNames && agentNames.length
+        ? `?agents=${encodeURIComponent(agentNames.join(","))}`
+        : "";
+      const res = await this.request<Record<string, boolean>>(
+        "GET",
+        `/api/enterprise/a2a/exposed${q}`,
+      );
+      return res && typeof res === "object" ? res : {};
+    } catch {
+      return {};
+    }
+  }
 }

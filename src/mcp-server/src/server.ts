@@ -32,6 +32,7 @@ import { createLoopTools } from "./tools/loops.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
 import { createConnectorTools } from "./tools/connector.js";
 import { createGitTools } from "./tools/git.js";
+import { createA2ATools } from "./tools/a2a.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
 
@@ -268,6 +269,7 @@ export async function createServer(config: ServerConfig = {}) {
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
     createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
+    createA2ATools(client, requireApiKey),           // A2A control plane — exposure/card/allow-list/endpoints (ent#160)
   ];
   // Operator tools: hidden from connector-scoped keys.
   for (const group of toolGroups) {
