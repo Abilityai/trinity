@@ -2500,24 +2500,6 @@ export class TrinityClient {
       `/api/enterprise/a2a/${encodeURIComponent(name)}/endpoints/${encodeURIComponent(endpointId)}`,
     );
   }
-
-  /**
-   * Best-effort {agent_name: a2a_exposed} map for surfacing on list_agents /
-   * get_agent. Returns {} on any failure (OSS-only 404, unentitled 403) so the
-   * caller simply omits the field.
-   */
-  async getA2AExposedMap(agentNames?: string[]): Promise<Record<string, boolean>> {
-    try {
-      const q = agentNames && agentNames.length
-        ? `?agents=${encodeURIComponent(agentNames.join(","))}`
-        : "";
-      const res = await this.request<Record<string, boolean>>(
-        "GET",
-        `/api/enterprise/a2a/exposed${q}`,
-      );
-      return res && typeof res === "object" ? res : {};
-    } catch {
-      return {};
-    }
-  }
+  // a2a_exposed is surfaced natively on GET /api/agents (ent#157), so list_agents
+  // / get_agent carry it without a separate fetch — no client merge needed.
 }

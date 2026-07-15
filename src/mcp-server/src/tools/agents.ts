@@ -9,27 +9,6 @@ import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
- * ent#160: decorate agents in place with `a2a_exposed` (mirrors mcp_exposed,
- * #846). Best-effort — the exposure map is served by the ENTITLEMENT-GATED
- * enterprise router, so `getA2AExposedMap` returns {} on an OSS-only (404) or
- * unentitled (403) instance and the field is simply omitted. Never throws.
- */
-async function enrichA2AExposed(
-  apiClient: TrinityClient,
-  agents: Array<{ name: string; a2a_exposed?: boolean }>,
-): Promise<void> {
-  if (!agents.length) return;
-  try {
-    const map = await apiClient.getA2AExposedMap(agents.map((a) => a.name));
-    for (const a of agents) {
-      if (Object.prototype.hasOwnProperty.call(map, a.name)) a.a2a_exposed = map[a.name];
-    }
-  } catch {
-    // Best-effort only — never let A2A surfacing break the agent listing.
-  }
-}
-
-/**
  * Create agent management tools with the given client
  * @param client - Base Trinity client (provides base URL, no auth when requireApiKey=true)
  * @param requireApiKey - Whether API key authentication is enabled
@@ -73,10 +52,6 @@ export function createAgentTools(
         const apiClient = getClient(authContext);
         const agents = await apiClient.listAgents();
 
-        // ent#160: best-effort a2a_exposed surfacing (mirrors mcp_exposed, #846).
-        // getA2AExposedMap swallows OSS-404 / unentitled-403 → {} → field omitted.
-        await enrichA2AExposed(apiClient, agents);
-
         // Phase 11.1: System-scoped keys see all agents (no filtering)
         if (authContext?.scope === "system") {
           console.log(`[list_agents] System agent - showing all ${agents.length} agents`);
@@ -118,8 +93,6 @@ export function createAgentTools(
         const authContext = context?.session;
         const apiClient = getClient(authContext);
         const agent = await apiClient.getAgent(name);
-        // ent#160: best-effort a2a_exposed surfacing (mirrors mcp_exposed, #846).
-        await enrichA2AExposed(apiClient, [agent as { name: string }]);
         return JSON.stringify(agent, null, 2);
       },
     },
