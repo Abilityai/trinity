@@ -218,7 +218,10 @@ async def test_cold_start_returns_instant_empty_then_refreshes(monkeypatch):
     # Returned the cold payload — could only happen if compute was NOT awaited.
     assert res["cached"] is False
     assert res["stale"] is True
-    assert res["running_count"] == 0
+    # #1617: a cold cache reports running_count=None + no_data=True, NOT 0, so
+    # it can't be mistaken for a real "zero containers running".
+    assert res["running_count"] is None
+    assert res["no_data"] is True
     assert res["containers"] == []
     assert res["cache_age_seconds"] is None
     assert _ORIGINAL_FIELDS <= set(res)
@@ -229,6 +232,40 @@ async def test_cold_start_returns_instant_empty_then_refreshes(monkeypatch):
     assert telemetry._stats_cache["data"] is not None
     assert telemetry._stats_cache["data"]["running_count"] == 1
     assert telemetry._stats_cache["data"]["total_memory_mb"] == 100.0
+
+
+# ── #1617: cold "no data" is distinguishable from a real "zero running" ──────
+
+@pytest.mark.asyncio
+async def test_cold_no_data_is_distinct_from_real_zero_running(monkeypatch):
+    """The bug: a cold cache returned running_count=0, identical to a healthy
+    fleet with zero containers. After the fix, cold → running_count None /
+    no_data True, while a genuinely-empty fleet (refresh ran, found nothing
+    running) → running_count 0 / no_data False."""
+    # Genuinely-empty fleet: agents exist but none are running.
+    monkeypatch.setattr(
+        telemetry, "list_all_agents_fast",
+        lambda: [_FakeAgent("a", status="exited"), _FakeAgent("b", status="exited")],
+    )
+    monkeypatch.setattr(
+        telemetry, "_get_single_container_stats_sync",
+        lambda name: (_ for _ in ()).throw(AssertionError("no running agent to stat")),
+    )
+
+    # 1) Cold cache → "not yet measured".
+    cold = await telemetry.get_container_stats(current_user=None)
+    assert cold["running_count"] is None
+    assert cold["no_data"] is True
+    assert cold["stale"] is True
+
+    # 2) Let the scheduled refresh complete, then re-query → real zero.
+    assert telemetry._refresh_task is not None
+    await telemetry._refresh_task
+    fresh = await telemetry.get_container_stats(current_user=None)
+    assert fresh["running_count"] == 0        # real "zero containers running"
+    assert fresh["no_data"] is False
+    assert fresh["stale"] is False
+    assert fresh["cached"] is True
 
 
 # ── Stale cache: serve old data now, schedule refresh ───────────────────────
