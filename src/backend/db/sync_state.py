@@ -32,6 +32,9 @@ _COLUMNS = (
     "ahead_working",
     "behind_working",
     "git_dir_bytes",  # #1596: agent .git on-disk size (bloat observability)
+    "pack_count",  # #1595: packs from `git count-objects -v`
+    "loose_objects",  # #1595: loose objects (gc-health signal)
+    "maintenance_failures",  # #1595: consecutive failed maintenance attempts
     "last_check_at",
     "updated_at",
 )
@@ -74,6 +77,9 @@ class SyncStateOperations:
         ahead_working: Optional[int] = None,
         behind_working: Optional[int] = None,
         git_dir_bytes: Optional[int] = None,
+        pack_count: Optional[int] = None,
+        loose_objects: Optional[int] = None,
+        maintenance_failures: Optional[int] = None,
         last_check_at: Optional[str] = None,
     ) -> Dict:
         """Upsert a sync-state row.
@@ -113,6 +119,11 @@ class SyncStateOperations:
             "ahead_working": _merged("ahead_working", ahead_working) or 0,
             "behind_working": _merged("behind_working", behind_working) or 0,
             "git_dir_bytes": _merged("git_dir_bytes", git_dir_bytes),  # #1596
+            "pack_count": _merged("pack_count", pack_count),  # #1595
+            "loose_objects": _merged("loose_objects", loose_objects),  # #1595
+            # 0 is a meaningful reset here (post-success), not "unset" — it
+            # passes _merged as-is; only a true None falls back to prior.
+            "maintenance_failures": _merged("maintenance_failures", maintenance_failures) or 0,
             "last_check_at": last_check_at or now,
             "updated_at": now,
         }

@@ -1,12 +1,17 @@
 """
 Git sync endpoints for GitHub bidirectional sync.
 """
+import functools
 import json
 import os
+import re
+import shutil
 import subprocess
 import logging
+import threading
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -15,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from ..models import GitSyncRequest, GitPullRequest
 from ..utils.git_conflict import classify_conflict
+from ..utils.registered_run import run_registered
 from .files import _read_persistent_state
 from .snapshot import build_snapshot, restore_from_tar
 
@@ -96,6 +102,11 @@ _SYNC_STATE_DEFAULT: Dict = {
     "last_error_summary": None,
     "consecutive_failures": 0,
     "git_dir_bytes": None,  # #1596: last-measured .git on-disk size
+    "pack_count": None,  # #1595: packs from `git count-objects -v`
+    "loose_objects": None,  # #1595: loose objects from `git count-objects -v`
+    "maintenance_status": None,  # #1595: last maintenance outcome string
+    "maintenance_failures": 0,  # #1595: consecutive failed maintenance attempts
+    "maintenance_next_attempt_at": None,  # #1595: backoff gate (ISO timestamp)
 }
 
 
@@ -120,19 +131,41 @@ def _read_sync_state_file(home_dir: Path) -> Dict:
         return dict(_SYNC_STATE_DEFAULT)
 
 
+# #1595: exponential backoff for failed maintenance — a repack that cannot
+# converge (too big for the timeout, low disk) must not become a ~2/3-duty-cycle
+# IO treadmill that also litters a multi-GB tmp_pack every 15 minutes.
+_MAINTENANCE_BACKOFF_BASE_SECONDS = 3600
+_MAINTENANCE_BACKOFF_CAP_SECONDS = 86400
+
+
 def _write_sync_state_file(
     home_dir: Path,
     last_sync_status: str,
     last_sync_at: Optional[str] = None,
     last_error_summary: Optional[str] = None,
     git_dir_bytes: Optional[int] = None,
+    pack_count: Optional[int] = None,
+    loose_objects: Optional[int] = None,
+    maintenance_status: Optional[str] = None,
 ) -> Dict:
     """Persist one sync outcome.
 
     consecutive_failures is bumped on `failed`, reset on `success`, untouched
     on `never`. last_error_summary is cleared on success, kept on never.
-    git_dir_bytes (#1596) is updated when measured; a None here preserves the
-    last known value.
+    git_dir_bytes (#1596) / pack_count / loose_objects (#1595) are updated when
+    measured; a None here preserves the last known value.
+
+    maintenance_status (#1595) drives the maintenance backoff bookkeeping:
+    "failed" increments maintenance_failures and pushes
+    maintenance_next_attempt_at out exponentially (1h → 2h → … capped 24h);
+    a "repacked …" success resets both; skip statuses ("skipped_low_disk",
+    "backoff") are recorded without touching the counter; None (no maintenance
+    considered this cycle) preserves all three fields.
+
+    The write is atomic (temp file + os.replace): the writer lives in the
+    auto-sync worker thread while `/api/git/status` reads on the event loop —
+    a read landing mid-truncate would see defaults and mask a real failure
+    streak in the backend's `agent_sync_state` upsert.
     """
     prior = _read_sync_state_file(home_dir)
 
@@ -146,13 +179,41 @@ def _write_sync_state_file(
 
     if git_dir_bytes is not None:
         prior["git_dir_bytes"] = git_dir_bytes
+    if pack_count is not None:
+        prior["pack_count"] = pack_count
+    if loose_objects is not None:
+        prior["loose_objects"] = loose_objects
+
+    if maintenance_status is not None:
+        prior["maintenance_status"] = maintenance_status
+        if maintenance_status == "failed":
+            prior_failures = prior.get("maintenance_failures")
+            if not isinstance(prior_failures, int) or isinstance(prior_failures, bool):
+                prior_failures = 0  # sync-state is agent-writable JSON — never trust it
+            failures = prior_failures + 1
+            prior["maintenance_failures"] = failures
+            # Exponent clamped: the cap is reached at 2^5 anyway, and an
+            # unclamped 2**N on a tampered counter is a bignum memory bomb.
+            backoff = min(
+                _MAINTENANCE_BACKOFF_BASE_SECONDS * (2 ** min(failures - 1, 10)),
+                _MAINTENANCE_BACKOFF_CAP_SECONDS,
+            )
+            prior["maintenance_next_attempt_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=backoff)
+            ).isoformat()
+        elif maintenance_status.startswith("repacked"):
+            prior["maintenance_failures"] = 0
+            prior["maintenance_next_attempt_at"] = None
+        # skip statuses ("skipped_low_disk", "backoff"): record only
 
     prior["last_sync_status"] = last_sync_status
     prior["last_sync_at"] = last_sync_at or datetime.now(timezone.utc).isoformat()
 
     path = _sync_state_path(home_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(prior, indent=2))
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(prior, indent=2))
+    os.replace(tmp_path, path)
     return prior
 
 
@@ -163,7 +224,59 @@ def _write_sync_state_file(
 # repo with few packs is a no-op). Non-destructive: repack rewrites packs +
 # prunes redundant/unreachable objects; it does NOT rewrite reachable history
 # (an opt-in squash policy is a separate follow-up).
+#
+# #1595: the base image now ships `gc.auto=0` (auto-gc always detached to PID 1
+# and was SIGKILLed by the orphan sweep — it never once completed), so garbage
+# accumulates as LOOSE objects, not packs. The trigger therefore fires on
+# pack count OR loose-object count; this pass is the single owner of repo
+# maintenance for the agent's home repo.
 _GIT_MAINTENANCE_PACK_THRESHOLD = int(os.getenv("GIT_MAINTENANCE_PACK_THRESHOLD", "20"))
+_GIT_MAINTENANCE_LOOSE_THRESHOLD = int(
+    os.getenv("GIT_MAINTENANCE_LOOSE_THRESHOLD", "6700")  # git's own gc.auto default
+)
+
+# #1595: repo-level mutual exclusion. Moving the auto-sync cycle off the event
+# loop (asyncio.to_thread) removed the accidental serialization the blocking
+# loop provided — without this lock an operator POST /api/git/sync could
+# interleave `git add/commit/push` with the threaded cycle's own (index.lock
+# roulette), or run during a repack. Non-blocking everywhere: the cycle skips
+# when an operator op is in flight; operator endpoints 409 (`agent_busy`)
+# while a cycle/maintenance runs.
+_REPO_LOCK = threading.Lock()
+
+
+def _with_repo_lock(fn):
+    """Guard a mutating git endpoint with the repo lock (409 on contention)."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if not _REPO_LOCK.acquire(blocking=False):
+            return _conflict_response(
+                status_code=409,
+                detail="Repository busy: auto-sync or git maintenance in progress",
+                conflict_type="agent_busy",
+                stderr="",
+                home_dir=Path("/home/developer"),
+                branch=None,
+            )
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _REPO_LOCK.release()
+
+    return wrapper
+
+
+def _maintenance_timeout_seconds() -> int:
+    """Repack budget — read at CALL time (#1595): an import-time copy makes env
+    monkeypatching silently inert and lets the transient-pid TTL drift from the
+    real timeout. Tunable so a first pass on a multi-GB repo can converge."""
+    raw = os.getenv("GIT_MAINTENANCE_TIMEOUT_SECONDS", "1800")
+    try:
+        value = int(raw)
+        return value if value > 0 else 1800
+    except ValueError:
+        return 1800
 
 
 def _count_git_packs(home_dir: Path) -> int:
@@ -180,35 +293,153 @@ def _git_dir_bytes(home_dir: Path) -> Optional[int]:
     if not git_dir.exists():
         return None
     try:
-        res = subprocess.run(
-            ["du", "-sb", str(git_dir)],
-            capture_output=True, text=True, timeout=60, check=True,
+        res = run_registered(
+            ["du", "-sb", str(git_dir)], timeout=60, check=True,
         )
         return int(res.stdout.split()[0])
     except Exception:
         return None
 
 
-def _maybe_run_git_maintenance(home_dir: Path) -> Optional[str]:
-    """#1596: consolidate .git when packs pile up. Best-effort, non-fatal — a
-    failed/skipped maintenance never fails the sync. Returns a short status."""
-    packs = _count_git_packs(home_dir)
-    if packs < _GIT_MAINTENANCE_PACK_THRESHOLD:
-        return None
+def _collect_git_object_stats(home_dir: Path) -> Dict:
+    """#1595: one `git count-objects -v` → loose count, pack count, pack bytes.
+
+    Returns {"loose_objects": int|None, "pack_count": int|None,
+    "size_pack_kb": int|None} — None fields on any failure so callers degrade
+    to observability-only loss, never a failed sync.
+    """
+    stats: Dict = {"loose_objects": None, "pack_count": None, "size_pack_kb": None}
+    if not (home_dir / ".git").exists():
+        return stats
     try:
-        # -a: repack ALL objects into a single pack; -d: delete now-redundant
-        # packs; -l: local only (don't pull remote packs). Then gc prunes loose
-        # + unreachable garbage immediately.
-        subprocess.run(
-            ["git", "repack", "-adl", "-q"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=1800, check=True,
+        res = run_registered(
+            ["git", "count-objects", "-v"], cwd=str(home_dir), timeout=60, check=True,
         )
-        subprocess.run(
-            ["git", "gc", "--quiet", "--prune=now"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=600, check=False,
+        fields = {}
+        for line in res.stdout.splitlines():
+            key, _, value = line.partition(":")
+            try:
+                fields[key.strip()] = int(value.strip())
+            except ValueError:
+                continue
+        stats["loose_objects"] = fields.get("count")
+        stats["pack_count"] = fields.get("packs")
+        stats["size_pack_kb"] = fields.get("size-pack")
+    except Exception:
+        logger.debug("count-objects failed; git object stats unavailable", exc_info=True)
+    return stats
+
+
+def _reap_stale_git_litter(home_dir: Path, *, repack_budget_seconds: int) -> None:
+    """#1595: remove lock/tmp litter a SIGKILLed git process leaves behind.
+
+    Runs at the TOP of every cycle (not only on the success+threshold path —
+    a repo wedged on `index.lock` fails at `git add` and would never reach a
+    maintenance-only placement). Age gates make removal race-free:
+    - gc.pid / index.lock older than 1h: no legitimate git op holds either
+      that long; a stale index.lock silently froze agents for 12 days.
+    - tmp_pack_*/tmp_obj_*/tmp_idx_* older than the repack budget + 300s:
+      maintenance is serialized (repo lock), so anything older than the
+      current attempt's budget is definitionally abandoned.
+    """
+    git_dir = home_dir / ".git"
+    if not git_dir.exists():
+        return
+    now = time.time()
+    for rel in ("gc.pid", "index.lock"):
+        target = git_dir / rel
+        try:
+            if target.exists() and now - target.stat().st_mtime > 3600:
+                target.unlink()
+                logger.warning("reaped stale git lock: %s", rel)
+        except OSError:
+            continue
+    pack_dir = git_dir / "objects" / "pack"
+    tmp_age_floor = repack_budget_seconds + 300
+    for pattern in ("tmp_pack_*", "tmp_obj_*", "tmp_idx_*", "tmp_rev_*"):
+        try:
+            candidates = list(pack_dir.glob(pattern))
+        except OSError:
+            continue
+        for target in candidates:
+            try:
+                if now - target.stat().st_mtime > tmp_age_floor:
+                    target.unlink()
+                    logger.info("reaped abandoned pack temp: %s", target.name)
+            except OSError:
+                continue
+
+
+def _maybe_run_git_maintenance(home_dir: Path, stats: Dict) -> Optional[str]:
+    """#1596/#1595: consolidate .git when packs or loose objects pile up.
+    Best-effort, non-fatal — a failed/skipped maintenance never fails the sync.
+    Returns a short status (None = not considered this cycle).
+
+    Guards (#1595):
+    - backoff: skip until `maintenance_next_attempt_at` after a failure —
+      a non-converging repack must not retry every 15-minute cycle.
+    - disk preflight: repack writes the full new pack BEFORE deleting old
+      ones; on a near-full disk that is a worse incident than the bloat.
+    - prune grace: `--unpack-unreachable=1.hour.ago` / `--prune=1.hour.ago`
+      instead of `now` — Claude executions run git concurrently by design,
+      and zero-grace pruning of their just-written, not-yet-referenced
+      objects corrupts the in-flight operation. 1h > any single git op.
+    - memory bound: pack.threads=1 + pack.windowMemory keep repack RSS
+      inside the agent cgroup (an OOM kill of uvicorn IS the outage).
+    """
+    packs = stats.get("pack_count")
+    loose = stats.get("loose_objects")
+    if packs is None and loose is None:
+        return None  # no data — never repack blind
+    if (packs or 0) < _GIT_MAINTENANCE_PACK_THRESHOLD and (
+        (loose or 0) < _GIT_MAINTENANCE_LOOSE_THRESHOLD
+    ):
+        return None
+
+    state = _read_sync_state_file(home_dir)
+    next_attempt = state.get("maintenance_next_attempt_at")
+    if next_attempt:
+        try:
+            # TypeError guard: a hand-edited naive timestamp must degrade to
+            # "proceed", not fail every future sync cycle (aware > naive raises).
+            if datetime.fromisoformat(next_attempt) > datetime.now(timezone.utc):
+                return "backoff"
+        except (ValueError, TypeError):
+            pass  # unparseable/naive timestamp — proceed
+
+    size_pack_kb = stats.get("size_pack_kb")
+    if size_pack_kb:
+        try:
+            free = shutil.disk_usage(str(home_dir)).free
+            if free < size_pack_kb * 1024 * 1.1:
+                logger.warning(
+                    "git maintenance skipped: free disk %d < 1.1x pack bytes %d",
+                    free, size_pack_kb * 1024,
+                )
+                return "skipped_low_disk"
+        except OSError:
+            pass
+
+    timeout = _maintenance_timeout_seconds()
+    try:
+        # -A + --unpack-unreachable=<grace>: unreachable objects younger than
+        # the grace survive as loose (concurrent-writer safety); older ones —
+        # the actual bloat — are dropped. -d deletes now-redundant packs;
+        # -l local only. gc then prunes aged loose garbage and expires reflogs.
+        run_registered(
+            [
+                "git", "-c", "pack.threads=1", "-c", "pack.windowMemory=128m",
+                "repack", "-A", "-d", "-l", "-q",
+                "--unpack-unreachable=1.hour.ago",
+            ],
+            cwd=str(home_dir), timeout=timeout, check=True,
+        )
+        run_registered(
+            ["git", "gc", "--quiet", "--prune=1.hour.ago"],
+            cwd=str(home_dir), timeout=600, check=False,
         )
         after = _count_git_packs(home_dir)
-        logger.info("git maintenance: consolidated %d packs -> %d", packs, after)
+        logger.info("git maintenance: consolidated %s packs -> %d", packs, after)
         return f"repacked {packs}->{after}"
     except Exception as exc:  # never let maintenance break the sync loop
         logger.warning("git maintenance failed (non-fatal): %s", exc)
@@ -216,73 +447,135 @@ def _maybe_run_git_maintenance(home_dir: Path) -> Optional[str]:
 
 
 def _run_auto_sync_once(home_dir: Path) -> Dict:
-    """One auto-sync cycle: stage, commit if dirty, push, maybe consolidate .git.
-    Records outcome.
+    """One auto-sync cycle: reap stale lock litter, measure, stage, commit if
+    dirty, push, maybe consolidate .git. Records outcome.
 
     Intentionally minimal — heavy conflict handling stays in the operator-
     initiated `sync_to_github` endpoint. Auto-sync is a heartbeat, not a
     rescue.
+
+    #1595: runs in a worker thread (asyncio.to_thread) so a long repack no
+    longer starves /health, the 5s liveness heartbeat, and chat. Every
+    subprocess routes through `run_registered` — a bare agent-server child is
+    indistinguishable from a leaked orphan and dies whenever it straddles a
+    sweep tick. Serialized against the operator git endpoints via _REPO_LOCK.
     """
     now = datetime.now(timezone.utc).isoformat()
+
+    if not _REPO_LOCK.acquire(blocking=False):
+        # Operator op in flight — skip quietly; not a sync failure.
+        logger.info("auto-sync: repo busy (operator git op in flight), skipping cycle")
+        return {"status": "skipped", "reason": "repo_busy"}
+
     try:
-        # Stage everything.
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=30, check=True,
+        _reap_stale_git_litter(
+            home_dir, repack_budget_seconds=_maintenance_timeout_seconds()
         )
 
-        # Is there anything to commit?
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=10,
-        )
-        if status.stdout.strip():
-            commit_msg = f"Trinity auto-sync: {now}"
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=str(home_dir), capture_output=True, text=True, timeout=30, check=True,
+        # Measure BEFORE the sync steps so the failure paths carry metrics too —
+        # the sickest repos (wedged on a lock, failing push) must not go dark.
+        stats = _collect_git_object_stats(home_dir)
+        gdb = _git_dir_bytes(home_dir)
+
+        try:
+            # Stage everything.
+            run_registered(
+                ["git", "add", "-A"], cwd=str(home_dir), timeout=30, check=True,
             )
 
-        push = subprocess.run(
-            ["git", "push", "origin", "HEAD"],
-            cwd=str(home_dir), capture_output=True, text=True, timeout=300,
-        )
-        if push.returncode != 0:
-            err = _summarize_git_error(push.stderr or push.stdout or "push failed")
-            _write_sync_state_file(home_dir, "failed",
-                                    last_sync_at=now, last_error_summary=err)
+            # Is there anything to commit? check=True: a swept/killed status
+            # (rc −9, empty stdout) must fail the cycle loudly, not be
+            # silently misread as "nothing to commit".
+            status = run_registered(
+                ["git", "status", "--porcelain"],
+                cwd=str(home_dir), timeout=10, check=True,
+            )
+            if status.stdout.strip():
+                commit_msg = f"Trinity auto-sync: {now}"
+                run_registered(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=str(home_dir), timeout=30, check=True,
+                )
+
+            push = run_registered(
+                ["git", "push", "origin", "HEAD"], cwd=str(home_dir), timeout=300,
+            )
+            if push.returncode != 0:
+                err = _summarize_git_error(push.stderr or push.stdout or "push failed")
+                _write_sync_state_file(
+                    home_dir, "failed", last_sync_at=now, last_error_summary=err,
+                    git_dir_bytes=gdb,
+                    pack_count=stats.get("pack_count"),
+                    loose_objects=stats.get("loose_objects"),
+                )
+                return {"status": "failed", "error": err}
+
+            # #1596/#1595: consolidate .git when packs or loose objects pile up
+            # (self-throttling, non-fatal), then record the resulting size so
+            # operators can watch the curve.
+            maintenance = _maybe_run_git_maintenance(home_dir, stats)
+            if maintenance and maintenance.startswith("repacked"):
+                # Repack changed everything — re-measure for honest numbers.
+                stats = _collect_git_object_stats(home_dir)
+                gdb = _git_dir_bytes(home_dir)
+            _write_sync_state_file(
+                home_dir, "success", last_sync_at=now,
+                git_dir_bytes=gdb,
+                pack_count=stats.get("pack_count"),
+                loose_objects=stats.get("loose_objects"),
+                maintenance_status=maintenance,
+            )
+            result = {"status": "success"}
+            if maintenance:
+                result["maintenance"] = maintenance
+            return result
+
+        except subprocess.CalledProcessError as exc:
+            err = _summarize_git_error(exc.stderr or exc.stdout or str(exc))
+            _write_sync_state_file(
+                home_dir, "failed", last_sync_at=now, last_error_summary=err,
+                git_dir_bytes=gdb,
+                pack_count=stats.get("pack_count"),
+                loose_objects=stats.get("loose_objects"),
+            )
             return {"status": "failed", "error": err}
-
-        # #1596: consolidate .git when packs pile up (self-throttling, non-fatal),
-        # then record the resulting .git size so operators can watch the curve.
-        maintenance = _maybe_run_git_maintenance(home_dir)
-        _write_sync_state_file(
-            home_dir, "success", last_sync_at=now,
-            git_dir_bytes=_git_dir_bytes(home_dir),
-        )
-        result = {"status": "success"}
-        if maintenance:
-            result["maintenance"] = maintenance
-        return result
-
-    except subprocess.CalledProcessError as exc:
-        err = _summarize_git_error(exc.stderr or exc.stdout or str(exc))
-        _write_sync_state_file(home_dir, "failed",
-                                last_sync_at=now, last_error_summary=err)
-        return {"status": "failed", "error": err}
-    except Exception as exc:  # defensive — never let the loop crash
+        except Exception as exc:  # defensive — never let the loop crash
+            err = _summarize_git_error(str(exc))
+            _write_sync_state_file(
+                home_dir, "failed", last_sync_at=now, last_error_summary=err,
+                git_dir_bytes=gdb,
+                pack_count=stats.get("pack_count"),
+                loose_objects=stats.get("loose_objects"),
+            )
+            return {"status": "failed", "error": err}
+    except Exception as exc:  # pre-measurement failure — keep the old contract
         err = _summarize_git_error(str(exc))
         _write_sync_state_file(home_dir, "failed",
                                 last_sync_at=now, last_error_summary=err)
         return {"status": "failed", "error": err}
+    finally:
+        _REPO_LOCK.release()
+
+
+def _redact_url_userinfo(text: str) -> str:
+    """Strip credentials from URLs in git output (#1595 review).
+
+    Git error lines print the full remote URL — for PAT-embedded remotes that
+    is `https://x-access-token:ghp_…@github.com/…` — and both the sync-state
+    error summary and the push-collision operator-queue entry persist and
+    surface that output. Redact userinfo everywhere git output leaves the
+    process.
+    """
+    return re.sub(r"(://)[^/@\s]+@", r"\1***@", text)
 
 
 def _summarize_git_error(raw: str) -> str:
-    """Trim git stderr to a 240-char one-liner (matches operator-queue field size)."""
+    """Trim git stderr to a 240-char one-liner (matches operator-queue field size).
+    URL userinfo redacted — see :func:`_redact_url_userinfo`."""
     if not raw:
         return "unknown error"
     first = raw.strip().splitlines()[0]
-    return first[:240]
+    return _redact_url_userinfo(first)[:240]
 
 
 def _get_pull_branch(current_branch: str, home_dir: Path) -> str:
@@ -408,7 +701,7 @@ def _record_push_collision(branch: str, lease_sha: str | None, stderr: str) -> N
                 "context": {
                     "branch": branch,
                     "expected_sha": lease_sha,
-                    "git_stderr": (stderr or "").strip()[:2000],
+                    "git_stderr": _redact_url_userinfo((stderr or "").strip())[:2000],
                     "remediation": (
                         "Assign a fresh working branch to one of the colliding "
                         "agents (Fleet → Branch Bindings → Assign fresh branch)."
@@ -632,6 +925,7 @@ async def get_git_status():
 
 
 @router.post("/api/git/sync")
+@_with_repo_lock
 async def sync_to_github(request: GitSyncRequest):
     """
     Sync local changes to GitHub by staging, committing, and pushing.
@@ -983,6 +1277,7 @@ async def get_git_log(limit: int = 10):
 
 
 @router.post("/api/git/pull")
+@_with_repo_lock
 async def pull_from_github(request: GitPullRequest = GitPullRequest()):
     """
     Pull latest changes from the remote branch with conflict resolution strategies.
@@ -1299,6 +1594,7 @@ def reset_to_main_preserve_state_impl(
 
 
 @router.post("/api/git/reset-to-main-preserve-state")
+@_with_repo_lock
 async def reset_to_main_preserve_state():
     """Adopt origin/main as the baseline, preserving allowlisted files (S3, #384).
 

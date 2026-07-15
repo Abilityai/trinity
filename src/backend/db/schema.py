@@ -689,6 +689,9 @@ TABLES = {
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
             git_dir_bytes INTEGER,
+            pack_count INTEGER,
+            loose_objects INTEGER,
+            maintenance_failures INTEGER DEFAULT 0,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)

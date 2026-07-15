@@ -32,6 +32,20 @@ if [ -n "${GITHUB_PAT}" ]; then
     export GITHUB_TOKEN="${GITHUB_PAT}"
 fi
 
+# === Stale git lock reap (#1595) ===
+# A SIGKILLed git process (orphan-sweep kill, container recreation mid-op)
+# leaves lock litter that silently wedges every later git op — a stale
+# index.lock froze agents for 12 days producing fake $0 successes. At
+# container start no git process is running, so any lock under .git is
+# definitionally stale.
+if [ -d /home/developer/.git ]; then
+    rm -f /home/developer/.git/index.lock \
+          /home/developer/.git/gc.pid \
+          /home/developer/.git/objects/maintenance.lock 2>/dev/null || true
+    find /home/developer/.git/refs /home/developer/.git/logs \
+        -name "*.lock" -type f -delete 2>/dev/null || true
+fi
+
 # Initialize from GitHub repository if specified
 if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"

@@ -2847,6 +2847,36 @@ def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
         "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
     )
 
+def _migrate_agent_sync_state_gc_signals(cursor, conn):
+    """Add pack_count / loose_objects / maintenance_failures to agent_sync_state (#1595).
+
+    Git-maintenance health signals measured by the auto-sync heartbeat
+    (`git count-objects -v`): pack and loose-object counts drive the bloat
+    observability the killed-auto-gc incident lacked, and the consecutive
+    maintenance-failure counter lets SyncHealthService edge-trigger an
+    operator alert. All nullable/default-0 — populated on the next sync of a
+    git-enabled agent.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "pack_count",
+        "ALTER TABLE agent_sync_state ADD COLUMN pack_count INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "loose_objects",
+        "ALTER TABLE agent_sync_state ADD COLUMN loose_objects INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "maintenance_failures",
+        "ALTER TABLE agent_sync_state ADD COLUMN maintenance_failures INTEGER DEFAULT 0",
+    )
+
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -2996,4 +3026,5 @@ MIGRATIONS = [
     ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
+    ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
 ]

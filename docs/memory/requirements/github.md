@@ -77,4 +77,19 @@
 - **Flow**: `docs/memory/feature-flows/git-sync-health.md`
 - **Upstream**: Epic #381 — sub-issues #389 (S1), #390 (S6)
 
+### 11.9 Survivable Git Maintenance — platform-owned repo upkeep (#1595, extends #1596)
+- **Status**: ✅ Implemented (2026-07-14)
+- **Description**: Git's own auto-gc can never complete inside an agent container (a detached `gc --auto` reparents to PID 1 and the #817 orphan sweep SIGKILLs it — silent unbounded `.git` bloat; 44 GB / 97%-garbage repos observed in production). The platform disables agent-side auto-gc and owns maintenance via a survivable, guarded pass in the auto-sync loop.
+- **Maintenance-ownership contract**: the base image ships `gc.auto=0`, `gc.autoDetach=false`, `maintenance.auto=false`, `maintenance.autoDetach=false` (`/etc/gitconfig`; `git_service` setup mirrors them into `~/.gitconfig`); the auto-sync loop's maintenance pass is the **single owner** of `/home/developer/.git` upkeep. Named residuals: sub-repos cloned into the workspace get no maintenance (blind spot, same as pre-fix); maintenance bounds *garbage*, not *history* — unbounded history growth stays with the deferred squash / geometric-repack follow-up.
+- **Key Features**:
+  - `agent_server/utils/registered_run.py` — the one seam for agent-server child subprocesses: orphan-sweep registration (`add_transient_pid`, call-time TTL) + process-group timeout kill (`start_new_session` + `killpg`)
+  - Auto-sync cycle off the event loop (`asyncio.to_thread`) with a non-blocking repo lock; mutating git endpoints 409 `agent_busy` under contention
+  - Trigger: packs ≥ `GIT_MAINTENANCE_PACK_THRESHOLD` (20) OR loose ≥ `GIT_MAINTENANCE_LOOSE_THRESHOLD` (6700); guards: free-disk preflight, exponential failure backoff (1h→24h), env-tunable budget (`GIT_MAINTENANCE_TIMEOUT_SECONDS`)
+  - Concurrent-writer safety: `repack -A -d -l --unpack-unreachable=1.hour.ago` + `gc --prune=1.hour.ago` (never `--prune=now`); `pack.threads=1` + `pack.windowMemory=128m` RSS bound
+  - Stale-lock hygiene: startup reap (`index.lock`, `gc.pid`, `maintenance.lock`, ref/reflog locks) + per-cycle age-gated reap incl. abandoned `tmp_pack_*`
+  - Signal: `pack_count`/`loose_objects`/`maintenance_failures` in sync-state → `agent_sync_state` (agent-supplied ints coerced at the boundary) → `GET /api/agents/sync-health`; edge-triggered `git_bloat` operator alerts (`GIT_DIR_ALERT_BYTES` default 10 GiB; 3 consecutive maintenance failures)
+- **Rollout**: base-image rebuild + agent recreate required; recovery of pre-existing bloated fleets is ops-side (trinity-ops-agent#127) using the tunable budget + memory bounds
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md`
+- **Related**: #1505 (general sweep-subtree seam — evidence cross-filed), #1501 (transient-pid seam), #1596 (threshold repack, superseded parameters)
+
 ---

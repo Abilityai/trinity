@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Dict, Optional
 
 from database import db
@@ -29,6 +30,29 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 60  # seconds
 ALERT_THRESHOLD = 3  # emit sync_failing entry after N consecutive failures
+
+# #1595: edge-triggered git-bloat alerting — the killed-auto-gc failure class
+# was "completely silent until the disk fills"; a column behind an API nobody
+# queries reproduces that. Both thresholds compare prior DB row → new value so
+# each crossing fires exactly once per episode (the sync_failing pattern).
+GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
+MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
+
+
+def _coerce_nonneg_int(value) -> Optional[int]:
+    """Boundary guard for agent-supplied numbers (#1595).
+
+    `sync-state.json` is agent-writable: a compromised/prompt-injected agent
+    can persist arbitrary JSON into it, and SQLite's dynamic typing would
+    accept strings/objects silently. Same posture as `/health clone_status`
+    (enum only, never agent-supplied strings). bool is an int subclass —
+    rejected explicitly.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and 0 <= value < 2**63:
+        return value
+    return None
 
 # WebSocket manager injected from main.py (optional, mirrors operator-queue pattern).
 _websocket_manager = None
@@ -123,6 +147,18 @@ class SyncHealthService:
 
         prior = db.get_sync_state(agent_name)
         prior_failures = prior["consecutive_failures"] if prior else 0
+        prior_git_dir_bytes = (prior.get("git_dir_bytes") if prior else None) or 0
+        prior_maintenance_failures = (
+            prior.get("maintenance_failures") if prior else None
+        ) or 0
+
+        # #1595: agent-supplied ints coerced at the boundary (see helper).
+        git_dir_bytes = _coerce_nonneg_int(sync_state.get("git_dir_bytes"))
+        pack_count = _coerce_nonneg_int(sync_state.get("pack_count"))
+        loose_objects = _coerce_nonneg_int(sync_state.get("loose_objects"))
+        maintenance_failures = _coerce_nonneg_int(
+            sync_state.get("maintenance_failures")
+        )
 
         updated = db.upsert_sync_state(
             agent_name,
@@ -135,7 +171,10 @@ class SyncHealthService:
             behind_main=payload.get("behind_main") or payload.get("behind") or 0,
             ahead_working=payload.get("ahead_working") or 0,
             behind_working=payload.get("behind_working") or 0,
-            git_dir_bytes=sync_state.get("git_dir_bytes"),  # #1596 bloat observability
+            git_dir_bytes=git_dir_bytes,  # #1596 bloat observability
+            pack_count=pack_count,  # #1595
+            loose_objects=loose_objects,  # #1595
+            maintenance_failures=maintenance_failures,  # #1595
             last_check_at=utc_now_iso(),
         )
 
@@ -143,6 +182,31 @@ class SyncHealthService:
         new_failures = updated["consecutive_failures"]
         if prior_failures < ALERT_THRESHOLD <= new_failures:
             self._emit_sync_failing_alert(agent_name, updated)
+
+        # #1595: edge-triggered git-bloat / maintenance-health alerts.
+        new_git_dir_bytes = updated.get("git_dir_bytes") or 0
+        if prior_git_dir_bytes < GIT_DIR_ALERT_BYTES <= new_git_dir_bytes:
+            self._emit_git_bloat_alert(
+                agent_name, updated,
+                reason=(
+                    f".git has grown to {new_git_dir_bytes / 1024**3:.1f} GiB "
+                    f"(alert threshold {GIT_DIR_ALERT_BYTES / 1024**3:.1f} GiB)"
+                ),
+            )
+        new_maintenance_failures = updated.get("maintenance_failures") or 0
+        if (
+            prior_maintenance_failures
+            < MAINTENANCE_FAILURES_ALERT_THRESHOLD
+            <= new_maintenance_failures
+        ):
+            self._emit_git_bloat_alert(
+                agent_name, updated,
+                reason=(
+                    f"git maintenance has failed {new_maintenance_failures} "
+                    "consecutive times — the repo may be too large to repack "
+                    "within its budget"
+                ),
+            )
 
     async def _fetch_git_status(self, agent_name: str) -> Optional[Dict]:
         """Fetch /api/git/status from the agent. None on unreachable."""
@@ -195,6 +259,36 @@ class SyncHealthService:
             )
         except Exception:
             logger.exception("failed to emit sync_failing alert")
+
+    def _emit_git_bloat_alert(self, agent_name: str, state: Dict, *, reason: str) -> None:
+        """#1595: operator-queue entry for repo bloat / failing maintenance.
+
+        Edge-triggered by the caller (prior DB row vs new value crosses the
+        threshold), so each episode fires once — mirrors
+        :meth:`_emit_sync_failing_alert`.
+        """
+        now = utc_now_iso()
+        item = {
+            "id": f"git-bloat-{agent_name}-{now}",
+            "agent_name": agent_name,
+            "type": "git_bloat",
+            "status": "pending",
+            "priority": "high",
+            "title": "Agent git repo needs attention",
+            "question": f"{agent_name}: {reason}.",
+            "context": {
+                "git_dir_bytes": state.get("git_dir_bytes"),
+                "pack_count": state.get("pack_count"),
+                "loose_objects": state.get("loose_objects"),
+                "maintenance_failures": state.get("maintenance_failures"),
+            },
+            "created_at": now,
+        }
+        try:
+            db.create_operator_queue_item(agent_name, item)
+            logger.warning("git_bloat emitted for %s: %s", agent_name, reason)
+        except Exception:
+            logger.exception("failed to emit git_bloat alert")
 
 
 # Module-level singleton mirrors operator_queue_service.

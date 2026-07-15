@@ -60,7 +60,12 @@ async def run_auto_sync_loop(
             if not (home / ".git").exists():
                 logger.debug("auto-sync: no .git in %s, skipping cycle", home)
             else:
-                result = _run_auto_sync_once(home)
+                # #1595: run the cycle in a worker thread. A blocking cycle
+                # (repack can run for many minutes) starves the event loop —
+                # /health unreachable, 5s heartbeats missed, chat dead. The
+                # cycle's subprocesses are sweep-registered and the repo lock
+                # serializes it against operator git endpoints.
+                result = await asyncio.to_thread(_run_auto_sync_once, home)
                 logger.info("auto-sync: %s", result.get("status"))
         except Exception:  # noqa: BLE001 — loop must never die
             logger.exception("auto-sync cycle raised unexpectedly")
