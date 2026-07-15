@@ -82,6 +82,16 @@ export default defineConfig({
         target: `http://${backendHost}:8000`,
         changeOrigin: true,
       },
+      // A2A inbound server (trinity-enterprise#157): the public well-known card
+      // + JSON-RPC/SSE task endpoint live on the backend under /a2a/. Proxy it
+      // (mirrors the prod nginx block) so the card URL resolves on the dev origin.
+      // changeOrigin:false preserves the browser Host so the backend renders the
+      // card's `url` against the real front-door origin (dev has no PUBLIC_CHAT_URL);
+      // prod nginx uses `Host $host` for the same reason.
+      '/a2a/': {
+        target: `http://${backendHost}:8000`,
+        changeOrigin: false,
+      },
       '/ws': {
         target: `ws://${backendHost}:8000`,
         ws: true,
