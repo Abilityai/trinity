@@ -35,6 +35,35 @@ from db_harness import db_backend, run as _hrun  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+# This file evicts shadow `utils.*` entries at import time and (in fixtures)
+# pops cached backend db/service modules so db_harness loads a fresh schema.
+# The autouse fixture below snapshots + restores those entries per test so the
+# swaps can't leak into sibling test files (Issue #762; sanctioned
+# import-time-stub pattern — precedent: tests/unit/test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    "utils",
+    "utils.api_client",
+    "utils.assertions",
+    "utils.cleanup",
+    "database",
+    "services.sync_health_service",
+    "services.agent_client",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 @pytest.fixture
 def tmp_db(db_backend, monkeypatch):
     """Fresh FULL schema; evict cached db/service modules; stub agent_client

@@ -71,6 +71,30 @@ from agent_server import auto_sync  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+# This file loads the base-image `agent_server` package via an explicit
+# file-based loader (above), replacing any cached copy in sys.modules. The
+# autouse fixture below snapshots + restores those entries per test so the
+# stubbed `agent_server` tree can't leak into sibling test files that import a
+# differently-shadowed `agent_server` (Issue #762; sanctioned import-time-stub
+# pattern — precedent: tests/unit/test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    name for name in sys.modules if name == "agent_server" or name.startswith("agent_server.")
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
