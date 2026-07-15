@@ -109,7 +109,11 @@ def generate_a2a_card(
     skills = _skills_from_capabilities(capabilities_list, use_cases, description)
 
     card: Dict[str, Any] = {
-        "protocolVersion": "1.0",
+        # ent#157: pin the targeted A2A spec version. The prior "1.0" was a
+        # placeholder that never had an endpoint behind it; the JSON-RPC server
+        # this card now points at speaks the v0.3.x method set (message/send,
+        # message/stream, tasks/get, tasks/cancel), lowerCamel method casing.
+        "protocolVersion": "0.3.0",
         "name": display_name,
         "description": description,
         "version": version,
@@ -146,15 +150,18 @@ def generate_a2a_card(
             },
         },
         "security": [{"bearerAuth": []}],
+        # ent#157: JSON-RPC 2.0 over HTTP is the transport the `url` endpoint
+        # speaks (message/send + message/stream SSE + tasks/get + tasks/cancel).
+        "preferredTransport": "JSONRPC",
     }
 
-    # URL points to where A2A clients would call the agent's JSON-RPC
-    # endpoint. The actual A2A JSON-RPC server is a separate ticket
-    # (issue #737 explicitly defers it). Placeholder URL: the existing
-    # public-chat endpoint, which IS callable today even though it's
-    # not strictly A2A protocol. Clients can use this to test
-    # reachability; full A2A semantics arrive with the JSON-RPC server.
+    # ent#157: `url` points at the real A2A JSON-RPC endpoint served by
+    # `routers/a2a.py` (`POST {base}/a2a/{name}`), NOT the old chat placeholder.
+    # The well-known discovery doc lives at `{base}/a2a/{name}/.well-known/
+    # agent-card.json`. base_url == "" ⇒ omit (relative resolution by the client).
     if base_url:
-        card["url"] = f"{base_url.rstrip('/')}/api/agents/{agent_name}/chat"
+        b = base_url.rstrip("/")
+        card["url"] = f"{b}/a2a/{agent_name}"
+        card["documentationUrl"] = f"{b}/a2a/{agent_name}/.well-known/agent-card.json"
 
     return card

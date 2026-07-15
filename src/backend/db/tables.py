@@ -102,6 +102,7 @@ agent_ownership = Table(
     Column("file_sharing_enabled", Integer),
     Column("circuit_breaker_enabled", Integer),
     Column("mcp_exposed", Integer),
+    Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag

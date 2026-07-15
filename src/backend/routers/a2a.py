@@ -16,18 +16,34 @@ container's labels, which survive `docker stop`.
 from __future__ import annotations
 
 import logging
+import uuid
+from typing import Any, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from dependencies import AuthorizedAgentByName
+from database import db
+from dependencies import AuthorizedAgentByName, get_current_user
+from models import User
+from services import a2a_gate, idempotency_service
 from services.a2a_card_service import generate_a2a_card
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.task_execution_service import (
+    get_task_execution_service,
+    terminate_execution_on_agent,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["a2a"])
+
+# ent#157: the public A2A inbound server (well-known card + JSON-RPC task
+# endpoint). Separate router (no /api prefix) so external orchestrators reach
+# the spec-shaped `/a2a/{name}/.well-known/agent-card.json` + `POST /a2a/{name}`.
+a2a_server_router = APIRouter(tags=["a2a-server"])
 
 
 def _base_url_from_request(request: Request) -> str:
@@ -132,3 +148,290 @@ async def get_agent_card(
         base_url=base_url,
     )
     return card
+
+
+# ===========================================================================
+# ent#157 — A2A inbound server (public well-known card + JSON-RPC task endpoint)
+# ===========================================================================
+
+# JSON-RPC 2.0 + A2A error codes.
+_RPC_PARSE_ERROR = -32700
+_RPC_INVALID_REQUEST = -32600
+_RPC_METHOD_NOT_FOUND = -32601
+_RPC_INVALID_PARAMS = -32602
+_RPC_INTERNAL_ERROR = -32603
+_A2A_TASK_NOT_FOUND = -32001
+_A2A_UNSUPPORTED = -32004
+
+
+def _rpc_error(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONResponse:
+    """A JSON-RPC 2.0 error envelope. Transport stays HTTP 200 — the error is
+    carried in the body (auth failures are the exception: those are HTTP 401 via
+    the dependency, before we ever parse an envelope)."""
+    err: Dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": err})
+
+
+def _rpc_result(rpc_id: Any, result: Any) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
+
+
+def _text_from_message(message: Dict[str, Any]) -> str:
+    """Concatenate the text parts of an A2A message (v0.3 part kind='text')."""
+    parts = message.get("parts") if isinstance(message, dict) else None
+    if not isinstance(parts, list):
+        return ""
+    out = []
+    for p in parts:
+        if isinstance(p, dict) and p.get("kind") == "text" and isinstance(p.get("text"), str):
+            out.append(p["text"])
+    return "\n".join(out).strip()
+
+
+def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
+                 context_id: Optional[str] = None, error: Optional[str] = None) -> Dict[str, Any]:
+    """Build an A2A Task object. `state`: submitted|working|completed|failed|canceled."""
+    task: Dict[str, Any] = {
+        "id": execution_id,
+        "contextId": context_id or execution_id,
+        "kind": "task",
+        "status": {"state": state},
+    }
+    if text is not None:
+        task["artifacts"] = [{
+            "artifactId": uuid.uuid4().hex,
+            "parts": [{"kind": "text", "text": text}],
+        }]
+    if error is not None:
+        task["status"]["message"] = {
+            "role": "agent",
+            "parts": [{"kind": "text", "text": error}],
+            "messageId": uuid.uuid4().hex,
+        }
+    return task
+
+
+def _a2a_state_for(status: str) -> str:
+    """Map a Trinity TaskExecutionStatus to an A2A task state."""
+    return "completed" if status == "success" else "failed"
+
+
+async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, Any]]:
+    """Build the honest A2A card for an EXPOSED agent, or None (→ uniform 404).
+
+    Uniform 404 for non-exposed / non-existent so the public surface is not an
+    enumeration oracle. Exposure can only be set by the entitled enterprise
+    setter, so in an OSS-only / unentitled build every agent is non-exposed and
+    this always returns None (routes 404) — safe by default.
+    """
+    if not db.get_a2a_exposed(agent_name):
+        return None
+    container = get_agent_container(agent_name)
+    if not container:
+        return None
+    template_data = await _fetch_template_data(agent_name, container)
+    return generate_a2a_card(
+        agent_name=agent_name,
+        template_data=template_data,
+        base_url=_base_url_from_request(request),
+    )
+
+
+@a2a_server_router.get("/a2a/{agent_name}/.well-known/agent-card.json")
+async def a2a_well_known_card(agent_name: str, request: Request):
+    """Public (unauthenticated) A2A discovery card for an exposed agent.
+
+    404 (uniform) when the agent is non-existent or not A2A-exposed. The card's
+    `url` points at `POST /a2a/{name}` (the JSON-RPC task endpoint)."""
+    card = await _serve_card(agent_name, request)
+    if card is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return card
+
+
+def _authorize_inbound(current_user: User, agent_name: str) -> None:
+    """Exposure + access + allow-list gate for an inbound A2A task. Raises
+    HTTPException(404) for non-exposed/inaccessible (uniform — no enumeration),
+    HTTPException(403) when the caller is off the per-agent allow-list."""
+    if not db.get_a2a_exposed(agent_name):
+        raise HTTPException(status_code=404, detail="Not found")
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=404, detail="Not found")
+    caller_identity = getattr(current_user, "email", None) or current_user.username
+    if not a2a_gate.check_inbound_allowed(agent_name, caller_identity):
+        raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
+
+
+async def _run_a2a_task(agent_name: str, text: str, current_user: User):
+    """Bridge one inbound A2A message into the Trinity execution stack."""
+    svc = get_task_execution_service()
+    return await svc.execute_task(
+        agent_name=agent_name,
+        message=text,
+        triggered_by="a2a",
+        source_user_id=getattr(current_user, "id", None),
+        source_user_email=getattr(current_user, "email", None),
+        source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+    )
+
+
+@a2a_server_router.post("/a2a/{agent_name}")
+async def a2a_jsonrpc(
+    agent_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """A2A JSON-RPC 2.0 task endpoint. Bearer = a Trinity MCP API key (validated
+    by `get_current_user` — fail-closed 401). Methods: message/send,
+    message/stream (SSE), tasks/get, tasks/cancel."""
+    _authorize_inbound(current_user, agent_name)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _rpc_error(None, _RPC_PARSE_ERROR, "Parse error: body is not valid JSON")
+
+    if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" or not isinstance(body.get("method"), str):
+        return _rpc_error(body.get("id") if isinstance(body, dict) else None,
+                          _RPC_INVALID_REQUEST, "Invalid JSON-RPC 2.0 request")
+
+    method = body["method"]
+    params = body.get("params") or {}
+    rpc_id = body.get("id")
+    if not isinstance(params, dict):
+        return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params must be an object")
+
+    caller_ip = request.client.host if request.client else None
+
+    # ---- message/send + message/stream ------------------------------------
+    if method in ("message/send", "message/stream"):
+        message = params.get("message")
+        if not isinstance(message, dict):
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.message is required")
+        text = _text_from_message(message)
+        if not text:
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "message has no text parts")
+
+        # Trigger-boundary dedup (Invariant #18): a re-delivered A2A message
+        # with the same messageId must not double-execute. messageId absent →
+        # dedup disabled (fail-open).
+        message_id = message.get("messageId")
+        decision = idempotency_service.begin(f"a2a:{agent_name}", message_id)
+        if decision.replay and not decision.in_flight and decision.snapshot:
+            return _rpc_result(rpc_id, decision.snapshot)
+        if decision.in_flight:
+            return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR,
+                              "A task for this messageId is already in progress", data={"retryable": True})
+
+        if method == "message/stream":
+            return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
+
+        try:
+            result = await _run_a2a_task(agent_name, text, current_user)
+        except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
+            idempotency_service.fail(decision)
+            logger.warning("a2a message/send failed for %s: %s", agent_name, exc)
+            return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+
+        state = _a2a_state_for(result.status)
+        task = _task_object(
+            result.execution_id, state,
+            text=result.response if state == "completed" else None,
+            error=result.error if state == "failed" else None,
+        )
+        idempotency_service.complete(decision, result.execution_id, task)
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
+            actor_user=current_user, actor_ip=caller_ip,
+            target_type="agent", target_id=agent_name,
+            endpoint=str(request.url.path),
+            details={"execution_id": result.execution_id, "state": state},
+        )
+        return _rpc_result(rpc_id, task)
+
+    # ---- tasks/get --------------------------------------------------------
+    if method == "tasks/get":
+        exec_id = params.get("id")
+        if not isinstance(exec_id, str) or not exec_id:
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
+        row = db.get_execution(exec_id)
+        if not row or row.get("agent_name") != agent_name:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        status = row.get("status")
+        a2a_state = {
+            "success": "completed", "failed": "failed", "cancelled": "canceled",
+            "running": "working", "queued": "submitted",
+        }.get(status, "working")
+        return _rpc_result(rpc_id, _task_object(
+            exec_id, a2a_state,
+            text=row.get("response") if a2a_state == "completed" else None,
+            error=row.get("error") if a2a_state == "failed" else None,
+        ))
+
+    # ---- tasks/cancel -----------------------------------------------------
+    if method == "tasks/cancel":
+        exec_id = params.get("id")
+        if not isinstance(exec_id, str) or not exec_id:
+            return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
+        row = db.get_execution(exec_id)
+        if not row or row.get("agent_name") != agent_name:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        await terminate_execution_on_agent(agent_name, exec_id)
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
+            actor_user=current_user, actor_ip=caller_ip,
+            target_type="agent", target_id=agent_name,
+            endpoint=str(request.url.path), details={"execution_id": exec_id},
+        )
+        return _rpc_result(rpc_id, _task_object(exec_id, "canceled"))
+
+    # ---- tasks/resubscribe (phased) --------------------------------------
+    if method == "tasks/resubscribe":
+        return _rpc_error(rpc_id, _A2A_UNSUPPORTED,
+                          "tasks/resubscribe is not yet supported on this server")
+
+    return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+
+
+async def _stream_task(agent_name: str, text: str, current_user: User,
+                       rpc_id: Any, decision, caller_ip: Optional[str]) -> StreamingResponse:
+    """message/stream via SSE. Emits a `working` status event, runs the task,
+    then a terminal task event. Non-incremental (the agent turn is atomic), but
+    spec-shaped so a streaming A2A client attaches and receives the result."""
+    import json as _json
+
+    async def _gen():
+        # Initial status: the server has accepted the task and is working.
+        working = {"jsonrpc": "2.0", "id": rpc_id, "result": {
+            "kind": "status-update",
+            "status": {"state": "working"},
+            "final": False,
+        }}
+        yield f"data: {_json.dumps(working)}\n\n"
+        try:
+            result = await _run_a2a_task(agent_name, text, current_user)
+        except Exception as exc:  # noqa: BLE001
+            idempotency_service.fail(decision)
+            logger.warning("a2a message/stream failed for %s: %s", agent_name, exc)
+            err = {"jsonrpc": "2.0", "id": rpc_id, "error": {
+                "code": _RPC_INTERNAL_ERROR, "message": "Task execution failed"}}
+            yield f"data: {_json.dumps(err)}\n\n"
+            return
+        state = _a2a_state_for(result.status)
+        task = _task_object(
+            result.execution_id, state,
+            text=result.response if state == "completed" else None,
+            error=result.error if state == "failed" else None,
+        )
+        idempotency_service.complete(decision, result.execution_id, task)
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION, event_action="a2a_task_stream", source="a2a",
+            actor_user=current_user, actor_ip=caller_ip,
+            target_type="agent", target_id=agent_name, details={"execution_id": result.execution_id},
+        )
+        final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
+        yield f"data: {_json.dumps(final)}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")

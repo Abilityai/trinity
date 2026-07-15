@@ -2779,6 +2779,27 @@ def _migrate_agent_ownership_mcp_exposed(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_a2a_exposed(cursor, conn):
+    """ent#157 — per-agent A2A inbound-server exposure toggle.
+
+    Adds ``a2a_exposed INTEGER DEFAULT 0`` to ``agent_ownership``. When set, the
+    public A2A surface (``GET /a2a/{name}/.well-known/agent-card.json`` + the
+    JSON-RPC task endpoint) serves/accepts the agent; default 0 (OFF, safe by
+    default). Edition-agnostic OSS primitive (the OSS routes read + enforce it);
+    the WRITE is entitlement-gated by the enterprise A2A module (like
+    ``mcp_exposed`` reads OSS but ``suspended_at`` is set only by enterprise).
+    Mirrored by the Alembic revision 0024_agent_ownership_a2a_exposed for
+    PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "a2a_exposed",
+        "ALTER TABLE agent_ownership ADD COLUMN a2a_exposed INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_tts_voice(cursor, conn):
     """epic #24 / #25 — outbound voice replies (shared agent-level config).
 
@@ -3350,4 +3371,5 @@ MIGRATIONS = [
     ("channel_report_back_columns", _migrate_channel_report_back_columns),
     ("telegram_progress_indicator", _migrate_telegram_progress_indicator),
     ("agent_evaluations_table", _migrate_agent_evaluations_table),
+    ("agent_ownership_a2a_exposed", _migrate_agent_ownership_a2a_exposed),
 ]
