@@ -20,6 +20,7 @@ The card honesty is also unit-tested at the generator level.
 """
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -298,3 +299,105 @@ def test_a2a_gate_fails_open_on_provider_error(client):
         assert r.status_code == 200  # fail-open: authenticated caller not blocked
     finally:
         client.a2a_gate.clear_provider()
+
+
+# --------------------------------------------------------------------------- #
+# message/stream (SSE)
+# --------------------------------------------------------------------------- #
+def test_message_stream_emits_working_then_final_completed(client):
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 9, "method": "message/stream",
+        "params": {"message": {"parts": [{"kind": "text", "text": "stream me"}]}}})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    body = r.text
+    events = [json.loads(line[len("data: "):]) for line in body.splitlines() if line.startswith("data: ")]
+    # First a non-final working status, then a final completed task.
+    assert events[0]["result"]["status"]["state"] == "working"
+    assert events[0]["result"]["final"] is False
+    assert events[-1]["result"]["status"]["state"] == "completed"
+    assert events[-1]["result"]["final"] is True
+    assert events[-1]["result"]["artifacts"][0]["parts"][0]["text"] == "hello from bot"
+
+
+# --------------------------------------------------------------------------- #
+# Idempotency: in-flight duplicate
+# --------------------------------------------------------------------------- #
+def test_message_send_in_flight_duplicate_is_retryable_error(client, monkeypatch):
+    class _InFlight:
+        def begin(self, scope, key):
+            return types.SimpleNamespace(key=(scope, key), replay=True, in_flight=True, snapshot=None, enabled=True)
+        def complete(self, *a, **k):
+            pass
+        def fail(self, *a, **k):
+            pass
+    monkeypatch.setattr(a2a, "idempotency_service", _InFlight())
+    r = _send(client, message_id="dup-1")
+    err = r.json()["error"]
+    assert err["code"] == -32603
+    assert err["data"]["retryable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# tasks/get state mapping across all Trinity statuses
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("status,expected", [
+    ("success", "completed"), ("failed", "failed"), ("cancelled", "canceled"),
+    ("running", "working"), ("queued", "submitted"), ("weird", "working"),
+])
+def test_tasks_get_state_mapping_all(client, status, expected):
+    client.state["executions"]["e"] = {"agent_name": "bot", "status": status, "response": "r", "error": "boom"}
+    r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "e"}})
+    assert r.json()["result"]["status"]["state"] == expected
+
+
+# --------------------------------------------------------------------------- #
+# Message part handling
+# --------------------------------------------------------------------------- #
+def test_message_multipart_text_is_concatenated(client):
+    r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
+        "message": {"parts": [
+            {"kind": "text", "text": "line one"},
+            {"kind": "file", "file": {"uri": "x"}},   # non-text part ignored
+            {"kind": "text", "text": "line two"},
+        ]}}})
+    assert r.json()["result"]["status"]["state"] == "completed"
+    assert client.state["last_execute"]["message"] == "line one\nline two"
+
+
+def test_message_only_nontext_parts_is_invalid(client):
+    r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
+        "message": {"parts": [{"kind": "file", "file": {"uri": "x"}}]}}})
+    assert r.json()["error"]["code"] == -32602  # no text → invalid params
+
+
+# --------------------------------------------------------------------------- #
+# Card: exposed-but-stopped agent still serves (from labels)
+# --------------------------------------------------------------------------- #
+def test_wellknown_serves_stopped_exposed_agent(client, monkeypatch):
+    # Exposed agent whose container is stopped: card still served (label fallback).
+    monkeypatch.setattr(a2a, "get_agent_container",
+                        lambda name: types.SimpleNamespace(status="exited", labels={"trinity.template": "tmpl"}))
+    async def _lbl(name, container):
+        return {"display_name": "Stopped Bot", "capabilities": []}
+    monkeypatch.setattr(a2a, "_fetch_template_data", _lbl)
+    r = client.http.get("/a2a/bot/.well-known/agent-card.json")
+    assert r.status_code == 200
+    assert r.json()["name"] == "Stopped Bot"
+
+
+# --------------------------------------------------------------------------- #
+# Auth: unauthenticated JSON-RPC POST → 401 (fail-closed), before any dispatch
+# --------------------------------------------------------------------------- #
+def test_jsonrpc_requires_auth_401(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    # Fresh app WITHOUT the get_current_user override → the real dependency runs;
+    # a request with no Bearer must fail closed at the auth layer (401), never
+    # reaching the exposure/dispatch logic.
+    app = FastAPI()
+    app.include_router(a2a.a2a_server_router)
+    c = TestClient(app)
+    r = c.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "message/send",
+                                 "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}})
+    assert r.status_code == 401
