@@ -265,8 +265,19 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
     Non-blocking (#1096): served from a short-TTL cache that is refreshed by a
     background task. The request never waits on the Docker daemon, so a fleet
     of agents can no longer pin a uvicorn worker for ~6s and stall the UI.
-    Adds three fields on top of the original contract: `cached` (bool),
-    `stale` (bool), and `cache_age_seconds` (float|None).
+    Adds four fields on top of the original contract: `cached` (bool),
+    `stale` (bool), `cache_age_seconds` (float|None), and `no_data` (bool).
+
+    Field semantics (#1617):
+    - `stale` is about CACHE FRESHNESS ONLY — the cached payload is older than
+      the TTL and a refresh was scheduled. It does NOT mean Docker is
+      unreachable (that surfaces as HTTP 503 below).
+    - `no_data` is True only on a cold cache (this worker has never completed a
+      refresh); in that case `running_count` is `None`, NOT `0`. A cold cache
+      per uvicorn worker previously returned `running_count: 0`, which is
+      indistinguishable from a healthy "zero containers running" and misled
+      diagnostics. `no_data: True` / `running_count: None` lets consumers tell
+      "not yet measured" from a real zero.
     """
     if not docker_client:
         raise HTTPException(status_code=503, detail="Docker not available")
@@ -277,16 +288,20 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
 
     # Fresh cache hit — return instantly, no refresh needed.
     if cached is not None and age is not None and age < _CACHE_TTL:
-        return {**cached, "cached": True, "stale": False, "cache_age_seconds": round(age, 1)}
+        return {**cached, "cached": True, "stale": False,
+                "cache_age_seconds": round(age, 1), "no_data": False}
 
     # Cache is stale or cold: kick off an out-of-band refresh and return now.
     _schedule_refresh()
 
     if cached is not None:
         # Serve stale data while the refresh runs (stale-while-revalidate).
-        return {**cached, "cached": True, "stale": True, "cache_age_seconds": round(age, 1)}
+        return {**cached, "cached": True, "stale": True,
+                "cache_age_seconds": round(age, 1), "no_data": False}
 
-    # Cold start (no data computed yet): return an instant, valid, empty
-    # payload. The next poll (a few seconds later) gets real data once the
-    # background refresh completes. No request ever pays the Docker latency.
-    return {**_empty_payload(0), "cached": False, "stale": True, "cache_age_seconds": None}
+    # Cold start (no data computed yet): NO measurement has happened on this
+    # worker. Return running_count=None + no_data=True so a consumer can't
+    # mistake "not yet measured" for a real "zero containers running" (#1617).
+    # The next poll (once the background refresh completes) carries real data.
+    return {**_empty_payload(0), "running_count": None,
+            "cached": False, "stale": True, "cache_age_seconds": None, "no_data": True}

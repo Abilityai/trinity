@@ -93,14 +93,31 @@ class TestContainerTelemetry:
         api_client: TrinityApiClient,
         created_agent
     ):
-        """GET /api/telemetry/containers returns running container count."""
-        response = api_client.get("/api/telemetry/containers")
-        assert_status(response, 200)
-        data = assert_json_response(response)
+        """GET /api/telemetry/containers returns running container count.
 
-        assert "running_count" in data
-        assert isinstance(data["running_count"], int)
-        assert data["running_count"] >= 0
+        #1617: a cold per-worker cache reports running_count=None + no_data=True
+        (not 0). Poll briefly for the background refresh to land a measured
+        count; tolerate the cold shape if it hasn't yet.
+        """
+        import time as _time
+
+        data = None
+        for _ in range(10):
+            response = api_client.get("/api/telemetry/containers")
+            assert_status(response, 200)
+            data = assert_json_response(response)
+            assert "running_count" in data
+            assert "no_data" in data
+            if not data["no_data"]:
+                break
+            _time.sleep(1)
+
+        if data["no_data"]:
+            # Still cold — measurement not yet available; contract still holds.
+            assert data["running_count"] is None
+        else:
+            assert isinstance(data["running_count"], int)
+            assert data["running_count"] >= 0
 
     def test_containers_returns_total_cpu_percent(
         self,
@@ -219,10 +236,24 @@ class TestTelemetryConsistency:
         api_client: TrinityApiClient,
         created_agent
     ):
-        """Running count matches length of containers list."""
-        response = api_client.get("/api/telemetry/containers")
-        assert_status(response, 200)
-        data = response.json()
+        """Running count matches length of containers list.
+
+        #1617: skip the comparison while the cache is cold (no_data=True,
+        running_count=None) — poll briefly for a measured payload first.
+        """
+        import time as _time
+
+        data = None
+        for _ in range(10):
+            response = api_client.get("/api/telemetry/containers")
+            assert_status(response, 200)
+            data = response.json()
+            if not data.get("no_data"):
+                break
+            _time.sleep(1)
+
+        if data.get("no_data"):
+            pytest.skip("container-stats cache still cold (no measured data yet)")
 
         running_count = data.get("running_count", 0)
         containers = data.get("containers", [])
