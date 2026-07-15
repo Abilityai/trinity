@@ -42,20 +42,24 @@ Feature ideas go in **Discussions**, not Issues — the public tracker stays foc
 
 The project follows a 4-stage SDLC: Todo → In Progress → In Dev → Done, tracked via GitHub Issues labels (`status-in-progress`, `status-in-dev`).
 
+**All PRs target the `dev` branch.** `main` only receives release cuts (`dev` → `main`) performed by maintainers — a PR opened against `main` will be asked to retarget. Direct pushes to both `dev` and `main` are blocked by branch protection; everything lands via PR and is **squash-merged**.
+
 1. **Fork and clone** the repository
-2. **Find or create an issue** — every PR must link to an issue
+2. **Find or create an issue** — every PR must link to an issue. Bugs go in [GitHub Issues](https://github.com/abilityai/trinity/issues); feature ideas start in [Discussions](https://github.com/abilityai/trinity/discussions) (see above) and get an issue once accepted
 3. **Create a feature branch** from `dev`:
    ```bash
    git checkout dev && git pull origin dev
    git checkout -b feature/<issue-number>-your-feature-name
    ```
-4. **Make your changes** following our coding standards
-5. **Test your changes** locally
-6. **Commit with clear messages**:
+   Use `fix/<issue-number>-<slug>` for bug fixes.
+4. **Make your changes** following our coding standards, keeping the diff minimal (see [PR Validation](#pr-validation-what-reviewers-check) below)
+5. **Test your changes** locally — new behavior needs tests (see [Test Expectations](#test-expectations))
+6. **Update documentation** as required by the change type (see [Documentation Requirements](#documentation-requirements))
+7. **Commit with clear messages**:
    ```bash
    git commit -m "feat: Add support for custom metrics"
    ```
-7. **Push and create a PR** against `dev` — include `Fixes #N` in the description. `main` is reserved for release cuts.
+8. **Push and create a PR against `dev`** — the description **must contain a closing keyword** for the linked issue: `Fixes #N`, `Closes #N`, or `Resolves #N`. A bare `#N` or `Refs #N` links the issue but does **not** trigger the status automation that moves it through the SDLC, so the issue strands in `status-in-progress` after merge.
 
 ### Commit Message Format
 
@@ -75,6 +79,80 @@ feat: Add agent custom metrics API
 fix: Correct context percentage calculation
 docs: Update deployment guide for production
 ```
+
+## PR Validation (what reviewers check)
+
+Every PR is validated against the Trinity development methodology before merge — maintainers run an automated validation pass and **no PR merges without passing it**. Running through this checklist yourself before opening the PR is the fastest path to a first-pass approval.
+
+### Process Checklist
+
+- [ ] PR targets `dev` (not `main`)
+- [ ] PR title/body carries a **closing keyword** (`Fixes #N` / `Closes #N` / `Resolves #N`) referencing an existing issue
+- [ ] Commit messages are descriptive and use the conventional prefix (`feat`/`fix`/`refactor`/`docs`)
+- [ ] PR is focused — fewer than ~50 changed files (larger PRs will be asked to split)
+- [ ] **Minimal necessary changes**: no unrelated refactoring, no cosmetic formatting of untouched code, no unrequested documentation files
+
+### Documentation Requirements
+
+Documentation scales with the change type:
+
+| Change Type | Required Docs |
+|-------------|---------------|
+| Bug fix | Descriptive commit message only |
+| Feature / API change | `docs/memory/architecture.md` and/or `docs/memory/feature-flows/*.md` as needed |
+| New capability | `docs/memory/requirements/` (via the `docs/memory/requirements.md` index) **+** a feature flow |
+| Refactor | Descriptive commit message only (unless it changes architecture) |
+| Docs only | No additional docs needed |
+
+Specifically:
+
+- **New/changed API endpoints, DB schema, or integrations** → update `docs/memory/architecture.md` (endpoint tables, schema section)
+- **New or changed feature behavior** → create/update the matching `docs/memory/feature-flows/*.md` and list new flows in the `docs/memory/feature-flows.md` index. Follow the section structure of existing flow docs (Overview, User Story, Entry Points, Frontend Layer, Backend Layer, Side Effects, Error Handling, Security Considerations, Testing, Related Flows)
+- **New capability** → add a requirements entry **before** implementing (Requirements-Driven Development is a project rule)
+
+### Test Expectations
+
+- **Feature / refactor PRs** — each new surface needs a **non-happy-path test**, not just the success case: a new endpoint gets a non-admin/ownership-scoped call and a parameter-validation check; a new background service gets a restart-survival test; new WebSocket/session state gets a multi-worker assertion. Happy-path-only coverage on a new surface will be flagged.
+- **Bug-fix PRs** — include a **regression test that names the issue** (e.g. `test_1234_...` or a docstring referencing `#1234`) and cover every call-site of the fixed behavior, not just the reported path.
+
+### Security Checklist (hard blockers)
+
+This is a **public repository** — every diff is scanned, and any of these blocks the merge:
+
+- [ ] No API keys or tokens (`sk-`, `ghp_`, `xoxb-`, `AKIA…`, etc.)
+- [ ] No real email addresses — use placeholders like `user@example.com`
+- [ ] No public IP addresses or internal URLs/domains
+- [ ] No `.env` files with real values (`.example` templates are fine)
+- [ ] No hardcoded secrets — read from `process.env` / `os.environ` instead
+- [ ] No credential files (`.pem`, `.key`, `id_rsa`, service-account JSON, etc.)
+- [ ] `docker-compose*.yml` / `Dockerfile` changes are justified in the PR description
+
+### Packaging Gotchas (recurring failure classes)
+
+These have each broken deploys before, so validation checks them explicitly:
+
+- **New top-level backend module** — `docker/backend/Dockerfile` copies top-level `src/backend/*.py` files by explicit name (subdirectories like `routers/`, `services/`, `db/` are copied wholesale). If you add a new top-level module, add it to the Dockerfile `COPY` list or it's silently dropped from the image and crashes on deploy.
+- **New environment variable** — a new `os.getenv("X")` in the backend must be wired into `backend.environment:` in **both** `docker-compose.yml` and `docker-compose.prod.yml`, and documented in `.env.example`. Prod compose launches standalone (no `env_file:`), so dev-only wiring leaves the setting inert on deploy.
+- **DB schema change** — Trinity runs dual-track migrations: add **both** a SQLite migration (`src/backend/db/migrations.py`) **and** a PostgreSQL Alembic revision (`src/backend/migrations/versions/`), plus the DDL update in `src/backend/db/schema.py` / `db/tables.py`. The `schema-parity` CI check guards part of this.
+
+### CI Checks
+
+Branch protection requires these checks green before merge:
+
+| Required check | What it does |
+|----------------|--------------|
+| `Analyze (python)` / `Analyze (javascript-typescript)` | CodeQL static analysis on every PR |
+| `schema-parity` | SQLite schema ↔ migration parity (self-skips when no schema files change) |
+| `verify-non-root` | Container security: non-root UID guard (self-skips when no Docker surface changes) |
+
+Other workflows (backend unit tests, frontend build, image smoke tests) run on PRs and are informational but reviewers expect them green.
+
+### After You Open the PR
+
+1. A maintainer reviews the code and runs the validation pass, resulting in **APPROVE**, **REQUEST CHANGES** (with a concrete fix list), or **NEEDS DISCUSSION** (scope/architecture questions)
+2. Address requested changes and push to the same branch — re-review happens on the same PR
+3. On approval the PR is **squash-merged to `dev`**; automation moves the linked issue to `status-in-dev`
+4. Your change ships to `main` at the next release cut — the release PR closes the issue
 
 ## Development Setup
 
