@@ -178,6 +178,14 @@ def _rpc_result(rpc_id: Any, result: Any) -> JSONResponse:
     return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": result})
 
 
+def _exec_field(row: Any, name: str) -> Any:
+    """Read a field from an execution row that may be a ScheduleExecution model
+    (attribute) OR a dict (mapping) — `db.get_execution` returns the former."""
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
 def _text_from_message(message: Dict[str, Any]) -> str:
     """Concatenate the text parts of an A2A message (v0.3 part kind='text')."""
     parts = message.get("parts") if isinstance(message, dict) else None
@@ -357,17 +365,19 @@ async def a2a_jsonrpc(
         if not isinstance(exec_id, str) or not exec_id:
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
         row = db.get_execution(exec_id)
-        if not row or row.get("agent_name") != agent_name:
+        # db.get_execution returns a ScheduleExecution object (not a dict) —
+        # read via _exec_field so both the model and a dict work.
+        if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
-        status = row.get("status")
+        status = _exec_field(row, "status")
         a2a_state = {
             "success": "completed", "failed": "failed", "cancelled": "canceled",
             "running": "working", "queued": "submitted",
         }.get(status, "working")
         return _rpc_result(rpc_id, _task_object(
             exec_id, a2a_state,
-            text=row.get("response") if a2a_state == "completed" else None,
-            error=row.get("error") if a2a_state == "failed" else None,
+            text=_exec_field(row, "response") if a2a_state == "completed" else None,
+            error=_exec_field(row, "error") if a2a_state == "failed" else None,
         ))
 
     # ---- tasks/cancel -----------------------------------------------------
@@ -376,7 +386,7 @@ async def a2a_jsonrpc(
         if not isinstance(exec_id, str) or not exec_id:
             return _rpc_error(rpc_id, _RPC_INVALID_PARAMS, "params.id is required")
         row = db.get_execution(exec_id)
-        if not row or row.get("agent_name") != agent_name:
+        if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         await terminate_execution_on_agent(agent_name, exec_id)
         await platform_audit_service.log(

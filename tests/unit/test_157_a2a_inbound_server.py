@@ -401,3 +401,14 @@ def test_jsonrpc_requires_auth_401(monkeypatch):
     r = c.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "message/send",
                                  "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}})
     assert r.status_code == 401
+
+
+def test_tasks_get_accepts_object_row_not_only_dict(client):
+    """Regression (live-caught): db.get_execution returns a ScheduleExecution
+    OBJECT, not a dict — tasks/get must read via attribute access, not .get()."""
+    client.state["executions"]["obj-1"] = types.SimpleNamespace(
+        agent_name="bot", status="success", response="from object", error=None)
+    r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "obj-1"}})
+    task = r.json()["result"]
+    assert task["status"]["state"] == "completed"
+    assert task["artifacts"][0]["parts"][0]["text"] == "from object"
