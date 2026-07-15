@@ -155,6 +155,51 @@ def _read_retention_settings() -> tuple[int, int, int, int]:
     )
 
 
+def _log_prune(pruned: int, message: str) -> None:
+    """Log a completed prune, escalating a chunk-capped sweep to WARNING (#1638).
+
+    Mass deletion used to log at INFO — the same level as a routine no-op — so
+    destroying 95% of a table produced no signal an operator or alert could see.
+
+    A trickle stays INFO: a healthy install prunes a few rows every cycle, and
+    WARNING there would be pure alarm fatigue. Hitting the per-cycle cap means a
+    backlog is still draining, which is exactly the signature of a retention
+    window that just got narrower — the #1638 case. Chunking is why this needs a
+    level rule at all: it splits one catastrophic delete into a long sequence of
+    individually-unremarkable lines.
+    """
+    if pruned >= RETENTION_CHUNK_SIZE_PER_CYCLE:
+        logger.warning(f"{message} — per-cycle cap hit, more rows remain (#1638)")
+    else:
+        logger.info(message)
+
+
+def log_effective_retention_windows() -> None:
+    """Log each retention window and WHERE IT CAME FROM, before any sweep (#1638).
+
+    This is the signal whose absence made #1638 invisible. A `code-default`
+    window is one that a future edit to `OPS_SETTINGS_DEFAULTS` can move under
+    the operator's feet; a `db-row` window is one they chose. Emitting both at
+    boot — *before* the startup sweep deletes anything — turns a silent
+    retroactive default change into something visible in the first screen of
+    logs, and gives a soak test something to catch.
+
+    Never raises: this is observability on the boot path.
+    """
+    try:
+        from services.settings_service import OPS_SETTINGS_DEFAULTS, RETENTION_OPS_KEYS
+
+        parts = []
+        for key in RETENTION_OPS_KEYS:
+            row = db.get_setting_value(key, None)
+            source = "db-row" if row is not None else "code-default"
+            value = row if row is not None else OPS_SETTINGS_DEFAULTS.get(key, "?")
+            parts.append(f"{key}={value}d ({source})")
+        logger.info(f"[Cleanup] Effective retention windows: {'; '.join(parts)}")
+    except Exception as e:
+        logger.warning(f"[Cleanup] Could not report effective retention windows: {e}")
+
+
 def _wal_checkpoint_truncate() -> None:
     """Run PRAGMA wal_checkpoint(TRUNCATE) to return freed pages to the OS.
 
@@ -620,9 +665,10 @@ class CleanupService:
                 )
                 report.execution_logs_pruned = pruned
                 if pruned > 0:
-                    logger.info(
+                    _log_prune(
+                        pruned,
                         f"[Cleanup] Nulled execution_log on {pruned} executions "
-                        f"older than {log_days} days (#772)"
+                        f"older than {log_days} days (#772)",
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning execution_log: {e}")
@@ -635,9 +681,10 @@ class CleanupService:
                 )
                 report.execution_rows_pruned = pruned
                 if pruned > 0:
-                    logger.info(
+                    _log_prune(
+                        pruned,
                         f"[Cleanup] Deleted {pruned} schedule_executions rows "
-                        f"older than {row_days} days (#772)"
+                        f"older than {row_days} days (#772)",
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning execution rows: {e}")
@@ -650,9 +697,10 @@ class CleanupService:
                 )
                 report.health_checks_pruned = pruned
                 if pruned > 0:
-                    logger.info(
+                    _log_prune(
+                        pruned,
                         f"[Cleanup] Deleted {pruned} agent_health_checks rows "
-                        f"older than {hc_days} days (#772)"
+                        f"older than {hc_days} days (#772)",
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning health checks: {e}")
@@ -728,9 +776,13 @@ class CleanupService:
         try:
             from services.settings_service import OPS_SETTINGS_DEFAULTS
 
+            # Subscript, not `.get(key, "180")` (#1638): the literal fallback was
+            # unreachable and advertised a default the dict no longer held — a
+            # reader trap in a destructive path. A missing key now raises into
+            # the handler below and disables the sweep (fail-safe).
             raw_sd_days = db.get_setting_value(
                 "agent_soft_delete_retention_days",
-                OPS_SETTINGS_DEFAULTS.get("agent_soft_delete_retention_days", "180"),
+                OPS_SETTINGS_DEFAULTS["agent_soft_delete_retention_days"],
             )
             try:
                 sd_days = max(int(raw_sd_days), 0)
@@ -776,9 +828,13 @@ class CleanupService:
                 report.soft_deleted_agents_purged = purged
                 report.agent_volumes_removed = volumes_removed
                 if purged > 0:
-                    logger.info(
+                    # Always WARNING (#1638): unlike a row prune, this destroys
+                    # the agent's data volumes (#1581) and is unrecoverable —
+                    # there is no such thing as a routine, unremarkable one.
+                    logger.warning(
                         f"[Cleanup] Hard-purged {purged} soft-deleted agent(s) "
-                        f"past {sd_days}-day retention (#834)"
+                        f"past {sd_days}-day retention, removed {volumes_removed} "
+                        f"data volume(s) — unrecoverable (#834/#1581)"
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning soft-deleted agents: {e}")
@@ -985,7 +1041,7 @@ class CleanupService:
 
             raw_schedule_days = db.get_setting_value(
                 "schedule_soft_delete_retention_days",
-                OPS_SETTINGS_DEFAULTS.get("schedule_soft_delete_retention_days", "30"),
+                OPS_SETTINGS_DEFAULTS["schedule_soft_delete_retention_days"],
             )
             try:
                 schedule_days = max(int(raw_schedule_days), 0)
@@ -1605,6 +1661,11 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+
+        # #1638: report the effective windows + their source BEFORE the startup
+        # sweep runs, so a retroactive default change is visible in the logs
+        # ahead of the deletion it causes rather than only in its aftermath.
+        log_effective_retention_windows()
 
         # Run initial cleanup on startup
         try:

@@ -50,15 +50,19 @@ def is_valid_public_channel_model(model: str) -> bool:
 # Ops Settings Configuration - moved from routers/settings.py
 # ============================================================================
 
-# Issue #1039: community retention floor (days). Operator-tunable retention
-# windows default to this in the community edition; an enterprise `retention`
-# license unlocks longer/configurable windows. The audit log is EXEMPT — it
-# keeps a 365-day integrity floor (see audit_retention_service). This is the
-# shared default the enterprise `retention` module clamps unentitled writes to.
-COMMUNITY_RETENTION_FLOOR_DAYS = 5
+# Re-exported from config.py (a leaf module) — database.py seeds these during
+# init_database(), which runs at import, and this module imports `db` from
+# database, so defining them here would be a circular import (#1638). Importers
+# keep using `from services.settings_service import ...`.
+from config import (  # noqa: E402
+    COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
+    COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
+)
 
-# The operator-tunable retention OPS-settings keys governed by the #1039 floor
-# (audit log excluded — separate env-driven 365-day floor).
+# The operator-tunable retention OPS-settings keys reported by
+# `GET /api/settings/retention` (audit log excluded — separate env-driven
+# 365-day floor). Membership here means "is a retention window"; it does NOT
+# mean "gets the community floor" — that set is COMMUNITY_FRESH_INSTALL_SEED.
 RETENTION_OPS_KEYS = (
     "execution_log_retention_days",
     "execution_row_retention_days",
@@ -79,32 +83,37 @@ OPS_SETTINGS_DEFAULTS = {
     "ops_log_retention_days": "7",  # Days to keep container logs
     "ops_health_check_interval": "60",  # Seconds between health checks
     "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
-    # Issue #1039: 5-day COMMUNITY retention floor. These operator-tunable
-    # windows default to 5 days in the community edition; an enterprise
-    # `retention` license unlocks longer/configurable windows. The audit log is
-    # EXEMPT — it keeps its 365-day integrity floor (audit_retention_service).
-    # Previous code defaults (execution-log 30 / execution-row 90 /
-    # health-check 7 / agent soft-delete 180 / schedule soft-delete 30) are
-    # documented in the #1039 release notes; self-hosters restore them via the
-    # OPS settings escape hatch (unsupported) or an enterprise license.
+    # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
+    #
+    # These are the fallback used at PRUNE time for an install with no
+    # `system_settings` row, which is the default state for every install that
+    # never touched retention. Lowering one of them silently hard-DELETEs the
+    # existing data of every such install, ~seconds after its next boot, with no
+    # error and a green /health. That is #1638; it cost ~3 months of execution
+    # history on a real instance.
+    #
+    # So: these stay at the widest (safest) historical value. The #1039
+    # community floor is applied to NEW installs by seeding rows
+    # (COMMUNITY_FRESH_INSTALL_SEED), which only ever touches an empty DB.
+    # If you want to shrink a window for existing installs, that is a migration
+    # + a docs/migrations/ entry + an operator decision — not an edit here.
     #
     # Issue #772: retention policy for execution_log + agent_health_checks.
     # "0" disables that prune step.
-    "execution_log_retention_days": "5",  # Null `execution_log` TEXT after N days (#1039: was 30)
-    "execution_row_retention_days": "5",  # DELETE schedule_executions rows after N days (#1039: was 90)
-    "health_check_retention_days": "5",   # DELETE agent_health_checks rows after N days (#1039: was 7)
+    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days (#772)
+    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days (#772)
+    "health_check_retention_days": "7",    # DELETE agent_health_checks rows after N days (#772)
     # Issue #834 Phase 1a: soft-delete retention for agents. After
     # DELETE /api/agents/{name}, the agent_ownership row is marked
     # `deleted_at = NOW` and child rows are preserved. The cleanup
     # sweep hard-deletes rows older than this many days (cascading
-    # child tables via #816's purge primitive). "0" disables the
-    # sweep entirely — soft-deleted rows then persist until manually
-    # purged. (#1039: community default lowered 180 → 5; recovery
-    # window shrinks accordingly — an enterprise license restores it.)
-    "agent_soft_delete_retention_days": "5",
-    # Issue #834 Phase 1b: per-schedule soft-delete. (#1039: lowered
-    # 30 → 5.) "0" disables the sweep.
-    "schedule_soft_delete_retention_days": "5",
+    # child tables via #816's purge primitive) AND removes the agent's
+    # data volumes (#1581). "0" disables the sweep entirely.
+    # #1638: EXEMPT from the community floor in every edition — this is a
+    # recovery window whose expiry destroys agent workspaces, not a log window.
+    "agent_soft_delete_retention_days": "180",
+    # Issue #834 Phase 1b: per-schedule soft-delete. "0" disables the sweep.
+    "schedule_soft_delete_retention_days": "30",
     # Issue #918: retention for agent_reports. Rows older than this many days
     # are deleted by the cleanup sweep. "0" disables the sweep.
     "agent_reports_retention_days": "90",

@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from services.settings_service import (
+    COMMUNITY_FRESH_INSTALL_SEED,
     COMMUNITY_RETENTION_FLOOR_DAYS,
     OPS_SETTINGS_DEFAULTS,
     RETENTION_OPS_KEYS,
@@ -59,12 +60,41 @@ def test_community_floor_is_five_days():
     assert COMMUNITY_RETENTION_FLOOR_DAYS == 5
 
 
-def test_operator_tunable_windows_default_to_floor():
-    """Every operator-tunable OPS window ships the 5-day community default."""
+def test_prune_time_defaults_are_never_the_community_floor():
+    """#1638 regression guard — the inverse of what this file asserted before.
+
+    `OPS_SETTINGS_DEFAULTS` is the fallback read at PRUNE time for an install
+    with no `system_settings` row — the default state of every install that
+    never touched retention. Setting it to the floor makes a default change
+    retroactive and destructive: on the next boot `cleanup_service` hard-DELETEs
+    everything outside the new, narrower window, silently.
+
+    This test previously asserted `== "5"`, which is exactly how #1065 shipped
+    green and cost a production instance ~3 months of execution history. The
+    floor now reaches new installs via COMMUNITY_FRESH_INSTALL_SEED, which only
+    writes to an empty database.
+    """
     for key in RETENTION_OPS_KEYS:
-        assert OPS_SETTINGS_DEFAULTS[key] == "5", (
-            f"{key} default must be the 5-day community floor (#1039)"
+        assert int(OPS_SETTINGS_DEFAULTS[key]) > COMMUNITY_RETENTION_FLOOR_DAYS, (
+            f"{key}: the prune-time default must stay wider than the community "
+            f"floor so an install with no row keeps its data (#1638). Apply the "
+            f"floor via COMMUNITY_FRESH_INSTALL_SEED instead."
         )
+
+
+def test_fresh_install_seed_applies_the_floor():
+    """The floor still reaches new installs — via the seed, not the defaults."""
+    for key, value in COMMUNITY_FRESH_INSTALL_SEED.items():
+        assert key in RETENTION_OPS_KEYS
+        assert int(value) == COMMUNITY_RETENTION_FLOOR_DAYS
+
+
+def test_agent_soft_delete_is_exempt_from_the_floor():
+    """#1638: purging a soft-deleted agent destroys its data volumes (#1581),
+    so this is a recovery window, not a log window. It is exempt in every
+    edition and must never be seeded down to the floor."""
+    assert "agent_soft_delete_retention_days" not in COMMUNITY_FRESH_INSTALL_SEED
+    assert int(OPS_SETTINGS_DEFAULTS["agent_soft_delete_retention_days"]) >= 180
 
 
 def test_audit_log_is_not_an_ops_retention_key():
@@ -101,7 +131,12 @@ def _call_retention(*, entitled: bool, ops_values=None, env=None):
         return asyncio.run(get_retention_status(current_user=_admin()))
 
 
-def test_read_surface_community_reports_floor_and_audit_exempt():
+def test_read_surface_community_reports_wide_defaults_and_audit_exempt():
+    """An install with no rows reports the WIDE code defaults (#1638).
+
+    Pre-#1638 this asserted every window read back as 5 — i.e. that an install
+    which had never opted in was already being pruned at the floor.
+    """
     res = _call_retention(entitled=False, env={
         "LOG_RETENTION_DAYS": "5",
         "AUDIT_LOG_RETENTION_DAYS": "365",
@@ -110,11 +145,34 @@ def test_read_surface_community_reports_floor_and_audit_exempt():
     assert res["community_floor_days"] == 5
     w = res["windows"]
     assert w["log_retention_days"] == 5
-    # OPS windows fall back to the 5-day defaults when unset in the DB
+    # OPS windows fall back to the wide code defaults when unset in the DB —
+    # an un-seeded install keeps its data.
     for key in RETENTION_OPS_KEYS:
-        assert w[key] == 5
+        assert w[key] == int(OPS_SETTINGS_DEFAULTS[key])
+        assert w[key] > COMMUNITY_RETENTION_FLOOR_DAYS
     # audit exempt — stays at the 365 floor
     assert w["audit_log_retention_days"] == 365
+
+
+def test_read_surface_reports_source_per_window():
+    """#1638: `code-default` vs `db-row` is the distinction that made the
+    silent retroactive change invisible — the read surface must expose it."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={"execution_row_retention_days": "90"},
+    )
+    sources = res["sources"]
+    assert sources["execution_row_retention_days"] == "db-row"
+    assert sources["health_check_retention_days"] == "code-default"
+
+
+def test_read_surface_does_not_advertise_a_nonexistent_env_hatch():
+    """#1638: the surface used to claim `enterprise → env → community-default`,
+    but no env layer exists for the OPS windows — so the one documented
+    mitigation an operator could have reached for did nothing."""
+    res = _call_retention(entitled=False)
+    assert "env" not in res["precedence"].split("(")[0]
+    assert "db-row" in res["precedence"]
 
 
 def test_read_surface_enterprise_edition_when_entitled():
