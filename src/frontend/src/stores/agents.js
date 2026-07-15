@@ -850,6 +850,60 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // A2A control plane (trinity-enterprise#158) — proxies the entitlement-gated
+    // enterprise endpoints. The full config (exposure, card URL, allow-list,
+    // outbound endpoints) comes from one GET; mutations return the updated config.
+    async getA2aConfig(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/enterprise/a2a/${name}/config`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setA2aExposure(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/enterprise/a2a/${name}/exposure`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async updateA2aAllowlist(name, { add = [], remove = [] }) {
+      const authStore = useAuthStore()
+      const response = await axios.post(`/api/enterprise/a2a/${name}/inbound-allowlist`,
+        { add, remove }, { headers: authStore.authHeader })
+      return response.data
+    },
+
+    async registerA2aEndpoint(name, { name: label, url, credentials }) {
+      const authStore = useAuthStore()
+      const body = { name: label, url }
+      if (credentials) body.credentials = credentials
+      const response = await axios.post(`/api/enterprise/a2a/${name}/endpoints`, body, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async removeA2aEndpoint(name, endpointId) {
+      const authStore = useAuthStore()
+      const response = await axios.delete(`/api/enterprise/a2a/${name}/endpoints/${endpointId}`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The owner-visible served Agent Card (#737) — used to show the advertised
+    // skills an external A2A caller will see.
+    async getA2aCard(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/a2a/agent-card`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // Shared Folders Actions (Phase 9.11: Agent Shared Folders)
     async getAgentFolders(name) {
       const authStore = useAuthStore()
