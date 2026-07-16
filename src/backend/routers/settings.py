@@ -217,14 +217,21 @@ async def get_retention_status(
 
     Reports the value resolved for each operator-tunable class — log archival
     (env LOG_*), execution log/row, health-check, and agent/schedule
-    soft-delete (OPS settings, DB → default precedence) — and the audit-log
-    window (separate 365-day integrity floor, exempt from the community floor).
+    soft-delete (OPS settings, DB-row → code-default precedence) — and the
+    audit-log window (separate 365-day integrity floor, exempt from the
+    community floor).
 
     ``edition`` is ``enterprise`` when the ``retention`` entitlement is present
     (license-driven once #1040 lands; registry-driven today) and ``community``
-    otherwise. In the community edition the windows default to the 5-day floor;
-    the env/OPS values remain an unsupported self-host escape hatch — OSS does
-    not hard-clamp (the enterprise module is the managed, supported surface).
+    otherwise. The 5-day community floor is applied by SEEDING a fresh install's
+    rows (#1638) — it is not a clamp, and OSS does not enforce it: any admin may
+    widen a window via ``PUT /api/settings/ops/config``. The enterprise module is
+    the managed, supported surface (audit, ``updated_by``, hot-reload).
+
+    ``source`` per key is ``db-row`` when an explicit setting exists and
+    ``code-default`` when the value is the fallback — the distinction that made
+    #1638 invisible (a ``code-default`` window is one a default change can move
+    under the operator's feet).
 
     Admin-only.
     """
@@ -243,14 +250,23 @@ async def get_retention_status(
         except (TypeError, ValueError):
             return 0
 
+    def _ops_source(key: str) -> str:
+        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
 
     return {
         "edition": "enterprise" if entitled else "community",
         "community_floor_days": COMMUNITY_RETENTION_FLOOR_DAYS,
-        # enterprise (license) DB setting → env var → 5-day community default
-        "precedence": "enterprise → env → community-default",
+        # #1638: the five OPS windows resolve DB-row → code-default. There is NO
+        # env layer for them (the previously advertised
+        # "enterprise → env → community-default" was never implemented — grep for
+        # EXECUTION_ROW_RETENTION_DAYS et al: zero reads). Only log archival is
+        # env-driven. Claiming an escape hatch that does not exist is what left
+        # operators with no way to pre-empt #1638.
+        "precedence": "db-row → code-default (OPS windows); env (log archival only)",
+        "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
@@ -2150,23 +2166,35 @@ async def reset_ops_settings(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Reset all ops settings to their default values.
+    Reset ops settings to their default values.
 
-    Admin-only. Removes all ops settings from the database,
-    causing them to fall back to defaults.
+    Admin-only. Removes ops settings from the database, causing them to fall
+    back to defaults.
+
+    Retention windows (`RETENTION_OPS_KEYS`) are deliberately EXCLUDED (#1638).
+    Deleting one of those rows silently changes how much of the operator's data
+    `cleanup_service` keeps, and a fresh install's seeded community floor would
+    be widened by a button labelled "reset to defaults" — an irreversible-ish
+    side effect nobody expects from a reset. Retention is changed only through
+    the dedicated retention path, where it is an explicit decision.
     """
     require_admin(current_user)
+
+    from services.settings_service import RETENTION_OPS_KEYS
 
     try:
         deleted = []
         for key in OPS_SETTINGS_DEFAULTS.keys():
+            if key in RETENTION_OPS_KEYS:
+                continue
             if db.delete_setting(key):
                 deleted.append(key)
 
         return {
             "success": True,
-            "message": "Ops settings reset to defaults",
-            "reset": deleted
+            "message": "Ops settings reset to defaults (retention windows unchanged)",
+            "reset": deleted,
+            "skipped": list(RETENTION_OPS_KEYS),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset ops settings: {str(e)}")

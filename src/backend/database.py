@@ -163,6 +163,8 @@ def init_database():
     if not is_sqlite():
         from db.alembic_runner import upgrade_to_head
         upgrade_to_head()
+        # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
+        _seed_fresh_install_retention_engine()
         _ensure_admin_user_engine()
         return
 
@@ -190,8 +192,104 @@ def init_database():
             # them, keeping the health check accurate.
             run_all_migrations(cursor, conn)
 
+            # #1638: apply the #1039 community retention floor to a fresh DB.
+            # MUST run after init_schema (system_settings/users must exist) and
+            # BEFORE _ensure_admin_user (which makes `users` non-empty and so
+            # would make this install look pre-existing).
+            _seed_fresh_install_retention(cursor, conn)
+
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
+
+
+_FRESH_INSTALL_SEED_NOTE = (
+    "[#1638] Fresh install: seeded community retention floor "
+    "(%s). Existing installs keep the wider code defaults."
+)
+
+
+def _is_fresh_install_sqlite(cursor) -> bool:
+    """True when this DB has never been set up (#1638).
+
+    `users` is empty for exactly one moment in a database's life: after
+    `init_schema` creates the table and before `_ensure_admin_user` populates
+    it. Any row means the install predates this boot and owns data whose
+    retention we must not narrow. Deliberately NOT a timestamp comparison — a
+    row count is dialect-portable and needs no release-date constant.
+    """
+    cursor.execute("SELECT 1 FROM users LIMIT 1")
+    return cursor.fetchone() is None
+
+
+def _seed_fresh_install_retention(cursor, conn):
+    """Apply the #1039 community retention floor to a fresh install (#1638).
+
+    The floor reaches new installs by writing explicit `system_settings` rows
+    here — NOT by lowering `OPS_SETTINGS_DEFAULTS`, which is read at prune time
+    and would retroactively destroy existing installs' data (#1638).
+
+    Fails SAFE and never raises: if this is skipped or errors, the install
+    simply has no rows and falls back to the wide code defaults, keeping more
+    data than intended. A failed *seed* must never brick boot — `init_database`
+    runs at import, so raising here would crash-loop the backend permanently.
+    """
+    # config, not services.settings_service: that module imports `db` from this
+    # one, and this runs at import time (#1638 circular-import trap).
+    from config import COMMUNITY_FRESH_INSTALL_SEED
+
+    try:
+        if not _is_fresh_install_sqlite(cursor):
+            return
+        now = utc_now_iso()
+        for key, value in COMMUNITY_FRESH_INSTALL_SEED.items():
+            # OR IGNORE: idempotent under a re-run (both migration locks fail
+            # open, so two workers can race this) and never clobbers a value an
+            # operator set.
+            cursor.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+                "VALUES (?, ?, ?)",
+                (key, value, now),
+            )
+        conn.commit()
+        print(_FRESH_INSTALL_SEED_NOTE % ", ".join(
+            f"{k}={v}d" for k, v in sorted(COMMUNITY_FRESH_INSTALL_SEED.items())
+        ))
+    except Exception as e:
+        print(f"WARNING: [#1638] retention seed skipped ({e}); "
+              f"install keeps the default (wider) retention windows")
+
+
+def _seed_fresh_install_retention_engine():
+    """Fresh-install retention seed — engine-based path for PostgreSQL (#300).
+
+    Mirrors `_seed_fresh_install_retention`; see it for the rationale. Same
+    fail-safe contract: never raises, and a skip leaves the wide code defaults
+    in place.
+    """
+    from sqlalchemy import func, select
+
+    from config import COMMUNITY_FRESH_INSTALL_SEED
+    from db.engine import get_engine, make_insert
+    from db.tables import system_settings, users
+
+    try:
+        with get_engine().begin() as conn:
+            count = conn.execute(select(func.count()).select_from(users)).scalar()
+            if count:
+                return
+            now = utc_now_iso()
+            for key, value in COMMUNITY_FRESH_INSTALL_SEED.items():
+                conn.execute(
+                    make_insert(system_settings)
+                    .values(key=key, value=value, updated_at=now)
+                    .on_conflict_do_nothing(index_elements=["key"])
+                )
+        print(_FRESH_INSTALL_SEED_NOTE % ", ".join(
+            f"{k}={v}d" for k, v in sorted(COMMUNITY_FRESH_INSTALL_SEED.items())
+        ))
+    except Exception as e:
+        print(f"WARNING: [#1638] retention seed skipped ({e}); "
+              f"install keeps the default (wider) retention windows")
 
 
 def _ensure_admin_user_engine():
