@@ -225,26 +225,27 @@ class TestDeliveryPathProducesTheInboundKey:
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def svc(monkeypatch):
-    """ProactiveMessageService with database + audit stubbed."""
-    fake_db_mod = types.ModuleType("database")
-    fake_db_mod.db = MagicMock()
-    fake_db_mod.db.get_or_create_public_chat_session.return_value = {"id": "sess-1"}
-    monkeypatch.setitem(sys.modules, "database", fake_db_mod)
+    """ProactiveMessageService with its module-level `db` + audit names stubbed.
 
-    fake_audit_mod = types.ModuleType("services.platform_audit_service")
+    Patches the names **as bound in the module** rather than stubbing
+    `sys.modules` and forcing a re-import. The re-import approach poisons
+    `tests/unit/test_1609_proactive_rate_limits.py` when this file runs first:
+    re-importing rebinds the `services.proactive_message_service` attribute on
+    the `services` package to a NEW module object, and monkeypatch restores
+    `sys.modules` but not that attribute. #1609 then reaches the module via
+    `import services.proactive_message_service as pms` (which resolves through
+    the package attribute) while its service instance comes from the original
+    module — so its patch lands on the wrong object and its assertions fail.
 
-    class _AuditEventType:
-        PROACTIVE_MESSAGE = "proactive_message"
+    Caught by CI's base-vs-head regression diff, not by local runs: the two files
+    have to execute in that order in one session for it to show.
+    """
+    import services.proactive_message_service as pms
 
-    fake_audit_mod.platform_audit_service = MagicMock(log=AsyncMock())
-    fake_audit_mod.AuditEventType = _AuditEventType
-    monkeypatch.setitem(sys.modules, "services.platform_audit_service", fake_audit_mod)
-
-    # Force a fresh import so the stubs above are what the module binds at
-    # import time. monkeypatch.delitem (not a bare sys.modules.pop) so the real
-    # module is restored afterwards and the deletion can't leak into later tests.
-    for mod in ("services.proactive_message_service", "proactive_message_service"):
-        monkeypatch.delitem(sys.modules, mod, raising=False)
+    fake_db = MagicMock()
+    fake_db.get_or_create_public_chat_session.return_value = {"id": "sess-1"}
+    monkeypatch.setattr(pms, "db", fake_db)
+    monkeypatch.setattr(pms, "platform_audit_service", MagicMock(log=AsyncMock()))
 
     from services.proactive_message_service import ProactiveMessageService, DeliveryResult
 
@@ -260,7 +261,7 @@ def svc(monkeypatch):
 
     return types.SimpleNamespace(
         service=service,
-        db=fake_db_mod.db,
+        db=fake_db,
         DeliveryResult=DeliveryResult,
     )
 
