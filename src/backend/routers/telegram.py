@@ -23,7 +23,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
-from services import rate_limiter
+from services import channel_history, rate_limiter
 from services.settings_service import get_proactive_rate_limit
 from dependencies import get_current_user, OwnedAgentByName
 from models import (
@@ -425,6 +425,30 @@ async def send_telegram_group_message(
                 )
 
             result = response.json().get("result", {})
+
+            # #1649: record the broadcast in a channel session so it is not
+            # simply lost. Telegram group sessions are keyed per (sender, chat)
+            # — the adapter has no group branch — and a broadcast has no human
+            # sender, so it is filed under a SYNTHETIC agent-sender key.
+            #
+            # Known limitation, deliberate: nothing else writes to that key, so
+            # no participant's inbound session contains this message and the
+            # agent still will NOT recall its broadcast when someone replies in
+            # the group. This is honest bookkeeping (the message is recorded,
+            # auditable, and attributable) — not a recall fix. Fixing recall
+            # needs a per-chat group session, which changes existing inbound
+            # group behaviour and is a separate decision.
+            channel_history.persist_outbound_group_message(
+                agent_name=agent_name,
+                channel="telegram",
+                session_identifier=channel_history.session_key_for_telegram_group(
+                    bot_id=binding.get("bot_id", ""),
+                    sender_id=agent_name,   # synthetic: the agent is the speaker
+                    chat_id=chat_id,
+                ),
+                text=request.message,
+            )
+
             return {
                 "ok": True,
                 "message_id": result.get("message_id"),

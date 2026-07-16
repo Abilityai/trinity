@@ -551,6 +551,26 @@ Body: { "message": "Hello group!" }
 }
 ```
 
+**Session history (#1649)** — on confirmed delivery the broadcast is appended to a
+channel session via `services/channel_history.py`, with `#903` shared-thread
+attribution (role `assistant`, `sender_label` = agent, **`sender_email=None`** so a
+broadcast is never folded into one participant's MEM-001 memory). Persisted only on
+success — a failed send writes no phantom turn — and fail-soft, since the message is
+already delivered by then.
+
+> **Known limitation — the agent still does not RECALL its own group broadcast.**
+> A Telegram group session is keyed per *(sender, chat)* (`get_session_identifier`
+> has no group branch), and a broadcast has no human sender. It is therefore filed
+> under a **synthetic agent-sender key** (`{bot_id}:{agent}:{chat_id}`) that nothing
+> else writes to — so no participant's inbound session contains it, and a reply in
+> the group won't carry it into context. This is deliberate: it makes the message
+> recorded, auditable, and attributable without changing existing group-session
+> behaviour. Real recall needs a per-chat group session, which is a behaviour change
+> for every existing inbound group conversation — a separate decision, not this fix.
+> Contrast Slack channels (thread-scoped), where the broadcast IS filed at the ts an
+> in-thread reply resolves to, so recall works. `tests/unit/test_1649_group_message_history.py`
+> pins this asymmetry so neither half drifts unnoticed.
+
 **MCP Tools** (`src/mcp-server/src/tools/channels.ts`):
 
 | Tool | Description |
