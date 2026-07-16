@@ -1,5 +1,5 @@
 """
-A2A v1.0 Agent Card generator (Issue #737 Phase 1).
+A2A Agent Card generator (#737 card; version pinned to 0.3.0 by ent#157).
 
 The A2A (Agent-to-Agent) protocol's discovery primitive is a JSON
 document — the "Agent Card" — that describes an agent's identity,
@@ -24,7 +24,8 @@ Out of scope (subsequent phases):
 - Schema validation against a published JSON Schema (the A2A spec
   doesn't publish a stable schema bundle yet)
 
-A2A v1.0 spec reference: https://google.github.io/A2A/
+A2A spec reference: https://google.github.io/A2A/ (targeting v0.3.x —
+see `protocolVersion` below)
 (A2A is Google's open protocol; field names mirror the spec verbatim.)
 """
 
@@ -75,7 +76,7 @@ def generate_a2a_card(
     template_data: Dict[str, Any],
     base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build an A2A v1.0 Agent Card for `agent_name` from template data.
+    """Build an A2A Agent Card (protocol `0.3.0`) for `agent_name` from template data.
 
     Args:
         agent_name: Trinity agent name (used for URL construction and
@@ -91,7 +92,7 @@ def generate_a2a_card(
             either fail closed or fall back to the discovery URL.
 
     Returns:
-        A2A v1.0-compliant card dict ready for JSON serialisation.
+        A2A `0.3.0`-compliant card dict ready for JSON serialisation.
     """
     # template.yaml shape (Trinity-internal):
     #   name, display_name, description, tagline, version, author,

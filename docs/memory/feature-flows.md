@@ -238,6 +238,7 @@
 | MCP Agent Exposure | [mcp-agent-exposure.md](feature-flows/mcp-agent-exposure.md) | Per-agent opt-in dedicated `chat_with_<slug>` MCP tool, dynamically poll-reconciled (#846) |
 | MCP Connector | [mcp-connector.md](feature-flows/mcp-connector.md) | Per-agent MCP connector — expose playbooks as tools to an external AI client via a scoped key; OSS-core (ent#46 → #118) |
 | Agent MCP Key | [agent-mcp-key.md](feature-flows/agent-mcp-key.md) | The agent's own `scope='agent'` key — container config-truth probe, start-time drift self-heal, owner-driven rotation (#1854) |
+| A2A Inbound Server | [a2a-inbound-server.md](feature-flows/a2a-inbound-server.md) | Opt-in public Agent Card + JSON-RPC/SSE task endpoint so external orchestrators discover and task an agent; per-caller `messageId` dedup, rate-limited public route, allow-list seam (ent#157/#160) |
 | Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 | Write User Memory | [write-user-memory.md](feature-flows/write-user-memory.md) | Per-user memory write MCP tool (MEM-001, #888) |
