@@ -10,9 +10,9 @@ an exposed agent via a per-agent inbound allow-list.
   behavioural change (the exposure flag can't even be turned on without the
   entitled enterprise setter, so this path is only reachable in enterprise
   builds anyway).
-* Enterprise build → the provider consults ``enterprise_a2a_inbound_allowlist``:
-  an empty list means "no extra restriction" (owner/shared is enough); a
-  non-empty list means the caller identity MUST be on it.
+* Enterprise build → a registered provider consults its own private policy
+  store: an empty allow-list means "no extra restriction" (owner/shared is
+  enough); a non-empty allow-list means the caller identity MUST be on it.
 
 The provider holds the policy + the private table; this module knows only the
 protocol:

@@ -26,6 +26,7 @@ import types
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
@@ -71,10 +72,21 @@ def client(monkeypatch):
         "access": {"bot"},                        # agents the caller can access
         "executions": {},                         # execution_id → row
     }
+    def _cancel_queued(eid, reason=None):
+        # Mirrors db.cancel_queued_execution's CAS: only a still-queued row
+        # flips, and the bool is the caller's honest signal.
+        row = state["executions"].get(eid)
+        if not row or row.get("status") != "queued":
+            return False
+        row["status"] = "cancelled"
+        state["cancelled_queued"] = (eid, reason)
+        return True
+
     fake_db = types.SimpleNamespace(
         get_a2a_exposed=lambda name: name in state["exposed"],
         can_user_access_agent=lambda user, name: name in state["access"],
         get_execution=lambda eid: state["executions"].get(eid),
+        cancel_queued_execution=_cancel_queued,
     )
     monkeypatch.setattr(a2a, "db", fake_db)
 
@@ -108,7 +120,7 @@ def client(monkeypatch):
 
     async def _terminate(agent, eid):
         state["terminated"] = (agent, eid)
-        return True
+        return state.get("terminate_result", True)
     monkeypatch.setattr(a2a, "terminate_execution_on_agent", _terminate)
 
     # No-op audit.
@@ -170,6 +182,40 @@ def test_wellknown_serves_card_when_exposed(client):
     card = r.json()
     assert card["protocolVersion"] == "0.3.0"
     assert card["url"].endswith("/a2a/bot")
+
+
+def test_wellknown_is_rate_limited_per_ip(client, monkeypatch):
+    """The route is unauthenticated and its URL is published by design; each hit
+    costs a DB read + live Docker call + an HTTP call into the container. Every
+    other unauthenticated route in the repo carries a per-IP limit."""
+    calls = []
+
+    def _enforce(key, limit, window, detail=None):
+        calls.append((key, limit, window))
+
+    monkeypatch.setattr(a2a.rate_limiter, "enforce", _enforce)
+    client.http.get("/a2a/bot/.well-known/agent-card.json")
+    assert calls, "well-known card served with no rate limit"
+    key, limit, window = calls[0]
+    assert key.startswith("a2a_card_ip:")
+    assert limit == a2a.A2A_CARD_RATE_LIMIT and window == a2a.A2A_CARD_RATE_WINDOW
+
+
+def test_wellknown_rate_limit_runs_before_any_docker_or_db_work(client, monkeypatch):
+    """Limiting after the expensive work would still let a flood stall the loop."""
+    order = []
+
+    def _enforce(key, limit, window, detail=None):
+        order.append("limit")
+        raise HTTPException(status_code=429, detail="rate limited")
+
+    monkeypatch.setattr(a2a.rate_limiter, "enforce", _enforce)
+    monkeypatch.setattr(a2a, "get_agent_container",
+                        lambda name: order.append("docker") or None)
+
+    r = client.http.get("/a2a/bot/.well-known/agent-card.json")
+    assert r.status_code == 429
+    assert order == ["limit"], f"work ran before the limiter: {order}"
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +305,125 @@ def test_tasks_cancel(client):
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-c"}})
     assert r.json()["result"]["status"]["state"] == "canceled"
     assert client.state["terminated"] == ("bot", "exec-c")
+
+
+def test_tasks_cancel_queued_row_cancels_in_backlog_not_on_agent(client):
+    """A queued execution has no container process — cancelling must go through
+    the backlog CAS, not a registry call that 404s and reports success anyway."""
+    client.state["executions"]["exec-q"] = {"agent_name": "bot", "status": "queued"}
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-q"}})
+    assert r.json()["result"]["status"]["state"] == "canceled"
+    assert client.state["cancelled_queued"][0] == "exec-q"
+    # The agent registry was never consulted for a queued row.
+    assert "terminated" not in client.state
+    assert client.state["executions"]["exec-q"]["status"] == "cancelled"
+
+
+def test_tasks_cancel_reports_failure_when_terminate_fails(client):
+    """The bool from terminate_execution_on_agent is the caller's only honest
+    signal — a discarded False told the caller "canceled" for a live task."""
+    client.state["executions"]["exec-r"] = {"agent_name": "bot", "status": "running"}
+    client.state["terminate_result"] = False
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-r"}})
+    assert r.json()["error"]["code"] == -32002
+
+
+@pytest.mark.parametrize("status", ["success", "failed", "cancelled"])
+def test_tasks_cancel_terminal_row_is_not_cancelable(client, status):
+    client.state["executions"]["exec-t"] = {"agent_name": "bot", "status": status}
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-t"}})
+    assert r.json()["error"]["code"] == -32002
+
+
+# --------------------------------------------------------------------------- #
+# Access gate (exposed ≠ accessible)
+# --------------------------------------------------------------------------- #
+def test_post_uniform_404_when_exposed_but_not_accessible(client):
+    """Exposure is not access. An exposed agent the caller can't reach must be
+    a uniform 404 — same as non-exposed — so the surface is not an enumeration
+    oracle."""
+    client.state["access"] = set()          # exposed stays {"bot"}
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 1, "method": "message/send",
+        "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}})
+    assert r.status_code == 404
+
+
+def test_inaccessible_and_nonexistent_are_indistinguishable(client):
+    """The two 404 branches must be byte-identical, or the difference is the
+    oracle the uniform 404 exists to remove."""
+    client.state["access"] = set()
+    envelope = {"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "x"}}
+    exposed_no_access = client.http.post("/a2a/bot", json=envelope)
+    nonexistent = client.http.post("/a2a/ghost", json=envelope)
+    assert exposed_no_access.status_code == nonexistent.status_code == 404
+    assert exposed_no_access.json() == nonexistent.json()
+
+
+def test_access_gate_still_admits_accessible_caller(client):
+    """Guard against the gate being satisfied by denying everyone."""
+    r = client.http.post("/a2a/bot", json={
+        "jsonrpc": "2.0", "id": 1, "method": "message/send",
+        "params": {"message": {"parts": [{"kind": "text", "text": "hi"}]}}})
+    assert r.status_code == 200
+    assert r.json()["result"]["status"]["state"] == "completed"
+
+
+# --------------------------------------------------------------------------- #
+# messageId dedup scoping (cross-caller disclosure)
+# --------------------------------------------------------------------------- #
+def test_idem_scope_is_per_caller_not_just_per_agent():
+    """`messageId` is peer-controlled and only unique *per client* — the A2A
+    spec's own examples use "req-1". Two callers sharing an agent-only scope
+    means caller B replays caller A's snapshot (A's full response text) and B's
+    task never runs. The scope must carry the caller principal."""
+    a = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
+    b = types.SimpleNamespace(username="bob", mcp_key_id="k-bob")
+    assert a2a._a2a_idem_scope("bot", a) != a2a._a2a_idem_scope("bot", b)
+
+
+def test_idem_scope_distinguishes_agent_scoped_keys_of_one_owner():
+    """Agent-scoped keys all resolve to the same owner user, so username alone
+    would collapse two calling agents into one namespace."""
+    one = types.SimpleNamespace(username="owner", mcp_key_id="k-agent-1")
+    two = types.SimpleNamespace(username="owner", mcp_key_id="k-agent-2")
+    assert a2a._a2a_idem_scope("bot", one) != a2a._a2a_idem_scope("bot", two)
+
+
+def test_idem_scope_is_stable_for_same_caller():
+    """Dedup must still work — the same caller's repeat must land in one scope."""
+    u = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
+    assert a2a._a2a_idem_scope("bot", u) == a2a._a2a_idem_scope("bot", u)
+
+
+def test_idem_scope_separates_agents_for_same_caller():
+    u = types.SimpleNamespace(username="alice", mcp_key_id="k-alice")
+    assert a2a._a2a_idem_scope("bot", u) != a2a._a2a_idem_scope("other", u)
+
+
+def test_second_caller_same_messageid_does_not_receive_first_callers_response(client):
+    """End-to-end proof of the disclosure the scope fix closes."""
+    envelope = {
+        "jsonrpc": "2.0", "id": 1, "method": "message/send",
+        "params": {"message": {"messageId": "req-1",
+                               "parts": [{"kind": "text", "text": "hi"}]}},
+    }
+    first = client.http.post("/a2a/bot", json=envelope)
+    assert first.json()["result"]["artifacts"][0]["parts"][0]["text"] == "hello from bot"
+
+    # A different caller reuses the SDK-default messageId "req-1".
+    client.user.username = "bob"
+    client.user.mcp_key_id = "k-bob"
+    client.state.pop("last_execute", None)
+
+    second = client.http.post("/a2a/bot", json=envelope)
+    # B's task actually executed rather than silently resolving to A's snapshot.
+    assert client.state.get("last_execute") is not None, \
+        "caller B's task was skipped — B replayed A's cached result"
+    assert second.json()["result"]["status"]["state"] == "completed"
 
 
 # --------------------------------------------------------------------------- #

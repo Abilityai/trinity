@@ -18,7 +18,7 @@ This guide covers both directions:
 | **Agent Card** | A JSON document (A2A's discovery primitive) advertising the agent's name, skills, endpoint URL, and auth scheme. Generated from the agent's `template.yaml`. |
 | **Well-known URL** | The public, unauthenticated discovery URL: `{base}/a2a/{agent}/.well-known/agent-card.json`. This is what you hand to an external client. |
 | **JSON-RPC endpoint** | `POST {base}/a2a/{agent}` — the A2A task endpoint (spec v0.3.x): `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`. |
-| **Inbound allow-list** | Optional per-agent list of caller identities permitted to task the agent. Empty = any authenticated owner/shared caller. |
+| **Inbound allow-list** | Optional per-agent list of caller account emails permitted to task the agent. Empty = any authenticated owner/shared caller. |
 | **Outbound endpoints** | External A2A endpoints (+ optional credentials) your agent may call. |
 
 ---
@@ -36,7 +36,7 @@ Open the agent's detail page and select the **A2A** tab.
 
    ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../images/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
-4. **Manage the inbound allow-list** (optional) — add caller identities that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
+4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
 5. **Register outbound endpoints** (optional) — external A2A endpoints your agent may call, with credentials stored encrypted (never shown again).
 
 ### Using MCP (drive it from an agent / automation)
@@ -120,7 +120,11 @@ Returns an A2A **Task**:
 
 ## Inbound allow-list
 
-By default, any caller authenticated as an owner/shared identity for the agent may task it. To restrict further, add identities (a caller URL, client id, or key id) in the **Inbound allow-list** section. With a non-empty list, only listed identities are accepted; everyone else gets `403`.
+By default, any caller authenticated as an owner/shared identity for the agent may task it. To restrict further, add identities in the **Inbound allow-list** section. With a non-empty list, only listed identities are accepted; everyone else gets `403`.
+
+**Use the caller's Trinity account email** — the identity Trinity compares against is the calling account's email, falling back to its username when the account has no email. A DID or caller URL will never match, so a list containing only those denies every real caller.
+
+> **The allow-list is a restriction, not a security boundary.** It layers on top of authentication — every caller has already passed the `401` and the owner/shared access check before it is consulted. It also **fails open**: if the policy backend errors, the request is allowed rather than denied, matching Trinity's availability bias. Don't rely on it as the only thing standing between an untrusted caller and the agent; that job belongs to authentication and sharing.
 
 ---
 

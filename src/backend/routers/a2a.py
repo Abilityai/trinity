@@ -15,6 +15,8 @@ container's labels, which survive `docker stop`.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import uuid
 from typing import Any, Dict, Optional
@@ -26,7 +28,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from database import db
 from dependencies import AuthorizedAgentByName, get_current_user
 from models import User
-from services import a2a_gate, idempotency_service
+from routers.public import _get_client_ip
+from services import a2a_gate, idempotency_service, rate_limiter
 from services.a2a_card_service import generate_a2a_card
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -161,7 +164,21 @@ _RPC_METHOD_NOT_FOUND = -32601
 _RPC_INVALID_PARAMS = -32602
 _RPC_INTERNAL_ERROR = -32603
 _A2A_TASK_NOT_FOUND = -32001
+_A2A_TASK_NOT_CANCELABLE = -32002
 _A2A_UNSUPPORTED = -32004
+
+# The well-known card route is unauthenticated and published by design, so the
+# agent name is public. Each hit costs a DB read + a live Docker API call + an
+# HTTP call into the agent container, so an unthrottled flood stalls the event
+# loop and hammers the fleet from one URL. Per-IP limit mirrors the other
+# unauthenticated routes: public.py (PUBLIC_LINK_LOOKUP_RATE_LIMIT),
+# files.py (_DOWNLOAD_RATE_LIMIT), webhooks.py (#1424).
+A2A_CARD_RATE_LIMIT = 60      # max card fetches per IP
+A2A_CARD_RATE_WINDOW = 60     # per minute
+
+# Cap the JSON-RPC body before parsing it (the #1424 / #1083 shape). nginx caps
+# at 25m, but :8000 may be reachable directly.
+_MAX_RPC_BODY_BYTES = 1_000_000
 
 
 def _rpc_error(rpc_id: Any, code: int, message: str, data: Any = None) -> JSONResponse:
@@ -222,8 +239,37 @@ def _task_object(execution_id: str, state: str, *, text: Optional[str] = None,
 
 
 def _a2a_state_for(status: str) -> str:
-    """Map a Trinity TaskExecutionStatus to an A2A task state."""
-    return "completed" if status == "success" else "failed"
+    """Map a Trinity TaskExecutionStatus to an A2A task state.
+
+    A cancelled execution is `canceled`, not `failed` — the A2A spec treats them
+    as distinct terminal states and a caller that cancelled its own task should
+    not be told the task errored.
+    """
+    return {"success": "completed", "cancelled": "canceled"}.get(status, "failed")
+
+
+def _a2a_idem_scope(agent_name: str, current_user: User) -> str:
+    """Dedup scope for an inbound A2A `messageId`: per (agent, caller principal).
+
+    `messageId` is a **peer-controlled** protocol field that A2A SDKs generate
+    automatically, and the spec only requires uniqueness *per client* — two
+    callers legitimately collide on `"req-1"`. Scoping on the agent alone would
+    make one caller's `messageId` resolve to another caller's stored snapshot,
+    which carries the agent's full response text: caller B would receive caller
+    A's output and B's own task would silently never run.
+
+    Keying the scope on the caller principal gives every caller a private
+    `messageId` namespace, so a collision can only ever replay the caller's own
+    prior result. `mcp_key_id` is preferred over `username` because agent-scoped
+    keys all resolve to the same owner user — the key id is what distinguishes
+    two agents calling on the same owner's behalf.
+    """
+    principal = (
+        getattr(current_user, "mcp_key_id", None)
+        or getattr(current_user, "username", None)
+        or "anonymous"
+    )
+    return f"a2a:{agent_name}:{principal}"
 
 
 async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, Any]]:
@@ -252,7 +298,19 @@ async def a2a_well_known_card(agent_name: str, request: Request):
     """Public (unauthenticated) A2A discovery card for an exposed agent.
 
     404 (uniform) when the agent is non-existent or not A2A-exposed. The card's
-    `url` points at `POST /a2a/{name}` (the JSON-RPC task endpoint)."""
+    `url` points at `POST /a2a/{name}` (the JSON-RPC task endpoint).
+
+    Per-IP rate limited BEFORE any DB/Docker/agent work — the expensive part of
+    serving a card is exactly what an unauthenticated flood would amplify.
+    Trusted-proxy aware (so X-Forwarded-For can't be spoofed past it) and
+    fail-open, per the shared limiter's contract.
+    """
+    rate_limiter.enforce(
+        f"a2a_card_ip:{_get_client_ip(request)}",
+        A2A_CARD_RATE_LIMIT,
+        A2A_CARD_RATE_WINDOW,
+        detail="Too many A2A card requests from this address.",
+    )
     card = await _serve_card(agent_name, request)
     if card is None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -296,8 +354,13 @@ async def a2a_jsonrpc(
     message/stream (SSE), tasks/get, tasks/cancel."""
     _authorize_inbound(current_user, agent_name)
 
+    # Cap before parsing — an uncapped await request.json() lets one caller pin
+    # memory. nginx caps at 25m, but :8000 may be reachable directly.
+    raw = await request.body()
+    if len(raw) > _MAX_RPC_BODY_BYTES:
+        return _rpc_error(None, _RPC_INVALID_REQUEST, "Request body too large")
     try:
-        body = await request.json()
+        body = json.loads(raw)
     except Exception:
         return _rpc_error(None, _RPC_PARSE_ERROR, "Parse error: body is not valid JSON")
 
@@ -326,8 +389,12 @@ async def a2a_jsonrpc(
         # with the same messageId must not double-execute. messageId absent →
         # dedup disabled (fail-open).
         message_id = message.get("messageId")
-        decision = idempotency_service.begin(f"a2a:{agent_name}", message_id)
+        decision = idempotency_service.begin(_a2a_idem_scope(agent_name, current_user), message_id)
         if decision.replay and not decision.in_flight and decision.snapshot:
+            # A streaming client can't parse a bare JSON body — replay in the
+            # transport it asked for.
+            if method == "message/stream":
+                return _replay_stream(rpc_id, decision.snapshot)
             return _rpc_result(rpc_id, decision.snapshot)
         if decision.in_flight:
             return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR,
@@ -388,7 +455,28 @@ async def a2a_jsonrpc(
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
-        await terminate_execution_on_agent(agent_name, exec_id)
+
+        # Report what actually happened. Telling a caller "canceled" while the
+        # task is still queued means it drains minutes later, runs, bills, and
+        # performs side effects the caller believed were cancelled.
+        status = _exec_field(row, "status")
+        if status in ("success", "failed", "cancelled"):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
+                              "Task is already in a terminal state")
+
+        if status == "queued":
+            # A queued row has no container process to signal — cancel it in the
+            # backlog directly (the chat.py queued-cancel branch's shape). The
+            # CAS inside cancel_queued_execution is what makes a lost race honest.
+            cancelled = bool(db.cancel_queued_execution(
+                exec_id, reason="Cancelled by A2A caller"))
+        else:
+            cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
+
+        if not cancelled:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
+                              "Task could not be canceled")
+
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION, event_action="a2a_cancel", source="a2a",
             actor_user=current_user, actor_ip=caller_ip,
@@ -405,13 +493,24 @@ async def a2a_jsonrpc(
     return _rpc_error(rpc_id, _RPC_METHOD_NOT_FOUND, f"Method not found: {method}")
 
 
+def _replay_stream(rpc_id: Any, task: Dict[str, Any]) -> StreamingResponse:
+    """Replay a stored task result to a `message/stream` caller in SSE.
+
+    A streaming SDK has an event-stream parser attached; handing it a bare JSON
+    body on replay breaks it. Same payload, right transport.
+    """
+    async def _gen():
+        final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
+        yield f"data: {json.dumps(final)}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
 async def _stream_task(agent_name: str, text: str, current_user: User,
                        rpc_id: Any, decision, caller_ip: Optional[str]) -> StreamingResponse:
     """message/stream via SSE. Emits a `working` status event, runs the task,
     then a terminal task event. Non-incremental (the agent turn is atomic), but
     spec-shaped so a streaming A2A client attaches and receives the result."""
-    import json as _json
-
     async def _gen():
         # Initial status: the server has accepted the task and is working.
         working = {"jsonrpc": "2.0", "id": rpc_id, "result": {
@@ -419,15 +518,23 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
             "status": {"state": "working"},
             "final": False,
         }}
-        yield f"data: {_json.dumps(working)}\n\n"
+        yield f"data: {json.dumps(working)}\n\n"
         try:
             result = await _run_a2a_task(agent_name, text, current_user)
+        except asyncio.CancelledError:
+            # A client disconnect cancels the generator, and CancelledError is a
+            # BaseException (3.8+) — the `except Exception` below never sees it.
+            # Without this, neither complete() nor fail() runs, the row stays
+            # in_flight, and every retry with this messageId gets "already in
+            # progress" for the full 24h TTL.
+            idempotency_service.fail(decision)
+            raise
         except Exception as exc:  # noqa: BLE001
             idempotency_service.fail(decision)
             logger.warning("a2a message/stream failed for %s: %s", agent_name, exc)
             err = {"jsonrpc": "2.0", "id": rpc_id, "error": {
                 "code": _RPC_INTERNAL_ERROR, "message": "Task execution failed"}}
-            yield f"data: {_json.dumps(err)}\n\n"
+            yield f"data: {json.dumps(err)}\n\n"
             return
         state = _a2a_state_for(result.status)
         task = _task_object(
@@ -442,6 +549,6 @@ async def _stream_task(agent_name: str, text: str, current_user: User,
             target_type="agent", target_id=agent_name, details={"execution_id": result.execution_id},
         )
         final = {"jsonrpc": "2.0", "id": rpc_id, "result": {**task, "final": True}}
-        yield f"data: {_json.dumps(final)}\n\n"
+        yield f"data: {json.dumps(final)}\n\n"
 
     return StreamingResponse(_gen(), media_type="text/event-stream")

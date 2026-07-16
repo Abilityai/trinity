@@ -90,7 +90,8 @@
       <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
         <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Inbound allow-list</h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-          Identities permitted to task this agent inbound (a caller URL, client id, or key id). Empty =
+          Trinity accounts permitted to task this agent inbound — the caller's account
+          <strong>email</strong> (or username, when the account has no email). Empty =
           any authenticated owner/shared caller. Non-empty = only these identities.
         </p>
         <div v-if="config.inbound_allowlist.length" class="space-y-2 mb-3">
@@ -115,7 +116,7 @@
           <input
             v-model.trim="newIdentity"
             type="text"
-            placeholder="did:example, https://caller/…, or key id"
+            placeholder="caller@example.com"
             class="flex-1 px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
           />
           <button
