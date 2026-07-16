@@ -792,7 +792,7 @@ Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md
 | GET | `/api/agents/{name}/folders/available` | Mountable folders from permitted agents |
 | GET | `/api/agents/{name}/folders/consumers` | Agents that will mount this folder |
 | GET/PUT | `/api/agents/{name}/autonomy` | Get / enable-disable autonomy (toggles all schedules) |
-| POST | `/api/agents/{name}/ssh-access` | Ephemeral SSH credentials (admin-only) |
+| POST | `/api/agents/{name}/ssh-access` | Ephemeral **key-based** SSH credentials (admin-only; BYOK — the caller supplies `public_key`, the server never handles private keys #175). `auth_method` accepts only `"key"`; password auth returned 400 since #1615 (it never worked — agent sshd runs `PasswordAuthentication no`, and host-side hashing used the `crypt` module removed in Python 3.13) |
 | GET/PUT | `/api/agents/{name}/read-only` | Read-only mode status / toggle (blocks source file writes) |
 | GET/PUT | `/api/agents/{name}/timeout` | Execution timeout (60–7200s, default 3600s, #665). PUT 400 `agent_timeout_below_active_schedules` if the new cap drops below any non-deleted schedule's `timeout_seconds` (#929) |
 | GET/PUT | `/api/agents/{name}/public-channel-model` | Per-agent model override for **public-facing** channels — public link, Slack/Telegram/WhatsApp, x402 (#894). GET returns raw override + resolved model + selectable list; PUT owner-only, whitelist-validated (422), NULL clears → platform default. Resolved at `public.py`/`message_router.py`/`paid.py` (override → platform default → fallback); the owner's own chats/schedules are unaffected |

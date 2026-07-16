@@ -316,13 +316,13 @@ Uses `execute_command_in_container()` which is now async:
 git_dir = await git_service.check_git_initialized(agent_name)
 ```
 
-### Agents Router (`src/backend/routers/agents.py`)
+### SSH Router (`src/backend/routers/agent_ssh.py`)
 
-**SSH access endpoint (lines 1203, 1247)**:
+**SSH access endpoint** — key injection is the only awaited Docker call on this
+path since #1615 removed password auth (`set_container_password`, the other
+caller here, is deleted):
 ```python
-if not await ssh_service.set_container_password(agent_name, password):
-# ...
-if not await ssh_service.inject_ssh_key(agent_name, keypair["public_key"]):
+if not await ssh_service.inject_ssh_key(agent_name, public_key_with_comment):
 ```
 
 ---

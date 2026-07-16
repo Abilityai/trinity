@@ -668,11 +668,11 @@ export function createAgentTools(
     getAgentSshAccess: {
       name: "get_agent_ssh_access",
       description:
-        "Generate ephemeral SSH credentials for direct terminal access to an agent container. " +
-        "Supports two auth methods: 'key' (provide your public key) or 'password' (one-liner with sshpass). " +
-        "Credentials expire automatically (default: 4 hours). Agent must be running. " +
-        "For key auth: generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key. " +
-        "The server never generates or handles private keys. Admin only.",
+        "Generate ephemeral, key-based SSH credentials for direct terminal access to an agent container. " +
+        "Generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key; the server injects " +
+        "it into the container and it expires automatically (default: 4 hours). Agent must be running. " +
+        "The server never generates or handles private keys. Admin only. " +
+        "(Password auth was removed — it never worked; key auth is the only method.)",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to access"),
         ttl_hours: z
@@ -680,26 +680,20 @@ export function createAgentTools(
           .optional()
           .default(4)
           .describe("How long the SSH key should be valid (0.1-24 hours, default: 4)"),
-        auth_method: z
-          .enum(["key", "password"])
-          .optional()
-          .default("key")
-          .describe("Authentication method: 'key' for SSH public key injection (more secure), 'password' for one-liner with sshpass (convenient, requires sshpass installed)"),
         public_key: z
           .string()
-          .optional()
-          .describe("Your SSH public key (required for 'key' auth method). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
+          .describe("Your SSH public key (required). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
       }),
       execute: async (
-        { agent_name, ttl_hours = 4, auth_method = "key", public_key }: { agent_name: string; ttl_hours?: number; auth_method?: "key" | "password"; public_key?: string },
+        { agent_name, ttl_hours = 4, public_key }: { agent_name: string; ttl_hours?: number; public_key?: string },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
-        console.log(`[get_agent_ssh_access] Generating SSH access for agent '${agent_name}' (TTL: ${ttl_hours}h, method: ${auth_method})`);
+        console.log(`[get_agent_ssh_access] Generating key-based SSH access for agent '${agent_name}' (TTL: ${ttl_hours}h)`);
 
-        const response = await apiClient.createSshAccess(agent_name, ttl_hours, auth_method, public_key);
+        const response = await apiClient.createSshAccess(agent_name, ttl_hours, public_key);
 
         return JSON.stringify(response, null, 2);
       },

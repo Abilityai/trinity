@@ -23,14 +23,8 @@ backend_path = str(_project_root / 'src' / 'backend')
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-# Mock crypt module (removed in Python 3.13+) - needs to be global
-# as it's imported at runtime inside set_container_password()
-if 'crypt' not in sys.modules:
-    mock_crypt_global = Mock()
-    mock_crypt_global.METHOD_SHA512 = "$6$"
-    mock_crypt_global.mksalt = Mock(return_value="$6$random_salt$")
-    mock_crypt_global.crypt = Mock(return_value="$6$random_salt$hashed_password")
-    sys.modules['crypt'] = mock_crypt_global
+# #1615: password SSH auth (and the stdlib `crypt` import that broke on Python
+# 3.13) was removed — no `crypt` mock is needed any more.
 
 
 def get_ssh_service():
@@ -48,16 +42,9 @@ def get_ssh_service():
     mock_docker_utils = Mock()
     mock_docker_utils.container_exec_run = mock_container_exec_run
 
-    # Create mock crypt module (removed in Python 3.13+)
-    mock_crypt = Mock()
-    mock_crypt.METHOD_SHA512 = "$6$"
-    mock_crypt.mksalt = Mock(return_value="$6$random_salt$")
-    mock_crypt.crypt = Mock(return_value="$6$random_salt$hashed_password")
-
     # Pre-populate sys.modules with mocks
     with patch.dict('sys.modules', {
         'redis': mock_redis,
-        'crypt': mock_crypt,
         'services.docker_service': Mock(get_agent_container=mock_get_agent_container),
         'services.docker_utils': mock_docker_utils,
     }):
@@ -89,28 +76,20 @@ def get_ssh_service():
 
 
 @pytest.mark.unit
-class TestSshPasswordGeneration:
-    """Test SSH password generation (synchronous, no Docker)."""
+class TestPasswordAuthRemoved:
+    """#1615: password SSH auth is gone — the broken helpers must not exist."""
 
-    def test_generate_password_returns_secure_string(self):
-        """generate_password() returns alphanumeric password of correct length."""
+    def test_password_helpers_are_removed(self):
         ssh_service, mocks = get_ssh_service()
         service = ssh_service.SshService()
+        assert not hasattr(service, "generate_password")
+        assert not hasattr(service, "set_container_password")
 
-        password = service.generate_password(length=24)
-
-        assert len(password) == 24
-        assert password.isalnum()
-
-    def test_generate_password_different_each_time(self):
-        """generate_password() returns unique passwords."""
-        ssh_service, mocks = get_ssh_service()
-        service = ssh_service.SshService()
-
-        passwords = [service.generate_password() for _ in range(10)]
-
-        # All passwords should be unique
-        assert len(set(passwords)) == 10
+    def test_module_does_not_import_crypt(self):
+        """The stdlib `crypt` import (removed in Python 3.13) is gone."""
+        import pathlib
+        src = pathlib.Path(backend_path, "services", "ssh_service.py").read_text()
+        assert "import crypt" not in src
 
 
 @pytest.mark.unit
@@ -173,27 +152,8 @@ class TestAsyncSshKeyInjection:
 
 @pytest.mark.unit
 class TestAsyncPasswordManagement:
-    """Test async password setting/clearing in containers."""
-
-    @pytest.mark.asyncio
-    async def test_set_container_password_uses_async_exec(self):
-        """set_container_password() uses async container_exec_run()."""
-        ssh_service, mocks = get_ssh_service()
-        service = ssh_service.SshService()
-
-        mock_container = Mock()
-        mock_exec_result = Mock()
-        mock_exec_result.exit_code = 0
-        mock_exec_result.output = b""
-
-        mocks['get_agent_container'].return_value = mock_container
-        mocks['container_exec_run'].return_value = mock_exec_result
-
-        result = await service.set_container_password("test-agent", "securepass123")
-
-        assert result is True
-        # Should call exec multiple times: usermod, sed, pkill, sshd
-        assert mocks['container_exec_run'].call_count >= 3
+    """Legacy password-credential CLEANUP stays (clear_container_password) so any
+    pre-#1615 password creds are still torn down — setting passwords is gone."""
 
     @pytest.mark.asyncio
     async def test_clear_container_password_uses_async_exec(self):

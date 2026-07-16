@@ -532,21 +532,20 @@ export class TrinityClient {
   }
 
   /**
-   * Generate ephemeral SSH credentials for direct agent access
-   * For key auth, client supplies their public key (private key never leaves client)
-   * For password auth, server generates ephemeral password
+   * Generate ephemeral, key-based SSH credentials for direct agent access.
+   * The client supplies their public key (the private key never leaves the client).
+   * Password auth was removed (#1615) — key auth is the only method.
    * @param name - Agent name
    * @param ttlHours - Credential validity in hours (0.1-24, default: 4)
-   * @param authMethod - Authentication method: "key" (default) or "password"
-   * @param publicKey - Client's SSH public key (required for "key" auth)
+   * @param publicKey - Client's SSH public key (required)
    */
   async createSshAccess(
     name: string,
     ttlHours: number = 4,
-    authMethod: "key" | "password" = "key",
     publicKey?: string
   ): Promise<SshAccessResponse> {
-    const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: authMethod };
+    // #1615: key-based auth only (password auth removed).
+    const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: "key" };
     if (publicKey) {
       body.public_key = publicKey;
     }

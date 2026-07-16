@@ -1394,10 +1394,10 @@ class RenameAgentRequest(BaseModel):
 
 
 class SshAccessRequest(BaseModel):
-    """Request body for SSH access."""
+    """Request body for SSH access (key-based only; #1615 removed password auth)."""
     ttl_hours: float = 4.0
-    auth_method: str = "key"  # "key" for SSH key, "password" for ephemeral password
-    public_key: Optional[str] = None  # Required for key auth — client-supplied OpenSSH public key
+    auth_method: str = "key"  # only "key" is supported (password auth removed, #1615)
+    public_key: Optional[str] = None  # Required — client-supplied OpenSSH public key
 
 
 # =============================================================================
