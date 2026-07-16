@@ -177,6 +177,10 @@ const routes = [
     path: '/enterprise/client-portal',
     name: 'EnterpriseClientPortal',
     component: () => import('../views/enterprise/ClientPortal.vue'),
+    // STANDALONE, no NavBar — deliberate (#1636). This is a client-facing
+    // surface, not an operator page: the platform nav would offer a client
+    // links they can't use. The sibling /enterprise pages DO render NavBar;
+    // this one is the exception, like /portal and /m.
     // hideHelpWidget: the platform "Trinity Help" widget (bottom-right) overlaps
     // the client chat composer's Send button and isn't relevant to a portal
     // client — keep it off this standalone surface.

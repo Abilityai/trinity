@@ -15,6 +15,7 @@ Enables agents to send proactive messages to specific users by verified email ac
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.
 - **MCP tool access**: Agents use `send_message` MCP tool for outreach
+- **History-aware (#1600)**: a delivered message is appended to the recipient's channel session, so the agent's next turn knows what it sent
 
 ## Architecture
 
@@ -160,6 +161,56 @@ actor_id=agent_name
 target_type="user"
 target_id=recipient_email
 ```
+
+### 5. Session-History Persistence (#1600)
+
+A delivered message is appended to the recipient's channel session, so the next
+inbound turn's `build_public_chat_context` includes it. Without this the agent had
+no record of its own outreach — it would repeat itself, contradict the message, or
+fail to parse the reply ("yes, sounds good" — to what?).
+
+```python
+# _send_message_inner, on confirmed delivery only (never on failure — no phantom turn)
+self._persist_outbound(agent_name, recipient_email, text, result)
+  -> db.get_or_create_public_chat_session(agent_name, result.session_identifier, channel)
+  -> db.add_public_chat_message(session_id, "assistant", text,
+                                sender_email=recipient_email,   # DM => single participant (#903)
+                                sender_label=agent_name)
+```
+
+**The session key must equal the inbound one.** Persisting into *a* session is
+useless; it has to be the one the recipient's next message resolves to, or the
+write succeeds and the bug survives invisibly. So each `_deliver_*` sets
+`DeliveryResult.session_identifier` by driving **its own adapter's**
+`get_session_identifier()` with a synthetic DM — never by re-deriving the format
+in the service, which would drift from the adapter:
+
+| Channel | Key | Derived from |
+|---------|-----|--------------|
+| Telegram | `{bot_id}:{user}:{chat}` | binding `bot_id` + chat link's `telegram_user_id` (a DM's chat_id IS the user id) |
+| WhatsApp | `{binding_id}:{phone}` | binding id + chat link's `wa_user_phone` |
+| Slack | `{team}:{user}:{dm_channel}` | workspace `team_id` + looked-up user + opened DM channel (`is_dm=True` selects the DM branch, not the thread branch) |
+
+**The session is created if absent.** `telegram_chat_links.session_id` and
+`whatsapp_chat_links.session_id` look like the natural key but are **never written
+by any code path** — vestigial columns, read in three SELECTs and nowhere else. So
+"reuse the link's session" isn't available; `get_or_create_public_chat_session` with
+the adapter's identifier lands in the same session regardless.
+
+**Attribution (#903)**: role `assistant`, `sender_label` = agent name,
+`sender_email` = the recipient. A proactive send targets ONE verified email — a DM,
+i.e. a single-participant session — so `_assistant_sender_email`'s rule resolves to
+the recipient, keeping sender-filtered MEM-001 summarization in the right user's
+memory.
+
+**Fail-soft**: the message is already delivered when this runs, so a persistence
+error is logged (loudly) and never surfaces as a delivery failure.
+
+**Scope**: `send_access_grant_notification` shares the `_deliver_*` helpers but does
+NOT persist — its history semantics are out of scope (#951). The call sits on the
+`send_message` path, which draws that line structurally rather than with a flag.
+Proactive **group** sends (`send_group_message`, #349/#350) have the same gap and a
+different session model — tracked in #1649.
 
 ## File Locations
 
