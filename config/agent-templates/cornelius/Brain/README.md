@@ -86,23 +86,24 @@ Captures  →  Article    →  Insights   →  Hubs       →  Frameworks
 - Review recent permanent notes
 
 ### Weekly
-- Run `/find-connections` on new notes
+- Ask Cornelius to find connections for your new notes
 - Update relevant MOCs
 - Review latest changelogs
 - Plan synthesis opportunities
 
 ### Monthly
-- Run auto-discovery agent
+- Ask Cornelius to hunt for cross-domain patterns
 - Review all changelogs
 - Create/update frameworks
 - Write synthesis articles
 
 ## 🔍 Quick Navigation
 
-**Looking for something?**
-- `/search-vault <query>` - Quick search
-- `/recall <topic>` - Deep exploration
-- `/find-connections <note>` - Discover relationships
+**Looking for something?** Just ask Cornelius in plain language — it searches
+this vault by keyword:
+- "Find my notes on <topic>"
+- "What have I written about <theme>?"
+- "What connects to [[Note Name]]?"
 - Start at: `03-MOCs/MOC - Master Navigation.md`
 
 ## 📚 Sample Workflows
@@ -111,13 +112,13 @@ Captures  →  Article    →  Insights   →  Hubs       →  Frameworks
 1. Read and highlight
 2. Create source note in `01-Sources/Books/`
 3. Extract permanent notes to `02-Permanent/`
-4. Run `/find-connections` on new notes
+4. Ask Cornelius to connect them to existing notes
 5. Update relevant MOCs
 6. Review changelog
 
 ### Writing an Article
 1. Start with a theme or question
-2. Run `/find-connections <theme>`
+2. Ask Cornelius what your notes say about it
 3. Review suggested connections
 4. Create outline in `04-Output/Articles/`
 5. Synthesize permanent notes
@@ -125,7 +126,7 @@ Captures  →  Article    →  Insights   →  Hubs       →  Frameworks
 
 ### Weekly Discovery
 1. Review notes from this week
-2. Run `/find-connections` on each major note
+2. Ask Cornelius to connect each major note to the rest of the vault
 3. Update MOCs
 4. Document patterns in changelog
 5. Identify synthesis opportunities
@@ -148,4 +149,4 @@ See these files for details:
 
 ---
 
-**Start here**: Open [[MOC - Knowledge Base]] to explore the ~1,000 seeded notes, try `/advise <a decision you're facing>`, then create your first note in `02-Permanent/` and run `/find-connections` to weave it in. ✨
+**Start here**: Open [[MOC - Knowledge Base]] to explore the seeded notes, ask Cornelius for advice on a decision you're facing, then create your first note in `02-Permanent/` and ask it to weave the note into the graph. ✨

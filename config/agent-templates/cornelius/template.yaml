@@ -27,23 +27,29 @@ author: "Trinity"
 updated: "2026-03-12"
 tagline: "Your insight harvester, second brain partner, and KB-grounded advisor"
 
+# Rendered above the fold as clickable prompts ("What You Can Ask"), so each entry
+# must be something this bundle can actually do. The two semantic-search lookups
+# were removed: they prefilled a task the keyword floor cannot serve
+# (they return with trinity-enterprise#173).
 use_cases:
   - "Get KB-grounded advice on problems using your own frameworks"
-  - "Quick knowledge lookup with semantic search and graph neighborhood"
+  - "Look up knowledge in your vault by keyword"
   - "Extract unique insights from conversations and transcripts"
   - "Discover hidden connections between notes in your knowledge base"
   - "Generate articles and content from accumulated knowledge"
-  - "Run autonomous deep research pipelines (discover, extract, connect)"
-  - "Stress-test ideas with dialectic analysis (pro/con agents + synthesis)"
+  - "Research a topic on the web and fold the findings into your vault"
+  - "Stress-test an idea by arguing both sides, then synthesizing"
   - "Graduate notes through Zettelkasten workflow"
-  - "Search and recall relevant knowledge using 3-layer semantic search"
   - "Analyze and understand your knowledge base structure"
 
+# Only what this bundle actually does. The semantic tier (semantic_search,
+# spreading_activation, usage_based_learning) needs resources/local-brain-search/,
+# which this template does not ship — the .trinity/brain-orb/search hook therefore
+# serves its keyword floor. Those tokens return with the stack itself
+# (trinity-enterprise#173).
+# `brain-orb` is load-bearing: the frontend route guard reads it from /info.
 capabilities:
   - brain-orb
-  - semantic_search
-  - spreading_activation
-  - usage_based_learning
   - insight_extraction
   - connection_discovery
   - knowledge_synthesis
@@ -71,90 +77,18 @@ credentials:
     - DOCUMENT_INSIGHTS_PATH
     - TRINITY_REMOTE_AGENT
 
-# Sub-Agents
-sub_agents:
-  - name: vault-manager
-    description: "CRUD operations on Obsidian vault notes with knowledge graph integrity"
-  - name: connection-finder
-    description: "Discover hidden connections and relationships between permanent notes"
-  - name: auto-discovery
-    description: "Autonomous cross-domain connection hunter using analytical reasoning"
-  - name: insight-extractor
-    description: "Extract unique insights from personal content, preserving authentic voice"
-  - name: document-insight-extractor
-    description: "Extract insights from external research (papers, books, articles)"
-  - name: thinking-partner
-    description: "Brainstorming and ideation support through dialogue"
-  - name: diagram-generator
-    description: "Create Mermaid diagrams and visualizations"
-  - name: local-brain-search
-    description: "SYNAPSE-inspired vector search with spreading activation and usage-based learning"
-  - name: research-specialist
-    description: "Deep web research with Gemini AI, Google Search grounding, and Apollo.io"
+# Sub-Agents — intentionally none.
+# This bundle ships no .claude/agents/. The upstream agent's sub-agents depend on
+# resources/local-brain-search/ and on MCP servers this template does not configure
+# (smart-connections, mcp-server-chart, apollo), so declaring them here rendered a
+# clickable delegation in the Info tab that resolved to nothing.
+# They return with the search stack (trinity-enterprise#173).
 
-# Skills (Slash Commands)
-skills:
-  # Problem-Solving & Advice
-  - name: advise
-    description: "KB-grounded problem-solving with framework application and citations"
-  - name: dialectic
-    description: "Stress-test ideas with two committed positions and structural synthesis"
-
-  # Fast Knowledge Access
-  - name: quick-search
-    description: "Fast KB lookup (3 tool calls max) - search + graph + read"
-  - name: recall
-    description: "3-layer semantic search with spreading activation"
-  - name: search-vault
-    description: "Quick search combining semantic and keyword approaches"
-
-  # Connection & Discovery
-  - name: find-connections
-    description: "Discover hidden connections around a note or topic"
-  - name: auto-discovery
-    description: "Autonomous cross-domain connection hunting"
-  - name: integrate-recent-notes
-    description: "Find and connect notes created in the last 14 days"
-
-  # Research & Extraction
-  - name: deep-research
-    description: "Autonomous research pipeline - discover, extract, connect"
-  - name: extract-insights
-    description: "Extract unique insights from personal content"
-  - name: extract-document-insights
-    description: "Extract insights from external research documents"
-
-  # Content Creation
-  - name: get-perspective-on
-    description: "Extract unique perspective on a topic (used by a content agent)"
-  - name: create-article
-    description: "Generate article from KB insights with tone/structure guides"
-  - name: synthesize-insights
-    description: "Combine multiple insights into coherent narrative"
-
-  # Knowledge Management
-  - name: graduate-insights
-    description: "Review and graduate notes to permanent status using Zettelkasten"
-  - name: analyze-kb
-    description: "Analyze knowledge base structure and generate report"
-  - name: refresh-index
-    description: "Rebuild Local Brain Search FAISS index"
-  - name: update-changelog
-    description: "Update the master CHANGELOG.md"
-
-  # Utility
-  - name: talk
-    description: "Interactive conversational mode for brainstorming"
-  - name: nano-banana-image-generator
-    description: "Generate images using Gemini 2.5 Flash ($0.039/image)"
-  - name: epub-chapter-extractor
-    description: "Extract chapters from EPUB files to markdown"
-  - name: self-diagnostic
-    description: "Run agent health check on skills, tools, integrations"
-
-  # Git
-  - name: git-commit-push
-    description: "Stage, commit, and push changes with approval gate"
+# Skills (Slash Commands) — intentionally none.
+# This bundle ships no .claude/skills/. The upstream agent's skills shell out to
+# resources/local-brain-search/run_*.sh or call MCP servers this template does not
+# configure, so every entry here named a slash command that did not exist.
+# They return with the search stack (trinity-enterprise#173).
 
 # MCP Servers
 mcp_servers:
@@ -164,10 +98,11 @@ mcp_servers:
     description: "Gemini AI for content generation and Google search grounding"
   - name: ebook-mcp
     description: "EPUB and PDF processing for ebook content extraction"
-  - name: playwright
-    description: "Browser automation for web scraping (local only)"
-  - name: trinity
-    description: "Remote agent orchestration and scheduling"
+# This list must match .mcp.json.template exactly (compatibility check X-004).
+# `playwright` was declared but never configured there.
+# `trinity` is injected into .mcp.json by the platform at start — it is a runtime
+# server, not a template one, so it is not declared here; the credential schema
+# above still carries its TRINITY_API_KEY.
 
 # Git Configuration
 git:
@@ -226,35 +161,8 @@ metrics:
   - name: search_queries
     type: counter
     label: "Search Queries"
-    description: "Number of semantic searches performed"
+    description: "Number of vault searches performed"
     unit: "queries"
-  - name: advice_requests
-    type: counter
-    label: "Advice Requests"
-    description: "Number of /advise queries handled"
-    unit: "requests"
-  - name: index_status
-    type: status
-    label: "Index Status"
-    description: "Status of the local FAISS index"
-    values:
-      - value: "indexed"
-        color: "green"
-        label: "Indexed"
-      - value: "stale"
-        color: "yellow"
-        label: "Needs Reindex"
-      - value: "missing"
-        color: "red"
-        label: "Not Indexed"
-  - name: memory_learning
-    type: status
-    label: "Memory Learning"
-    description: "Status of usage-based learning system"
-    values:
-      - value: "active"
-        color: "green"
-        label: "Learning"
-      - value: "disabled"
-        color: "gray"
-        label: "Disabled"
+# Removed with the stack they measured: index_status (local FAISS index),
+# memory_learning (usage-based learning), advice_requests (/advise).
+# They return with trinity-enterprise#173.
