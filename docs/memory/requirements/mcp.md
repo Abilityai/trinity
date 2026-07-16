@@ -52,7 +52,7 @@
 ## 32. A2A Agent Discoverability (#737)
 
 ### 32.1 A2A Agent Card Endpoint (#737 — Phase 1)
-- **Status**: ✅ Shipped (Phase 1)
+- **Status**: ✅ Implemented (Phase 1)
 - **Implements**: Issue #737
 - **Description**: Each Trinity agent exposes an A2A-protocol Agent
   Card so external orchestrators (AWS Bedrock, Azure Copilot, Google
