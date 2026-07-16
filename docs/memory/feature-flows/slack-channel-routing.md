@@ -59,6 +59,35 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - `POST /api/agents/{name}/slack/channel` → `{status, channel_name, channel_id, workspace_name}`
 - `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}` — **409** if the agent is the workspace's DM default and other agents are still bound (#584)
 - `PUT /api/agents/{name}/slack/channel/dm-default` → `{status, team_id, workspace_name, previous, new_default}` — owner-only; single-tx clear-then-set on `is_dm_default`; audit-logged via `AGENT_LIFECYCLE/slack_dm_default_changed` (#584)
+- `POST /api/agents/{name}/slack/channels/{channel_id}/messages` → proactive channel send (#350); owner-gated, rate limited. **Persists to session history (#1649)** — see below
+
+### Proactive channel sends → session history (#1649)
+
+On confirmed delivery the broadcast is appended to a channel session via
+`services/channel_history.py`, so the agent has a record of its own outreach.
+
+**This is a real recall fix on Slack.** Channel sessions are thread-scoped
+(`team:channel:thread`, #903) and an in-thread reply carries `thread_ts` = the
+**parent's** ts. So:
+
+| Send | Session key |
+|------|-------------|
+| reply into an existing thread (`thread_ts` given) | that thread's ts |
+| new top-level post | the post's **own** ts — exactly the key an in-thread reply resolves to |
+
+Capturing the posted ts needs it back from Slack, so the router calls
+`slack_service.send_message_detailed()` → `(ok, error, ts)`. `send_message()` keeps
+its `(ok, error)` contract and delegates, because ~7 call sites unpack the 2-tuple.
+
+Attribution is `#903` shared-thread: role `assistant`, `sender_label` = agent name,
+**`sender_email=None`** — a broadcast must never be folded into one participant's
+MEM-001 memory. Persisted only on success (no phantom turn on failure) and
+fail-soft (the message is already delivered).
+
+*Caveat*: a reply posted **top-level** in the channel rather than in the thread
+starts its own session and won't see the broadcast — inherent to thread-scoping
+(#903), not something this fix changes. Telegram groups get bookkeeping only, not
+recall — see [telegram-integration.md](telegram-integration.md).
 
 ## Backend Layer
 

@@ -174,15 +174,6 @@ const routes = [
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
   {
-    path: '/enterprise/client-portal',
-    name: 'EnterpriseClientPortal',
-    component: () => import('../views/enterprise/ClientPortal.vue'),
-    // hideHelpWidget: the platform "Trinity Help" widget (bottom-right) overlaps
-    // the client chat composer's Send button and isn't relevant to a portal
-    // client — keep it off this standalone surface.
-    meta: { requiresAuth: true, requiresEntitlement: 'client_portal', title: 'Client Portal', hideHelpWidget: true }
-  },
-  {
     // Public client-facing portal — a client signs in with a verified email
     // (no platform account) and sees the agents shared with them. Standalone
     // (no NavBar / platform chrome), no requiresAuth. Backend 404s in

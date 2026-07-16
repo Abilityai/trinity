@@ -21,7 +21,7 @@ from fastapi.responses import RedirectResponse
 from database import db
 from dependencies import get_current_user
 from models import SlackChannelMessageRequest, SlackEventResponse, User
-from services import rate_limiter
+from services import channel_history, rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
 from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
@@ -702,7 +702,8 @@ async def send_agent_slack_channel_message(
     if not bot_token:
         raise HTTPException(status_code=500, detail="Failed to retrieve Slack bot token")
 
-    ok, error = await slack_service.send_message(
+    # #1649: `_detailed` to capture the posted message's ts — see below.
+    ok, error, posted_ts = await slack_service.send_message_detailed(
         bot_token=bot_token,
         channel=channel_id,
         text=text,
@@ -711,6 +712,33 @@ async def send_agent_slack_channel_message(
     )
     if not ok:
         raise HTTPException(status_code=502, detail=f"Slack send failed: {error}")
+
+    # #1649: record the broadcast in the channel session an inbound reply will
+    # resolve to. Slack channel sessions are thread-scoped (`team:channel:thread`,
+    # #903), and a reply carries thread_ts = the PARENT's ts. So:
+    #   - replying into an existing thread -> that thread's ts
+    #   - a new top-level post            -> the post's OWN ts, which is exactly
+    #     the key an in-thread reply to it will carry
+    # Either way this lands in the session the conversation continues in, so the
+    # agent DOES recall its broadcast — unlike the Telegram group case, whose
+    # per-(sender, chat) sessions have no shared key to write to.
+    #
+    # Caveat: a reply posted top-level in the channel (not in the thread) starts
+    # its own session and won't see this message. That is inherent to Slack's
+    # thread-scoped session model (#903), not something this fix can change.
+    thread_key = request.thread_ts or posted_ts
+    channel_history.persist_outbound_group_message(
+        agent_name=name,
+        channel="slack",
+        session_identifier=(
+            channel_history.session_key_for_slack_channel(
+                team_id=target["team_id"], channel_id=channel_id, thread_ts=thread_key
+            )
+            if thread_key
+            else None  # no ts (older/odd Slack response) -> log + skip, never crash
+        ),
+        text=text,
+    )
 
     return {
         "sent": True,

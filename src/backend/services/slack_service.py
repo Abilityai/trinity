@@ -232,7 +232,42 @@ class SlackService:
         - thread_ts: Reply in thread
         - blocks: Block Kit formatted content
 
-        Returns (success, error_message).
+        Returns (success, error_message). Callers that need the posted message's
+        ``ts`` (e.g. to resolve the thread a reply will land in — #1649) should
+        use :meth:`send_message_detailed`; this 2-tuple contract is kept as-is
+        because ~7 call sites depend on it.
+        """
+        ok, error, _ts = await self.send_message_detailed(
+            bot_token=bot_token,
+            channel=channel,
+            text=text,
+            username=username,
+            icon_url=icon_url,
+            thread_ts=thread_ts,
+            blocks=blocks,
+        )
+        return ok, error
+
+    async def send_message_detailed(
+        self,
+        bot_token: str,
+        channel: str,
+        text: str,
+        username: Optional[str] = None,
+        icon_url: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+        blocks: Optional[list] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """As :meth:`send_message`, but also returns the posted message's ``ts``.
+
+        Returns (success, error_message, ts).
+
+        The ``ts`` matters for session identity (#1649): a Slack channel session
+        is thread-scoped (``team:channel:thread``, #903). A reply in a thread
+        carries ``thread_ts`` = the PARENT message's ts — so for a top-level
+        post, the message's own ts IS the key of the session any in-thread reply
+        resolves to. Without the ts there is no way to persist a proactive post
+        into the session its replies will use.
         """
         try:
             payload = {
@@ -258,13 +293,15 @@ class SlackService:
             if not data.get("ok"):
                 error = data.get("error", "unknown_error")
                 logger.error(f"Slack chat.postMessage failed: {error}")
-                return False, error
+                return False, error, None
 
-            return True, None
+            # `ts` is the posted message's id and, for a top-level post, the
+            # thread key any in-thread reply will carry (#1649).
+            return True, None, data.get("ts")
 
         except Exception as e:
             logger.error(f"Failed to send Slack message: {e}")
-            return False, str(e)
+            return False, str(e), None
 
     async def post_webhook(
         self,

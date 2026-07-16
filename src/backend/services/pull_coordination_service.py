@@ -27,12 +27,97 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
+from services.platform_prompt_service import (
+    ExecutionContext,
+    compose_system_prompt,
+    is_execution_context_enabled,
+)
 from services.slot_service import SLOT_TTL_BUFFER
 from utils.credential_sanitizer import sanitize_execution_log, sanitize_response
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Platform system-prompt composition on the pull path (#1629)
+# ---------------------------------------------------------------------------
+# A pull-claimed turn used to run with ONLY the caller's `system_prompt` override
+# (or nothing) — the operator-queue protocol, file-sharing/user-memory rules, and
+# the #1402 async human-gate contract (all delivered via the platform prompt)
+# never reached it. Compose the same runtime-aware platform prompt the push path
+# builds (task_execution_service) at claim time, folding in the caller override.
+
+
+def _resolve_agent_runtime(agent_name: Optional[str]) -> str:
+    """Best-effort runtime resolution for the platform prompt (#1187). Mirrors
+    task_execution_service — lazy, guarded, Claude default on any failure so
+    prompt composition never blocks a claim."""
+    if not agent_name:
+        return "claude-code"
+    try:
+        from services.docker_service import get_agent_runtime
+
+        return get_agent_runtime(agent_name)
+    except Exception:
+        return "claude-code"
+
+
+def _compose_pull_system_prompt(
+    agent_name: Optional[str],
+    triggered_by: Optional[str],
+    caller_prompt: Optional[str],
+    *,
+    execution_id: Optional[str],
+) -> Optional[str]:
+    """Compose platform prompt + execution context + caller override for a
+    pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
+    with the caller prompt only (parity with the pre-#1629 pull path) + a WARN —
+    a prompt failure never blocks dispatch."""
+    runtime = _resolve_agent_runtime(agent_name)
+    try:
+        exec_ctx = ExecutionContext(
+            agent_name=agent_name,
+            mode=ExecutionContext.derive_mode(triggered_by),
+            triggered_by=triggered_by,
+            execution_id=execution_id,
+        )
+        return compose_system_prompt(
+            execution_context=exec_ctx,
+            caller_prompt=caller_prompt,
+            include_execution_context=is_execution_context_enabled(),
+            runtime=runtime,
+        )
+    except Exception as e:  # noqa: BLE001 — never block a claim on prompt build
+        logger.warning(
+            "[PullCoordination] platform prompt composition failed for %s "
+            "(caller prompt only): %s",
+            agent_name, e,
+        )
+        return caller_prompt
+
+
+# Platform-authored constant banner (#1629 / #1402): the model otherwise cannot
+# observe that a turn is a re-delivery. Only an integer count is interpolated —
+# no agent/user text, so no prompt-injection surface. Prepended at READ time to
+# the claimed message; the stored `schedule_executions.message` is never mutated.
+_REDELIVERY_BANNER = (
+    "[Trinity re-delivery notice] This task is a re-delivery — attempt {n} of {cap}. "
+    "A previous attempt did not confirm completion, so it is being retried. Any "
+    "irreversible external side effect (a payment, an outbound message, a publish, "
+    "etc.) may already have been performed on a prior attempt. Verify before "
+    "re-performing it; if you cannot verify, PARK the effect via the operator "
+    "queue rather than repeat it."
+)
+
+
+def _redelivery_banner(redelivery_count: int) -> str:
+    """Framing banner for a re-delivered turn. attempt N = redelivery_count + 1
+    (first delivery is 0); cap is the fleet-wide MAX_REDELIVERY."""
+    return _REDELIVERY_BANNER.format(n=int(redelivery_count) + 1, cap=MAX_REDELIVERY)
+
 
 # An incoming result over one of these is an idempotent replay (never
 # re-applied). Mirrors ``routers.agents._AUTHORITATIVE_TERMINALS`` (#1083): a
@@ -122,8 +207,27 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if meta.get("file_ids") is not None:
         payload["file_ids"] = meta.get("file_ids")
-    if meta.get("task_overrides") is not None:
-        payload["task_overrides"] = meta.get("task_overrides")
+
+    # #1629: compose the platform system prompt (parity with the push path) and
+    # hand it to the worker via task_overrides.system_prompt — the field the pull
+    # worker reads (`execute_headless(system_prompt=overrides.get("system_prompt"))`).
+    # Fold in any caller override; fail-open leaves the caller prompt (or None).
+    overrides: Dict[str, Any] = dict(meta.get("task_overrides") or {})
+    overrides["system_prompt"] = _compose_pull_system_prompt(
+        row.get("agent_name"),
+        row.get("triggered_by"),
+        overrides.get("system_prompt"),
+        execution_id=row["id"],
+    )
+    payload["task_overrides"] = overrides
+
+    # #1629: re-delivered turns get a deterministic framing banner prepended to
+    # the message at READ time (never persisted — the stored row.message is
+    # untouched). Platform-authored constant + an integer; no injection surface.
+    redelivery_count = row.get("redelivery_count") or 0
+    if redelivery_count > 0:
+        base_message = payload.get("message") or ""
+        payload["message"] = f"{_redelivery_banner(redelivery_count)}\n\n{base_message}"
 
     envelope = {
         "id": message_id,
