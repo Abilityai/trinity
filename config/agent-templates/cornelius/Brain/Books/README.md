@@ -14,4 +14,4 @@ here so the structure is in place; populate it by processing your own books.
 2. Make a folder here named after the book (e.g. `antifragile-taleb/`).
 3. Extract one atomic insight per note into that folder — your own words, one
    idea each (see `../02-Permanent/README.md`).
-4. Run `/find-connections` to weave the new notes into the graph.
+4. Ask Cornelius to weave the new notes into the graph.

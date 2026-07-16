@@ -11,7 +11,7 @@ place; populate it with your own research runs.
 
 ## How sessions are added
 
-- The `/deep-research` and `/extract-document-insights` skills create a dated
+- Ask Cornelius to research a topic or extract insights from a document; it creates a dated
   session folder here and write extracted insights into it.
-- Validated insights graduate into `../02-Permanent/` via `/graduate-insights`.
+- Validated insights graduate into `../02-Permanent/` once you confirm they're worth keeping.
 - Sessions are logged in `../05-Meta/Changelogs/`.

@@ -17,9 +17,8 @@ They are deliberately GENERIC (assert every declaration resolves to a file)
 rather than pinning today's list, so a future re-vendor that reintroduces the
 same class of drift fails here.
 
-The semantic tier returns via trinity-enterprise#173 (Layer 0 of the Sovereign KB
-epic ent#172); when it lands, the declarations come back WITH the files and these
-tests keep passing unchanged.
+The semantic tier returns via trinity-enterprise#173; when it lands, the
+declarations come back WITH the files and these tests keep passing unchanged.
 """
 from __future__ import annotations
 
@@ -154,9 +153,7 @@ def test_claude_md_does_not_invoke_the_absent_search_stack(claude_md):
     stack_ships = (BUNDLE / "resources" / "local-brain-search" / "run_search.sh").is_file()
     if stack_ships:
         pytest.skip("search stack bundled (trinity-enterprise#173)")
-    # Ignore the prose line that explicitly tells the agent the stack is absent.
-    lines = [ln for ln in claude_md.splitlines() if "does not exist" not in ln]
-    hits = [ln.strip() for ln in lines
+    hits = [ln.strip() for ln in claude_md.splitlines()
             if re.search(r"resources/local-brain-search/run_[a-z]+\.sh", ln)]
     assert not hits, f"CLAUDE.md instructs the agent to run absent scripts: {hits[:3]} (#1646)."
 
@@ -176,12 +173,14 @@ def test_claude_md_has_no_dangling_at_imports(claude_md):
 def test_claude_md_does_not_reference_unshipped_slash_commands(claude_md):
     """A /skill instruction is only honest if the skill file ships.
 
-    Only *agent-local* commands are in scope. `/plugin` is a Claude Code builtin
-    and `/trinity:onboard` comes from the trinity plugin the operator installs —
-    neither is served by this bundle, so the negative lookahead skips the
-    `/namespace:command` form and `_EXTERNAL` allowlists the builtins.
+    Only *agent-local* commands are in scope. `/trinity:onboard` comes from the
+    trinity plugin the operator installs, so the `(?!:)` lookahead skips the
+    `/namespace:command` form. `_EXTERNAL` covers the rest: `plugin` is a Claude
+    Code builtin, and the others are POSIX path segments that suppress false
+    positives from prose paths like `open /path/to/folder` (CLAUDE.md:30) — not
+    builtins. Extend it when CLAUDE.md gains a new prose path.
     """
-    _EXTERNAL = {"plugin", "home", "api", "data", "path", "to", "opt", "usr", "var", "tmp", "mcp", "docs"}
+    _EXTERNAL = {"plugin", "home", "api", "data", "path", "opt", "usr", "var", "tmp", "mcp", "docs"}
     # (?!:) skips plugin-namespaced commands like /trinity:onboard
     referenced = set(re.findall(r"(?<![\w/])/([a-z][a-z0-9-]{2,})\b(?!:)", claude_md))
     referenced -= _EXTERNAL
@@ -190,6 +189,36 @@ def test_claude_md_does_not_reference_unshipped_slash_commands(claude_md):
                        and not (BUNDLE / ".claude" / "commands" / f"{n}.md").is_file())
     assert not unshipped, (
         f"CLAUDE.md references slash commands with no file in the bundle: {unshipped} (#1646)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The seed vault is shipped content and makes the same claims
+# ---------------------------------------------------------------------------
+
+def test_brain_notes_do_not_reference_unshipped_commands():
+    """The seed vault's own notes must not advertise commands that don't ship.
+
+    Found by review: the first pass trimmed `template.yaml` + `CLAUDE.md` and
+    stopped, but `Brain/README.md` still said "Start here ... try /advise" and
+    `02-Permanent/README.md` still documented `/recall` as "3-layer semantic
+    search". Those notes render in the Brain tab and are the literal first thing
+    a fresh install is told to read — a *more* visible surface than the Info tab
+    this issue started from. Same bug, one directory over.
+    """
+    offenders = {}
+    for note in (BUNDLE / "Brain").rglob("*.md"):
+        found = set()
+        for cmd in re.findall(r"(?<![\w/])/([a-z][a-z0-9-]{2,})\b(?!:)", note.read_text()):
+            if (BUNDLE / ".claude" / "skills" / cmd / "SKILL.md").is_file():
+                continue
+            if (BUNDLE / ".claude" / "commands" / f"{cmd}.md").is_file():
+                continue
+            found.add(cmd)
+        if found:
+            offenders[str(note.relative_to(BUNDLE))] = sorted(found)
+    assert not offenders, (
+        f"seed vault notes reference slash commands the bundle does not ship: {offenders} (#1646)."
     )
 
 

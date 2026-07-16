@@ -68,7 +68,7 @@ type: permanent
 2. Validate accuracy and relevance
 3. Edit if needed
 4. Move to `02-Permanent/`
-5. Run `/find-connections` to integrate
+5. Ask Cornelius to connect it to existing notes
 
 ## 🔗 Linking Strategy
 
@@ -117,25 +117,24 @@ Use `[[wikilinks]]` with context:
 - **Refine wording**: Make clearer over time
 - **Split if needed**: If note covers multiple ideas
 
-## 🚀 Discovery Commands
+## 🚀 Discovery
+
+Ask Cornelius in plain language — there are no slash commands to memorize:
 
 ### Find Connections
-```
-/find-connections [note name]
-```
-Discovers hidden relationships with other notes.
+> "What connects to [[Note Name]]?"
+
+It reads the note, searches the vault, and surfaces related notes.
 
 ### Search
-```
-/search-vault [topic]
-```
-Quick search across all notes.
+> "Find my notes on [topic]"
+
+Keyword search across the vault.
 
 ### Deep Recall
-```
-/recall [topic]
-```
-3-layer semantic search with context.
+> "What do my notes say about [topic]? Read the most relevant ones."
+
+Search, then read the top hits for context.
 
 ## 📊 Quality Checklist
 

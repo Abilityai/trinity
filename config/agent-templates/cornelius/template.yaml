@@ -37,8 +37,8 @@ use_cases:
   - "Extract unique insights from conversations and transcripts"
   - "Discover hidden connections between notes in your knowledge base"
   - "Generate articles and content from accumulated knowledge"
-  - "Run autonomous deep research pipelines (discover, extract, connect)"
-  - "Stress-test ideas with dialectic analysis (pro/con agents + synthesis)"
+  - "Research a topic on the web and fold the findings into your vault"
+  - "Stress-test an idea by arguing both sides, then synthesizing"
   - "Graduate notes through Zettelkasten workflow"
   - "Analyze and understand your knowledge base structure"
 
@@ -46,7 +46,7 @@ use_cases:
 # spreading_activation, usage_based_learning) needs resources/local-brain-search/,
 # which this template does not ship — the .trinity/brain-orb/search hook therefore
 # serves its keyword floor. Those tokens return with the stack itself
-# (trinity-enterprise#173, Layer 0 of the Sovereign KB epic ent#172).
+# (trinity-enterprise#173).
 # `brain-orb` is load-bearing: the frontend route guard reads it from /info.
 capabilities:
   - brain-orb

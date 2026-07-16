@@ -117,7 +117,7 @@ Your thoughts, reactions, questions, or connections to other ideas:
 2. **After finishing**: Create this source note
 3. **Extract insights**: Create permanent notes in `02-Permanent/`
 4. **Link them**: Update this note with permanent note links
-5. **Find connections**: Run `/find-connections` on new permanent notes
+5. **Find connections**: Ask Cornelius to connect the new permanent notes to the vault
 
 ---
 

@@ -30,24 +30,24 @@ updated: 2025-01-01
 
 ## 🔍 Explore it
 
-- `/search-vault <topic>` - quick semantic search
-- `/recall <topic>` - deep, multi-layer retrieval
-- `/find-connections <note name>` - discover related notes
-- `/advise <problem>` - get advice grounded in the seeded knowledge
+Ask Cornelius in plain language — it searches this vault by keyword:
+
+- "Find my notes on <topic>"
+- "What do my notes say about <topic>? Read the most relevant ones."
+- "What connects to [[Note Name]]?"
+- "Help me think through <problem>, grounded in my notes"
 
 ## ✍️ Make it yours
 
 The seeded notes are external research distilled into neutral, atomic notes (provenance `encountered`) - a foundation to reason *from*. Add your own thinking on top:
 - Capture in `00-Inbox/`, process atomic insights into `02-Permanent/`
 - Link generously with `[[wikilinks]]`; new MOCs emerge as your clusters grow
-- Run `/refresh-index` after adding notes so search and connections stay current
+- Search is keyword-based over `Brain/**/*.md` — no index to rebuild
 
-## 📊 Vault Statistics (seed release)
+## 📊 Vault Statistics
 
-- **Total notes**: ~1,067 · **Graph edges**: ~5,000 (explicit + semantic)
-- **Seeded library**: ~1,031 research / book-insight notes across 57 research sessions + 6 book scopes
-- **Maps of Content**: 13
-- Run `/analyze-kb` anytime to regenerate full statistics
+Ask Cornelius to count and summarize the vault whenever you want current
+figures — it reads `Brain/` directly, so the numbers are never stale.
 
 ---
 

@@ -205,9 +205,11 @@ Bash) against `Brain/`.
 **Search.** There is no semantic index. Find notes with `Grep`/`Glob` over
 `Brain/**/*.md` — keyword matching, not embeddings. The Brain Orb's search hook
 (`.trinity/brain-orb/search`) does the same and reports `{"backend": "keyword"}`.
-Do not reference or invoke `resources/local-brain-search/` — it does not exist.
-The semantic tier arrives with trinity-enterprise#173; until then, keyword search
-is the honest floor, and it works fine on a vault this size.
+Do not invoke `resources/local-brain-search/` — it is not bundled here. (The orb
+hooks still probe that path on purpose and fall back to keyword when it is
+absent, which is how they upgrade transparently once it ships — that is their
+job, not yours.) The semantic tier arrives with trinity-enterprise#173; until
+then, keyword search is the honest floor, and it works fine on a vault this size.
 
 **MCP servers available** (see `.mcp.json.template`):
 
@@ -226,16 +228,19 @@ Apollo) is **not** configured here.
 Brain/
 ├── 00-Inbox/                    # Quick capture, unprocessed notes
 ├── 01-Sources/                  # Literature notes, references
+│   └── Books/                   # Book notes
 ├── 02-Permanent/                # Atomic, evergreen notes (CORE)
 ├── 03-MOCs/                     # Maps of Content
 ├── 04-Output/                   # Published content
-│   ├── Articles/                # Each article in own folder
-│   └── Draft Posts/             # Social media drafts (plain text)
+│   └── Articles/                # Each article in own folder
 ├── 05-Meta/                     # System notes
-│   └── Changelogs/              # Session changelogs
+│   ├── Changelogs/              # Session changelogs
+│   └── Templates/               # Note templates
+├── 06-Belief-System/            # Belief-system notes
+├── 08-Meta-Cognitive/           # Meta-cognitive notes
 ├── AI Extracted Notes/          # AI-extracted insights from YOUR content
+├── Books/                       # Book library
 ├── Document Insights/           # Insights from external documents
-├── CHANGELOG.md                 # Master changelog
 └── README.md                    # Vault overview
 
 resources/
