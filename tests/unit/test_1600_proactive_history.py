@@ -123,6 +123,104 @@ class TestSessionIdentifierParity:
 
 
 # --------------------------------------------------------------------------- #
+# The identifier the SERVICE actually produces
+# --------------------------------------------------------------------------- #
+class TestDeliveryPathProducesTheInboundKey:
+    """Drive the real `_deliver_*` and assert the key it returns.
+
+    `TestSessionIdentifierParity` above compares two probes *written in this
+    file* — it proves the adapters are self-consistent, which was never in
+    doubt, and would pass even if the service built its probe wrong. These tests
+    close that hole: they exercise the service's own probe construction and
+    compare the result against the key an inbound DM resolves to.
+
+    Caught in review by sabotaging the service (`bot_id` -> `botid_TYPO`, which
+    silently yields `unknown:...` and a DIFFERENT session): every other test in
+    this file still passed. These fail.
+    """
+
+    @pytest.mark.asyncio
+    async def test_telegram_delivery_returns_the_inbound_session_key(self, svc, monkeypatch):
+        from adapters.base import NormalizedMessage
+        from adapters import telegram_adapter as tg_mod
+
+        svc.db.get_telegram_binding.return_value = {"id": 1, "bot_id": "bot-77"}
+        svc.db.get_telegram_chat_link_by_verified_email.return_value = {
+            "telegram_user_id": "123456", "session_id": None,
+        }
+        svc.db.get_telegram_bot_token.return_value = "xoxb-fake"
+
+        async def _send(**kw):
+            return {"message_id": 42}
+        monkeypatch.setattr(tg_mod.TelegramAdapter, "_send_message", staticmethod(_send))
+
+        result = await svc.service._deliver_telegram("agent-a", "user@example.com", "ping")
+        assert result.success
+
+        expected = tg_mod.TelegramAdapter().get_session_identifier(NormalizedMessage(
+            sender_id="123456", text="hi", channel_id="123456", timestamp="t",
+            metadata={"bot_id": "bot-77", "is_group": False},
+        ))
+        assert result.session_identifier == expected, (
+            f"service derived {result.session_identifier!r}, inbound resolves to "
+            f"{expected!r} — the proactive turn would land in a different session"
+        )
+        assert "bot-77" in result.session_identifier, "bot_id never reached the key"
+
+    @pytest.mark.asyncio
+    async def test_slack_delivery_returns_the_inbound_dm_key(self, svc, monkeypatch):
+        from adapters.base import NormalizedMessage
+        from adapters.slack_adapter import SlackAdapter
+        import services.slack_service as slack_mod
+
+        svc.db.get_all_slack_workspaces.return_value = [
+            {"team_id": "T1", "bot_token": "xoxb-fake"}
+        ]
+
+        async def _by_email(token, email):
+            return {"id": "U9"}
+
+        async def _open_dm(token, uid):
+            return "D5"
+
+        async def _send(**kw):
+            return True, None
+
+        monkeypatch.setattr(slack_mod.slack_service, "get_user_by_email", _by_email)
+        monkeypatch.setattr(slack_mod.slack_service, "open_dm_channel", _open_dm)
+        monkeypatch.setattr(slack_mod.slack_service, "send_message", _send)
+
+        result = await svc.service._deliver_slack("agent-a", "user@example.com", "ping")
+        assert result.success
+
+        expected = SlackAdapter().get_session_identifier(NormalizedMessage(
+            sender_id="U9", text="hi", channel_id="D5", timestamp="t",
+            metadata={"team_id": "T1", "is_dm": True},
+        ))
+        assert result.session_identifier == expected
+        assert result.session_identifier == "T1:U9:D5"
+
+    @pytest.mark.asyncio
+    async def test_failed_send_carries_no_session_key(self, svc, monkeypatch):
+        """A failed delivery must not hand the caller a key to persist against."""
+        from adapters import telegram_adapter as tg_mod
+
+        svc.db.get_telegram_binding.return_value = {"id": 1, "bot_id": "bot-77"}
+        svc.db.get_telegram_chat_link_by_verified_email.return_value = {
+            "telegram_user_id": "123456",
+        }
+        svc.db.get_telegram_bot_token.return_value = "xoxb-fake"
+
+        async def _send(**kw):
+            return None  # Telegram returned nothing => send failed
+        monkeypatch.setattr(tg_mod.TelegramAdapter, "_send_message", staticmethod(_send))
+
+        result = await svc.service._deliver_telegram("agent-a", "user@example.com", "ping")
+        assert result.success is False
+        assert result.session_identifier is None
+
+
+# --------------------------------------------------------------------------- #
 # Persistence behaviour
 # --------------------------------------------------------------------------- #
 @pytest.fixture
