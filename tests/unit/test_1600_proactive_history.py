@@ -142,8 +142,11 @@ def svc(monkeypatch):
     fake_audit_mod.AuditEventType = _AuditEventType
     monkeypatch.setitem(sys.modules, "services.platform_audit_service", fake_audit_mod)
 
+    # Force a fresh import so the stubs above are what the module binds at
+    # import time. monkeypatch.delitem (not a bare sys.modules.pop) so the real
+    # module is restored afterwards and the deletion can't leak into later tests.
     for mod in ("services.proactive_message_service", "proactive_message_service"):
-        sys.modules.pop(mod, None)
+        monkeypatch.delitem(sys.modules, mod, raising=False)
 
     from services.proactive_message_service import ProactiveMessageService, DeliveryResult
 
