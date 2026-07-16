@@ -15,8 +15,6 @@ Clients generate their own keypairs and supply only the public key.
 import os
 import json
 import logging
-import secrets
-import string
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Literal
@@ -97,82 +95,10 @@ class SshService:
             logger.error(f"Error injecting SSH key into {agent_name}: {e}")
             return False
 
-    def generate_password(self, length: int = 24) -> str:
-        """
-        Generate a secure random password for SSH access.
-
-        Args:
-            length: Password length (default 24 chars)
-
-        Returns:
-            Random password string (alphanumeric, safe for shell)
-        """
-        # Use alphanumeric characters only - safe for shell commands
-        alphabet = string.ascii_letters + string.digits
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
-
-    async def set_container_password(self, agent_name: str, password: str) -> bool:
-        """
-        Set SSH password for developer user in agent container.
-
-        Args:
-            agent_name: Name of the agent
-            password: Password to set
-
-        Returns:
-            True if successful, False otherwise
-        """
-        import crypt
-
-        container = get_agent_container(agent_name)
-        if not container:
-            logger.error(f"Container not found for agent: {agent_name}")
-            return False
-
-        try:
-            # Generate encrypted password using SHA-512
-            salt = crypt.mksalt(crypt.METHOD_SHA512)
-            encrypted = crypt.crypt(password, salt)
-
-            # Use usermod -p with single-quoted password (handles $ in hash correctly)
-            # SHA-512 hashes look like: $6$salt$hash - the $ signs are literal
-            # Single quotes in shell preserve all special characters
-            result = await container_exec_run(
-                container,
-                f"usermod -p '{encrypted}' developer",
-                user="root"
-            )
-
-            if result.exit_code != 0:
-                logger.error(f"Failed to set password via usermod: {result.output}")
-                # Fallback to chpasswd with plaintext password
-                logger.info("Trying chpasswd fallback...")
-                result = await container_exec_run(
-                    container,
-                    f"sh -c 'echo \"developer:{password}\" | chpasswd'",
-                    user="root"
-                )
-                if result.exit_code != 0:
-                    logger.error(f"chpasswd fallback also failed: {result.output}")
-                    return False
-
-            # Ensure password authentication is enabled in sshd_config
-            await container_exec_run(
-                container,
-                "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-                user="root"
-            )
-
-            # Restart SSH daemon to pick up changes (HUP isn't enough for auth changes)
-            await container_exec_run(container, "pkill sshd", user="root")
-            await container_exec_run(container, "sh -c '/usr/sbin/sshd'", user="root")
-
-            logger.info(f"Set ephemeral password for agent {agent_name}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error setting password for {agent_name}: {e}")
-            return False
+    # NOTE (#1615): password SSH auth was removed. `generate_password` and
+    # `set_container_password` (which imported the stdlib `crypt` module removed
+    # in Python 3.13, and which couldn't work anyway since the agent sshd runs
+    # `PasswordAuthentication no`) are deleted. Key-based auth is the only path.
 
     async def clear_container_password(self, agent_name: str) -> bool:
         """

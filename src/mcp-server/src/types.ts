@@ -129,13 +129,12 @@ export interface SshConnectionInfo {
   host: string;
   port: number;
   user: string;
-  password?: string;  // Only for password auth
 }
 
 export interface SshAccessResponse {
   status: string;
   agent: string;
-  auth_method: "key" | "password";
+  auth_method: "key";  // #1615: password auth removed
   connection: SshConnectionInfo;
   expires_at: string;
   expires_in_hours: number;
