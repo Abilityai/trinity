@@ -254,7 +254,9 @@
                       class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
                       <option value="claude-sonnet-4-6">Claude Sonnet 4.6 — Fast + smart (recommended)</option>
-                      <option value="claude-opus-4-8">Claude Opus 4.8 — Most capable</option>
+                      <option value="claude-fable-5">Claude Fable 5 — Most capable, longest tasks (latest)</option>
+                      <option value="claude-sonnet-5">Claude Sonnet 5 — Fast + smart, 1M context (latest)</option>
+                      <option value="claude-opus-4-8">Claude Opus 4.8 — Most capable Opus</option>
                       <option value="claude-opus-4-7">Claude Opus 4.7</option>
                       <option value="claude-opus-4-6">Claude Opus 4.6</option>
                     </select>
