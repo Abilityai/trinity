@@ -3,10 +3,13 @@ SSH Service for ephemeral SSH credential management.
 
 Provides functionality to:
 1. Accept client-supplied public keys for SSH access
-2. Generate ephemeral passwords
-3. Inject credentials into agent containers
-4. Clean up expired credentials from containers
-5. Track credentials in Redis with TTL for auto-expiry
+2. Inject credentials into agent containers
+3. Clean up expired credentials from containers
+4. Track credentials in Redis with TTL for auto-expiry
+
+Key-based auth is the only method (#1615 removed password auth: the agent
+sshd runs `PasswordAuthentication no`, so it could never succeed, and the
+host-side hashing imported the stdlib `crypt` module removed in Python 3.13).
 
 Security: Private keys are NEVER generated or handled server-side.
 Clients generate their own keypairs and supply only the public key.
@@ -99,10 +102,21 @@ class SshService:
     # `set_container_password` (which imported the stdlib `crypt` module removed
     # in Python 3.13, and which couldn't work anyway since the agent sshd runs
     # `PasswordAuthentication no`) are deleted. Key-based auth is the only path.
+    #
+    # `clear_container_password` below is deliberately KEPT as a cleanup-only
+    # path: a backend on Python <3.13 could set a password successfully, so a
+    # pre-upgrade Redis credential row (`auth_type="password"`) may still be in
+    # flight when this ships. Those rows carry a TTL of at most
+    # SSH_ACCESS_MAX_TTL_HOURS, so the branch is dead within a day of deploy —
+    # it exists so the last legacy credentials still get locked rather than
+    # left set. Nothing writes `auth_type="password"` any more.
 
     async def clear_container_password(self, agent_name: str) -> bool:
         """
         Clear/lock the developer user password in agent container.
+
+        Cleanup-only (#1615): no code sets a password any more. This locks a
+        password left behind by a pre-#1615 backend; see the note above.
 
         Args:
             agent_name: Name of the agent
@@ -182,8 +196,10 @@ class SshService:
 
         Args:
             agent_name: Name of the agent
-            credential_id: Unique identifier (key comment or password session id)
-            auth_type: Type of authentication ("key" or "password")
+            credential_id: Unique identifier (key comment)
+            auth_type: Always "key" for new rows. `"password"` stays in the type
+                only because pre-#1615 rows still in Redis carry it and the
+                cleanup paths read it back; nothing writes it any more.
             created_by: Email/username of creator
             ttl_hours: Time-to-live in hours
             public_key: Public key line (for key auth only)

@@ -1,7 +1,7 @@
 # Feature: SSH Access
 
 ## Overview
-Generate ephemeral SSH credentials for direct terminal access to agent containers. Supports key-based (ED25519) or password-based authentication with configurable TTL (default 4 hours, max 24 hours). Controlled by system-wide `ssh_access_enabled` ops setting. **Admin-only access.**
+Generate ephemeral SSH credentials for direct terminal access to agent containers. **Key-based (ED25519) auth only** — the client supplies its own public key and the private key never leaves the client. Configurable TTL (default 4 hours, max 24 hours). Controlled by system-wide `ssh_access_enabled` ops setting. **Admin-only access.**
 
 ## User Story
 As a platform admin, I want to generate temporary SSH credentials for agent containers so that I can access them directly via SSH from my local terminal for debugging or maintenance (especially useful with Tailscale/VPN setups).
@@ -9,6 +9,7 @@ As a platform admin, I want to generate temporary SSH credentials for agent cont
 ## Revision History
 | Date | Change |
 |------|--------|
+| 2026-07-16 | **Removed password auth (#1615)**: the option was broken end-to-end — host-side hashing imported the stdlib `crypt` module (removed in Python 3.13, so every request 500'd), and the agent sshd runs `PasswordAuthentication no`, so a password login could never succeed even with a hash set. `auth_method` now accepts only `"key"`; `"password"` returns 400. Removed `generate_password()`, `set_container_password()`, `clear_container_password()`. |
 | 2026-04-18 | **SEC: Admin-only access**: Changed from owner/admin to admin-only. Uses `require_admin` dependency instead of `can_user_delete_agent` check. |
 | 2026-03-26 | **SEC: Removed server-side keypair generation (#175)**: Key auth now requires client-supplied `public_key`. Private keys never leave the client. Removed `generate_ssh_keypair()` and `cryptography` dependency. |
 | 2026-02-24 | **Async Docker Operations**: All SshService methods now async (DOCKER-001). Uses `container_exec_run` wrapper to prevent event loop blocking. |
@@ -31,17 +32,17 @@ As a platform admin, I want to generate temporary SSH credentials for agent cont
 
 ### Tool Definition
 
-**agents.ts** (`src/mcp-server/src/tools/agents.ts:383-420`)
+**agents.ts** (`src/mcp-server/src/tools/agents.ts`, `getAgentSshAccess`)
 
 ```typescript
 getAgentSshAccess: {
   name: "get_agent_ssh_access",
   description:
-    "Generate ephemeral SSH credentials for direct terminal access to an agent container. " +
-    "Supports two auth methods: 'key' (provide your public key) or 'password' (one-liner with sshpass). " +
-    "Credentials expire automatically (default: 4 hours). Agent must be running. " +
-    "For key auth: generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key. " +
-    "The server never generates or handles private keys. Admin only.",
+    "Generate ephemeral, key-based SSH credentials for direct terminal access to an agent container. " +
+    "Generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key; the server injects " +
+    "it into the container and it expires automatically (default: 4 hours). Agent must be running. " +
+    "The server never generates or handles private keys. Admin only. " +
+    "(Password auth was removed — it never worked; key auth is the only method.)",
   parameters: z.object({
     agent_name: z.string().describe("Name of the agent to access"),
     ttl_hours: z
@@ -49,40 +50,32 @@ getAgentSshAccess: {
       .optional()
       .default(4)
       .describe("How long the SSH key should be valid (0.1-24 hours, default: 4)"),
-    auth_method: z
-      .enum(["key", "password"])
-      .optional()
-      .default("key")
-      .describe("Authentication method: 'key' for SSH public key injection (more secure), 'password' for one-liner with sshpass (convenient, requires sshpass installed)"),
     public_key: z
       .string()
-      .optional()
-      .describe("Your SSH public key (required for 'key' auth method). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
+      .describe("Your SSH public key (required). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
   }),
-  execute: async (
-    { agent_name, ttl_hours = 4, auth_method = "key", public_key }: { ... },
-    context?: { session?: McpAuthContext }
-  ) => {
-    const authContext = context?.session;
-    const apiClient = getClient(authContext);
-    const response = await apiClient.createSshAccess(agent_name, ttl_hours, auth_method, public_key);
+  execute: async ({ agent_name, ttl_hours = 4, public_key }, context?) => {
+    const apiClient = getClient(context?.session);
+    const response = await apiClient.createSshAccess(agent_name, ttl_hours, public_key);
     return JSON.stringify(response, null, 2);
   },
 }
 ```
 
+`auth_method` is gone from the tool surface (#1615) — there is nothing to choose.
+
 ### Client Method
 
-**client.ts** (`src/mcp-server/src/client.ts:314-324`)
+**client.ts** (`src/mcp-server/src/client.ts`, `createSshAccess`)
 
 ```typescript
 async createSshAccess(
   name: string,
   ttlHours: number = 4,
-  authMethod: "key" | "password" = "key",
   publicKey?: string
 ): Promise<SshAccessResponse> {
-  const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: authMethod };
+  // #1615: key-based auth only (password auth removed).
+  const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: "key" };
   if (publicKey) body.public_key = publicKey;
   return this.request<SshAccessResponse>(
     "POST",
@@ -91,6 +84,9 @@ async createSshAccess(
   );
 }
 ```
+
+The client still sends `auth_method: "key"` explicitly so an older backend (which
+defaults the field) keeps working.
 
 ### Type Definitions
 
@@ -102,13 +98,12 @@ export interface SshConnectionInfo {
   host: string;         // SSH host (tailscale IP, SSH_HOST env, or localhost)
   port: number;         // SSH port (from container label trinity.ssh-port)
   user: string;         // Always "developer"
-  password?: string;    // Only for password auth
 }
 
 export interface SshAccessResponse {
   status: string;           // "success"
   agent: string;            // Agent name
-  auth_method: "key" | "password";
+  auth_method: "key";       // #1615: password auth removed
   connection: SshConnectionInfo;
   expires_at: string;       // ISO timestamp
   expires_in_hours: number; // TTL value used
@@ -129,13 +124,13 @@ export interface SshAccessResponse {
 
 ```python
 class SshAccessRequest(BaseModel):
-    """Request body for SSH access."""
+    """Request body for SSH access (key-based only; #1615 removed password auth)."""
     ttl_hours: float = 4.0
-    auth_method: str = "key"  # "key" for SSH key, "password" for ephemeral password
-    public_key: Optional[str] = None  # Required for key auth — client-supplied OpenSSH public key
+    auth_method: str = "key"  # only "key" is supported (password auth removed, #1615)
+    public_key: Optional[str] = None  # Required — client-supplied OpenSSH public key
 ```
 
-#### POST /{agent_name}/ssh-access (Line 1005)
+#### POST /{agent_name}/ssh-access
 
 ```python
 @router.post("/{agent_name}/ssh-access")
@@ -146,10 +141,7 @@ async def create_ssh_access(
 ):
     # 1. Check if SSH access is enabled system-wide
     if not get_ops_setting("ssh_access_enabled", as_type=bool):
-        raise HTTPException(
-            status_code=403,
-            detail="SSH access is disabled. Enable it in Settings -> Ops Settings -> ssh_access_enabled"
-        )
+        raise HTTPException(status_code=403, detail="SSH access is disabled. ...")
 
     # 2. Verify agent exists and is running
     container = get_agent_container(agent_name)
@@ -158,28 +150,32 @@ async def create_ssh_access(
     if container.status != "running":
         raise HTTPException(status_code=400, detail="Agent must be running")
 
-    # 4. Validate and clamp TTL (0.1 - 24 hours)
+    # 3. Validate auth method — key-based only (#1615: password auth removed).
+    #    An explicit "password" gets a 400 that says what to do instead, rather
+    #    than a 500 (the old crypt ImportError) or a silent no-op.
+    if body.auth_method != "key":
+        raise HTTPException(status_code=400, detail="Password SSH auth is no longer supported. ...")
+
+    # 4. public_key is required — no server-side keypair generation (#175)
+    if not body.public_key:
+        raise HTTPException(status_code=400, detail="public_key is required ...")
+
+    # 5. Validate and clamp TTL (0.1 - 24 hours)
     ttl_hours = max(0.1, min(body.ttl_hours, SSH_ACCESS_MAX_TTL_HOURS))
 
-    # 5. Get SSH port and host
+    # 6. Get SSH port and host
     labels = container.attrs.get("Config", {}).get("Labels", {})
     ssh_port = int(labels.get("trinity.ssh-port", "2222"))
     host = get_ssh_host()  # Tailscale IP, SSH_HOST env, or localhost
 
-    # 6. Generate credentials based on auth_method
-    if auth_method == "password":
-        # Password flow
-        password = ssh_service.generate_password()
-        ssh_service.set_container_password(agent_name, password)
-        ssh_service.store_credential_metadata(...)
-        return { password response }
-    else:
-        # Key flow — client supplies public key, server injects it
-        public_key = body.public_key  # Required, validated
-        ssh_service.inject_ssh_key(agent_name, public_key_with_comment)
-        ssh_service.store_key_metadata(...)
-        return { key response — no private_key field }
+    # 7. Inject the client-supplied key and record metadata
+    await ssh_service.inject_ssh_key(agent_name, public_key_with_comment)
+    await ssh_service.store_key_metadata(...)
+    return { key response — no private_key field }
 ```
+
+There is one flow now. The old `if auth_method == "password"` branch is gone
+along with the service functions it called.
 
 ### SSH Service
 
@@ -226,58 +222,6 @@ async def inject_ssh_key(self, agent_name: str, public_key: str) -> bool:
 ```
 
 > **Note**: As of DOCKER-001, all SshService methods use `container_exec_run` from `services/docker_utils.py` to avoid blocking the FastAPI event loop.
-
-#### Password Generation (Lines 132-144) - SshService.generate_password()
-
-```python
-def generate_password(self, length: int = 24) -> str:
-    """Generate a secure random password for SSH access."""
-    # Alphanumeric only - safe for shell commands
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
-```
-
-#### Password Setting (Lines 150-211) - SshService.set_container_password()
-
-```python
-async def set_container_password(self, agent_name: str, password: str) -> bool:
-    """Set SSH password for developer user in agent container."""
-    import crypt
-
-    container = get_agent_container(agent_name)
-
-    # Generate encrypted password using SHA-512
-    salt = crypt.mksalt(crypt.METHOD_SHA512)
-    encrypted = crypt.crypt(password, salt)
-
-    # Use usermod -p with single-quoted password (handles $ in hash correctly)
-    result = await container_exec_run(
-        container,
-        f"usermod -p '{encrypted}' developer",
-        user="root"
-    )
-
-    if result.exit_code != 0:
-        # Fallback to chpasswd with plaintext password
-        result = await container_exec_run(
-            container,
-            f"sh -c 'echo \"developer:{password}\" | chpasswd'",
-            user="root"
-        )
-
-    # Enable password authentication in sshd_config
-    await container_exec_run(
-        container,
-        "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-        user="root"
-    )
-
-    # Restart SSH daemon to apply changes
-    await container_exec_run(container, "pkill sshd", user="root")
-    await container_exec_run(container, "sh -c '/usr/sbin/sshd'", user="root")
-
-    return True
-```
 
 #### Redis Metadata Storage (Lines 273-318) - SshService.store_credential_metadata()
 
@@ -383,6 +327,15 @@ def get_ssh_host() -> str:
 
 ## Credential Cleanup
 
+> **Why the cleanup paths still mention passwords (#1615).** Nothing writes
+> `auth_type="password"` any more, but a backend on Python <3.13 could set a
+> password successfully, so a pre-upgrade Redis row may still be in flight when
+> the removal ships. Those rows carry a TTL of at most `SSH_ACCESS_MAX_TTL_HOURS`
+> (24h), so the `auth_type == "password"` branches below — and
+> `clear_container_password()` — are dead within a day of deploy. They exist so
+> the last legacy credentials get locked rather than left set, and are the only
+> surviving password code.
+
 ### Automatic Expiry (Redis TTL)
 
 Redis handles metadata expiry automatically via `setex()`. When TTL expires, the key is deleted.
@@ -444,20 +397,6 @@ async def remove_ssh_key(self, agent_name: str, comment: str) -> bool:
         f"sed -i '/{escaped_comment}/d' /home/developer/.ssh/authorized_keys",
         user="developer"
     )
-    return True
-```
-
-### Password Clearing (Lines 213-241) - SshService.clear_container_password()
-
-```python
-async def clear_container_password(self, agent_name: str) -> bool:
-    """Clear/lock the developer user password in agent container."""
-    container = get_agent_container(agent_name)
-    if not container:
-        return True  # Container may have been deleted
-
-    # Lock the account password (user can still use key auth)
-    await container_exec_run(container, "passwd -l developer", user="root")
     return True
 ```
 
@@ -569,7 +508,7 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 
 ## Complete Flow
 
-### Key-Based Authentication
+### Key-Based Authentication (the only flow)
 
 ```
 1. Client generates keypair locally: ssh-keygen -t ed25519
@@ -622,48 +561,6 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
    }
 ```
 
-### Password-Based Authentication
-
-```
-1-3. Same as key-based flow
-   |
-4. Password Generation (ssh_service.py:132-144)
-   |-- Generate 24-char alphanumeric password
-   |
-5. Password Setting (ssh_service.py:146-204)
-   |-- Generate SHA-512 hash with crypt.mksalt()
-   |-- docker exec: usermod -p 'encrypted' developer (set password)
-   |-- docker exec: sed /etc/ssh/sshd_config (enable PasswordAuthentication)
-   |-- docker exec: pkill sshd && /usr/sbin/sshd (restart daemon)
-   |
-6. Store Metadata in Redis
-   |-- Key: ssh_access:{agent_name}:pwd-{agent_name}-{timestamp}
-   |-- TTL: ttl_hours * 3600 seconds
-   |
-7. Return Response
-   {
-     "status": "success",
-     "agent": "my-agent",
-     "auth_method": "password",
-     "connection": {
-       "command": "sshpass -p 'ABC123xyz...' ssh -o StrictHostKeyChecking=no -p 2222 developer@100.x.x.x",
-       "host": "100.x.x.x",
-       "port": 2222,
-       "user": "developer",
-       "password": "ABC123xyz..."
-     },
-     "expires_at": "2026-01-02T20:00:00Z",
-     "expires_in_hours": 4,
-     "instructions": [
-       "Install sshpass if needed: brew install sshpass (macOS) or apt install sshpass (Linux)",
-       "Connect: sshpass -p '...' ssh -o StrictHostKeyChecking=no -p 2222 developer@100.x.x.x",
-       "Password expires in 4 hours"
-     ]
-   }
-```
-
----
-
 ## Error Handling
 
 | Error Case | HTTP Status | Message |
@@ -672,11 +569,10 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 | SSH access disabled globally | 403 | "SSH access is disabled. Enable it in Settings -> Ops Settings -> ssh_access_enabled" |
 | Agent container not found | 404 | "Agent not found" |
 | Agent not running | 400 | "Agent must be running to generate SSH access. Start the agent first." |
-| Invalid auth_method | 400 | "auth_method must be 'key' or 'password'" |
+| auth_method other than "key" | 400 | "Password SSH auth is no longer supported. Use key-based auth: ..." (#1615) |
 | Missing public_key for key auth | 400 | "public_key is required for key-based authentication..." |
 | Invalid public_key format | 400 | "Invalid public key format. Must be an OpenSSH public key..." |
 | Key injection failed | 500 | "Failed to inject SSH key into agent container" |
-| Password setting failed | 500 | "Failed to set SSH password in agent container" |
 
 ---
 
@@ -690,16 +586,11 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 
 4. **No Server-Side Key Generation**: Private keys are never generated, transmitted, or stored server-side. Clients generate their own keypairs locally and supply only the public key (SEC #175).
 
-5. **Password Security**:
-   - 24-char alphanumeric passwords (144+ bits of entropy)
-   - SHA-512 hashing in container
-   - Password locked when credential expires
+5. **Container Isolation**: Each agent has its own container with isolated SSH configuration.
 
-6. **Container Isolation**: Each agent has its own container with isolated SSH configuration.
+6. **No Persistent Keys**: Ephemeral keys are appended to authorized_keys with unique comments, allowing targeted removal.
 
-7. **No Persistent Keys**: Ephemeral keys are appended to authorized_keys with unique comments, allowing targeted removal.
-
-8. **Container Capabilities**: Minimal capabilities granted - only those required for SSH privilege separation.
+7. **Container Capabilities**: Minimal capabilities granted - only those required for SSH privilege separation.
 
 9. **Tailscale Priority**: Prefers Tailscale IP over localhost for secure network access.
 
@@ -741,14 +632,14 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
    - Verify: Setting saved successfully
 
 2. **Generate Key-Based Credentials via MCP**
-   - Action: Call `get_agent_ssh_access` with `auth_method: "key"`
-   - Expected: Response contains private_key and connection.command
-   - Verify: Save private key, run SSH command, verify connection
+   - Action: `ssh-keygen -t ed25519` locally, then call `get_agent_ssh_access` with your PUBLIC key
+   - Expected: `connection.command` returned; **no** `private_key` field (removed in #175 — the server never handles private keys)
+   - Verify: Run the SSH command with your own private key, verify connection
 
-3. **Generate Password-Based Credentials via MCP**
-   - Action: Call `get_agent_ssh_access` with `auth_method: "password"`
-   - Expected: Response contains connection.password and sshpass command
-   - Verify: Run command (requires sshpass installed), verify connection
+3. **Password auth is refused**
+   - Action: `POST /api/agents/{agent}/ssh-access` with `{"auth_method": "password"}`
+   - Expected: **400** naming key auth as the alternative — not a 500 (the pre-#1615 `crypt` ImportError) and not a silent success
+   - Verify: `pytest tests/unit/test_ssh_service.py`
 
 4. **TTL Validation**
    - Action: Call with `ttl_hours: 0.01` (too low) and `ttl_hours: 100` (too high)
@@ -771,7 +662,6 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 ### Edge Cases
 - Multiple concurrent SSH sessions (should work)
 - Key generation for agent with existing keys (appends to authorized_keys)
-- Password generation when password auth already enabled (overwrites)
 - Container restart during credential lifetime (credentials lost)
 
 ### Status

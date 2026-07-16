@@ -928,6 +928,18 @@
         "observability"
       ],
       "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
+    },
+    {
+      "file": "unit/test_1615_ssh_password_removed.py",
+      "feature": "#1615",
+      "added": "2026-07-16",
+      "categories": [
+        "backend",
+        "ssh",
+        "security",
+        "regression"
+      ],
+      "description": "Password SSH auth removed (#1615, router surface): an explicit auth_method='password' returns 400 naming key auth as the alternative \u2014 not the pre-fix 500 (ModuleNotFoundError: crypt, removed from the stdlib in Python 3.13) and not a silent fall-through; refusal is case-insensitive and covers unknown methods; the request never reaches the container; key auth still works and remains the default; the response carries neither private_key (#175) nor password. Complements test_ssh_service.py, which guards the service layer (helpers deleted, no crypt import)."
     }
   ]
 }
