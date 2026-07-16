@@ -312,3 +312,41 @@ DEFAULT_GITHUB_TEMPLATE_REPOS = [
     "abilityai/ruby-content",
     "abilityai/ruby-engagement",
 ]
+
+
+# ============================================================================
+# Retention (#1039 community floor / #1638 upgrade safety)
+# ============================================================================
+# These live in config.py — a leaf module — rather than services/settings_service.py
+# because database.py seeds them during init_database(), which runs at import
+# time. settings_service imports `from database import db`, so reaching into it
+# from the seed path is a circular import (#1638). settings_service re-exports
+# both names, so `from services.settings_service import ...` keeps working.
+
+# Community retention floor (days). The audit log is EXEMPT — it keeps a
+# 365-day integrity floor (see audit_retention_service). This is also the value
+# the enterprise `retention` module clamps unentitled writes to.
+COMMUNITY_RETENTION_FLOOR_DAYS = 5
+
+# #1638: the windows a FRESH install is seeded with, applying the community
+# floor to new installs only. Seeded once, against an empty database, by
+# database._seed_fresh_install_retention() — never written to an install that
+# already has data.
+#
+# This is the ONLY mechanism that may apply the floor. Do NOT apply it by
+# lowering OPS_SETTINGS_DEFAULTS: those are read at prune time as the fallback
+# for an install with no row, so lowering one retroactively hard-DELETEs the
+# existing data of every install that never opted in — silently, on its next
+# boot. That is #1638, and it cost a production instance ~3 months of history.
+#
+# `agent_soft_delete_retention_days` is deliberately ABSENT: it is a *recovery*
+# window, not a log window. Its expiry chains purge_agent_ownership ->
+# clear_agent_runtime_state -> remove_agent_volumes (#1581), destroying the
+# agent's workspace/public/shared volumes and any declared `data_paths` runtime
+# data (#1169). The floor does not apply to it in ANY edition.
+COMMUNITY_FRESH_INSTALL_SEED = {
+    "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "health_check_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "schedule_soft_delete_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+}

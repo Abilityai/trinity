@@ -928,6 +928,18 @@
         "observability"
       ],
       "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
+    },
+    {
+      "file": "unit/test_1600_proactive_history.py",
+      "feature": "#1600",
+      "added": "2026-07-16",
+      "categories": [
+        "backend",
+        "channels",
+        "proactive-messaging",
+        "regression"
+      ],
+      "description": "Proactive messages persist to channel session history (#1600). Core property is session-identifier EQUALITY: the key the proactive path derives must equal the key an inbound DM resolves to, per channel (telegram/whatsapp/slack) \u2014 persisting into a different session looks like a fix but leaves the agent unaware of its own outreach. Also: #903 attribution (assistant role, agent sender_label, recipient sender_email for the single-participant DM), persist only on confirmed delivery (no phantom turn on failure), fail-soft on DB error (message already sent), session created when absent (the chat-link session_id column is never written by any code path), and access-grant notifications deliberately NOT persisted (#951 out of scope)."
     }
   ]
 }

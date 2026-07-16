@@ -15,6 +15,7 @@
  */
 import { computed, onMounted } from 'vue'
 import { useEnterpriseStore } from '../../stores/enterprise'
+import NavBar from '@/components/NavBar.vue'
 
 const store = useEnterpriseStore()
 
@@ -106,59 +107,67 @@ const totalEntitled = computed(
 </script>
 
 <template>
-  <div class="enterprise-landing p-6 max-w-6xl mx-auto">
-    <header class="mb-8">
-      <div class="flex items-center gap-3 mb-2">
-        <h1 class="text-3xl font-semibold text-gray-900 dark:text-white">Enterprise</h1>
-        <span class="px-2 py-0.5 text-xs font-bold rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200">
-          PRO
-        </span>
-      </div>
-      <p class="text-sm text-gray-500 dark:text-gray-400">
-        Compliance-gating features for Trinity Enterprise. See
-        <a href="https://github.com/abilityai/trinity/issues/847" class="underline" target="_blank">#847</a>
-        for the architecture spike.
-      </p>
-      <p class="text-xs text-gray-400 mt-2">
-        {{ totalEntitled }} of {{ cards.length }} features entitled for this instance.
-      </p>
-    </header>
+  <!-- Trinity has no global chrome: App.vue renders only <router-view>, so each
+       authenticated view mounts NavBar itself (Dashboard/Settings/Operations/
+       Templates do). Without it this page had no way back to the platform but
+       the browser's back button (#1636). -->
+  <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
+    <NavBar />
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-      <component
-        :is="card.available ? 'router-link' : 'div'"
-        v-for="card in cards"
-        :key="card.id"
-        :to="card.available ? card.route : undefined"
-        class="block rounded-lg border bg-white dark:bg-gray-800 p-5 transition-all"
-        :class="card.available
-          ? 'border-gray-200 dark:border-gray-700 hover:border-blue-400 hover:shadow-md cursor-pointer'
-          : 'border-gray-200 dark:border-gray-700 opacity-70 cursor-not-allowed'"
-      >
-        <div class="flex items-start justify-between mb-3">
-          <span class="text-3xl">{{ card.icon }}</span>
-          <span
-            class="px-2 py-0.5 text-[10px] font-bold rounded uppercase tracking-wider"
-            :class="card.available
-              ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-200'
-              : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
-          >
-            {{ card.available ? 'Available' : card.entitled ? 'Coming soon' : 'Not licensed' }}
+    <div class="enterprise-landing p-6 max-w-6xl mx-auto">
+      <header class="mb-8">
+        <div class="flex items-center gap-3 mb-2">
+          <h1 class="text-3xl font-semibold text-gray-900 dark:text-white">Enterprise</h1>
+          <span class="px-2 py-0.5 text-xs font-bold rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200">
+            PRO
           </span>
         </div>
-        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-1">
-          {{ card.title }}
-        </h3>
-        <p class="text-sm text-gray-600 dark:text-gray-400">{{ card.description }}</p>
-      </component>
-    </div>
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+          Compliance-gating features for Trinity Enterprise. See
+          <a href="https://github.com/abilityai/trinity/issues/847" class="underline" target="_blank">#847</a>
+          for the architecture spike.
+        </p>
+        <p class="text-xs text-gray-400 mt-2">
+          {{ totalEntitled }} of {{ cards.length }} features entitled for this instance.
+        </p>
+      </header>
 
-    <footer class="mt-10 p-4 rounded bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
-      <strong class="block text-gray-900 dark:text-white mb-1">About Trinity Enterprise</strong>
-      Backend modules ship from the private repo
-      <code class="text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">Abilityai/trinity-enterprise</code>.
-      Frontend is part of the OSS bundle, gated server-side. See
-      <code class="text-xs">docs/planning/ENTERPRISE_ARCHITECTURE.md</code> for the decision record.
-    </footer>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <component
+          :is="card.available ? 'router-link' : 'div'"
+          v-for="card in cards"
+          :key="card.id"
+          :to="card.available ? card.route : undefined"
+          class="block rounded-lg border bg-white dark:bg-gray-800 p-5 transition-all"
+          :class="card.available
+            ? 'border-gray-200 dark:border-gray-700 hover:border-blue-400 hover:shadow-md cursor-pointer'
+            : 'border-gray-200 dark:border-gray-700 opacity-70 cursor-not-allowed'"
+        >
+          <div class="flex items-start justify-between mb-3">
+            <span class="text-3xl">{{ card.icon }}</span>
+            <span
+              class="px-2 py-0.5 text-[10px] font-bold rounded uppercase tracking-wider"
+              :class="card.available
+                ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-200'
+                : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'"
+            >
+              {{ card.available ? 'Available' : card.entitled ? 'Coming soon' : 'Not licensed' }}
+            </span>
+          </div>
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-1">
+            {{ card.title }}
+          </h3>
+          <p class="text-sm text-gray-600 dark:text-gray-400">{{ card.description }}</p>
+        </component>
+      </div>
+
+      <footer class="mt-10 p-4 rounded bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400">
+        <strong class="block text-gray-900 dark:text-white mb-1">About Trinity Enterprise</strong>
+        Backend modules ship from the private repo
+        <code class="text-xs bg-gray-100 dark:bg-gray-700 px-1 rounded">Abilityai/trinity-enterprise</code>.
+        Frontend is part of the OSS bundle, gated server-side. See
+        <code class="text-xs">docs/planning/ENTERPRISE_ARCHITECTURE.md</code> for the decision record.
+      </footer>
+    </div>
   </div>
 </template>
