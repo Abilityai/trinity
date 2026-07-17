@@ -555,6 +555,19 @@ class DatabaseManager:
     def is_agent_live(self, agent_name: str):
         return self._agent_ops.is_agent_live(agent_name)
 
+    # #1664: Docker data-volume identity. `is_volume_base_reserved` is the
+    # volume-ownership predicate the #1581 orphan sweep must use instead of
+    # `is_agent_name_reserved` — a renamed agent's volumes keep the pre-rename
+    # base, so asking "is this a live agent NAME?" marks live data an orphan.
+    def is_volume_base_reserved(self, volume_base: str):
+        return self._agent_ops.is_volume_base_reserved(volume_base)
+
+    def get_volume_base_name(self, agent_name: str):
+        return self._agent_ops.get_volume_base_name(agent_name)
+
+    def set_volume_base_name(self, agent_name: str, volume_base: str):
+        return self._agent_ops.set_volume_base_name(agent_name, volume_base)
+
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
 
