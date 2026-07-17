@@ -36,14 +36,14 @@ from db_harness import db_backend, run as _hrun  # noqa: E402
 
 
 @pytest.fixture
-def db_setup(db_backend):
+def db_setup(db_backend, monkeypatch):
     """Active backend with a fresh full schema (db_harness, #300).
 
     Returns (backend_marker, schedule_ops). The scrub method needs neither
-    user_ops nor agent_ops, so pass None placeholders. Pops any sibling-stubbed
-    db.schedules so the import re-resolves fresh.
+    user_ops nor agent_ops, so pass None placeholders. Evicts any sibling-stubbed
+    db.schedules so the import re-resolves fresh (auto-restored after the test).
     """
-    sys.modules.pop("db.schedules", None)
+    monkeypatch.delitem(sys.modules, "db.schedules", raising=False)
     from db.schedules import ScheduleOperations
 
     schedule_ops = ScheduleOperations(None, None)
