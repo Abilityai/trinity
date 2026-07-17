@@ -979,6 +979,18 @@
       "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) \u2014 including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works \u2014 mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
     },
     {
+      "file": "unit/test_1673_execution_error_not_success.py",
+      "feature": "#1673",
+      "added": "2026-07-17",
+      "categories": [
+        "agent-runtime",
+        "unit",
+        "sessions",
+        "regression"
+      ],
+      "description": "Claude Code error_during_execution must not be recorded as success (#1673): stream_parser falls back to errors[] when result text is empty; _finalize_headless_result surfaces error_type=execution_error as 502 instead of falling through to the #160 `context: fork` placeholder. Guards the Sessions-tab resume-not-found fallback contract (detail carries 'no conversation found') and pins that the #160 placeholder still fires for genuine clean exits."
+    },
+    {
       "file": "unit/test_1402_prompt_contract.py",
       "feature": "#1402",
       "added": "2026-07-15",
