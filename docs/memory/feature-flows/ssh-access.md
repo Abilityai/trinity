@@ -9,7 +9,8 @@ As a platform admin, I want to generate temporary SSH credentials for agent cont
 ## Revision History
 | Date | Change |
 |------|--------|
-| 2026-07-16 | **Removed password auth (#1615)**: the option was broken end-to-end — host-side hashing imported the stdlib `crypt` module (removed in Python 3.13, so every request 500'd), and the agent sshd runs `PasswordAuthentication no`, so a password login could never succeed even with a hash set. `auth_method` now accepts only `"key"`; `"password"` returns 400. Removed `generate_password()`, `set_container_password()`, `clear_container_password()`. |
+| 2026-07-17 | **Enforce key TTL on the filesystem + injection-safe inject/remove (#1616)**. The expired-key security gap: an ephemeral key's TTL was enforced ONLY on its Redis metadata — `SshService.cleanup_expired_credentials()` (which removes the line from the `authorized_keys` file sshd reads) had **zero callers** (`SSH_ACCESS_CLEANUP_INTERVAL` was unused), so on a preserved (never-recreated) volume an **expired** key lingered in the file and still granted login. Wired it into the 5-min `cleanup_service` loop (`_sweep_expired_ssh_credentials`, report field `ssh_credentials_expired`; fail-open). `inject_ssh_key` now passes the public key via the exec **environment** (never string-interpolated) in one atomic `sh -c` and gained `skip_if_present=True` (append-if-absent via `grep -qxF`), killing both the repeat-inject double-add and the docker-py `shlex.split`→`sh -c` double-unquoting injection class. `remove_ssh_key` (now load-bearing for cleanup) matches the comment as an exact awk `$NF` last-field via `ENVIRON` (no regex/shell metachar escaping, no substring over-delete). **Scope note:** #1616's reported *recreate-wipe* symptom is a SEPARATE, unidentified mechanism — a normal never-renamed agent is volume-safe on recreate (`/home/developer` is a named volume, forwarded by the config-recreate path), the #1664/#1665/#1667 volume-identity family (fixed by #1666) postdates the reporter's build, and no start-time re-injection hook was added (it is near-inert and would mask data loss). |
+| 2026-07-16 | **Removed password auth (#1615)**: the option was broken end-to-end — host-side hashing imported the stdlib `crypt` module (removed in Python 3.13, so every request 500'd), and the agent sshd runs `PasswordAuthentication no`, so a password login could never succeed even with a hash set. `auth_method` now accepts only `"key"`; `"password"` returns 400. Removed `generate_password()` and `set_container_password()`. `clear_container_password()` is **retained** as a cleanup-only path (it locks a password left by a pre-#1615 backend on Python <3.13); nothing sets passwords any more. |
 | 2026-04-18 | **SEC: Admin-only access**: Changed from owner/admin to admin-only. Uses `require_admin` dependency instead of `can_user_delete_agent` check. |
 | 2026-03-26 | **SEC: Removed server-side keypair generation (#175)**: Key auth now requires client-supplied `public_key`. Private keys never leave the client. Removed `generate_ssh_keypair()` and `cryptography` dependency. |
 | 2026-02-24 | **Async Docker Operations**: All SshService methods now async (DOCKER-001). Uses `container_exec_run` wrapper to prevent event loop blocking. |
@@ -340,13 +341,29 @@ def get_ssh_host() -> str:
 
 Redis handles metadata expiry automatically via `setex()`. When TTL expires, the key is deleted.
 
-### Proactive Container Cleanup (Lines 368-413) - SshService.cleanup_expired_credentials()
+**But the Redis TTL alone is not enough.** The key's line in the container's
+`authorized_keys` is what `sshd` actually reads — and Redis expiring the metadata
+does nothing to that file. The file-side removal is `cleanup_expired_credentials()`
+below, wired into the 5-min `cleanup_service` loop (#1616).
+
+### Proactive Container Cleanup (#1616) - SshService.cleanup_expired_credentials()
+
+**Wiring (#1616).** This method existed since DOCKER-001 but had **zero callers**
+(`SSH_ACCESS_CLEANUP_INTERVAL` was defined and never read), so an expired key's
+line lingered in `authorized_keys` and still granted login on a preserved
+(never-recreated) volume — the enforceable half of #1616's "silent divergence."
+It is now registered as a self-contained sweep in `cleanup_service._run_cleanup_inner`
+(`_sweep_expired_ssh_credentials`, report field `ssh_credentials_expired`), running
+every 5 minutes. Fail-open: the sweep owns its try/except, the per-key loop below
+skips a Redis/exec error, and `remove_ssh_key` tolerates a missing container/file
+— so a stopped or deleted agent is a no-op. The short Redis TTL is still the
+primary guarantee; this makes it real on the filesystem.
 
 ```python
 async def cleanup_expired_credentials(self) -> int:
     """
     Clean up expired SSH credentials from containers.
-    Called periodically by background task.
+    Called every 5 min by cleanup_service (#1616).
     Redis TTL handles metadata cleanup automatically,
     but we need to remove credentials from containers.
     """
@@ -381,23 +398,65 @@ async def cleanup_expired_credentials(self) -> int:
     return cleaned
 ```
 
-### Key Removal (Lines 243-279) - SshService.remove_ssh_key()
+### Key Removal (#1616) - SshService.remove_ssh_key()
+
+Now load-bearing for the cleanup sweep, so it must never over-delete or be
+injectable. The comment travels via the exec **environment** (raw, no shell
+parsing) and is matched by awk as the exact **last field** (`$NF`) read from
+`ENVIRON` — no regex/shell metacharacter escaping, and a crafted comment can
+neither match a neighbouring key (the old substring `sed -i '/comment/d'` could)
+nor run a shell. Writes to a temp file and swaps only on awk success, then
+restores 600 perms (sshd StrictModes).
 
 ```python
 async def remove_ssh_key(self, agent_name: str, comment: str) -> bool:
-    """Remove SSH key by comment from agent's authorized_keys."""
+    """Remove SSH key by comment (exact last field) from authorized_keys."""
     container = get_agent_container(agent_name)
     if not container:
         return True  # Container may have been deleted
 
-    # Use sed to remove lines containing the comment
-    escaped_comment = comment.replace("/", "\\/").replace(".", "\\.")
+    # Static script — comment flows in via the exec environment only.
+    script = (
+        "f=/home/developer/.ssh/authorized_keys\n"
+        '[ -f "$f" ] || exit 0\n'
+        't="$f.trinity-remove.$$"\n'
+        'if awk \'BEGIN { c = ENVIRON["TRINITY_SSH_COMMENT"] } $NF != c\' '
+        '"$f" > "$t"; then\n'
+        '  mv "$t" "$f" && chmod 600 "$f"\n'
+        'else\n  rm -f "$t"\n  exit 1\nfi\n'
+    )
     await container_exec_run(
-        container,
-        f"sed -i '/{escaped_comment}/d' /home/developer/.ssh/authorized_keys",
-        user="developer"
+        container, ["sh", "-c", script], user="developer",
+        environment={"TRINITY_SSH_COMMENT": comment},
     )
     return True
+```
+
+### Key Injection (#1616) - SshService.inject_ssh_key()
+
+One atomic `sh -c` script; the public key flows in via the exec **environment**
+(never interpolated — the old `sh -c 'printf ... '<key>' ...'` form was run
+through docker-py's `shlex.split` AND the container's `sh -c`, so a single quote
+in the key raised `ValueError` and a `$(...)`/backtick opened an in-container
+command substitution). `skip_if_present=True` (default) appends only if the exact
+line is absent (`grep -qxF`), so a repeat/retried inject never duplicates a line.
+
+```python
+async def inject_ssh_key(self, agent_name, public_key, skip_if_present=True) -> bool:
+    ...
+    script = (
+        "set -e\nd=/home/developer/.ssh\nf=\"$d/authorized_keys\"\n"
+        'mkdir -p "$d"\nchmod 700 "$d"\ntouch "$f"\n'
+        # append-if-absent when skip_if_present
+        'if ! grep -qxF -- "$TRINITY_SSH_KEY" "$f"; then\n'
+        "  printf '%s\\n' \"$TRINITY_SSH_KEY\" >> \"$f\"\nfi\n"
+        'chmod 600 "$f"\n'
+    )
+    result = await container_exec_run(
+        container, ["sh", "-c", script], user="developer",
+        environment={"TRINITY_SSH_KEY": public_key},
+    )
+    return result.exit_code == 0
 ```
 
 ### Agent Stop/Delete Cleanup (Lines 441-484) - SshService.cleanup_agent_credentials()
@@ -530,11 +589,11 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
    |-- Get SSH port from container labels
    |-- Get host (SSH_HOST env or Tailscale or localhost)
    |
-5. Key Injection (ssh_service.py)
+5. Key Injection (ssh_service.py) — #1616: one atomic `sh -c`; key via exec env, never interpolated
    |-- Append tracking comment: trinity-ephemeral-{agent}-{timestamp}
-   |-- docker exec: mkdir -p /home/developer/.ssh, chmod 700
-   |-- docker exec: printf >> /home/developer/.ssh/authorized_keys
-   |-- docker exec: chmod 600 authorized_keys
+   |-- docker exec sh -c: mkdir -p ~/.ssh; chmod 700; touch authorized_keys
+   |-- ...append-if-absent (grep -qxF) so a repeat inject can't duplicate a line
+   |-- ...chmod 600 authorized_keys
    |
 6. Store Metadata in Redis (ssh_service.py)
    |-- Key: ssh_access:{agent_name}:{comment}
@@ -602,7 +661,7 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
 |----------|---------|-------------|
 | `SSH_ACCESS_DEFAULT_TTL_HOURS` | 4 | Default credential lifetime |
 | `SSH_ACCESS_MAX_TTL_HOURS` | 24 | Maximum allowed TTL |
-| `SSH_ACCESS_CLEANUP_INTERVAL` | 900 | Background cleanup interval (seconds) |
+| `SSH_ACCESS_CLEANUP_INTERVAL` | 900 | **Unused** (legacy). The expired-key sweep runs on `cleanup_service`'s own 5-min cycle (`CLEANUP_INTERVAL_SECONDS`), not this value (#1616). |
 | `SSH_HOST` | (auto-detect) | Override host for SSH commands (highest priority) |
 | `FRONTEND_URL` | `http://localhost` | Used to auto-detect SSH host in production (e.g., `https://trinity.abilityai.dev` → `trinity.abilityai.dev`) |
 
@@ -654,15 +713,17 @@ security_opt=['apparmor:docker-default'],  # no-new-privileges removed for SSH s
    - Action: Set `ssh_access_enabled = false`, call `get_agent_ssh_access`
    - Expected: 403 error with enable instructions
 
-7. **Credential Expiry**
+7. **Credential Expiry (#1616)**
    - Action: Generate credential with short TTL (0.1 hours = 6 min)
-   - Expected: After expiry, SSH connection fails
-   - Verify: Redis key deleted, authorized_keys cleaned
+   - Expected: After expiry AND one cleanup cycle (≤5 min), SSH connection fails
+   - Verify: Redis key auto-deleted by TTL; the key's line is removed from
+     `authorized_keys` by the `cleanup_service` expired-SSH sweep (previously
+     the line lingered and still granted login — #1616)
 
 ### Edge Cases
 - Multiple concurrent SSH sessions (should work)
-- Key generation for agent with existing keys (appends to authorized_keys)
-- Container restart during credential lifetime (credentials lost)
+- Key generation for agent with existing keys (appends to authorized_keys; a repeat inject of the same key is a no-op — #1616 append-if-absent)
+- `docker restart` (same container) preserves keys; a **recreate** rebuilds the container. A normal, never-renamed agent is volume-safe — `/home/developer` is a named volume (`agent-{name}-workspace`) that the config-recreate path forwards, so `.ssh` survives. Genuinely volume-less agents (ephemeral "ghost" agents) are overlay-only by design and lose `.ssh` on recreate. The recreate-wipe symptom in #1616's report is an unidentified mechanism on the reporter's build (not the #1664/#1665/#1667 family, which postdates it); no start-time re-injection hook was added.
 
 ### Status
 Not Tested
