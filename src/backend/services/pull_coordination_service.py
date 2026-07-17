@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
 from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
+from services import event_dispatch_service
 from services.platform_prompt_service import (
     ExecutionContext,
     compose_system_prompt,
@@ -374,6 +375,24 @@ def apply_task_result(
         logger.info(
             "[#1081] pull result applied for %s: status=%s error_code=%s",
             execution_id, row_status, error_code,
+        )
+        # #1578: emit agent.task.completed/failed at the pull sink terminal too,
+        # on the CAS-won branch only (a replayed/late report short-circuits above
+        # or loses the CAS — no double-wake). Dark until a pull pilot is enabled,
+        # but wired now so a pilot doesn't silently dark-fail report-back.
+        # Fire-and-forget + fail-open. `apply_task_result` is sync but is called
+        # from an async router handler, so create_task has a running loop.
+        summary = (
+            sanitized_content
+            if row_status == TaskExecutionStatus.SUCCESS
+            else (err_text or None)
+        )
+        event_dispatch_service.spawn_task_terminal_event(
+            execution.agent_name,
+            execution_id,
+            terminal_status=row_status,
+            summary_or_error=summary,
+            cost=cost,
         )
         return ResultApplyOutcome("applied", row_status)
 
