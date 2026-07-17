@@ -71,6 +71,51 @@ SECRET_VALUE_PATTERNS = [
 
 # Compiled patterns for performance
 _sensitive_var_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_VAR_PATTERNS]
+
+# --- #1661: linear KEY=value redaction -------------------------------------
+# The patterns above describe VARIABLE NAMES (`.*TOKEN.*` means "a name
+# containing TOKEN"). Stage 3 below used to compose each one into a
+# LINE-scanning regex — `(.*TOKEN.*)=(["\']?)([^\s"\']+)\2` — i.e. two
+# unbounded `.*` around a literal, re-scanned from every offset of the line.
+# Cost was superlinear in line length: ~6.8s for `.*TOKEN.*` alone on an 8 KB
+# line, ~10 CPU-minutes on the 44 KB tool-result lines that triggered #1661.
+# That is what pegged a core: the agent-server reader thread was not blocked on
+# a pipe, it was *computing* — which is why the #728/#1502 pipe fixes never
+# helped, and why it "self-cleared" (the regex eventually finished).
+#
+# One linear pass instead: find `key=value` pairs, then test the (short) key.
+# The key is bounded by delimiters, and the lookbehind stops the engine from
+# retrying every offset inside a long unbroken token (a 44 KB base64 blob would
+# otherwise reintroduce quadratic cost).
+_KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
+
+# A name pattern must match a SUFFIX of the key, not the whole key: the old
+# composed regex could start matching mid-token, so `DB_.*` redacted
+# `MY_DB_PASS=x`. Anchoring with \Z reproduces exactly that (a `fullmatch`
+# rewrite would silently redact LESS — a leak, not a speedup).
+_SENSITIVE_KEY_SUFFIX_RE = [
+    re.compile(r'(?:' + p + r')\Z', re.IGNORECASE) for p in SENSITIVE_VAR_PATTERNS
+]
+
+
+def _is_sensitive_kv_key(key: str) -> bool:
+    """True if `key` (a short `KEY=` name) names a credential."""
+    return any(r.search(key) for r in _SENSITIVE_KEY_SUFFIX_RE)
+
+
+def _redact_kv_match(match: "re.Match") -> str:
+    """Redact the value of a sensitive `key=value` pair, keep everything else.
+
+    Mirrors the old replacement byte-for-byte: the value (and its quotes, which
+    the old `\1=` replacement also dropped) becomes the placeholder; text
+    around the pair is untouched.
+    """
+    key = match.group(1)
+    if _is_sensitive_kv_key(key):
+        return f"{key}={REDACTION_PLACEHOLDER}"
+    return match.group(0)
+
+
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
 
 # Cache for known credential values (loaded from environment)
@@ -163,13 +208,10 @@ def sanitize_text(text: str) -> str:
 
     # 3. Redact key=value pairs where key is sensitive
     # Handle: KEY=value, KEY="value", KEY='value'
-    for var_pattern in _sensitive_var_re:
-        # Match: SENSITIVE_VAR=somevalue or SENSITIVE_VAR="somevalue"
-        kv_pattern = re.compile(
-            r'(' + var_pattern.pattern + r')=(["\']?)([^\s"\']+)\2',
-            re.IGNORECASE
-        )
-        result = kv_pattern.sub(r'\1=' + REDACTION_PLACEHOLDER, result)
+    # #1661: ONE linear pass (see _KV_LINE_RE) — this used to compile a
+    # line-scanning regex per name pattern, which cost CPU-minutes on a large
+    # line and pegged a core.
+    result = _KV_LINE_RE.sub(_redact_kv_match, result)
 
     return result
 
