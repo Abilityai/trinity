@@ -211,7 +211,7 @@ async def get_slack_connection_status(
     current_user: User = Depends(get_current_user)
 ):
     """Get Slack connection status for a public link."""
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     link = db.get_public_link(link_id)
@@ -247,7 +247,7 @@ async def connect_slack(
     If workspace not yet connected: returns OAuth URL (frontend opens it).
     If workspace already connected: creates a Slack channel for the agent and binds it.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can connect Slack")
 
     link = db.get_public_link(link_id)
@@ -337,7 +337,7 @@ async def disconnect_slack(
     current_user: User = Depends(get_current_user)
 ):
     """Disconnect Slack workspace from public link."""
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can disconnect Slack")
 
     link = db.get_public_link(link_id)
@@ -360,7 +360,7 @@ async def update_slack_connection(
     current_user: User = Depends(get_current_user)
 ):
     """Update Slack connection settings (enable/disable)."""
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can modify Slack settings")
 
     link = db.get_public_link(link_id)
@@ -391,7 +391,7 @@ async def get_agent_slack_channel(
     Returns binding info if the agent is bound to a channel,
     or {bound: false} if not.
     """
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     workspaces = db.get_all_slack_workspaces()
@@ -427,7 +427,7 @@ async def create_agent_slack_channel(
     Requires at least one connected workspace. Creates a channel
     named after the agent and binds it for message routing.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     # Check if already bound
@@ -496,7 +496,7 @@ async def delete_agent_slack_channel(
     When the agent is the only one bound, unbind is allowed — the workspace
     ends up with no Slack agents, which is a clean cascade.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     workspaces = db.get_all_slack_workspaces()
@@ -540,7 +540,7 @@ async def set_agent_as_slack_dm_default(
     flips it; ``unbind`` auto-promotes the oldest remaining agent so the
     workspace is never left with zero defaults.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     # Find the workspace where this agent is bound. There should be at
@@ -629,7 +629,7 @@ async def list_agent_slack_channels(
     Backs the MCP ``list_channel_groups`` discovery tool. Any user with access
     to the agent may list; proactive send is owner-gated separately.
     """
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     # team_id → workspace name, resolved once for labelling.
@@ -661,7 +661,7 @@ async def send_agent_slack_channel_message(
     Posts via ``chat.postMessage`` with the agent's identity, optionally in a
     thread.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can send channel messages")
 
     text = (request.message or "").strip()
