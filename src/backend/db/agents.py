@@ -15,7 +15,7 @@ to focused mixin classes in db/agent_settings/:
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, delete, func, and_
+from sqlalchemy import select, insert, update, delete, func, and_, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -185,6 +185,107 @@ class AgentOperations(
                 )
             ).first()
             return row is not None
+
+    def is_volume_base_reserved(
+        self, volume_base: str, exclude_agent: Optional[str] = None
+    ) -> bool:
+        """True if any ownership row (live OR soft-deleted) owns the Docker
+        data volumes named ``agent-{volume_base}-{workspace|public|shared}``
+        (#1664).
+
+        The volume-identity counterpart of :meth:`is_agent_name_reserved`, and
+        the ONLY safe orphan predicate for the #1581 volume sweep. A volume
+        describes itself by name and by its immutable ``trinity.agent-name``
+        label, but Docker can rename neither — so after an agent rename BOTH
+        carry the pre-rename name while the volume is still the live agent's
+        home. Asking "is this *name* an agent?" therefore answers the wrong
+        question and marks live data an orphan; asking "does any agent own
+        volumes under this base?" answers the right one.
+
+        A row owns volumes under BOTH of its identities — the check is a
+        UNION, not a switch:
+
+        - ``agent_name``: NULL ``volume_base_name`` means "same as agent_name"
+          (every agent that was never renamed, so no backfill is needed), AND
+          a renamed agent still creates *new* volumes under its CURRENT name —
+          `get_public_volume_name` / `get_shared_volume_name` are called with
+          the live name, so enabling file-sharing after a rename produces
+          `agent-{new}-public`. A renamed agent therefore legitimately owns
+          volumes under two bases, and the public volume is unmounted whenever
+          file-sharing is off — matching only the pin would mark that live
+          agent's shared files an orphan and delete them.
+        - ``volume_base_name``: the pre-rename base its workspace kept.
+
+        Union-of-both is also strictly safer than the pre-#1664 predicate it
+        replaces (`is_agent_name_reserved` ≡ the first branch alone), so this
+        can only protect more than before, never less. A purged row matches
+        neither, so a genuine orphan is still reclaimable.
+
+        ``exclude_agent`` ignores one row — pass the agent that is ASKING, so
+        the question becomes "does anyone ELSE claim this base?" (#1671). The
+        rename gate needs it: an agent renamed ``B``→``A`` keeps pin ``B``, so
+        renaming it back to ``B`` must be allowed (it already owns that base,
+        and the result has exactly one claimant). Without the exclusion that
+        legitimate rename-back is refused, and told its own volumes belong to
+        someone else.
+        """
+        if not volume_base:
+            return False
+        where = [
+            or_(
+                agent_ownership.c.agent_name == volume_base,
+                agent_ownership.c.volume_base_name == volume_base,
+            )
+        ]
+        if exclude_agent:
+            where.append(agent_ownership.c.agent_name != exclude_agent)
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(agent_ownership.c.agent_name).where(*where)
+            ).first()
+            return row is not None
+
+    def get_volume_base_name(self, agent_name: str) -> Optional[str]:
+        """The base name of ``agent_name``'s Docker data volumes (#1664).
+
+        Returns the pinned ``volume_base_name`` when set (the agent was
+        renamed and kept its volumes), else ``agent_name``. Returns None only
+        when the agent has no ownership row at all.
+        """
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(
+                    agent_ownership.c.agent_name,
+                    agent_ownership.c.volume_base_name,
+                ).where(agent_ownership.c.agent_name == agent_name)
+            ).first()
+            if row is None:
+                return None
+            return row.volume_base_name or row.agent_name
+
+    def set_volume_base_name(self, agent_name: str, volume_base: str) -> bool:
+        """Pin ``agent_name``'s volume identity, but only if not already pinned
+        (#1664). Returns True when a row was written.
+
+        Guarded on ``volume_base_name IS NULL`` so it can never overwrite an
+        earlier rename's pin with a later one — the volume base is frozen at
+        the FIRST rename and every subsequent rename must keep pointing at the
+        same volumes. Used by the boot-time heal for agents renamed before this
+        column existed; the rename path pins inline (see
+        ``MetadataMixin.rename_agent``).
+        """
+        if not agent_name or not volume_base:
+            return False
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.volume_base_name.is_(None),
+                )
+                .values(volume_base_name=volume_base)
+            )
+            return (result.rowcount or 0) > 0
 
     def is_agent_live(self, agent_name: str) -> bool:
         """True if `agent_name` has a live (non-soft-deleted) ownership row.

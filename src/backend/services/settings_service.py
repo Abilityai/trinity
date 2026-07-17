@@ -33,6 +33,8 @@ _PLATFORM_MODEL_CACHE_TTL = 60.0
 # this set after it was saved is treated as unset (→ platform default) by
 # `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
 PUBLIC_CHANNEL_MODELS = frozenset({
+    "claude-fable-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",

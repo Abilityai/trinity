@@ -92,6 +92,14 @@ RETENTION_CHUNK_SIZE_PER_CYCLE = 5000
 # orphan (creation writes the volume BEFORE the row).
 ORPHAN_VOLUME_RECLAIM_PER_CYCLE = 100
 ORPHAN_VOLUME_GRACE_SECONDS = 3600  # 1h — comfortably past any create latency
+# Issue #1664: consecutive cycles a candidate volume must be observed unattached
+# before it may be reclaimed. A container recreate (guardrails / resources /
+# shared-folder change, operator rebuild) removes the old container before
+# creating the new one, so a LIVE agent's volume is briefly unattached; one
+# sighting is not evidence of an orphan. 3 strikes ≈ 15 min at the 5-min cycle —
+# orders of magnitude longer than any recreate gap, and this is a backstop sweep
+# with no urgency (the purge path is the primary reclaim).
+ORPHAN_VOLUME_UNATTACHED_STRIKES = 3
 
 # Issue #1142: `responded` operator_queue rows carry an operator answer the 5s
 # write-back loop still has to deliver to the agent file (a stopped agent picks
@@ -385,6 +393,10 @@ class CleanupService:
         # inside the 5-min cleanup loop. First cycle runs maintenance
         # immediately; then every 12th cycle (60 min at 5-min interval).
         self._cycle_count: int = 0
+        # #1664: volume name -> consecutive cycles observed unattached AND
+        # unowned. In-process only (a restart just restarts the count — the
+        # safe direction).
+        self._unattached_volume_strikes: Dict[str, int] = {}
 
     def start(self):
         """Start the background cleanup loop."""
@@ -908,6 +920,15 @@ class CleanupService:
                 volumes_removed = 0
                 for name in names:
                     try:
+                        # #1664: read the volume base BEFORE the purge deletes
+                        # the row that holds it — a renamed agent's volumes are
+                        # named after its former self, and after the purge
+                        # nothing remembers that. Falls back to the agent name
+                        # (the never-renamed case, and the pre-#1664 default).
+                        try:
+                            volume_base = db.get_volume_base_name(name) or name
+                        except Exception:
+                            volume_base = name
                         if db.purge_agent_ownership(name):
                             purged += 1
                             # #1560: the name is reusable from this instant on.
@@ -918,7 +939,34 @@ class CleanupService:
                             # (in-use) volume retries via the orphan sweep, so a
                             # failure here never blocks the purge.
                             try:
-                                volumes_removed += await remove_agent_volumes(name)
+                                # Both identities: a renamed agent's workspace
+                                # kept the old base, but any volume created
+                                # after the rename (public/shared — those name
+                                # off the LIVE name) is under the new one. The
+                                # set is deduped, so an un-renamed agent is one
+                                # call as before (#1664).
+                                for base in dict.fromkeys((volume_base, name)):
+                                    # `volume_base_name` carries no unique
+                                    # constraint, and installs predating the
+                                    # create-time gate (crud.py, #1664) can hold
+                                    # a collision: agent `new` pinned to base
+                                    # `old` PLUS a live agent literally named
+                                    # `old`, both on the same volumes. This row
+                                    # is already purged, so a still-True answer
+                                    # means a DIFFERENT row claims the base —
+                                    # its data is live and not ours to drop.
+                                    if db.is_volume_base_reserved(base):
+                                        logger.warning(
+                                            "[#1664] purge of %s: volume base %r "
+                                            "still claimed by another agent — "
+                                            "skipping removal",
+                                            name,
+                                            base,
+                                        )
+                                        continue
+                                    volumes_removed += await remove_agent_volumes(
+                                        base
+                                    )
                             except Exception as e:
                                 logger.warning(
                                     f"[#1581] volume removal after purge of {name} "
@@ -947,22 +995,56 @@ class CleanupService:
         """4c-bis-2. Issue #1581: reclaim orphaned agent data volumes.
 
         Docker-as-truth backstop for the purge-time removal: an
-        `agent-{name}-{workspace|public|shared}` volume whose ownership row no
-        longer exists (`is_agent_name_reserved` is False — covers purged rows;
-        a soft-deleted agent still matches, so the recovery window is respected)
-        is reclaimable. Every removal goes through the same name+label guard as
-        the targeted path (`remove_agent_volumes`), so a live/durable agent's
-        data is unreachable by a bug. Bounded per cycle + a creation-grace
-        window (creation writes the volume before the ownership row).
+        `agent-{base}-{workspace|public|shared}` volume that no ownership row
+        claims is reclaimable. Bounded per cycle, plus three independent
+        conditions that must ALL hold before anything is destroyed — this sweep
+        force-removes durable user data (#1169 `data_paths`), so it fails safe
+        on every ambiguity (#1638 principle):
+
+        1. **No owner** — `db.is_volume_base_reserved` (NOT
+           `is_agent_name_reserved`, #1664): a renamed agent keeps its
+           pre-rename volumes, so the volume's self-declared identity (name +
+           immutable `trinity.agent-name` label) names an agent that no longer
+           exists while the data is live. Asking the ownership rows which
+           volume bases they own answers the real question. Soft-deleted rows
+           still match, so the recovery window is respected.
+        2. **Unattached** — no container mounts it. The rename case again:
+           belt-and-braces over (1) via Docker itself (Invariant #11). When
+           attachment can't be established the whole sweep is skipped rather
+           than run blind.
+        3. **Unattached for `ORPHAN_VOLUME_UNATTACHED_STRIKES` consecutive
+           cycles** — closes the recreate race: `recreate_container_with_
+           updated_config` removes the old container before creating the new
+           one, leaving a live agent's volume momentarily unattached. A single
+           unattached observation is therefore not evidence of an orphan; a
+           streak spanning ~15 min is. Any attached (or re-owned) observation
+           resets the streak.
+
+        Removal still goes through the name+label guard (`remove_agent_volumes`)
+        as a last line of defence. Also carries a creation-grace window
+        (creation writes the volume before the ownership row).
         """
         try:
             from services.docker_utils import (
                 list_agent_data_volumes,
+                list_attached_volume_names,
                 remove_agent_volumes,
             )
 
             volumes = await list_agent_data_volumes()
             if not volumes:
+                self._unattached_volume_strikes.clear()
+                return
+
+            # Fail-closed: "which volumes are in use?" is unanswerable → do not
+            # reclaim this cycle. Deleting a live agent's home volume is
+            # unrecoverable; waiting 5 minutes costs nothing.
+            attached = await list_attached_volume_names()
+            if attached is None:
+                logger.warning(
+                    "[#1581] skipping orphan-volume sweep: container mounts "
+                    "unavailable (cannot prove a volume is unused)"
+                )
                 return
 
             now = utc_now()
@@ -970,17 +1052,28 @@ class CleanupService:
             # Group orphan volumes by agent so one remove_agent_volumes call
             # drops all three (workspace/public/shared) of a dead agent.
             orphan_agents: set = set()
+            seen_volumes: set = set()
             for volume in volumes:
-                if len(orphan_agents) >= ORPHAN_VOLUME_RECLAIM_PER_CYCLE:
-                    break
                 try:
-                    labels = (volume.attrs.get("Labels") or {}) if volume.attrs else {}
-                    agent_name = labels.get("trinity.agent-name")
-                    if not agent_name or agent_name in orphan_agents:
+                    volume_name = getattr(volume, "name", None)
+                    if not volume_name:
                         continue
-                    # Row still present (live OR soft-deleted → recoverable) —
-                    # not an orphan; the purge sweep owns it.
-                    if db.is_agent_name_reserved(agent_name):
+                    seen_volumes.add(volume_name)
+                    labels = (volume.attrs.get("Labels") or {}) if volume.attrs else {}
+                    volume_base = labels.get("trinity.agent-name")
+                    if not volume_base:
+                        continue
+                    # (1) Some agent — live or soft-deleted — owns this base.
+                    # Covers the renamed agent whose volumes still carry the
+                    # old base (#1664).
+                    if db.is_volume_base_reserved(volume_base):
+                        self._unattached_volume_strikes.pop(volume_name, None)
+                        continue
+                    # (2) In use ⇒ someone's live data, whatever it calls
+                    # itself. Reset the streak: the next unattached sighting
+                    # starts counting from scratch.
+                    if volume_name in attached:
+                        self._unattached_volume_strikes.pop(volume_name, None)
                         continue
                     # Grace: skip a volume younger than the window (its ownership
                     # row may still be mid-write during a slow create).
@@ -991,16 +1084,30 @@ class CleanupService:
                         # (never reclaim on ambiguity — the purge path is the
                         # primary reclaim; this is only a backstop).
                         continue
-                    orphan_agents.add(agent_name)
+                    # (3) Require a streak of unattached cycles.
+                    strikes = self._unattached_volume_strikes.get(volume_name, 0) + 1
+                    self._unattached_volume_strikes[volume_name] = strikes
+                    if strikes < ORPHAN_VOLUME_UNATTACHED_STRIKES:
+                        continue
+                    if volume_base in orphan_agents:
+                        continue
+                    if len(orphan_agents) >= ORPHAN_VOLUME_RECLAIM_PER_CYCLE:
+                        continue
+                    orphan_agents.add(volume_base)
                 except Exception as e:
                     logger.warning(f"[#1581] orphan-volume triage failed: {e}")
 
-            for agent_name in orphan_agents:
+            # Drop strike state for volumes that no longer exist so the map
+            # can't grow without bound across cycles.
+            for stale in set(self._unattached_volume_strikes) - seen_volumes:
+                self._unattached_volume_strikes.pop(stale, None)
+
+            for volume_base in orphan_agents:
                 try:
-                    reclaimed += await remove_agent_volumes(agent_name)
+                    reclaimed += await remove_agent_volumes(volume_base)
                 except Exception as e:
                     logger.warning(
-                        f"[#1581] orphan volume reclaim for {agent_name} failed: {e}"
+                        f"[#1581] orphan volume reclaim for {volume_base} failed: {e}"
                     )
 
             report.orphan_agent_volumes_reclaimed = reclaimed
@@ -1765,6 +1872,51 @@ class CleanupService:
         except Exception as e:
             logger.debug(f"[Watchdog] WebSocket broadcast error: {e}")
 
+    async def _heal_renamed_volume_bases(self) -> int:
+        """One-shot boot heal for #1664: pin `volume_base_name` for agents that
+        were renamed before the column existed. Returns the rows healed.
+
+        Rename keeps the agent's volumes under the pre-rename name, and until
+        #1664 nothing recorded that — the only surviving evidence is Docker's
+        own mount table: container `agent-{current}` mounting
+        `agent-{other}-workspace` at the home path IS a completed rename
+        (Invariant #11). Any other agent — the overwhelming majority — mounts
+        `agent-{current}-workspace`, matches the NULL default, and is skipped.
+
+        Runs before the startup sweep so an already-renamed agent is owned by
+        its volumes on the very first triage. Idempotent (the DB write only
+        fills a NULL) and best-effort: the orphan sweep's unattached-streak +
+        mounted-volume checks still stand between a heal failure and a delete.
+        """
+        healed = 0
+        try:
+            from services.docker_utils import (
+                get_agent_workspace_volume_map,
+                volume_base_from_workspace_volume,
+            )
+
+            mounts = await get_agent_workspace_volume_map()
+            for agent_name, volume_name in mounts.items():
+                base = volume_base_from_workspace_volume(volume_name)
+                if not base or base == agent_name:
+                    continue
+                try:
+                    if db.set_volume_base_name(agent_name, base):
+                        healed += 1
+                        logger.info(
+                            "[#1664] Startup: pinned volume base %r for renamed "
+                            "agent %r (from its container mount)",
+                            base,
+                            agent_name,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[#1664] could not pin volume base for {agent_name}: {e}"
+                    )
+        except Exception as e:
+            logger.error(f"[#1664] volume-base heal error: {e}")
+        return healed
+
     async def _cleanup_loop(self):
         """Main cleanup loop."""
         # One-shot startup hook for #740: any non-terminal agent_loops left
@@ -1778,6 +1930,12 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Loop orphan sweep error: {e}")
+
+        # One-shot startup hook for #1664: agents renamed BEFORE
+        # `volume_base_name` existed have an unpinned row, so their (still
+        # old-named) volumes read as orphans. Reconstruct the pin from Docker
+        # before the startup sweep runs.
+        await self._heal_renamed_volume_bases()
 
         # #1638: report the effective windows + their source BEFORE the startup
         # sweep runs, so a retroactive default change is visible in the logs

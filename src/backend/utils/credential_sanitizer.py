@@ -55,6 +55,55 @@ SENSITIVE_KEY_PATTERNS = [
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
 _sensitive_key_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_KEY_PATTERNS]
 
+# --- #1661: linear KEY=value redaction -------------------------------------
+# The patterns above describe KEY NAMES (`.*TOKEN.*` means "a name containing
+# TOKEN"). The stage below used to compose each one into a LINE-scanning regex
+# — `(.*TOKEN.*)=(["\']?)([^\s"\']+)\2` — i.e. two unbounded `.*` around a
+# literal, re-scanned from every offset of the line. Cost was superlinear in
+# line length: ~6.8s for `.*TOKEN.*` alone on an 8 KB line, ~10 CPU-minutes on a
+# 44 KB line. Agent-side this pegged a core (#1661); here it burns backend CPU
+# on the same input, since this layer sanitizes execution logs before DB write.
+#
+# One linear pass instead: find `key=value` pairs, then test the (short) key.
+# The lookbehind stops the engine retrying every offset inside a long unbroken
+# token (a 44 KB base64 blob would otherwise reintroduce quadratic cost).
+# The lookbehind is load-bearing, not decoration: it is what keeps this LINEAR.
+# Without it the engine retries the key at every offset inside a long non-matching
+# run, which is exactly the quadratic shape this issue is about. CodeQL reports
+# `py/polynomial-redos` here because its model ignores lookbehinds; the adversarial
+# cases it names (`!`*n, `!=`+`!=!`*n) are pinned as tests in
+# tests/unit/test_1661_sanitizer_linear.py and run in ~1ms at 64 KB. Do not
+# "simplify" the lookbehind away.
+_KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
+
+# A name pattern must match a SUFFIX of the key, not the whole key: the old
+# composed regex could start matching mid-token, so `DB_.*` redacted
+# `MY_DB_PASS=x`. Anchoring with \Z reproduces exactly that (a `fullmatch`
+# rewrite would silently redact LESS — a leak, not a speedup).
+_SENSITIVE_KEY_SUFFIX_RE = [
+    re.compile(r'(?:' + p + r')\Z', re.IGNORECASE) for p in SENSITIVE_KEY_PATTERNS
+]
+
+
+def _is_sensitive_kv_key(key: str) -> bool:
+    """True if `key` (a short `KEY=` name) names a credential."""
+    return any(r.search(key) for r in _SENSITIVE_KEY_SUFFIX_RE)
+
+
+def _redact_kv_match(match: "re.Match") -> str:
+    """Redact the value of a sensitive `key=value` pair, keep everything else.
+
+    Mirrors the old replacement byte-for-byte: the value (and its quotes, which
+    the old `\1=` replacement also dropped) becomes the placeholder; text
+    around the pair is untouched.
+    """
+    key = match.group(1)
+    if _is_sensitive_kv_key(key):
+        return f"{key}={REDACTION_PLACEHOLDER}"
+    return match.group(0)
+
+
+
 REDACTION_PLACEHOLDER = "***REDACTED***"
 
 
@@ -77,13 +126,10 @@ def sanitize_text(text: str) -> str:
     for pattern in _secret_value_re:
         result = pattern.sub(REDACTION_PLACEHOLDER, result)
 
-    # Redact key=value pairs where key is sensitive
-    for key_pattern in _sensitive_key_re:
-        kv_pattern = re.compile(
-            r'(' + key_pattern.pattern + r')=(["\']?)([^\s"\']+)\2',
-            re.IGNORECASE
-        )
-        result = kv_pattern.sub(r'\1=' + REDACTION_PLACEHOLDER, result)
+    # Redact key=value pairs where key is sensitive.
+    # #1661: ONE linear pass (see _KV_LINE_RE) — this used to compile a
+    # line-scanning regex per key pattern, costing CPU-minutes on a large line.
+    result = _KV_LINE_RE.sub(_redact_kv_match, result)
 
     return result
 

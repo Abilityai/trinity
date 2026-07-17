@@ -145,7 +145,8 @@ async def create_agent_internal(
     current_user: User,
     request: Optional[Request] = None,
     skip_name_sanitization: bool = False,
-    ws_manager=None
+    ws_manager=None,
+    adopt_existing_workspace: bool = False,
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -166,6 +167,13 @@ async def create_agent_internal(
         request: FastAPI request object
         skip_name_sanitization: If True, don't sanitize the name (used when name is pre-validated)
         ws_manager: Optional WebSocket manager for broadcasts
+        adopt_existing_workspace: #1667 — allow mounting a workspace volume that
+            ALREADY exists instead of refusing it (409). Only deploy-local
+            (#950) may pass True: it pre-populates the volume with the template
+            before calling here, so for it a pre-existing volume is expected
+            rather than a stranger's leftover. Deliberately a function kwarg and
+            NOT a field on `AgentConfig` — as an API field, a caller could set
+            it and re-open the silent-adopt disclosure this closes.
 
     Returns:
         AgentStatus of the created agent
@@ -272,6 +280,80 @@ async def create_agent_internal(
         or db.is_agent_name_reserved(config.name)
     ):
         raise HTTPException(status_code=409, detail="Agent already exists")
+
+    # #1664: the name being free does NOT mean its volumes are. Rename frees the
+    # NAME while the agent keeps its volumes under the old base (Docker can
+    # rename neither a volume nor its label), so `agent-{name}-workspace` can
+    # still be a live agent's `/home/developer`. The volume block below is
+    # get-then-create — an existing volume is REUSED, not rejected — so without
+    # this gate a new agent created under a freed name silently boots on the
+    # renamed agent's home volume: its `.env`, its `.credentials.enc`, its
+    # workspace, with both containers writing the same disk. The owners need not
+    # be the same person, which makes it a cross-tenant credential disclosure,
+    # not just corruption. Refuse instead: the volumes are somebody's live data
+    # until their owning row is purged.
+    # Ghosts are exempt: they are volume-less by construction (the volume block
+    # below is `if not config.ephemeral`), so there is nothing to collide with —
+    # and this would put a DB read on the burst-spawn path for no reason.
+    if not config.ephemeral and db.is_volume_base_reserved(config.name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Agent name unavailable: its data volumes still belong to "
+                "another agent (it was renamed). Pick a different name."
+            ),
+        )
+
+    # #1667: the gate above covers a volume some ROW still claims (the rename
+    # case). This covers the volume NOTHING claims — a purge whose removal hit
+    # an in-use 409, a crash between `volume_create` and the ownership INSERT
+    # (creation writes the volume first, which is why the orphan sweep carries a
+    # 1h creation grace), or a restored backup. The volume block below is
+    # get-then-create: an existing volume is silently mounted as this agent's
+    # `/home/developer`, so the previous holder of the name has its `.env`,
+    # `.credentials.enc` and workspace resurface inside a different agent —
+    # possibly a different owner's. Adopting is a decision, so the adopter must
+    # declare itself (`adopt_existing_workspace`); everyone else is refused.
+    #
+    # Emptiness can't discriminate: deploy-local (#950) — the ONE legitimate
+    # adopter — pre-populates this volume with the template BEFORE calling
+    # create, so a valid adopt is non-empty. (Docker also auto-populates a named
+    # volume from the image on first mount, so "empty" wouldn't even identify a
+    # crashed create.)
+    #
+    # Deliberately raised HERE, before the docker try-block: that block catches
+    # Exception, rolls back, and re-raises as a generic 500 — a 409 raised
+    # inside it would lose both its status and this message (the same reason
+    # fork_to_own raises its destination 409 before the block). Nothing is built
+    # yet at this point, so there is also nothing to roll back.
+    if (
+        not config.ephemeral
+        and not adopt_existing_workspace
+        and docker_client
+    ):
+        _workspace_vol = f"agent-{config.name}-workspace"
+        try:
+            await volume_get(_workspace_vol)
+        except docker.errors.NotFound:
+            pass  # the normal path: no leftover, create it below
+        except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
+            logger.warning(
+                "[#1667] could not probe workspace volume %s (%s); proceeding",
+                _workspace_vol,
+                e,
+            )
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Data volume '{_workspace_vol}' already exists and no agent "
+                    f"claims it, so its contents would silently become this "
+                    f"agent's home directory. Refusing to adopt another agent's "
+                    f"leftover data. Remove it (docker volume rm "
+                    f"{_workspace_vol}) or choose a different name — unclaimed "
+                    f"agent volumes are also reclaimed automatically."
+                ),
+            )
 
     # #1560: reaching here means the name is free — but `is_agent_name_reserved`
     # only stops matching once the retention purge hard-deletes the row, and the
@@ -941,8 +1023,37 @@ async def create_agent_internal(
             }
             if not config.ephemeral:
                 agent_volume_name = f"agent-{config.name}-workspace"
+                # #1667: adopting a pre-existing volume is a DECISION, not a
+                # fallthrough. This used to be get-then-create with no branch —
+                # an existing volume was silently mounted as the new agent's
+                # `/home/developer`, so whatever the previous holder of this
+                # name left behind (its `.env`, its `.credentials.enc`, its
+                # workspace) resurfaced inside a different agent, possibly a
+                # different owner's. #1664's gate covers the case where a row
+                # still claims the base (rename); this covers the case where
+                # NOTHING claims it — a purge whose removal hit an in-use 409,
+                # a crash between `volume_create` and the ownership INSERT
+                # (creation writes the volume first — the reason the orphan
+                # sweep carries a 1h creation grace), or a restored backup.
+                #
+                # Emptiness cannot be the discriminator: the one legitimate
+                # adopter — deploy-local (#950) — PRE-POPULATES this volume with
+                # the template before calling create, so a valid adopt is
+                # non-empty. (And Docker auto-populates a named volume from the
+                # image on first mount, so "empty" wouldn't even identify a
+                # crashed create.) So the adopter declares itself, and everyone
+                # else is refused.
                 try:
                     await volume_get(agent_volume_name)
+                    # Reaching here means the volume pre-exists. The refusal
+                    # gate above already ran, so this is a declared adopt —
+                    # deploy-local's pre-populated workspace (#950). Logged:
+                    # an adopt is never silent again (#1667).
+                    logger.info(
+                        "[#1667] adopting pre-existing workspace volume %s for %s",
+                        agent_volume_name,
+                        config.name,
+                    )
                 except docker.errors.NotFound:
                     await volume_create(
                         name=agent_volume_name,

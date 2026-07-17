@@ -2877,6 +2877,32 @@ def _migrate_agent_sync_state_gc_signals(cursor, conn):
     )
 
 
+def _migrate_agent_ownership_volume_base_name(cursor, conn):
+    """#1664 — pin an agent's Docker data-volume identity to the ownership row.
+
+    Adds ``volume_base_name TEXT`` (NULL ⇒ the volume base is ``agent_name``,
+    the case for every agent that was never renamed). Rename keeps the agent's
+    existing volumes (Docker can rename neither a volume nor its immutable
+    ``trinity.agent-name`` label), so after a rename the volume's own identity
+    is stale and the #1581 orphan sweep read it as a dead agent's leftovers.
+    Freezing the volume base here makes ownership resolvable from the DB rather
+    than from the volume's self-description. Backfill is a no-op by
+    construction: NULL already means "same as agent_name", which is correct for
+    every pre-existing row EXCEPT agents renamed before this migration — those
+    are healed at boot by ``CleanupService._heal_renamed_volume_bases``
+    (services/cleanup_service.py), which reads Docker's container mounts (the
+    only surviving record of the old volume name). Mirrored by Alembic
+    0024_agent_ownership_volume_base_name.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "volume_base_name",
+        "ALTER TABLE agent_ownership ADD COLUMN volume_base_name TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -3027,4 +3053,5 @@ MIGRATIONS = [
     ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
+    ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
 ]
