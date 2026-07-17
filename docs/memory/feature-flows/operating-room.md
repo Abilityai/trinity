@@ -312,7 +312,7 @@ Background async service that bridges agent containers and the database. Global 
 - `DEFAULT_POLL_INTERVAL = 5` seconds (line 31)
 
 **Poll cycle** (`_poll_cycle`):
-0. **Leader gate (#1632)**: acquires/refreshes the `opqueue:leader` Redis lease (SET NX, TTL 3×poll-interval, own-lease-only refresh, fail-open to leader on Redis down — mirror monitoring #1464). A non-leader worker **returns immediately**, so under `--workers 2` only one worker syncs → no double-charge of the ingestion rate limiter, no double-broadcast of the flood alert, no double-scan of agent files.
+0. **Leader gate (#1632)**: acquires/refreshes the `opqueue:leader` Redis lease (SET NX, TTL `max(3×poll-interval, 30s)` — a floor so one slow-writing agent's cycle can't expire the lease mid-cycle and flap leadership — own-lease-only refresh, fail-open to leader on Redis down — mirror monitoring #1464). A non-leader worker **returns immediately**, so under `--workers 2` only one worker syncs → no double-charge of the ingestion rate limiter, no double-broadcast of the flood alert, no double-scan of agent files.
 1. Gets running agents via `list_all_agents_fast()` (lazy import from `services.docker_service`)
 2. Filters to only `status == "running"` agents
 3. Calls `db.mark_operator_queue_expired()` for items past `expires_at`

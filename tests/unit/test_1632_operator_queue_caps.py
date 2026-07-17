@@ -463,6 +463,63 @@ class TestExemptionAndFloodAlert:
 
 
 # ---------------------------------------------------------------------------
+# 5b. Platform producer — validation_service direct create (#1632)
+# ---------------------------------------------------------------------------
+# `_notify_operator_on_failure` was converted to a DIRECT db.create_operator_queue_item
+# (#1632): it's a *platform* alert, so it must bypass the agent-authored sync-ingestion
+# caps (routing it through the agent file would flow it through `_sync_agent` and cap it),
+# it uses the reserved `val_` id prefix an agent cannot pre-create (so an agent can't
+# suppress its own validation alarm), and it stays best-effort. The conversion also fixed a
+# latent bug: the method used to `.append` to a bare list (`[]`) while the sync loop expects
+# `{"requests": [...]}`, so the notification was never actually ingested.
+
+def _validation_service():
+    """A ValidationService without __init__ (skips the TaskExecutionService() build)."""
+    from services.validation_service import ValidationService
+    return ValidationService.__new__(ValidationService)
+
+
+def _validation_result():
+    from services.validation_service import ValidationResult, ValidationStatus
+    return ValidationResult(
+        status=ValidationStatus.FAIL,
+        summary="checks failed",
+        items=[{"check": "c", "result": "fail", "evidence": "e"}],
+        recommendation="retry",
+    )
+
+
+class TestValidationServiceDirectCreate:
+    def test_notifies_via_direct_db_create_with_reserved_val_id(self, monkeypatch):
+        # The platform exemption's concrete producer: one DIRECT create (never an
+        # agent-file write → never rate/depth-capped), reserved `val_` id, alert.
+        import services.validation_service as vs
+        db = MagicMock()
+        monkeypatch.setattr(vs, "db", db)
+        svc = _validation_service()
+
+        asyncio.run(svc._notify_operator_on_failure("exec-1", "agent-a", _validation_result()))
+
+        assert db.create_operator_queue_item.call_count == 1
+        agent_arg, item = db.create_operator_queue_item.call_args.args
+        assert agent_arg == "agent-a"
+        assert item["id"].startswith("val_")           # reserved prefix (agent can't pre-create)
+        assert item["type"] == "alert"
+        assert item["priority"] == "high"
+        assert item["context"]["execution_id"] == "exec-1"
+
+    def test_notify_is_best_effort_swallows_create_failure(self, monkeypatch):
+        # Validation must not fail because the operator-queue create failed.
+        import services.validation_service as vs
+        db = MagicMock()
+        db.create_operator_queue_item.side_effect = Exception("db down")
+        monkeypatch.setattr(vs, "db", db)
+        svc = _validation_service()
+
+        asyncio.run(svc._notify_operator_on_failure("exec-1", "agent-a", _validation_result()))  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # 6. Leader lock (multi-worker)
 # ---------------------------------------------------------------------------
 
@@ -518,6 +575,17 @@ class TestLeaderLock:
         asyncio.run(svc._poll_cycle())
 
         assert svc._sync_agent.await_count == 0        # no sync work when not leader
+
+    def test_leader_ttl_has_headroom_over_worst_case_cycle(self):
+        # #1632 F1: the lease is refreshed once per cycle, so it must outlast one
+        # worst-case cycle + the inter-cycle sleep, or leadership flaps under a
+        # slow-writing agent and the flood alert double-emits. A _sync_agent can
+        # take a fast read + write_file(timeout=10.0) ≈ 10s, then the loop sleeps
+        # poll_interval (5s default) → ~15s between refreshes. The bare
+        # poll_interval*3 (15s) had zero headroom; the 30s floor gives 2×.
+        assert OperatorQueueSyncService(poll_interval=5)._leader_ttl() >= 30
+        # A larger poll interval keeps the *3 rule (still dwarfs the 10s write).
+        assert OperatorQueueSyncService(poll_interval=20)._leader_ttl() == 60
 
 
 # ---------------------------------------------------------------------------

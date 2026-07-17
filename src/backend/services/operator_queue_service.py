@@ -251,10 +251,18 @@ class OperatorQueueSyncService:
         logger.info("Operator queue sync service stopped")
 
     def _leader_ttl(self) -> int:
-        """Lease TTL — 3× the poll interval so one or two missed refreshes don't
-        drop leadership, but a dead holder's lock expires within ~3 cycles and a
-        sibling takes over."""
-        return max(1, self.poll_interval) * 3
+        """Lease TTL. Refreshed once at the TOP of each `_poll_cycle`, so it must
+        comfortably outlast ONE worst-case cycle plus the inter-cycle sleep — or
+        the lease expires mid-cycle, a sibling grabs it, and leadership flaps
+        (both workers run an overlapping cycle → the flood alert double-emits,
+        since its id carries `utc_now_iso()` and so isn't deduped by
+        `on_conflict`). A `_sync_agent` can take a fast read + `write_file`
+        (10s timeout, `_write_responses_to_agent`), and the loop then sleeps
+        `poll_interval`, so the bare `poll_interval * 3` (15s at the 5s default)
+        has ~zero headroom over a single slow-writing agent. Floor at 30s so one
+        slow write can't drop leadership. (Monitoring #1464 mirrors this pattern
+        but at a 30s interval, where `* 3` already dwarfs its cycle.)"""
+        return max(self.poll_interval * 3, 30)
 
     def _try_acquire_leadership(self) -> bool:
         """#1632 — cross-worker leader election for the sync loop (mirror
