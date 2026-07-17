@@ -53,6 +53,7 @@ users = Table(
     Column("updated_at", Text),
     Column("last_login", Text),
     Column("suspended_at", Text),
+    Column("github_pat_encrypted", Text),  # ent#162 — per-user GitHub PAT (AES-256-GCM envelope)
 )
 
 subscription_credentials = Table(

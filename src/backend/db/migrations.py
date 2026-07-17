@@ -2903,6 +2903,27 @@ def _migrate_agent_ownership_volume_base_name(cursor, conn):
     conn.commit()
 
 
+def _migrate_users_github_pat(cursor, conn):
+    """ent#162 — per-user GitHub PAT.
+
+    Adds ``github_pat_encrypted TEXT`` (NULL = no personal credential) to
+    ``users``. A user configures one GitHub token in their own settings; agent
+    creation then resolves per-agent → owner's per-user → global, so a non-admin
+    is no longer confined to the admin PAT's repo scope. Stored as an
+    AES-256-GCM envelope via ``CredentialEncryptionService`` (Invariant #12), the
+    same shape as the per-agent PAT (``agent_git_config.github_pat_encrypted``).
+    Backfill is a no-op: NULL means "no personal credential", correct for every
+    existing user. Mirrored by Alembic 0025_users_github_pat.
+    """
+    _safe_add_column(
+        cursor,
+        "users",
+        "github_pat_encrypted",
+        "ALTER TABLE users ADD COLUMN github_pat_encrypted TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -3054,4 +3075,5 @@ MIGRATIONS = [
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
+    ("users_github_pat", _migrate_users_github_pat),
 ]

@@ -499,6 +499,20 @@ class DatabaseManager:
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
 
+    # --- Per-user GitHub PAT (ent#162) ---
+
+    def get_user_github_pat(self, user_id: int):
+        return self._user_ops.get_user_github_pat(user_id)
+
+    def set_user_github_pat(self, user_id: int, pat: str) -> bool:
+        return self._user_ops.set_user_github_pat(user_id, pat)
+
+    def clear_user_github_pat(self, user_id: int) -> bool:
+        return self._user_ops.clear_user_github_pat(user_id)
+
+    def has_user_github_pat(self, user_id: int) -> bool:
+        return self._user_ops.has_user_github_pat(user_id)
+
     # =========================================================================
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================

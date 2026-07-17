@@ -977,6 +977,19 @@
         "integration"
       ],
       "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) \u2014 including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works \u2014 mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
+    },
+    {
+      "file": "unit/test_ent162_per_user_github_pat.py",
+      "feature": "trinity-enterprise#162",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "unit",
+        "credentials",
+        "github",
+        "security"
+      ],
+      "description": "Per-user GitHub PAT (ent#162, Shape A): resolve_github_pat ladder per-agent->per-user->global->none + owner isolation; the load-bearing recreate-no-storm guard (adding a per-user PAT must not flip check_github_pat_env_matches for a running global-fallback agent); persist-only-user-tier (global-fallback agent keeps NULL, stays a propagation target); live users.github_pat_encrypted column + AES-256-GCM round-trip; real DatabaseManager facade delegation; read endpoint returns flags only, never the token."
     }
   ]
 }

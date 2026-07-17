@@ -45,7 +45,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login TEXT,
-            suspended_at TEXT
+            suspended_at TEXT,
+            github_pat_encrypted TEXT
         )
     """,
 

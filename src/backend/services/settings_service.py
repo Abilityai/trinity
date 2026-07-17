@@ -474,6 +474,60 @@ def get_github_pat() -> str:
     return settings_service.get_github_pat()
 
 
+def get_github_pat_for_agent(agent_name: str) -> str:
+    """Resolve a GitHub PAT for an agent: per-agent PAT → global.
+
+    This is the **2-tier** ladder used by the recreate/restart env-rebuild path
+    (services/agent_service/lifecycle.py, helpers.check_github_pat_env_matches).
+    It deliberately does NOT consult the per-user tier (ent#162): re-deriving a
+    live per-user PAT here would make ``check_github_pat_env_matches`` reactive,
+    so adding/rotating a personal PAT in Settings would force-recreate the
+    owner's running agents and kill in-flight work. The per-user tier is a
+    create-time input only — see ``resolve_github_pat`` below.
+
+    Relocated from ``routers/git.py`` so services stop importing a router
+    (Invariant #1); ``routers/git.py`` re-exports it for backward compatibility.
+    """
+    agent_pat = db.get_agent_github_pat(agent_name)
+    if agent_pat:
+        return agent_pat
+    return get_github_pat()
+
+
+def resolve_github_pat(agent_name: Optional[str] = None,
+                       owner_id: Optional[int] = None) -> tuple:
+    """Resolve a GitHub PAT with tier provenance, for the agent-CREATE path (ent#162).
+
+    Returns ``(pat, tier)`` where ``tier`` is one of:
+      - ``"per_agent"`` — the agent already has its own PAT (explicit override)
+      - ``"per_user"``  — the owner's personal PAT, read **live** by ``owner_id``
+      - ``"global"``    — the admin-set / env global PAT
+      - ``"none"``      — nothing configured (``pat`` is ``""``)
+
+    The tier is what the create path keys its persist decision on: persist the
+    resolved value as the agent's #347 per-agent PAT for ``per_agent``/``per_user``,
+    but **NEVER** for ``global``. A global-fallback agent must keep
+    ``github_pat_encrypted`` NULL so ``github_pat_propagation_service`` continues
+    to reach it on admin global-PAT rotation (ent#162 Decision 2).
+
+    ``owner_id`` is the agent owner's user id — resolution keys on ownership only,
+    never on a calling/sharing user, so a sharee can never inject their PAT as the
+    agent's git identity.
+    """
+    if agent_name:
+        agent_pat = db.get_agent_github_pat(agent_name)
+        if agent_pat:
+            return agent_pat, "per_agent"
+    if owner_id is not None:
+        user_pat = db.get_user_github_pat(owner_id)
+        if user_pat:
+            return user_pat, "per_user"
+    global_pat = get_github_pat()
+    if global_pat:
+        return global_pat, "global"
+    return "", "none"
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
