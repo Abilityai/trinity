@@ -528,7 +528,7 @@ Cancellations and expirations are propagated back to the agent on the next sync 
 
 The "Operator Communication" instructions agents receive — the queue-file protocol/schema, the three request types, the #1402 fire-and-park contract, derived request ids, and file hygiene — live in `src/backend/services/platform_prompt_service.py` (`PLATFORM_INSTRUCTIONS`), injected per invocation via `--append-system-prompt` on the push dispatch path. Sentinel phrases are test-locked by `tests/unit/test_1402_prompt_contract.py`.
 
-**Historical note**: the old file-based injection (`config/trinity-meta-prompt/prompt.md` → agent-side `/api/trinity/inject` with staleness re-injection) was removed in #136 — `docker/base-image/agent_server/routers/trinity.py` now serves only a static status endpoint. `prompt.md` remains as a reference copy kept in sync with the canonical section (parity-checked by the same test); deleting it is a candidate cleanup. **Known gap (#1629)**: pull-claimed turns bypass platform-prompt composition entirely and currently receive none of these instructions.
+**Historical note**: the old file-based injection (`config/trinity-meta-prompt/prompt.md` → agent-side `/api/trinity/inject` with staleness re-injection) was removed in #136 — `docker/base-image/agent_server/routers/trinity.py` now serves only a static status endpoint. `prompt.md` remains as a reference copy kept in sync with the canonical section (parity-checked by the same test); deleting it is a candidate cleanup. Pull-claimed turns compose the same instructions via `services/pull_coordination_service.py` (#1629, fix #1633 — fail-open: a composition error runs the turn with the caller prompt only rather than blocking the claim).
 
 ---
 
