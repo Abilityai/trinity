@@ -555,8 +555,15 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
         pass
     await container_remove(old_container)
 
-    # Build new volume configuration
-    agent_volume_name = f"agent-{agent_name}-workspace"
+    # Build new volume configuration.
+    #
+    # #1665: deliberately NOT f"agent-{agent_name}-workspace" — a dead
+    # assignment of exactly that name used to sit here and read as though it
+    # were the mount this function uses. It isn't: the mounts are carried
+    # forward from the old container's `Mounts` below, which is what keeps a
+    # renamed agent on its pre-rename volume across a recreate. Anything that
+    # needs to NAME this agent's volume must go through
+    # `_workspace_volume_name` (ownership row), never the current name.
 
     # Start with base volumes - get existing bind mounts
     old_mounts = old_container.attrs.get("Mounts", [])
@@ -723,6 +730,36 @@ async def _provision_folders_and_run_agent_container(
     return new_container
 
 
+def _workspace_volume_name(agent_name: str) -> str:
+    """The name of ``agent_name``'s home volume — resolved, never assumed
+    (#1664/#1665).
+
+    THE rule for every "this agent's volume" lookup: rename keeps the agent's
+    volumes under the pre-rename base, because Docker can rename neither a
+    volume nor its immutable `trinity.agent-name` label. So the agent's CURRENT
+    name is not its volume's name, and f-stringing it is wrong for any agent
+    that was ever renamed. The ownership row is the only record of the pairing
+    (`volume_base_name`, NULL ⇒ never renamed ⇒ the name itself).
+
+    Getting this wrong is silent, not loud: `containers.run` CREATES a missing
+    named volume instead of failing, so a wrong name yields an empty
+    `/home/developer` and a working-looking agent.
+
+    Fail-safe: a DB error falls back to the agent name — the pre-#1665 behavior,
+    and correct for every un-renamed agent — rather than blocking the rebuild.
+    """
+    try:
+        return f"agent-{db.get_volume_base_name(agent_name) or agent_name}-workspace"
+    except Exception as e:  # noqa: BLE001 — never block a rebuild on a DB read
+        logger.warning(
+            "[#1665] could not resolve volume base for %s (%s); "
+            "falling back to the agent name",
+            agent_name,
+            e,
+        )
+        return f"agent-{agent_name}-workspace"
+
+
 async def _read_template_yaml_from_volume(agent_name: str) -> dict:
     """Read the agent's `template.yaml` off its persisted workspace volume
     without a running container (#1559).
@@ -732,8 +769,12 @@ async def _read_template_yaml_from_volume(agent_name: str) -> dict:
     carries the committed `template.yaml` — survives. A throwaway, network-less
     base-image container `cat`s the file. Tolerant: any failure (missing file,
     unparseable) returns `{}` so the caller falls back to safe defaults.
+
+    #1665: resolves the volume through the ownership row — for a renamed agent
+    the current name names no volume, so this silently read nothing and the
+    caller rebuilt on default agent-type/runtime instead of the committed ones.
     """
-    volume_name = f"agent-{agent_name}-workspace"
+    volume_name = _workspace_volume_name(agent_name)
     try:
         out = await containers_run(
             "trinity-agent-base:latest",
@@ -853,7 +894,20 @@ async def recreate_missing_container(agent_name: str):
         "trinity.full-capabilities": str(full_capabilities).lower(),
     }
 
-    base_volumes = {f"agent-{agent_name}-workspace": {"bind": "/home/developer", "mode": "rw"}}
+    # #1664/#1665: resolve the workspace volume through the ownership row, NOT
+    # f"agent-{agent_name}-workspace". Rename keeps the agent's volumes under
+    # the pre-rename base (Docker can rename neither a volume nor its label), so
+    # for a renamed agent the current name points at a volume that does not
+    # exist — and `containers.run` CREATES a missing named volume rather than
+    # failing, so recovery silently rebuilt the agent on an empty
+    # `/home/developer` while its real data (incl. #1169 `data_paths`) sat
+    # unreferenced under the old base. NULL pin ⇒ agent_name (never renamed).
+    base_volumes = {
+        _workspace_volume_name(agent_name): {
+            "bind": "/home/developer",
+            "mode": "rw",
+        }
+    }
 
     logger.info("Rebuilding missing container for recovered agent %s (#1559)", agent_name)
     return await _provision_folders_and_run_agent_container(
