@@ -1473,6 +1473,10 @@ class DatabaseManager:
         """Delete terminal schedule_executions rows older than retention_days (#772)."""
         return self._schedule_ops.prune_execution_rows(retention_days, chunk_size)
 
+    def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
+        """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""
+        return self._schedule_ops.scrub_terminal_backlog_metadata(chunk_size)
+
     def get_running_executions_with_agent_info(self):
         """Get all running executions with schedule timeout info (Issue #129)."""
         return self._schedule_ops.get_running_executions_with_agent_info()
