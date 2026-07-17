@@ -564,3 +564,72 @@ def test_loop_access_fallback_denies_stranger(seeded):
 def test_loop_access_fallback_admits_owner(seeded):
     # Not the initiator, not admin → falls through to the real agent access check.
     assert loops._check_loop_access(_loop(), _owner()) is None
+
+
+# =============================================================================
+# Part B — helper-level truth tables for the five dependencies.py helpers
+#          (added WITH the helpers; locks the contract the migrated sites rely
+#          on: connector fence, owner-or-admin, strict-self no-admin, type parity).
+# =============================================================================
+
+def _connector(agent="bound-agent"):
+    # A connector-scoped principal resolves to a real user but is consumption-only.
+    return _user(_OWNER, uid=_OWNER_ID, connector_agent=agent)
+
+
+def test_assert_admin_contract(seeded):
+    import dependencies as dep
+    assert dep.assert_admin(_admin()) is None
+    exc = _raised(lambda: dep.assert_admin(_stranger()))
+    _assert_403(exc, "Admin access required")
+    # connector principal is rejected before the role check (consumption-only).
+    exc = _raised(lambda: dep.assert_admin(_connector()))
+    _assert_403(exc, "Connector keys are consumption-only and cannot perform this operation")
+    # custom detail threads through.
+    exc = _raised(lambda: dep.assert_admin(_stranger(), detail="nope"))
+    _assert_403(exc, "nope")
+
+
+def test_assert_agent_access_contract(seeded):
+    import dependencies as dep
+    assert dep.assert_agent_access(_owner(), _AGENT) is None
+    exc = _raised(lambda: dep.assert_agent_access(_stranger(), _AGENT))
+    _assert_403(exc, "Access denied")
+    # connector fence: a connector key scoped to a DIFFERENT agent → 403 before db.
+    exc = _raised(lambda: dep.assert_agent_access(_connector("other"), _AGENT))
+    _assert_403(exc, "Connector key is scoped to a different agent")
+
+
+def test_assert_agent_owner_contract(seeded):
+    import dependencies as dep
+    assert dep.assert_agent_owner(_owner(), _AGENT) is None
+    exc = _raised(lambda: dep.assert_agent_owner(_stranger(), _AGENT))
+    _assert_403(exc, "Not authorized")  # default detail
+    # connector owner-op fence fires regardless of the bound agent.
+    exc = _raised(lambda: dep.assert_agent_owner(_connector(_AGENT), _AGENT))
+    _assert_403(exc, "Connector keys are consumption-only and cannot perform owner operations")
+
+
+def test_assert_owns_or_admin_truth_table(seeded):
+    import dependencies as dep
+    owner = _user("u", uid=7)
+    admin = _user("a", role="admin", uid=9)
+    other = _user("o", uid=11)
+    assert dep.assert_owns_or_admin(owner, 7) is None       # owner (non-admin) → allow
+    assert dep.assert_owns_or_admin(admin, 7) is None       # admin (non-owner) → allow
+    exc = _raised(lambda: dep.assert_owns_or_admin(other, 7))  # neither → deny
+    _assert_403(exc, "Not authorized")
+    # owner_id type parity: an int owner_id vs an int User.id compares by value.
+    assert dep.assert_owns_or_admin(_user("u", uid=42), 42) is None
+
+
+def test_assert_owns_no_admin_bypass(seeded):
+    import dependencies as dep
+    owner = _user("u", uid=7)
+    admin = _user("a", role="admin", uid=9)
+    assert dep.assert_owns(owner, 7) is None                # owner → allow
+    # NO admin bypass — an admin who is not the owner is DENIED (widening guard).
+    exc = _raised(lambda: dep.assert_owns(admin, 7))
+    _assert_403(exc, "You don't have access to this session")
+    exc = _raised(lambda: dep.assert_owns(_user("o", uid=11), 7))
+    _assert_403(exc, "You don't have access to this session")
