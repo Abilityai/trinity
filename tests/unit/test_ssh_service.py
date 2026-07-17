@@ -15,6 +15,7 @@ from unittest.mock import Mock, MagicMock, patch, AsyncMock
 import sys
 import json
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Add backend path for imports (relative to this file)
@@ -339,14 +340,20 @@ class TestRedisMetadataStorage:
         # Verify key format
         assert call_args[0][0] == "ssh_access:test-agent:key-123"
 
-        # Verify TTL (4 hours = 14400 seconds)
-        assert call_args[0][1] == 14400
+        # Verify Redis TTL = true expiry (4h = 14400s) + the cleanup grace (#1616):
+        # the metadata outlives the key's `expires_at` so the 5-min sweep can
+        # observe it as expired before Redis forgets it.
+        grace = ssh_service.SSH_ACCESS_CLEANUP_GRACE_SECONDS
+        assert call_args[0][1] == 14400 + grace
 
         # Verify JSON content
         stored_data = json.loads(call_args[0][2])
         assert stored_data["agent_name"] == "test-agent"
         assert stored_data["auth_type"] == "key"
         assert stored_data["public_key"] == "ssh-ed25519 AAAA..."
+        # `expires_at` remains the TRUE deadline — grace touches only the Redis TTL.
+        expires_at = datetime.fromisoformat(stored_data["expires_at"].replace("Z", "+00:00"))
+        assert timedelta(hours=3, minutes=59) < (expires_at - datetime.now(timezone.utc)) < timedelta(hours=4, minutes=1)
 
     def test_list_active_keys_returns_all_credentials(self):
         """list_active_keys() returns all active credentials from Redis."""

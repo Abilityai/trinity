@@ -19,7 +19,7 @@ import os
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Literal
 
 import redis
@@ -34,8 +34,40 @@ SSH_ACCESS_DEFAULT_TTL_HOURS = int(os.getenv("SSH_ACCESS_DEFAULT_TTL_HOURS", "4"
 SSH_ACCESS_MAX_TTL_HOURS = int(os.getenv("SSH_ACCESS_MAX_TTL_HOURS", "24"))
 SSH_ACCESS_CLEANUP_INTERVAL = int(os.getenv("SSH_ACCESS_CLEANUP_INTERVAL", "900"))  # 15 minutes
 
+# Grace kept on the Redis metadata TTL *beyond* a key's true `expires_at` (#1616).
+# The expired-key sweep removes the `authorized_keys` line at `expires_at`, but it
+# can only act on a row Redis still holds — so the metadata must outlive the true
+# expiry long enough for at least one sweep to observe it as expired. This MUST
+# exceed the cleanup cadence (`cleanup_service.CLEANUP_INTERVAL_SECONDS` = 300);
+# 600s = two cycles of headroom, so a skipped/slow cycle still catches the key.
+# `expires_at` in the stored metadata stays the TRUE expiry — grace applies ONLY
+# to the Redis TTL, never to when the key stops granting login.
+SSH_ACCESS_CLEANUP_GRACE_SECONDS = int(
+    os.getenv("SSH_ACCESS_CLEANUP_GRACE_SECONDS", "600")
+)
+
 # Redis key prefix
 SSH_ACCESS_PREFIX = "ssh_access:"
+
+
+def _parse_iso_utc(raw: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 UTC timestamp — as written by ``store_credential_metadata``
+    (``isoformat() + "Z"``) — into an aware UTC ``datetime``.
+
+    Returns ``None`` when the value is absent or unparseable, so a malformed /
+    legacy row degrades to the Redis-TTL fallback in the sweep rather than
+    raising and aborting the whole cycle.
+    """
+    if not raw:
+        return None
+    try:
+        s = raw.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 
 class SshService:
@@ -279,11 +311,18 @@ class SshService:
         if public_key:
             metadata["public_key"] = public_key
 
-        # Store with TTL
+        # Store with TTL + grace (#1616). The metadata deliberately outlives the
+        # key's TRUE `expires_at` by SSH_ACCESS_CLEANUP_GRACE_SECONDS so the 5-min
+        # cleanup sweep is guaranteed at least one observation of the key AFTER it
+        # has expired but BEFORE Redis auto-deletes the row — the sweep removes the
+        # authorized_keys line at `expires_at`, not at Redis-forget time. Without
+        # the grace, ~80% of keys expired from Redis between two 5-min cycles and
+        # their file line was never removed (still granting login). `expires_at`
+        # above stays the true expiry; the grace touches only the Redis TTL.
         ttl_seconds = int(ttl_hours * 3600)
         self.redis_client.setex(
             redis_key,
-            ttl_seconds,
+            ttl_seconds + SSH_ACCESS_CLEANUP_GRACE_SECONDS,
             json.dumps(metadata)
         )
 
@@ -334,49 +373,72 @@ class SshService:
 
     async def cleanup_expired_credentials(self) -> int:
         """
-        Clean up expired SSH credentials from containers.
+        Remove EXPIRED ephemeral SSH keys from the container ``authorized_keys``
+        file ``sshd`` actually reads.
 
-        This is called periodically by a background task.
-        Redis TTL handles the metadata cleanup automatically,
-        but we need to remove credentials from containers.
+        Called every 5 min by ``cleanup_service`` (#1616). For a key-auth
+        credential the Redis TTL governs only the *metadata* — expiring it does
+        nothing to the file, so this file-side removal is the ONLY thing that
+        revokes access on a running, preserved-volume agent.
+
+        Expiry is decided from the stored ``expires_at`` (the key's true
+        deadline), NOT from a Redis-TTL window. Because ``store_credential_metadata``
+        keeps the Redis row alive ``SSH_ACCESS_CLEANUP_GRACE_SECONDS`` past that
+        deadline, every expired key is observed by at least one sweep before Redis
+        forgets it — closing the ~80% cross-cycle miss the old ``ttl in [0,60]``
+        heuristic had against the 5-min cadence. Best-effort: a stopped/deleted
+        agent is a no-op (``remove_ssh_key`` tolerates a missing container).
 
         Returns:
             Number of credentials cleaned up
         """
-        # Note: This is a best-effort cleanup. Credentials might remain in containers
-        # if the container was stopped during the credential's lifetime.
-        # The main security guarantee comes from short TTLs.
-
         cleaned = 0
         pattern = f"{SSH_ACCESS_PREFIX}*"
+        now = datetime.now(timezone.utc)
 
-        # Get all credentials that are about to expire (within cleanup interval).
         # SCAN, not KEYS: the backend Redis ACL user is `-@dangerous`, which
         # blocks `KEYS` (#1616 — caught live: it raises NoPermissionError, which
         # would make this whole sweep fail-open to 0 every cycle and leave the
         # security fix inert). SCAN is allowed and is production-safe anyway.
         for redis_key in self.redis_client.scan_iter(match=pattern):
-            ttl = self.redis_client.ttl(redis_key)
+            try:
+                data = self.redis_client.get(redis_key)
+                if not data:
+                    continue
+                metadata = json.loads(data)
 
-            # If TTL is very low or negative, the credential is about to expire
-            # Clean it from the container proactively
-            if ttl is not None and 0 <= ttl <= 60:
-                try:
-                    data = self.redis_client.get(redis_key)
-                    if data:
-                        metadata = json.loads(data)
-                        agent_name = metadata.get("agent_name")
-                        auth_type = metadata.get("auth_type", "key")
-                        credential_id = metadata.get("credential_id") or metadata.get("comment")
+                expires_at = _parse_iso_utc(metadata.get("expires_at"))
+                if expires_at is not None:
+                    is_expired = now >= expires_at
+                else:
+                    # Legacy / malformed row with no parseable expires_at: fall
+                    # back to the old Redis-TTL heuristic so we never do WORSE
+                    # than before this fix for such a row.
+                    ttl = self.redis_client.ttl(redis_key)
+                    is_expired = ttl is not None and 0 <= ttl <= 60
 
-                        if agent_name and credential_id:
-                            if auth_type == "password":
-                                await self.clear_container_password(agent_name)
-                            else:
-                                await self.remove_ssh_key(agent_name, credential_id)
-                            cleaned += 1
-                except Exception as e:
-                    logger.warning(f"Error during credential cleanup for {redis_key}: {e}")
+                if not is_expired:
+                    continue
+
+                agent_name = metadata.get("agent_name")
+                auth_type = metadata.get("auth_type", "key")
+                credential_id = metadata.get("credential_id") or metadata.get("comment")
+                if not (agent_name and credential_id):
+                    continue
+
+                if auth_type == "password":
+                    removed = await self.clear_container_password(agent_name)
+                else:
+                    removed = await self.remove_ssh_key(agent_name, credential_id)
+
+                if removed:
+                    # Forget the metadata only AFTER the file line is gone, so a
+                    # transient removal failure retries on the next cycle (still
+                    # inside the grace window) instead of orphaning the file line.
+                    self.redis_client.delete(redis_key)
+                    cleaned += 1
+            except Exception as e:
+                logger.warning(f"Error during credential cleanup for {redis_key}: {e}")
 
         if cleaned > 0:
             logger.info(f"Cleaned up {cleaned} expired SSH credentials")

@@ -1210,16 +1210,21 @@ class CleanupService:
         — the code that removes the actual line from the file `sshd` reads —
         existed but had ZERO callers (`SSH_ACCESS_CLEANUP_INTERVAL` was unused),
         so on a preserved (never-recreated) volume an expired key lingered in
-        `authorized_keys` and still granted login after its stated expiry. Wiring
-        the sweep here makes file-side expiry actually happen.
+        `authorized_keys` and still granted login after its stated expiry. For a
+        key-auth credential the Redis TTL revokes nothing — only this file-side
+        removal does — so wiring the sweep is what actually enforces the TTL.
+
+        The sweep removes a key's line once its stored `expires_at` has passed;
+        `store_credential_metadata` keeps the Redis row alive
+        `SSH_ACCESS_CLEANUP_GRACE_SECONDS` past that deadline so every expired key
+        is observed by at least one 5-min cycle before Redis forgets it (the
+        earlier `ttl in [0,60]` heuristic missed ~80% of keys across the cadence).
 
         Best-effort and self-contained (#1026): owns its try/except, never
         raises to the cycle. `cleanup_expired_credentials` is itself fail-open
         per key (a Redis or `docker exec` error on one key is logged and
         skipped), and `remove_ssh_key` tolerates a missing container/file — so a
-        stopped or deleted agent is a no-op rather than an error. The short Redis
-        TTL remains the primary guarantee; this is the file-side enforcement that
-        makes the TTL real.
+        stopped or deleted agent is a no-op rather than an error.
         """
         try:
             from services.ssh_service import get_ssh_service

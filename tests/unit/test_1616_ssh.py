@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -262,16 +263,51 @@ def _load_with_redis(redis_client):
     return mod, svc
 
 
+def _iso(delta: timedelta) -> str:
+    """A stored-format expiry (`isoformat() + "Z"`) at now+delta, matching
+    exactly what store_credential_metadata writes."""
+    return (datetime.utcnow() + delta).isoformat() + "Z"
+
+
 @pytest.mark.asyncio
-async def test_cleanup_removes_near_expiry_key_from_file(tmp_path):
+async def test_cleanup_removes_expired_key_from_file(tmp_path):
     redis_client = Mock()
     redis_client.scan_iter.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
-    redis_client.ttl.return_value = 30  # within the 0..60 near-expiry window
     redis_client.get.return_value = json.dumps(
         {
             "agent_name": "agentA",
             "auth_type": "key",
             "credential_id": "trinity-ephemeral-agentA-1",
+            "expires_at": _iso(timedelta(minutes=-1)),  # already past its deadline
+        }
+    )
+
+    _, svc = _load_with_redis(redis_client)
+    svc.remove_ssh_key = AsyncMock(return_value=True)
+
+    cleaned = await svc.cleanup_expired_credentials()
+
+    assert cleaned == 1
+    svc.remove_ssh_key.assert_awaited_once_with("agentA", "trinity-ephemeral-agentA-1")
+    # Metadata is forgotten only AFTER the file line is removed.
+    redis_client.delete.assert_called_once_with("ssh_access:agentA:trinity-ephemeral-agentA-1")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_closes_cross_cycle_miss(tmp_path):
+    """The C1 regression guard: a key whose Redis TTL is far above the old
+    `[0,60]` window is STILL removed once its `expires_at` has passed — proving
+    the sweep is expiry-driven, not the ~20%-effective TTL heuristic (#1616).
+    Under the old code this key (ttl=250) was skipped and lingered forever."""
+    redis_client = Mock()
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
+    redis_client.ttl.return_value = 250  # well outside the retired 0..60 window
+    redis_client.get.return_value = json.dumps(
+        {
+            "agent_name": "agentA",
+            "auth_type": "key",
+            "credential_id": "trinity-ephemeral-agentA-1",
+            "expires_at": _iso(timedelta(seconds=-5)),  # expired 5s ago (still in grace)
         }
     )
 
@@ -285,12 +321,16 @@ async def test_cleanup_removes_near_expiry_key_from_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_leaves_live_key_untouched(tmp_path):
+async def test_cleanup_leaves_unexpired_key_untouched(tmp_path):
     redis_client = Mock()
     redis_client.scan_iter.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
-    redis_client.ttl.return_value = 3600  # far from expiry
     redis_client.get.return_value = json.dumps(
-        {"agent_name": "agentA", "auth_type": "key", "credential_id": "c1"}
+        {
+            "agent_name": "agentA",
+            "auth_type": "key",
+            "credential_id": "c1",
+            "expires_at": _iso(timedelta(hours=3)),  # still valid for hours
+        }
     )
 
     _, svc = _load_with_redis(redis_client)
@@ -300,13 +340,64 @@ async def test_cleanup_leaves_live_key_untouched(tmp_path):
 
     assert cleaned == 0
     svc.remove_ssh_key.assert_not_awaited()
+    redis_client.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_metadata_when_removal_fails(tmp_path):
+    """If remove_ssh_key reports failure the Redis row is NOT deleted, so the
+    expired key is retried next cycle (still within the grace window) rather than
+    orphaning the file line."""
+    redis_client = Mock()
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
+    redis_client.get.return_value = json.dumps(
+        {
+            "agent_name": "agentA",
+            "auth_type": "key",
+            "credential_id": "c1",
+            "expires_at": _iso(timedelta(minutes=-1)),
+        }
+    )
+
+    _, svc = _load_with_redis(redis_client)
+    svc.remove_ssh_key = AsyncMock(return_value=False)
+
+    cleaned = await svc.cleanup_expired_credentials()
+
+    assert cleaned == 0
+    svc.remove_ssh_key.assert_awaited_once()
+    redis_client.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_legacy_row_without_expires_at_falls_back_to_ttl(tmp_path):
+    """A pre-#1616 / malformed row with no parseable expires_at degrades to the
+    old Redis-TTL heuristic (never worse than before): ttl in [0,60] → removed,
+    a live ttl → left."""
+    redis_client = Mock()
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
+    redis_client.ttl.return_value = 30  # within the legacy near-expiry window
+    redis_client.get.return_value = json.dumps(
+        {"agent_name": "agentA", "auth_type": "key", "credential_id": "c1"}  # no expires_at
+    )
+
+    _, svc = _load_with_redis(redis_client)
+    svc.remove_ssh_key = AsyncMock(return_value=True)
+
+    assert await svc.cleanup_expired_credentials() == 1
+
+    # A legacy row still far from expiry is left alone.
+    redis_client.ttl.return_value = 3600
+    redis_client.delete.reset_mock()
+    svc.remove_ssh_key.reset_mock()
+    assert await svc.cleanup_expired_credentials() == 0
+    svc.remove_ssh_key.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_cleanup_is_fail_open_on_redis_error():
     redis_client = Mock()
     redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
-    redis_client.ttl.return_value = 10
     redis_client.get.side_effect = RuntimeError("redis down")
 
     _, svc = _load_with_redis(redis_client)
@@ -333,9 +424,13 @@ async def test_cleanup_uses_scan_not_keys():
     would make the whole sweep fail-open to 0 every cycle (#1616, caught live)."""
     redis_client = Mock()
     redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
-    redis_client.ttl.return_value = 30
     redis_client.get.return_value = json.dumps(
-        {"agent_name": "agentA", "auth_type": "key", "credential_id": "c1"}
+        {
+            "agent_name": "agentA",
+            "auth_type": "key",
+            "credential_id": "c1",
+            "expires_at": _iso(timedelta(minutes=-1)),
+        }
     )
     # Make KEYS blow up the way the real ACL does, so a regression to it fails loudly.
     redis_client.keys.side_effect = AssertionError("KEYS is blocked for the backend ACL user")
@@ -347,6 +442,40 @@ async def test_cleanup_uses_scan_not_keys():
     assert cleaned == 1
     redis_client.scan_iter.assert_called_once()
     redis_client.keys.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_store_metadata_ttl_carries_cleanup_grace(tmp_path):
+    """The Redis row outlives the key's TRUE expiry by the cleanup grace so an
+    expired key is observable by at least one 5-min sweep before Redis forgets it
+    — the mechanism that closes the cross-cycle miss (#1616). `expires_at` in the
+    stored blob stays the true deadline; only the setex TTL carries the grace."""
+    redis_client = Mock()
+    mod, svc = _load_with_redis(redis_client)
+    grace = mod.SSH_ACCESS_CLEANUP_GRACE_SECONDS
+
+    # The grace MUST exceed the 5-min cleanup cadence or an expired key can still
+    # slip through between two cycles (the whole point of the grace).
+    assert grace > 300
+
+    svc.store_credential_metadata(
+        agent_name="agentA",
+        credential_id="c1",
+        auth_type="key",
+        created_by="admin",
+        ttl_hours=4.0,
+        public_key="ssh-ed25519 AAAA c1",
+    )
+
+    redis_client.setex.assert_called_once()
+    args = redis_client.setex.call_args[0]
+    # setex TTL = true ttl (4h = 14400s) + grace.
+    assert args[1] == 14400 + grace
+    stored = json.loads(args[2])
+    # The stored expiry is the TRUE deadline (~4h out), NOT ttl+grace.
+    exp = datetime.fromisoformat(stored["expires_at"].replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    assert timedelta(hours=3, minutes=59) < (exp - now) < timedelta(hours=4, minutes=1)
 
 
 # ---------------------------------------------------------------------------
