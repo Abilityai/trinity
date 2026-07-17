@@ -1055,6 +1055,7 @@ TABLES = {
         CREATE TABLE IF NOT EXISTS operator_queue (
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
+            request_id TEXT,
             type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             priority TEXT NOT NULL DEFAULT 'medium',
@@ -1420,6 +1421,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_priority ON operator_queue(priority)",
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_type ON operator_queue(type)",
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_created ON operator_queue(created_at DESC)",
+    # #1631: agent-authored request ids only need per-agent uniqueness. The
+    # platform-minted `id` (uuid) is the global handle; `request_id` carries the
+    # agent's string, so two agents can reuse the same id without collision.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
 
     # Nevermined payment indexes (NVM-001)
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",

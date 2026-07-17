@@ -2373,8 +2373,9 @@ class DatabaseManager:
             agent_name, since_hours
         )
 
-    def mark_operator_queue_acknowledged(self, item_id):
-        return self._operator_queue_ops.mark_acknowledged(item_id)
+    def mark_operator_queue_acknowledged(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
     def mark_operator_queue_expired(self):
         return self._operator_queue_ops.mark_expired()
@@ -2385,8 +2386,9 @@ class DatabaseManager:
     def get_operator_queue_responded_for_agent(self, agent_name):
         return self._operator_queue_ops.get_responded_items_for_agent(agent_name)
 
-    def operator_queue_item_exists(self, item_id):
-        return self._operator_queue_ops.item_exists(item_id)
+    def operator_queue_item_exists(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.item_exists(agent_name, item_id)
 
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001
