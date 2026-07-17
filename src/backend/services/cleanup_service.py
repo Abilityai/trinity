@@ -255,6 +255,8 @@ class CleanupReport:
     execution_logs_pruned: int = 0
     execution_rows_pruned: int = 0
     health_checks_pruned: int = 0
+    # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
+    backlog_metadata_scrubbed: int = 0
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -284,6 +286,7 @@ class CleanupReport:
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
+                self.backlog_metadata_scrubbed +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned +
@@ -305,6 +308,7 @@ class CleanupReport:
             "shared_files_purged": self.shared_files_purged,
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
+            "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -731,6 +735,25 @@ class CleanupService:
                     )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
+
+        # #1449: scrub stale drain-replay PII (user_message/user_email/
+        # system_prompt) from backlog_metadata on authoritative-terminal rows.
+        # NOT gated on a retention window — it is a security invariant, not an
+        # operator knob (a fixed default avoids the #1638 floor-by-seed trap).
+        # Count-only logging — the blob carries PII and must never be logged.
+        try:
+            scrubbed = db.scrub_terminal_backlog_metadata(
+                chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+            )
+            report.backlog_metadata_scrubbed = scrubbed
+            if scrubbed > 0:
+                _log_prune(
+                    scrubbed,
+                    f"[Cleanup] Scrubbed backlog_metadata on {scrubbed} "
+                    f"terminal executions (#1449)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past
@@ -1205,6 +1228,7 @@ class CleanupService:
         """
         retention_total = (report.execution_logs_pruned
                            + report.execution_rows_pruned
+                           + report.backlog_metadata_scrubbed  # #1449
                            + report.health_checks_pruned
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
