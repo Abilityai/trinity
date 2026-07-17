@@ -47,49 +47,74 @@ class SshService:
             redis_url = REDIS_URL
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
 
-    async def inject_ssh_key(self, agent_name: str, public_key: str) -> bool:
+    async def inject_ssh_key(
+        self, agent_name: str, public_key: str, skip_if_present: bool = True
+    ) -> bool:
         """
         Inject SSH public key into agent's authorized_keys file.
 
         Args:
             agent_name: Name of the agent
             public_key: Full public key line (including comment)
+            skip_if_present: When True (default), the key is appended only if the
+                exact line is not already present — idempotent, so a repeat inject
+                (or a retried on-demand request) never duplicates a line. When
+                False, the key is always appended.
 
         Returns:
             True if successful, False otherwise
+
+        Security (#1616): the public key is passed to the container via the
+        exec ``environment`` — it is NEVER interpolated into the command string.
+        The old ``sh -c 'printf ... '<key>' ...'`` form was run through TWO
+        unquoting layers (docker-py ``shlex.split``s a string ``cmd`` before the
+        container's ``sh -c`` re-parses it), so a single quote in the key raised
+        ``ValueError`` and a ``$(...)``/backtick opened an in-container command-
+        substitution. Passing the value as an environment entry (raw, no shell
+        parsing) closes that class entirely; the whole operation is one atomic
+        ``sh -c`` script whose text carries no caller data.
         """
         container = get_agent_container(agent_name)
         if not container:
             logger.error(f"Container not found for agent: {agent_name}")
             return False
 
-        try:
-            # Ensure .ssh directory exists with correct permissions
-            await container_exec_run(
-                container,
-                'sh -c "mkdir -p /home/developer/.ssh && chmod 700 /home/developer/.ssh"',
-                user="developer"
+        if skip_if_present:
+            # grep -qxF: whole-line (-x), fixed-string (-F), quiet (-q); `--`
+            # ends option parsing. Matches the exact injected line so a repeat
+            # inject is a no-op rather than a duplicate.
+            append_block = (
+                'if ! grep -qxF -- "$TRINITY_SSH_KEY" "$f"; then\n'
+                "  printf '%s\\n' \"$TRINITY_SSH_KEY\" >> \"$f\"\n"
+                'fi'
             )
+        else:
+            append_block = "printf '%s\\n' \"$TRINITY_SSH_KEY\" >> \"$f\""
 
-            # Append public key to authorized_keys (escape the key for shell)
-            # Use printf to handle potential special characters
-            escaped_key = public_key.replace("'", "'\"'\"'")
+        # Static script — no caller data is interpolated. The key flows in via
+        # the container environment only (see docstring).
+        script = (
+            "set -e\n"
+            "d=/home/developer/.ssh\n"
+            'f="$d/authorized_keys"\n'
+            'mkdir -p "$d"\n'
+            'chmod 700 "$d"\n'
+            'touch "$f"\n'
+            f"{append_block}\n"
+            'chmod 600 "$f"\n'
+        )
+
+        try:
             result = await container_exec_run(
                 container,
-                f"sh -c 'printf \"%s\\n\" '\"'{escaped_key}'\"' >> /home/developer/.ssh/authorized_keys'",
-                user="developer"
+                ["sh", "-c", script],
+                user="developer",
+                environment={"TRINITY_SSH_KEY": public_key},
             )
 
             if result.exit_code != 0:
-                logger.error(f"Failed to append key: {result.output}")
+                logger.error(f"Failed to inject SSH key: {result.output}")
                 return False
-
-            # Set correct permissions on authorized_keys
-            await container_exec_run(
-                container,
-                'chmod 600 /home/developer/.ssh/authorized_keys',
-                user="developer"
-            )
 
             logger.info(f"Injected SSH key into agent {agent_name}")
             return True
@@ -150,10 +175,26 @@ class SshService:
 
         Args:
             agent_name: Name of the agent
-            comment: The key comment to search for and remove
+            comment: The key comment to search for and remove. Trinity injects a
+                single-token comment (``trinity-ephemeral-{agent}-{ts}``) as the
+                key line's LAST whitespace-delimited field, so an exact last-field
+                match targets precisely that line.
 
         Returns:
             True if successful, False otherwise
+
+        Security (#1616): this is now load-bearing for the expired-key cleanup
+        sweep, so it must never over-delete or be injectable. The comment is
+        passed to the container via the exec ``environment`` and read by awk
+        through ``ENVIRON`` — it is NEVER interpolated into the command string
+        (which docker-py would ``shlex.split`` before the container ``sh -c``
+        re-parsed it) and never compiled into a regex. awk compares the raw
+        comment to each line's last field (``$NF``) by exact string equality:
+        no metacharacter escaping is needed, and a crafted comment (containing
+        ``/`` ``.`` ``[`` ``*`` ``\\`` a quote or a newline) can neither match a
+        neighbouring key nor run a shell. The old ``sed -i '/{comment}/d'`` did a
+        substring match with partial escaping — it could delete an unrelated key
+        whose line merely contained the comment as a substring.
         """
         container = get_agent_container(agent_name)
         if not container:
@@ -161,19 +202,36 @@ class SshService:
             logger.info(f"Container not found for agent {agent_name} during key cleanup")
             return True
 
+        # Static script — the comment flows in via the container environment
+        # only. Writes to a temp file first and only swaps it in if awk
+        # succeeds, so a mid-rewrite failure never truncates authorized_keys.
+        # chmod 600 after the swap restores the perms `mv` would otherwise carry
+        # over from the umask-created temp file (sshd StrictModes).
+        script = (
+            "f=/home/developer/.ssh/authorized_keys\n"
+            '[ -f "$f" ] || exit 0\n'
+            't="$f.trinity-remove.$$"\n'
+            'if awk \'BEGIN { c = ENVIRON["TRINITY_SSH_COMMENT"] } $NF != c\' '
+            '"$f" > "$t"; then\n'
+            '  mv "$t" "$f" && chmod 600 "$f"\n'
+            "else\n"
+            '  rm -f "$t"\n'
+            "  exit 1\n"
+            "fi\n"
+        )
+
         try:
-            # Use sed to remove lines containing the comment
-            # Escape special characters in comment for sed
-            escaped_comment = comment.replace("/", "\\/").replace(".", "\\.")
             result = await container_exec_run(
                 container,
-                f"sed -i '/{escaped_comment}/d' /home/developer/.ssh/authorized_keys",
-                user="developer"
+                ["sh", "-c", script],
+                user="developer",
+                environment={"TRINITY_SSH_COMMENT": comment},
             )
 
             if result.exit_code != 0:
-                logger.warning(f"sed command returned non-zero: {result.output}")
-                # File might not exist, which is fine
+                logger.warning(f"SSH key removal returned non-zero: {result.output}")
+                # Best-effort: the file may be absent or awk unavailable — the
+                # short Redis TTL is the primary expiry guarantee.
 
             logger.info(f"Removed SSH key '{comment}' from agent {agent_name}")
             return True
