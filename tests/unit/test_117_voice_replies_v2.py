@@ -98,11 +98,11 @@ def _make_app():
 
 
 def _admin():
-    return types.SimpleNamespace(id=1, username="admin", role="admin", agent_name=None)
+    return types.SimpleNamespace(id=1, username="admin", role="admin", agent_name=None, connector_agent=None)
 
 
 def _user():
-    return types.SimpleNamespace(id=2, username="bob", role="user", agent_name=None)
+    return types.SimpleNamespace(id=2, username="bob", role="user", agent_name=None, connector_agent=None)
 
 
 def test_elevenlabs_get_admin_never_echoes_key():
