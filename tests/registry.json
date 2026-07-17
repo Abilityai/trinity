@@ -1575,6 +1575,17 @@
         "database"
       ],
       "description": "A2AExposureMixin (ent#157) OSS a2a_exposed primitive: default-false (no row / unset column), set/get round-trip, per-agent isolation, missing-agent set\u2192False, deleted_at guard (soft-deleted agent never flipped/read exposed), get_a2a_exposed_agents live-only listing. sqlite3 + SQLAlchemy engine at one temp file."
+    },
+    {
+      "file": "unit/test_180_a2a_exposed_skills.py",
+      "feature": "ent#180",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "a2a",
+        "unit"
+      ],
+      "description": "A2A exposed-skills filter (ent#180): the open-core seam that narrows a card's skills[] to what an agent may advertise. OSS-unchanged by construction (no provider \u2192 identity, same list object); None = no opinion = advertise all (the unconfigured default, so an exposed agent's card is byte-identical across upgrade) vs [] = explicit advertise-nothing; stale/unknown stored ids are inert (the selection only subtracts, the template stays the source of truth); fail-open on provider error AND on a malformed return (a str would otherwise iterate to chars and silently empty the card \u2014 fail-closed, invisible); both card surfaces filter via one router helper (structural guard against a route rebuilding an unfiltered card). Disclosure control only \u2014 message/send dispatches free-form text, so this never narrows what a caller may ask for."
     }
   ]
 }

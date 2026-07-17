@@ -148,6 +148,49 @@
 - **UI counterpart**: `components/A2aPanel.vue` on the agent's Sharing
   tab.
 
+### 32.4 A2A Exposed-Skills Filter (ent#180)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#180
+- **Description**: Let an operator choose which of an agent's skills its
+  A2A card advertises. §32.1 maps every `template.yaml capabilities[]`
+  tag into the card's `skills[]` with no filter, and §32.2's discovery
+  route is unauthenticated — so today an exposed agent's full capability
+  list is world-readable. This narrows what the outside is told.
+- **FR-1 — Disclosure control, NOT an invocation boundary**: the card's
+  `skills[]` is advertisement. Inbound `message/send` dispatches
+  free-form text via `execute_task(triggered_by="a2a")`; there is no
+  per-skill routing, so filtering changes what an orchestrator **sees**,
+  never what it may **ask for**. Documented in these words on the config
+  surface too — a filter that operators mistake for an invocation gate is
+  a control that looks like security and is not. Constraining what an
+  external caller can actually reach is a separate concern (the
+  `allowed_tools`/guardrails primitives) and is deliberately out of scope.
+- **FR-2 — Default is unchanged behaviour**: no configuration ⇒ advertise
+  every capability, exactly as §32.1 does today. Exposure is already an
+  explicit opt-in (§32.2 FR-1), so an exposed agent's card stays
+  byte-identical across the upgrade. A stored **empty list** is distinct
+  from *no configuration*: it means "advertise nothing", an explicit
+  operator choice, not a default.
+- **FR-3 — Both card surfaces agree**: the filter applies to the public
+  well-known card and the authenticated per-agent card alike. Two
+  surfaces answering "what does this agent do?" differently is a bug —
+  the owner's management view of what is *available to select* comes from
+  the config surface, not from the card.
+- **FR-4 — Stale tags are inert**: a stored selection naming a capability
+  the template no longer declares is ignored, never advertised. The
+  config outlives any given `template.yaml`, so the template stays the
+  source of truth for what exists; the selection only ever subtracts.
+- **FR-5 — Filter seam (open-core)**: extends the §32.2 FR-7 seam
+  (`services/a2a_gate.py`) rather than adding a module — a registered
+  provider answers "which skills may this agent advertise?"; OSS
+  registers none, so the card is unfiltered and OSS behaviour is
+  unchanged by construction. Consistent with FR-2, a provider error
+  **fails open** (advertise all) and logs at WARNING: the seam's
+  availability bias, and the honest trade for a control that is
+  explicitly not a security boundary — failing closed would silently
+  empty a card and break discovery invisibly.
+- **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md`
+
 ---
 
 ## 45. Per-Agent MCP Exposure — Dedicated Dynamic Tools (#846)

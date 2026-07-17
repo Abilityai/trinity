@@ -129,6 +129,32 @@ async def _fetch_template_data(agent_name: str, container) -> dict:
     return label_fallback
 
 
+def _card_with_exposed_skills(
+    agent_name: str,
+    template_data: dict,
+    base_url: str,
+) -> dict:
+    """Build the card, then narrow `skills[]` to what this agent may advertise.
+
+    ent#180. THE single place a card is produced: both the authenticated
+    per-agent card (#737) and the public well-known card (ent#157) go through
+    here, so the two surfaces can never answer "what does this agent do?"
+    differently (requirements §32.4 FR-3) and a future third surface gets the
+    filter by default rather than by remembering.
+
+    `generate_a2a_card` stays pure (no I/O) — the provider lookup lives here.
+    OSS builds register no provider, so this is the identity function and the
+    card is byte-identical to before ent#180.
+    """
+    card = generate_a2a_card(
+        agent_name=agent_name,
+        template_data=template_data,
+        base_url=base_url,
+    )
+    card["skills"] = a2a_gate.filter_exposed_skills(agent_name, card.get("skills") or [])
+    return card
+
+
 @router.get("/{agent_name}/a2a/agent-card")
 async def get_agent_card(
     agent_name: AuthorizedAgentByName,
@@ -156,7 +182,7 @@ async def get_agent_card(
 
     template_data = await _fetch_template_data(agent_name, container)
     base_url = _base_url_from_request(request)
-    card = generate_a2a_card(
+    card = _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
         base_url=base_url,
@@ -297,7 +323,7 @@ async def _serve_card(agent_name: str, request: Request) -> Optional[Dict[str, A
     if not container:
         return None
     template_data = await _fetch_template_data(agent_name, container)
-    return generate_a2a_card(
+    return _card_with_exposed_skills(
         agent_name=agent_name,
         template_data=template_data,
         base_url=_base_url_from_request(request),
