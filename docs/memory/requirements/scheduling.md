@@ -331,6 +331,25 @@
   - Pinia store with 30s polling + `agent_activity` WebSocket refresh guard
 - **Flow**: `docs/memory/feature-flows/executions-dashboard.md`
 
+### 10.13 Pull-Mode Re-Delivery Cap & Async Operator Human-Gate (#1402)
+- **Status**: ✅ Implemented — cap/park mechanism shipped 2026-07-12 (#1550, Phase 3); async-contract surface shipped 2026-07-15 (#1402)
+- **GitHub Issue**: #1402 (sub of #1081); companion #1401 (recovery trace); pull-path prompt delivery was #1629 (fixed in #1633, merged to dev — see below)
+- **Description**: Under pull/work-stealing (#1081), lease-expiry re-delivery re-runs failed turns. Two cases must escalate to a human instead of looping: a **poison task** that fails every re-delivery, and an **irreversible-and-un-confineable effect** the platform cannot make safe (agent's own keys / `gh` / `curl` — no confined Trinity tool in the path). Both land in the **asynchronous operator queue** (OPS-001). There are **no synchronous user gates**: a turn that needs a human parks a request and ENDS — it never holds a worker waiting on a person.
+- **Re-delivery cap (mechanism — shipped Phase 3)**:
+  - `schedule_executions.redelivery_count` + fleet-wide `MAX_REDELIVERY` (env, default 3); distinct from #678's `retry_count` (reader-race auto-retry).
+  - Under the cap the lease reaper re-queues the SAME row (`execution_id` preserved — effect_guard #1084 and idempotency #525 are execution_id-scoped); at the cap it poison-parks: operator alert FIRST (idempotent `poison-{execution_id}` item), then CAS-FAILs the row (`poison_lease` tag) — never silently dropped.
+  - **Counter semantics: raw attempts, NO reset-on-progress.** Partial progress is invisible to the platform (the #548/#333 trace-fidelity gap), and resetting on apparent progress would let an intermittently-progressing poison task loop forever. Re-litigating requires new trace-fidelity evidence, not a config change.
+  - Per-agent cap override: **deferred** (seam documented in `lease_reaper_service.get_max_redelivery`). Design note: a per-agent cap of 0 is the only *deterministic platform-side* park-first lever for effect-bearing pilot agents — every lease expiry escalates straight to a human (tradeoff: every transient crash becomes an operator interrupt). Record kept so the future pilot decision isn't re-derived.
+- **Async human-gate contract (AUTHORED CONTRACT, NOT ENFORCEMENT)**: the platform cannot intercept un-confineable effects by definition; the lever is the contract surfaced to agents in the platform system prompt (`platform_prompt_service.PLATFORM_INSTRUCTIONS` → Operator Communication) and `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`:
+  - **Fire-and-park, never block-and-wait**: park the request → end the turn → process `responded` items at the start of a later turn. Task-mode guidance (`_mode_guidance`) carries an explicit carve-out so "execute to completion, don't ask questions" doesn't contradict parking.
+  - **Ask before irreversible actions**: payments, messages/emails through the agent's own credentials, public posts, destructive deletions — park an `approval` first when uncertain; do reversible parts first, gate only the irreversible step.
+  - **Collision-safe request ids**: derived from the current execution id (`approval-{execution_id}-{slug}`) — `operator_queue.id` is a global PK with `on_conflict_do_nothing`, so date-serial ids collide cross-agent and are silently swallowed; execution-id derivation also makes re-parks under re-delivery idempotent. Follow-up: scope uniqueness to `(agent_name, id)` (#1631).
+  - **No-next-turn limitation (documented, not solved)**: responses are written back to the agent's queue file within ~5s but are processed only at a future turn; an agent with no schedule/heartbeat must include resume instructions in the request. The respond→re-trigger dispatch path is a deferred follow-up (#1630). Recommended `expires_at`; an `expired` flip means "not approved — do not proceed".
+  - The gate is **honor-system** — a compliance/recovery contract and audit trail, not a security boundary (the agent writes and reads its own queue file). Rails needing a hard guarantee use confined Trinity-owned tools (#1408) or stay human-operated.
+- **Still blocking pull default-on for effect-bearing agents** (closing #1402 does NOT green-light it): trace fidelity #548/#333; #1401 `prior_trace` injection (claim-response field reserved, unwired); fail-closed `execution_id` injection (§10.10.1 gate); operator-queue flooding caps (#1632 — the approval channel has no rate limit or size caps).
+- **No longer blocking**: pull-path platform-prompt delivery + re-delivery banner — #1629, fixed by #1633 (`services/pull_coordination_service.py` composes the platform prompt on the claim path, fail-open). The issue stays open until the next release cut per the SDLC; the code is on dev, so pull-claimed turns DO receive this contract.
+- **Flow**: `docs/memory/feature-flows/operating-room.md` (queue protocol + poison-park); `docs/memory/feature-flows/cleanup-service.md` (reaper scheduling)
+
 ---
 
 ## 34. Agent-Defined Pipelines (#919)
