@@ -919,6 +919,7 @@ operator_queue = Table(
     metadata,
     Column("id", Text, primary_key=True),
     Column("agent_name", Text),
+    Column("request_id", Text),  # #1631 — agent-authored id (UNIQUE per agent)
     Column("type", Text),
     Column("status", Text),
     Column("priority", Text),

@@ -335,7 +335,7 @@ Services that run continuously in the backend process:
 | Service | Module | Description |
 |---------|--------|-------------|
 | **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps, the **expired-SSH sweep** (`_sweep_expired_ssh_credentials` → `SshService.cleanup_expired_credentials` — removes an expired ephemeral key's line from the container `authorized_keys` sshd reads; TTL was previously enforced only on Redis metadata, #1616), and the #740 startup orphan-loop hook — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772). Runs the additive **lease-reaper** (`lease_reaper_service`) each cycle — re-queues (preserving `execution_id`) or poison-parks expired pull leases (#1081 Phase 3, #429/#1402; inert until an agent is piloted) |
-| **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back (OPS-001) |
+| **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back (OPS-001). The item `id` is a platform-minted uuid; the agent's correlation string is `request_id` with `(agent_name, request_id)` uniqueness, so all sync reads/writes (exists, acknowledge, response write-back) are agent-scoped and two agents can't collide (#1631) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s — see [Git Sync Health](#git-sync-health-389390) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval (30s default); authoritative for aggregate status. **Lifespan-resumed (#1121):** boot reads the persisted `monitoring_config` (staggered +12s) and starts the loop only when `enabled` — the flag is the single source of truth, **defaults OFF**, persisted by `enable`/`disable`/`PUT /config` (which also reconcile the running loop) so the choice survives restarts; `*_check_interval` rejects non-positive values (422), loop clamps sleep ≥1s (MON-001). **Cross-worker leader lock (#1464):** the loop runs in every uvicorn worker but only the holder of the Redis `monitoring:leader` lease (SET NX, TTL 3×interval, own-lease-only refresh; fail-open to leader when Redis is down) performs each probe cycle, so `--workers 2` no longer double-probes the fleet or double-feeds the circuit breaker; leadership fails over automatically when the holder dies |
 | **Heartbeat Watch Loop** | `heartbeat_service.py` | 5s loop acting on missed agent heartbeats — see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307) |
@@ -1658,8 +1658,9 @@ CREATE INDEX idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id);
 **operator_queue** (OPS-001):
 ```sql
 CREATE TABLE operator_queue (
-    id TEXT PRIMARY KEY,
+    id TEXT PRIMARY KEY,               -- #1631: platform-minted uuid4().hex (global row handle)
     agent_name TEXT NOT NULL,
+    request_id TEXT,                   -- #1631: agent-authored correlation string; UNIQUE(agent_name, request_id)
     type TEXT NOT NULL,                -- approval, question, alert
     status TEXT NOT NULL DEFAULT 'pending', -- pending, responded, acknowledged, expired, cancelled
     priority TEXT NOT NULL DEFAULT 'medium', -- critical, high, medium, low
@@ -1684,6 +1685,8 @@ CREATE INDEX idx_operator_queue_status ON operator_queue(status);
 CREATE INDEX idx_operator_queue_priority ON operator_queue(priority);
 CREATE INDEX idx_operator_queue_type ON operator_queue(type);
 CREATE INDEX idx_operator_queue_created ON operator_queue(created_at DESC);
+-- #1631: per-agent uniqueness on the agent-authored correlation string
+CREATE UNIQUE INDEX idx_operator_queue_agent_request ON operator_queue(agent_name, request_id);
 ```
 
 **agent_sync_state** (#389 — see [Git Sync Health](#git-sync-health-389390)):

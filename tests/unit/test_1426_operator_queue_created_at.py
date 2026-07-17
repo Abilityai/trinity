@@ -59,12 +59,15 @@ def test_missing_created_at_is_defaulted_not_raised():
     item = _make_item()
     del item["created_at"]
 
-    # Must NOT raise (pre-fix: KeyError('created_at')).
-    db.create_operator_queue_item("agent-x", item)
+    # Must NOT raise (pre-fix: KeyError('created_at')). #1631: create_item
+    # returns the platform-minted uuid `id`; the agent's authored string is kept
+    # as request_id, so look the row up by the returned id.
+    row_id = db.create_operator_queue_item("agent-x", item)
 
-    row = db.get_operator_queue_item(item["id"])
+    row = db.get_operator_queue_item(row_id)
     assert row is not None, "item should have been created"
     assert row.get("created_at"), "created_at should be defaulted to a non-empty value"
+    assert row["request_id"] == item["id"], "agent's authored id preserved as request_id"
 
 
 def test_missing_title_and_question_are_defaulted():
@@ -73,9 +76,9 @@ def test_missing_title_and_question_are_defaulted():
     del item["title"]
     del item["question"]
 
-    db.create_operator_queue_item("agent-x", item)
+    row_id = db.create_operator_queue_item("agent-x", item)
 
-    row = db.get_operator_queue_item(item["id"])
+    row = db.get_operator_queue_item(row_id)
     assert row is not None
     assert row.get("title"), "title should be defaulted"
     assert row.get("question"), "question should be defaulted"
@@ -84,9 +87,9 @@ def test_missing_title_and_question_are_defaulted():
 def test_present_fields_are_preserved():
     """Defaulting must not clobber a well-formed item."""
     item = _make_item()
-    db.create_operator_queue_item("agent-x", item)
+    row_id = db.create_operator_queue_item("agent-x", item)
 
-    row = db.get_operator_queue_item(item["id"])
+    row = db.get_operator_queue_item(row_id)
     assert row["created_at"] == "2026-07-02T16:00:00Z"
     assert row["title"] == "Approve reward payout"
     assert row["question"] == "Release 500 USDC?"

@@ -13,6 +13,7 @@ unchanged.
 """
 
 import json
+import uuid
 from typing import Optional, List, Dict, Set
 from datetime import datetime
 
@@ -32,6 +33,7 @@ class OperatorQueueOperations:
         return {
             "id": row["id"],
             "agent_name": row["agent_name"],
+            "request_id": row["request_id"],  # #1631 — agent-authored id
             "type": row["type"],
             "status": row["status"],
             "priority": row["priority"],
@@ -55,6 +57,7 @@ class OperatorQueueOperations:
     _SELECT_COLS = (
         operator_queue.c.id,
         operator_queue.c.agent_name,
+        operator_queue.c.request_id,  # #1631 — agent-authored id
         operator_queue.c.type,
         operator_queue.c.status,
         operator_queue.c.priority,
@@ -82,17 +85,28 @@ class OperatorQueueOperations:
             item: Queue item data from agent's operator-queue.json
 
         Returns:
-            The item ID
+            The item ID (the platform-minted uuid of the row that actually
+            exists — on conflict that is the pre-existing row, NOT the uuid this
+            call minted).
         """
         # #1525: `id` was the last hard-indexed field. The sync loop guards on a
         # truthy id before calling, but keep the DB boundary self-defensive so an
         # id-less item can never KeyError-hot-loop here (raise a clear ValueError
         # the caller quarantines, rather than an opaque KeyError).
-        item_id = item.get("id")
-        if not item_id:
+        request_id = item.get("id")
+        if not request_id:
             raise ValueError("operator-queue item is missing a required 'id'")
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
+
+        # #1631: the agent's id served both the platform's global row handle AND
+        # the agent's private correlation key — so two agents choosing the same
+        # id collided on the PK and the second item was silently dropped. Split
+        # them: `id` is a platform-minted uuid (globally unique by construction),
+        # the agent's string lives in `request_id`, and uniqueness is scoped per
+        # agent via the (agent_name, request_id) index. The conflict target moves
+        # off `id` to that index, so a same-agent re-insert stays idempotent.
+        new_id = uuid.uuid4().hex
 
         # Agents author operator-queue.json free-form, so the sync boundary must
         # be defensive (#1426): a required field missing from one item used to
@@ -103,8 +117,9 @@ class OperatorQueueOperations:
         # created once and the loop stops (the next cycle sees it via exists()).
         # `created_at` defaults to now (ingest time) per the issue's preferred fix.
         stmt = make_insert(operator_queue).values(
-            id=item_id,
+            id=new_id,
             agent_name=agent_name,
+            request_id=request_id,
             type=item.get("type", "question"),
             status=item.get("status", "pending"),
             priority=item.get("priority", "medium"),
@@ -115,11 +130,23 @@ class OperatorQueueOperations:
             execution_id=item.get("context", {}).get("execution_id") if item.get("context") else None,
             created_at=item.get("created_at") or utc_now_iso(),
             expires_at=item.get("expires_at"),
-        ).on_conflict_do_nothing(index_elements=["id"])
+        ).on_conflict_do_nothing(index_elements=["agent_name", "request_id"])
 
+        # Insert + re-read in one transaction: on conflict the insert is a no-op
+        # and the surviving row carries a DIFFERENT uuid, so to honour the
+        # documented contract (return the id of the row that exists) the return
+        # must be that row's id, not the `new_id` this call minted and discarded.
         with get_engine().begin() as conn:
             conn.execute(stmt)
-        return item_id
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+        return row[0] if row else new_id
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -411,21 +438,44 @@ class OperatorQueueOperations:
             )
             return result.rowcount
 
-    def mark_acknowledged(self, item_id: str) -> bool:
-        """Mark an item as acknowledged by the agent."""
+    def mark_acknowledged(self, agent_name: str, request_id: str) -> Optional[str]:
+        """Mark an item as acknowledged by the agent.
+
+        #1631: scoped to (agent_name, request_id) — the agent's file carries its
+        own `request_id`, not the platform uuid `id`. Matching on `request_id`
+        alone would let agent B's acknowledgement flip agent A's identically-id'd
+        row (a real cross-agent write bug), so the agent_name must be part of the
+        predicate.
+
+        Returns the acknowledged row's platform uuid `id` (or None if no
+        `responded` row matched) — the WS `operator_queue_acknowledged` event and
+        the frontend store both key items by that uuid, so the caller must
+        broadcast it, not the agent's `request_id`.
+        """
         now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)
                 .where(
                     and_(
-                        operator_queue.c.id == item_id,
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
                         operator_queue.c.status == "responded",
                     )
                 )
                 .values(status="acknowledged", acknowledged_at=now)
             )
-            return result.rowcount > 0
+            if result.rowcount == 0:
+                return None
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+            return row[0] if row else None
 
     def mark_expired(self) -> int:
         """Mark pending items past their expires_at as expired.
@@ -546,12 +596,6 @@ class OperatorQueueOperations:
             "responded_today": responded_today,
         }
 
-    def get_pending_item_ids(self) -> List[str]:
-        """Get IDs of all pending items (for sync service to check)."""
-        stmt = select(operator_queue.c.id).where(operator_queue.c.status == "pending")
-        with get_engine().connect() as conn:
-            return [row[0] for row in conn.execute(stmt).all()]
-
     def get_responded_items_for_agent(self, agent_name: str) -> List[Dict]:
         """Get responded (not yet acknowledged) items for a specific agent.
 
@@ -590,8 +634,19 @@ class OperatorQueueOperations:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_item(row) for row in rows]
 
-    def item_exists(self, item_id: str) -> bool:
-        """Check if an item exists in the database."""
-        stmt = select(operator_queue.c.id).where(operator_queue.c.id == item_id)
+    def item_exists(self, agent_name: str, item_id: str) -> bool:
+        """Check whether this agent already created an item for a request id.
+
+        #1631: scoped to (agent_name, request_id). The old id-only check was the
+        collision bug — agent A's id read as "exists" for agent B, so B's item
+        (a distinct request) was never created. `item_id` here is the agent's
+        `request_id`, not the platform uuid `id`.
+        """
+        stmt = select(operator_queue.c.id).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == item_id,
+            )
+        )
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None

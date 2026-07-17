@@ -63,7 +63,7 @@
             </svg>
             Expires {{ formatDate(item.expires_at) }}
           </span>
-          <span class="text-gray-400 dark:text-gray-600">{{ item.id }}</span>
+          <span class="text-gray-400 dark:text-gray-600">{{ item.request_id || item.id }}</span>
         </div>
       </div>
 
