@@ -29,6 +29,11 @@ from services.cleanup_service import CleanupService, CleanupReport
 # the running code looks up.
 _CS = sys.modules[CleanupService.__module__]
 
+# #1644: the blast-radius guard is a separate module with its OWN
+# `from database import db` binding, so patching `_CS.db` does not reach it —
+# the guard would read the real database mid-test. Patch both to the same mock.
+import services.retention_guard as _RG  # noqa: E402
+
 
 def _make_service():
     """A CleanupService with the HTTP-bearing methods stubbed out."""
@@ -44,6 +49,11 @@ def _setting_side_effect(key, default=None):
         return "180"
     if key == "schedule_soft_delete_retention_days":
         return "30"
+    # #1644: the agent purge is floored at 0 (every candidate destroys Docker
+    # volumes, #1581), so the happy path only reaches `purge_agent_ownership`
+    # with an acknowledgement on file. The ack is bound to the window in force.
+    if key == "retention_ack_agent_soft_delete_retention_days":
+        return "180"
     return default
 
 
@@ -67,6 +77,21 @@ def _configure_db(db):
     db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
     db.find_expired_leases.return_value = []  # #1081 Phase 3 lease reaper — inert by default
     db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
+    # #1644 blast-radius guard: every destructive sweep now counts its candidate
+    # set before pruning and REFUSES if it's over threshold. These must be real
+    # ints — the guard is fail-closed, so a bare MagicMock (uncomparable to int)
+    # correctly aborts the prune, which is what this suite would otherwise see.
+    # Small values keep the happy path under the guard's threshold.
+    db.count_execution_log_candidates.return_value = 5
+    db.count_execution_row_candidates.return_value = 6
+    db.count_health_check_candidates.return_value = 7
+    db.count_agent_reports_candidates.return_value = 3
+    db.count_operator_queue_terminal_candidates.return_value = 8
+    db.count_soft_deleted_schedules_past_retention.return_value = 2
+    # FLOOR_AGENTS is 0 (any volume destruction is acked), so the agent sweep is
+    # only allowed through here because an ack is present — see the guard's
+    # get_setting_value side effect below.
+    db.count_soft_deleted_agents_past_retention.return_value = 1
 
 
 def _run(svc):
@@ -78,6 +103,7 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     capacity = MagicMock()
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
+         patch.object(_RG, "db", new=db), \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
          patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
          patch.object(_CS, "_wal_checkpoint_truncate") as wal:

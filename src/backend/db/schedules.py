@@ -31,6 +31,60 @@ from utils.helpers import iso_cutoff, utc_now_iso, to_utc_iso, parse_iso_timesta
 
 logger = logging.getLogger(__name__)
 
+# #772 terminal set, shared by the retention prunes and their #1644 counts.
+_RETENTION_TERMINAL = ("success", "failed", "cancelled", "skipped")
+
+
+def _execution_log_prune_predicate(cutoff: str):
+    """WHERE clause for the #772 `execution_log` null-out sweep.
+
+    #1644: extracted so `prune_execution_logs` and `count_execution_log_candidates`
+    are the SAME predicate by construction. A hand-mirrored copy in the guard would
+    silently drift the first time either side is edited — and a guard that counts a
+    different set than the prune deletes is worse than no guard, because it reports
+    a blast radius that isn't the one about to happen.
+    """
+    return and_(
+        schedule_executions.c.status.in_(_RETENTION_TERMINAL),
+        schedule_executions.c.completed_at.isnot(None),
+        schedule_executions.c.completed_at < cutoff,
+        schedule_executions.c.execution_log.isnot(None),
+    )
+
+
+def _execution_row_prune_predicate(cutoff: str):
+    """WHERE clause for the #772 terminal-row DELETE sweep (see #1644 note above).
+
+    This is the accessor that destroyed 95.7% of a production instance's history
+    in #1638 — the highest-value predicate in the file to keep in one place.
+    """
+    return and_(
+        schedule_executions.c.status.in_(_RETENTION_TERMINAL),
+        schedule_executions.c.completed_at.isnot(None),
+        schedule_executions.c.completed_at < cutoff,
+    )
+
+
+def _soft_deleted_schedules_predicate(cutoff: str):
+    """WHERE clause for the #834 Phase 1b soft-deleted schedule purge (#1644)."""
+    return and_(
+        agent_schedules.c.deleted_at.isnot(None),
+        agent_schedules.c.deleted_at < cutoff,
+    )
+
+
+def _bounded_count(conn, table_col, predicate, limit: int) -> int:
+    """COUNT the candidate set, stopping at `limit` (#1644).
+
+    The guard only ever asks "is this more than N?", so an exact COUNT over a
+    million-row backlog is wasted work on a loop that runs every 5 minutes. The
+    LIMIT subquery makes this O(limit) instead of O(candidates) while still
+    answering the only question asked. Callers pass `threshold + 1` so a return
+    value of exactly `limit` means "at least limit" — which is all the > test needs.
+    """
+    inner = select(table_col).where(predicate).limit(limit).subquery()
+    return int(conn.execute(select(func.count()).select_from(inner)).scalar() or 0)
+
 
 def _norm_ts(value: Optional[str]) -> Optional[str]:
     """Normalize a stored ISO timestamp to UTC with an explicit 'Z' suffix (#1474).
@@ -750,12 +804,7 @@ class ScheduleOperations:
         cutoff = iso_cutoff(hours=retention_days * 24)
         stmt = (
             select(agent_schedules.c.id)
-            .where(
-                and_(
-                    agent_schedules.c.deleted_at.isnot(None),
-                    agent_schedules.c.deleted_at < cutoff,
-                )
-            )
+            .where(_soft_deleted_schedules_predicate(cutoff))
             .limit(limit)
         )
         with get_engine().connect() as conn:
@@ -3351,6 +3400,51 @@ class ScheduleOperations:
             )
             return result.rowcount
 
+    def count_execution_log_candidates(self, retention_days: int, limit: int) -> int:
+        """#1644: how many rows `prune_execution_logs(retention_days)` would null.
+
+        Bounded at `limit` (see `_bounded_count`). Shares the prune's predicate by
+        construction, so the number the guard reports is the number that would go.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        with get_engine().connect() as conn:
+            return _bounded_count(
+                conn,
+                schedule_executions.c.id,
+                _execution_log_prune_predicate(cutoff),
+                limit,
+            )
+
+    def count_execution_row_candidates(self, retention_days: int, limit: int) -> int:
+        """#1644: how many rows `prune_execution_rows(retention_days)` would DELETE."""
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        with get_engine().connect() as conn:
+            return _bounded_count(
+                conn,
+                schedule_executions.c.id,
+                _execution_row_prune_predicate(cutoff),
+                limit,
+            )
+
+    def count_soft_deleted_schedules_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """#1644: how many schedules `_sweep_soft_deleted_schedules` would purge."""
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        with get_engine().connect() as conn:
+            return _bounded_count(
+                conn,
+                agent_schedules.c.id,
+                _soft_deleted_schedules_predicate(cutoff),
+                limit,
+            )
+
     def prune_execution_logs(self, retention_days: int, chunk_size: int = 500) -> int:
         """Null `execution_log` on terminal executions older than retention_days.
 
@@ -3359,6 +3453,11 @@ class ScheduleOperations:
         agent, status) while reclaiming the bulk of the space. Runs in chunks
         to keep the write lock short — each chunk commits before the next, so
         a 3 GB backfill won't block a live system.
+
+        NOTE (#1644): `chunk_size` bounds each *transaction*, NOT the call — the
+        loop below drains the entire candidate set. One call deletes everything
+        past the cutoff. See `_execution_log_prune_predicate` for why the
+        predicate is shared with the #1644 blast-radius count.
 
         Args:
             retention_days: Null logs older than this. 0 disables the sweep.
@@ -3372,7 +3471,6 @@ class ScheduleOperations:
 
         cutoff = iso_cutoff(hours=retention_days * 24)
         total = 0
-        _terminal = ("success", "failed", "cancelled", "skipped")
         engine = get_engine()
         while True:
             # SELECT-then-UPDATE-by-id keeps the WHERE predicate aligned
@@ -3384,14 +3482,7 @@ class ScheduleOperations:
                     row["id"]
                     for row in conn.execute(
                         select(schedule_executions.c.id)
-                        .where(
-                            and_(
-                                schedule_executions.c.status.in_(_terminal),
-                                schedule_executions.c.completed_at.isnot(None),
-                                schedule_executions.c.completed_at < cutoff,
-                                schedule_executions.c.execution_log.isnot(None),
-                            )
-                        )
+                        .where(_execution_log_prune_predicate(cutoff))
                         .limit(chunk_size)
                     ).mappings()
                 ]
@@ -3425,7 +3516,6 @@ class ScheduleOperations:
 
         cutoff = iso_cutoff(hours=retention_days * 24)
         total = 0
-        _terminal = ("success", "failed", "cancelled", "skipped")
         engine = get_engine()
         while True:
             with engine.begin() as conn:
@@ -3433,13 +3523,7 @@ class ScheduleOperations:
                     row["id"]
                     for row in conn.execute(
                         select(schedule_executions.c.id)
-                        .where(
-                            and_(
-                                schedule_executions.c.status.in_(_terminal),
-                                schedule_executions.c.completed_at.isnot(None),
-                                schedule_executions.c.completed_at < cutoff,
-                            )
-                        )
+                        .where(_execution_row_prune_predicate(cutoff))
                         .limit(chunk_size)
                     ).mappings()
                 ]
