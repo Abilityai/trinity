@@ -91,6 +91,33 @@ class TestLinearCost:
         assert large_dt < max(small_dt * 40, 0.5)
 
     @pytest.mark.parametrize("mod", BOTH)
+    @pytest.mark.parametrize(
+        "attack",
+        [
+            pytest.param(lambda n: "!" * n, id="many-bangs"),
+            pytest.param(lambda n: "!=" + "!=!" * (n // 3), id="bang-equals-bang"),
+            pytest.param(lambda n: 'K="' + "x" * n, id="unterminated-quote"),
+            pytest.param(lambda n: "x" * n + "=", id="trailing-equals-no-value"),
+            pytest.param(lambda n: "a= " * (n // 3), id="missing-values"),
+            pytest.param(lambda n: '=' * n, id="all-equals"),
+        ],
+    )
+    def test_adversarial_inputs_stay_linear(self, mod, attack):
+        """Guards the ReDoS surface of `_KV_LINE_RE` — including the two strings
+        CodeQL's `py/polynomial-redos` names (`!`*n, and `!=` + `!=!`*n).
+
+        The linearity comes from the lookbehind: it stops the engine retrying
+        the key at every offset inside a long token, which is what would make
+        `([^\s"\'=]+)=` quadratic on a non-matching run. CodeQL does not model
+        the lookbehind, so it reports this as polynomial; these cases are the
+        executable proof that it is not — and the reason the lookbehind must not
+        be "simplified away" by a later edit.
+        """
+        start = time.perf_counter()
+        mod.sanitize_text(attack(64_000))
+        assert time.perf_counter() - start < 1.0
+
+    @pytest.mark.parametrize("mod", BOTH)
     def test_one_giant_unbroken_token(self, mod):
         """A 200 KB base64-ish blob with no delimiters. The key charset is
         delimiter-bounded, so the engine must not retry every offset inside it."""

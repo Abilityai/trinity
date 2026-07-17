@@ -87,6 +87,13 @@ _sensitive_var_re = [re.compile(p, re.IGNORECASE) for p in SENSITIVE_VAR_PATTERN
 # The key is bounded by delimiters, and the lookbehind stops the engine from
 # retrying every offset inside a long unbroken token (a 44 KB base64 blob would
 # otherwise reintroduce quadratic cost).
+# The lookbehind is load-bearing, not decoration: it is what keeps this LINEAR.
+# Without it the engine retries the key at every offset inside a long non-matching
+# run, which is exactly the quadratic shape this issue is about. CodeQL reports
+# `py/polynomial-redos` here because its model ignores lookbehinds; the adversarial
+# cases it names (`!`*n, `!=`+`!=!`*n) are pinned as tests in
+# tests/unit/test_1661_sanitizer_linear.py and run in ~1ms at 64 KB. Do not
+# "simplify" the lookbehind away.
 _KV_LINE_RE = re.compile(r'(?<![^\s"\'=])([^\s"\'=]+)=(["\']?)([^\s"\']+)\2')
 
 # A name pattern must match a SUFFIX of the key, not the whole key: the old
