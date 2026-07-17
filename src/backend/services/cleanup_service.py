@@ -276,6 +276,8 @@ class CleanupReport:
     ephemeral_orphans_reclaimed: int = 0
     # Issue #1142: terminal operator_queue rows deleted past their retention window
     operator_queue_pruned: int = 0
+    # Issue #1616: expired ephemeral SSH keys removed from agent authorized_keys
+    ssh_credentials_expired: int = 0
 
     @property
     def total(self) -> int:
@@ -290,7 +292,7 @@ class CleanupReport:
                 self.expired_leases_requeued + self.expired_leases_parked +
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
-                self.operator_queue_pruned)
+                self.operator_queue_pruned + self.ssh_credentials_expired)
 
     def to_dict(self) -> Dict:
         return {
@@ -315,6 +317,7 @@ class CleanupReport:
             "agent_volumes_removed": self.agent_volumes_removed,
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
             "operator_queue_pruned": self.operator_queue_pruned,
+            "ssh_credentials_expired": self.ssh_credentials_expired,
             "total": self.total,
         }
 
@@ -398,6 +401,7 @@ class CleanupService:
         await self._sweep_ephemeral_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
+        await self._sweep_expired_ssh_credentials(report)
         self._maybe_wal_checkpoint(report)
 
         self._cycle_count += 1
@@ -1196,6 +1200,39 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error purging idempotency keys: {e}")
+
+    async def _sweep_expired_ssh_credentials(self, report: CleanupReport) -> None:
+        """4c-sexies. Issue #1616: remove near-expired ephemeral SSH keys from
+        agent ``authorized_keys``.
+
+        The security gap this closes: an ephemeral SSH key's TTL was enforced
+        ONLY on its Redis metadata. `SshService.cleanup_expired_credentials()`
+        — the code that removes the actual line from the file `sshd` reads —
+        existed but had ZERO callers (`SSH_ACCESS_CLEANUP_INTERVAL` was unused),
+        so on a preserved (never-recreated) volume an expired key lingered in
+        `authorized_keys` and still granted login after its stated expiry. Wiring
+        the sweep here makes file-side expiry actually happen.
+
+        Best-effort and self-contained (#1026): owns its try/except, never
+        raises to the cycle. `cleanup_expired_credentials` is itself fail-open
+        per key (a Redis or `docker exec` error on one key is logged and
+        skipped), and `remove_ssh_key` tolerates a missing container/file — so a
+        stopped or deleted agent is a no-op rather than an error. The short Redis
+        TTL remains the primary guarantee; this is the file-side enforcement that
+        makes the TTL real.
+        """
+        try:
+            from services.ssh_service import get_ssh_service
+
+            cleaned = await get_ssh_service().cleanup_expired_credentials()
+            report.ssh_credentials_expired = cleaned
+            if cleaned > 0:
+                logger.info(
+                    f"[Cleanup] Removed {cleaned} expired SSH key(s) from agent "
+                    f"authorized_keys (#1616)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error sweeping expired SSH credentials: {e}")
 
     def _maybe_wal_checkpoint(self, report: CleanupReport) -> None:
         """4d. Issue #772: after a retention sweep reclaims meaningful space,
