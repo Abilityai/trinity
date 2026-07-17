@@ -578,7 +578,12 @@ async def deploy_local_agent_logic(
             agent_config,
             current_user,
             request,
-            skip_name_sanitization=True
+            skip_name_sanitization=True,
+            # #1667: THE one legitimate adopt — the workspace volume was just
+            # pre-populated with the template above, so create must mount it
+            # rather than refuse it. Every other caller is refused a
+            # pre-existing volume (it would be another agent's leftover data).
+            adopt_existing_workspace=True,
         )
 
         # 11. Return response

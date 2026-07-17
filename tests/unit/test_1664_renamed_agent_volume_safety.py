@@ -609,3 +609,115 @@ class TestCreateRefusesAReservedVolumeBase:
         # It fails later (entitlement/quota), never on the volume-base gate.
         assert "data volumes" not in str(exc.value.detail)
         db.is_volume_base_reserved.assert_not_called()
+
+
+class TestCreateRefusesAnUnclaimedVolume:
+    """#1667: the create path is get-then-create — an existing volume is mounted
+    as the new agent's `/home/developer`. #1664's gate covers a volume some ROW
+    still claims (rename); this covers the volume NOTHING claims: a purge whose
+    removal hit an in-use 409, a crash between volume_create and the ownership
+    INSERT, or a restored backup. Adopting is now a declared decision."""
+
+    def _cfg(self, name="fresh", ephemeral=False):
+        config = MagicMock()
+        config.name = name
+        config.ephemeral = ephemeral
+        return config
+
+    def _db(self):
+        db = MagicMock()
+        db.get_agent_owner.return_value = None
+        db.is_agent_name_reserved.return_value = False
+        db.is_volume_base_reserved.return_value = False   # nothing claims it
+        return db
+
+    @pytest.mark.asyncio
+    async def test_refuses_a_pre_existing_unclaimed_volume(self):
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = self._db()
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
+             patch.object(crud, "docker_client", MagicMock()), \
+             patch.object(crud, "volume_get", AsyncMock(return_value=MagicMock())):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(self._cfg(), MagicMock())
+
+        assert exc.value.status_code == 409
+        assert "already exists" in str(exc.value.detail)
+        # Actionable, not just a refusal.
+        assert "docker volume rm" in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_deploy_may_adopt_its_prepopulated_volume(self):
+        """deploy-local (#950) pre-populates the workspace BEFORE create, so for
+        it a pre-existing volume is the expected state, not a stranger's data."""
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = self._db()
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
+             patch.object(crud, "docker_client", MagicMock()), \
+             patch.object(crud, "volume_get", AsyncMock(return_value=MagicMock())):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(
+                    self._cfg(), MagicMock(), adopt_existing_workspace=True
+                )
+
+        # Proceeds past the gate (fails later on quota/docker), never on it.
+        assert "already exists" not in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_no_volume_is_the_normal_path(self):
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+        import docker as _docker
+
+        db = self._db()
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
+             patch.object(crud, "docker_client", MagicMock()), \
+             patch.object(crud, "volume_get",
+                          AsyncMock(side_effect=_docker.errors.NotFound("nope"))):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(self._cfg(), MagicMock())
+
+        assert "already exists" not in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_probe_failure_does_not_block_creation(self):
+        """Fail-open: a Docker probe error must not make creation unavailable."""
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = self._db()
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
+             patch.object(crud, "docker_client", MagicMock()), \
+             patch.object(crud, "volume_get",
+                          AsyncMock(side_effect=RuntimeError("docker down"))):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(self._cfg(), MagicMock())
+
+        assert "already exists" not in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_ghosts_skip_the_probe(self):
+        """Ghosts are volume-less by construction — no volume, no probe."""
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = self._db()
+        probe = AsyncMock(return_value=MagicMock())
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)), \
+             patch.object(crud, "docker_client", MagicMock()), \
+             patch.object(crud, "volume_get", probe):
+            with pytest.raises(HTTPException):
+                await crud.create_agent_internal(
+                    self._cfg(name="ghost", ephemeral=True), MagicMock()
+                )
+
+        probe.assert_not_awaited()

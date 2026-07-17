@@ -413,7 +413,12 @@ def _load_crud(docker_available=True):
     docker_service.get_agent_status_from_container = MagicMock(return_value=MagicMock())
 
     docker_utils = MagicMock()
-    docker_utils.volume_get = AsyncMock()
+    # #1667: a bare AsyncMock answers "yes, that volume exists" to every probe,
+    # which is the opposite of reality for the fresh agent names these tests
+    # create — and now means "another agent's leftover data is sitting there",
+    # so create refuses with a 409. NotFound is the truthful default; a test
+    # that wants the volume to pre-exist overrides it.
+    docker_utils.volume_get = AsyncMock(side_effect=_NotFound("no such volume"))
     docker_utils.volume_create = AsyncMock()
     docker_utils.containers_run = AsyncMock(return_value=MagicMock())
 
