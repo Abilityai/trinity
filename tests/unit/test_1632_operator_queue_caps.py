@@ -44,7 +44,6 @@ from services.operator_queue_service import (  # noqa: E402
     OPERATOR_QUEUE_TITLE_MAX,
     OPERATOR_QUEUE_QUESTION_MAX,
     OPERATOR_QUEUE_CONTEXT_MAX_BYTES,
-    OPERATOR_QUEUE_OPTIONS_MAX_BYTES,
     OPERATOR_QUEUE_MAX_PENDING_PER_AGENT,
 )
 from services.rate_limiter import RateLimitResult  # noqa: E402
