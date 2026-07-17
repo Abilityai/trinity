@@ -23,6 +23,7 @@ from models import (
     DeployLocalRequest,
     ExecutionResultEnvelope,
     HeartbeatPayload,
+    AgentLabelUpdate,
     McpExposedUpdate,
     VoiceRepliesUpdate,
     VoiceReplyRequest,
@@ -154,9 +155,14 @@ async def list_agents_endpoint(
     # Add tags to each agent in response
     agent_names = [a.get("name") for a in agents]
     all_tags = db.get_tags_for_agents(agent_names)
+    # ent#181: the human-facing label, batched like tags — a per-agent read here
+    # would be an N+1 on the fleet's hottest endpoint. Agents without a label
+    # are absent from the map and render under their slug, as they do today.
+    all_labels = db.get_display_labels_for_agents(agent_names)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
+        agent["display_label"] = all_labels.get(agent.get("name"))
 
     return agents
 
@@ -387,6 +393,11 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
     agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    # ent#181: the detail endpoint is what AgentHeader loads on page open — it
+    # must carry the label too, or the header shows the slug until the first
+    # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
+    # path, so a per-agent call is fine here.
+    agent_dict["display_label"] = db.get_display_label(agent_name)
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
@@ -825,6 +836,73 @@ async def set_circuit_breaker_endpoint(
             "platform-wide DISPATCH_BREAKER_ENABLED flag is enabled."
         )
     return result
+
+
+# ============================================================================
+# Display Label (ent#181)
+# ============================================================================
+
+
+@router.get("/{agent_name}/label")
+async def get_agent_label_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """The agent's human-facing label (ent#181).
+
+    `label` is None when none is set — deliberately not coerced to the slug, so
+    the UI can show an empty field rather than pre-filling the slug and inviting
+    someone to "edit" a name they never chose. `display_name` is the resolved
+    value to render; `agent_name` is the immutable slug everything else keys on.
+    """
+    label = db.get_display_label(agent_name)
+    return {
+        "agent_name": agent_name,
+        "label": label,
+        "display_name": label or agent_name,
+    }
+
+
+@router.put("/{agent_name}/label")
+async def set_agent_label_endpoint(
+    agent_name: OwnedAgentByName,
+    body: AgentLabelUpdate,
+    current_user: CurrentUser,
+):
+    """Set or clear the agent's label (ent#181). Owner-only.
+
+    Changes ONE column. Nothing restarts, nothing is re-keyed: the slug — and
+    with it every route, container, volume, MCP key, A2A card and `agent_name`
+    row — is untouched. That is what separates this from `PUT /rename`
+    (RENAME-001), which must stop the container, rewrite ~20 tables, and still
+    leaves the agent's volumes under the old base (#1664/#1665/#1667/#1669/#1671).
+
+    A blank label clears it (the agent renders under its slug again) rather than
+    storing an empty string, which would render as a nameless agent everywhere.
+    """
+    if not db.set_display_label(agent_name, body.label):
+        # The dependency already proved access; a miss here means the row is
+        # gone or soft-deleted underneath us.
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    label = db.get_display_label(agent_name)
+    if manager:
+        await manager.broadcast(json.dumps({
+            # `event` is the field the frontend WS client switches on; `type`
+            # is the normalized filter field. Both, matching agent_started etc.
+            "event": "agent_label_changed",
+            "type": "agent_label_changed",
+            "data": {
+                "name": agent_name,
+                "display_label": label,
+                "display_name": label or agent_name,
+            },
+        }))
+    return {
+        "agent_name": agent_name,
+        "label": label,
+        "display_name": label or agent_name,
+    }
 
 
 # ============================================================================

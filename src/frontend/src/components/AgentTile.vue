@@ -16,9 +16,9 @@
         <div class="t-nameline">
           <span
             class="t-name nodrag"
-            :title="agent.name"
+            :title="agentNameTooltip(agent)"
             @click="viewDetails"
-          >{{ agent.name }}</span>
+          >{{ agentDisplayName(agent) }}</span>
           <RuntimeBadge :runtime="agent.runtime || 'claude-code'" :show-label="false" class="flex-none" />
           <span
             v-if="isSystemAgent"
@@ -150,6 +150,7 @@ import { useRouter } from 'vue-router'
 import { formatCostCompact } from '../composables/useFormatters'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import { useNetworkStore } from '@/stores/network'

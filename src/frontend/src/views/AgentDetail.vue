@@ -64,6 +64,7 @@
             @add-tag="addTag"
             @remove-tag="removeTag"
             @rename="renameAgent"
+            @set-label="setAgentLabel"
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
             @change-subscription="changeSubscription"
@@ -370,6 +371,28 @@ function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return DEEP_LINK_TABS.includes(resolved) ? resolved : null
 }
+// Apply the ?tab=/?resumeSessionId= deep-link landing. Called from BOTH onMounted
+// AND onActivated: AgentDetail is KeepAlive-cached (App.vue), so the common path —
+// open agent (caches it), click into an execution, "Continue as Chat" back — hits
+// onActivated, NOT onMounted. Handling the resume ONLY in onMounted silently dropped
+// it: routeForcedMode stayed null, effectiveChatMode fell back to the default 'session'
+// mode, SessionPanel rendered instead of ChatPanel, and the resume id was discarded
+// with no error and no banner (EXEC-023 #1672). One shared fn so the two hooks can't
+// drift again.
+function applyDeepLinkRouting() {
+  if (route.query.tab) {
+    const resolvedTab = resolveDeepLinkTab(route.query.tab)
+    if (resolvedTab) activeTab.value = resolvedTab
+    // #1112: a legacy ?tab=session deep-link expresses session-mode intent.
+    if (route.query.tab === 'session') chatMode.value = 'session'
+  }
+  // #1112/#1672: an execution resume (ExecutionDetail "Continue as Chat") carries a
+  // claude_session_id only the legacy ChatPanel resumes — force legacy for this
+  // landing WITHOUT persisting to the user's saved preference. Clear the transient
+  // override on any non-resume landing so a prior resume doesn't stick legacy mode
+  // for the rest of the SPA session (the KeepAlive instance outlives the navigation).
+  routeForcedMode.value = resumeSessionId.value ? 'legacy' : null
+}
 // Tabs that flex-fill the viewport (page enters h-screen fullscreen layout).
 // #1112: Chat (both session and legacy modes render ChatMessages, which depends
 // on flex-1 grow). #1500: Tasks (list fills instead of a fixed max-h-96 cap).
@@ -589,6 +612,21 @@ async function toggleRunning() {
 }
 
 // Rename agent (RENAME-001)
+// ent#181: the pencil edits the LABEL — one column, no restart, no re-key.
+// `label === null` clears it and the agent renders under its slug again.
+async function setAgentLabel(label) {
+  if (!agent.value) return
+  try {
+    const res = await agentsStore.setAgentLabel(agent.value.name, label)
+    // Reflect it locally so the header updates without a refetch; the slug
+    // (agent.value.name) is deliberately untouched.
+    agent.value.display_label = res.label
+  } catch (e) {
+    console.error('Failed to set agent label:', e)
+    error.value = e.response?.data?.detail || 'Failed to update the label'
+  }
+}
+
 const renameLoading = ref(false)
 
 async function renameAgent(newName) {
@@ -1181,19 +1219,8 @@ onMounted(async () => {
   startEmotionCycling()
   startAllPolling()
 
-  // Handle tab query param (from Timeline click navigation)
-  if (route.query.tab) {
-    const resolvedTab = resolveDeepLinkTab(route.query.tab)
-    if (resolvedTab) {
-      activeTab.value = resolvedTab
-    }
-    // #1112: a legacy ?tab=session deep-link expresses session-mode intent.
-    if (route.query.tab === 'session') chatMode.value = 'session'
-  }
-  // #1112: execution-resume (ExecutionDetail "continue as chat") carries a
-  // claude_session_id the legacy ChatPanel resumes — force legacy for this
-  // landing without persisting the change to the user's saved preference.
-  if (resumeSessionId.value) routeForcedMode.value = 'legacy'
+  // Handle tab / resume deep-link (from Timeline or ExecutionDetail navigation)
+  applyDeepLinkRouting()
 })
 
 // onActivated fires when component is shown (after being cached by KeepAlive)
@@ -1211,14 +1238,10 @@ onActivated(async () => {
     await checkBrainOrbCapability()
   }
 
-  // Handle tab query param (EXEC-023: Continue as Chat navigation)
-  // Must also check here since onMounted doesn't fire for cached components
-  if (route.query.tab) {
-    const resolvedTab = resolveDeepLinkTab(route.query.tab)
-    if (resolvedTab) {
-      activeTab.value = resolvedTab
-    }
-  }
+  // EXEC-023 (#1672): re-apply the full tab + resume landing here, not just the
+  // tab. onMounted does NOT fire for a KeepAlive-cached instance, so this is the
+  // path the common "Continue as Chat" navigation actually takes.
+  applyDeepLinkRouting()
 
   // DEPRECATED: Terminal tab hidden (candidate for removal)
   // if (activeTab.value === 'terminal') {

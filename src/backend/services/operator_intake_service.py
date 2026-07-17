@@ -24,6 +24,7 @@ Discipline:
 """
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -40,6 +41,35 @@ _INSTALLATION_ID_KEY = "installation_id"
 _INTAKE_SUBMITTED_KEY = "operator_intake_submitted"
 
 _HTTP_TIMEOUT_SECONDS = 5.0
+
+# Only a lowercase snake_case error CODE is ever echoed into a log line — an
+# echoed email / free text / control chars are dropped by construction, so the
+# no-PII invariant stays LOCALLY enforced and is not delegated to the Worker.
+_SAFE_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _safe_error_detail(resp: "httpx.Response") -> str:
+    """Best-effort ` (<code>)` from the Worker's {ok:false,error:"<code>"} body.
+
+    Hardened so it can NEVER re-hide the WARNING and NEVER leak PII:
+      * broad `except Exception` — a non-JSON/empty/malformed body returns "" and
+        never raises (a raise would fall through to the outer except and downgrade
+        this WARNING to INFO — the #1444 silent-swallow class).
+      * `isinstance(body, dict)` — a JSON list/string/number degrades to "".
+      * coded-shape whitelist — only a lowercase snake_case code is echoed;
+        anything with @/spaces/uppercase/control chars (an echoed email or free
+        text) is dropped, keeping the module's no-PII invariant LOCAL.
+    """
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 — non-JSON / empty / malformed
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, str) and _SAFE_ERROR_CODE.fullmatch(err):
+        return f" ({err})"
+    return ""
 
 
 def get_or_create_installation_id() -> str:
@@ -106,16 +136,26 @@ async def submit_operator_intake(
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             resp = await client.post(OPERATOR_INTAKE_URL, json=payload)
 
-        # Best-effort delivery: a non-2xx is logged at debug and otherwise
-        # ignored. We do NOT roll back the submitted marker — re-sending on the
-        # next restart would risk duplicate leads.
-        if resp.status_code >= 400:
-            logger.debug("Operator intake POST returned HTTP %s", resp.status_code)
-        else:
+        # Best-effort delivery. Gate success on TRUE 2xx: a 3xx (redirect) or
+        # 4xx/5xx means the submission did NOT land — surface it at WARNING so a
+        # hosted-endpoint outage can't hide (#1593). The marker is NOT rolled
+        # back (re-send risks a duplicate lead; at-most-once is deliberate).
+        if 200 <= resp.status_code < 300:
             # Log only the install-id prefix — never the operator's email.
             logger.info(
                 "Operator intake submitted (install %s…)",
                 payload["installation_id"][:8],
             )
+        else:
+            logger.warning(
+                "Operator intake POST returned HTTP %s%s",
+                resp.status_code,
+                _safe_error_detail(resp),
+            )
     except Exception as e:  # noqa: BLE001 — fire-and-forget, swallow everything
-        logger.debug("Operator intake submission skipped (ignored): %s", type(e).__name__)
+        # Connect/timeout/TLS/DNS failure. An outage CAN raise (Worker removed →
+        # connection refused, hung edge → read timeout), not only return a 404 —
+        # log at INFO (prod root=INFO) so it's visible once, at-most-once per
+        # install, without WARNING's "platform broken" semantics or alarming a
+        # deliberately-offline install. Only the exception TYPE, never the email.
+        logger.info("Operator intake submission skipped (ignored): %s", type(e).__name__)

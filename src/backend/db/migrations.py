@@ -2903,6 +2903,26 @@ def _migrate_agent_ownership_volume_base_name(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_display_label(cursor, conn):
+    """ent#181 — the human-facing agent label.
+
+    Adds ``display_label TEXT`` (nullable) to ``agent_ownership``. NULL means
+    "render the slug", which is exactly today's behaviour, so no backfill and
+    every existing agent looks unchanged until someone sets a label.
+
+    The column is presentation only — the slug (``agent_name``) stays the
+    identity every route, container, volume, MCP key and A2A card keys on.
+    Mirrored by Alembic 0025_agent_ownership_display_label.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "display_label",
+        "ALTER TABLE agent_ownership ADD COLUMN display_label TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
     """#1081 Phase 0 — dark pull/work-stealing coordination columns.
 
@@ -3054,4 +3074,5 @@ MIGRATIONS = [
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
+    ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
 ]

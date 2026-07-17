@@ -58,7 +58,7 @@
             </button>
             <!-- Continue as Chat button (EXEC-023) -->
             <button
-              v-if="execution?.claude_session_id && execution?.status !== 'running'"
+              v-if="canContinueAsChat"
               @click="continueAsChat"
               class="px-3 py-1.5 bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center space-x-1"
               title="Continue this execution as an interactive chat"
@@ -765,9 +765,20 @@ function copyExecutionId() {
   navigator.clipboard.writeText(executionId.value)
 }
 
+// EXEC-023 (#1672): a resumable execution needs a REAL session id, not one of the
+// #1083 dispatch sentinels. 'dispatched'/'dispatched_async' are written into
+// claude_session_id before the real id lands and stay there permanently on a
+// reaper-FAILED async row — both are truthy, so a bare truthiness check let the
+// button offer a resume that runs `--resume dispatched_async` and cannot resolve.
+const RESUME_SENTINELS = ['dispatched', 'dispatched_async']
+const canContinueAsChat = computed(() => {
+  const sid = execution.value?.claude_session_id
+  return !!sid && !RESUME_SENTINELS.includes(sid) && execution.value?.status !== 'running'
+})
+
 // Continue execution as chat (EXEC-023)
 function continueAsChat() {
-  if (!execution.value?.claude_session_id) return
+  if (!canContinueAsChat.value) return
 
   router.push({
     name: 'AgentDetail',
