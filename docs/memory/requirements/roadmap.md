@@ -91,6 +91,22 @@
 - **GitHub Issue**: #169
 - **Relationship to 17.2 (Redis Streams)**: This is a pragmatic first step. If Redis Streams (#22) lands later, subscriptions can migrate.
 
+### 17.2a System-Emitted Task Completion Events (#1578)
+- **Status**: ✅ Implemented (2026-07-17)
+- **Priority**: Medium (P2) · `theme-reliability`
+- **Description**: The **backend** deterministically emits `agent.task.completed` / `agent.task.failed` at **every CAS-won execution terminal**, delivered over the existing EVT-001 subscription-dispatch machinery, so a subscribed caller/orchestrator is **woken** when a long async task finishes instead of polling `get_execution_result`. Implements the missing half of `TARGET_ARCHITECTURE.md` §Async-First Communication and is a down-payment on Epic #1045 → #1081 (pull coordination).
+- **System- vs agent-emitted**: EVT-001 (17.2) carries only **agent-emitted** events (an agent's LLM calls `emit_event`). These are the first **system-emitted** events — synthesized by the deterministic backend chokepoint with no LLM in the loop, `source_agent` = the executing agent, in the reserved `agent.task.*` namespace.
+- **Key Features**:
+  - Emitted from a single shared helper (`services/event_dispatch_service.py::emit_task_terminal_event`) fanned across **every** CAS-won terminal writer — `apply_result` (success + failure), `_write_terminal_and_gate` (timeout/budget/crash), the #1083 lease-reaper (`cleanup_service`), and the pull sink (`pull_coordination_service`, dark until a pilot). Bulk watchdog sweeps are a documented residual (no per-row context).
+  - **Matching-subscription gated**: `find_matching_event_subscriptions` runs FIRST — zero matching subscriptions ⇒ **no** `agent_events` row and **no** dispatch (inert by default, no fleet-wide spam).
+  - **CAS-won exactly-once**: emit runs strictly inside the `won` branch, so a replayed/late #1083 callback or a lease-expiry race fires nothing (no double-wake).
+  - **Payload** `{execution_id, status, triggered_by, summary_or_error, duration_ms, cost, fan_out_id, loop_id}` — flat + `{{payload.field}}`-interpolable; `status` is the string value (`success`/`failed`/`cancelled`). `fan_out_id`/`loop_id` carried for the future pull fan-out join envelope.
+  - **Reserved namespace + loop safety (3 layers)**: agents cannot `emit_event` into `agent.task.*` (400); self-subscription to `agent.task.*` is blocked at create + update (400); and a **recursion-break** — a task spawned by an `agent.task.*` dispatch is persisted with `triggered_by="event"` and the emit helper suppresses re-emission, breaking self / A↔B / A→B→C→A auto-emit cycles at the root.
+  - **Delivery** = EVT-001 subscription dispatch (loopback async `/task`). Best-effort: wakes a **running** (incl. #1402 parked-but-running) subscriber; a stopped subscriber's 503 is swallowed (the `agent_events` row persists, the wake does not). Durable "lands in the caller's queue" is the pull migration's future queue.
+  - **Fail-open**: the entire emit body is try/except-swallowed — a broken/slow emit never affects the billed terminal.
+- **Additive & inert**: reuses `agent_events` / `agent_event_subscriptions` and the existing `triggered_by` TEXT column — no schema change, no migration, no feature flag, no new config.
+- **GitHub Issue**: #1578 (Epic #1045 → #1081)
+
 ### 17.3 Event Handlers & Reactions
 - **Status**: ✅ Partially Implemented via EVT-001 (2026-03-26)
 - **Priority**: High

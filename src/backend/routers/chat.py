@@ -29,6 +29,11 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services import idempotency_service
+from services.event_dispatch_service import (
+    RESERVED_EVENT_TRIGGER,
+    RESERVED_EVENT_TRIGGER_HEADER_VALUE,
+    verify_internal_dispatch_secret,
+)
 from services.task_execution_service import (
     _compute_context_used,
     dispatch_breaker_active,
@@ -1116,6 +1121,7 @@ async def _run_async_task_with_persistence(
     self_task_activity_id: Optional[str] = None,
     images: Optional[list] = None,
     dispatch_gate_checked: bool = False,
+    triggered_by_override: Optional[str] = None,
 ):
     """
     Async /task background wrapper (issue #95).
@@ -1133,7 +1139,9 @@ async def _run_async_task_with_persistence(
     """
     start_time = datetime.utcnow()
     task_service = get_task_execution_service()
-    triggered_by = "agent" if x_source_agent else "manual"
+    # #1578: a reserved agent.task.* dispatch persists triggered_by="event" (the
+    # recursion-break sentinel); every other async task keeps the derived value.
+    triggered_by = triggered_by_override or ("agent" if x_source_agent else "manual")
 
     # Outer try/finally so a sync long-poll waiter (issue #498) is always
     # signaled even if the post-task side effects below raise.
@@ -1361,6 +1369,8 @@ async def execute_parallel_task(
     x_mcp_key_id: Optional[str] = Header(None),
     x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
+    x_event_trigger: Optional[str] = Header(None),
+    x_internal_secret: Optional[str] = Header(None),
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -1460,6 +1470,21 @@ async def execute_parallel_task(
     else:
         source = ExecutionSource.USER
         triggered_by = "manual"
+
+    # #1578 recursion-break: a task the backend dispatched for a reserved
+    # `agent.task.*` completion event carries X-Event-Trigger. Persist it as
+    # `triggered_by="event"` so the emit helper suppresses this task's OWN
+    # terminal event — breaking self / A↔B / A→B→C→A auto-emit cycles at the
+    # root. The tag is honored ONLY when accompanied by a valid backend-internal
+    # `X-Internal-Secret` (C-003) — trigger_subscription stamps both, so an
+    # external `/task` caller spoofing X-Event-Trigger alone cannot suppress a
+    # real agent's completion event.
+    reserved_event_dispatch = (
+        x_event_trigger == RESERVED_EVENT_TRIGGER_HEADER_VALUE
+        and verify_internal_dispatch_secret(x_internal_secret)
+    )
+    if reserved_event_dispatch:
+        triggered_by = RESERVED_EVENT_TRIGGER
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicates before
     # any file upload / execution-record creation. Optional header — absent →
@@ -1744,6 +1769,9 @@ async def execute_parallel_task(
                 self_task_activity_id=self_task_activity_id,
                 images=_image_data,
                 dispatch_gate_checked=True,  # #526: router already gated at acquire()
+                triggered_by_override=(
+                    RESERVED_EVENT_TRIGGER if reserved_event_dispatch else None
+                ),  # #1578 recursion-break
             )
         )
         bg_task.add_done_callback(_on_task_done)
