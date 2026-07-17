@@ -145,6 +145,38 @@ class MetadataMixin:
                 if taken:
                     return False
 
+                # #1671: the name being free does not mean its VOLUME BASE is.
+                # #1664 made one row claim one base and gated creation on it;
+                # rename is the only other producer of `volume_base_name`, so
+                # leaving it ungated lets an ordinary swap mint the collision
+                # the create gate refuses: rename `x` -> `x-old` (row keeps pin
+                # `x`), then rename `y` -> `x`. Two rows would then claim base
+                # `x`, and because `get_public_volume_name` names off the LIVE
+                # name (deliberate — see is_volume_base_reserved), the new `x`
+                # get-then-creates onto the old agent's `agent-x-public`: the
+                # #1667 silent-adopt disclosure through the ungated path. It
+                # also strands the volumes forever — with two claimants the
+                # purge guard skips BOTH bases and the orphan sweep never
+                # reclaims them.
+                #
+                # Only ANOTHER row's pin blocks: `agent_name == new_name` is the
+                # `taken` check above, and this row's own pin must not block a
+                # rename-back (an agent renamed `B`->`A` keeps pin `B`; renaming
+                # it to `B` is legitimate and leaves a single claimant).
+                #
+                # Enforced HERE, inside the rename transaction, not only at the
+                # router: it closes the check-then-write gap and covers any
+                # future caller of rename_agent (the #1445 router+chokepoint
+                # pattern).
+                base_claimed = conn.execute(
+                    select(1).where(
+                        agent_ownership.c.volume_base_name == new_name,
+                        agent_ownership.c.agent_name != old_name,
+                    )
+                ).first()
+                if base_claimed:
+                    return False
+
                 # Update all tables in order
                 # Primary table.
                 #

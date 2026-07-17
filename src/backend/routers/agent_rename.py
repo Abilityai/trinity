@@ -97,6 +97,34 @@ async def rename_agent_endpoint(
     if existing:
         raise HTTPException(status_code=409, detail=f"Agent with name '{sanitized_name}' already exists")
 
+    # #1671: a free NAME does not mean a free VOLUME BASE. Rename keeps the
+    # agent's volumes under its existing base, so a previously-renamed agent
+    # still claims its old name's base — and renaming a second agent into that
+    # base gives it two claimants. That is the #1667 silent-adopt disclosure via
+    # the one producer #1664 left ungated (`get_public_volume_name` names off
+    # the LIVE name, so the new holder get-then-creates onto the old agent's
+    # `agent-{name}-public`), and it strands both bases: with two claimants the
+    # purge guard skips them and the orphan sweep never reclaims them.
+    #
+    # `exclude_agent` = this agent: only ANOTHER row's claim blocks. Renaming an
+    # agent back to a name it already owns the base of (`B`->`A`->`B`) is
+    # legitimate and leaves a single claimant.
+    #
+    # Raised BEFORE the container is stopped/renamed — nothing is half-done on
+    # refusal. `db.rename_agent` re-checks inside its transaction (the
+    # chokepoint that closes the check-then-write gap, #1445 pattern); this gate
+    # exists so the caller gets an actionable 409 instead of that path's generic
+    # 500.
+    if db.is_volume_base_reserved(sanitized_name, exclude_agent=agent_name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Name '{sanitized_name}' is unavailable: its data volumes still "
+                f"belong to another agent (that agent was renamed and kept them). "
+                f"Pick a different name."
+            ),
+        )
+
     # Get the container
     container = get_agent_container(agent_name)
     if not container:

@@ -559,8 +559,12 @@ class DatabaseManager:
     # volume-ownership predicate the #1581 orphan sweep must use instead of
     # `is_agent_name_reserved` — a renamed agent's volumes keep the pre-rename
     # base, so asking "is this a live agent NAME?" marks live data an orphan.
-    def is_volume_base_reserved(self, volume_base: str):
-        return self._agent_ops.is_volume_base_reserved(volume_base)
+    def is_volume_base_reserved(self, volume_base: str, exclude_agent=None):
+        # #1671: `exclude_agent` = "does anyone ELSE claim this base?" — the
+        # rename gate passes the renaming agent so a rename-back isn't refused.
+        return self._agent_ops.is_volume_base_reserved(
+            volume_base, exclude_agent=exclude_agent
+        )
 
     def get_volume_base_name(self, agent_name: str):
         return self._agent_ops.get_volume_base_name(agent_name)

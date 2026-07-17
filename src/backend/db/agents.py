@@ -171,7 +171,9 @@ class AgentOperations(
             ).first()
             return row is not None
 
-    def is_volume_base_reserved(self, volume_base: str) -> bool:
+    def is_volume_base_reserved(
+        self, volume_base: str, exclude_agent: Optional[str] = None
+    ) -> bool:
         """True if any ownership row (live OR soft-deleted) owns the Docker
         data volumes named ``agent-{volume_base}-{workspace|public|shared}``
         (#1664).
@@ -203,17 +205,28 @@ class AgentOperations(
         replaces (`is_agent_name_reserved` ≡ the first branch alone), so this
         can only protect more than before, never less. A purged row matches
         neither, so a genuine orphan is still reclaimable.
+
+        ``exclude_agent`` ignores one row — pass the agent that is ASKING, so
+        the question becomes "does anyone ELSE claim this base?" (#1671). The
+        rename gate needs it: an agent renamed ``B``→``A`` keeps pin ``B``, so
+        renaming it back to ``B`` must be allowed (it already owns that base,
+        and the result has exactly one claimant). Without the exclusion that
+        legitimate rename-back is refused, and told its own volumes belong to
+        someone else.
         """
         if not volume_base:
             return False
+        where = [
+            or_(
+                agent_ownership.c.agent_name == volume_base,
+                agent_ownership.c.volume_base_name == volume_base,
+            )
+        ]
+        if exclude_agent:
+            where.append(agent_ownership.c.agent_name != exclude_agent)
         with get_engine().connect() as conn:
             row = conn.execute(
-                select(agent_ownership.c.agent_name).where(
-                    or_(
-                        agent_ownership.c.agent_name == volume_base,
-                        agent_ownership.c.volume_base_name == volume_base,
-                    )
-                )
+                select(agent_ownership.c.agent_name).where(*where)
             ).first()
             return row is not None
 

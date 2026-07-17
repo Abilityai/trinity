@@ -721,3 +721,112 @@ class TestCreateRefusesAnUnclaimedVolume:
                 )
 
         probe.assert_not_awaited()
+
+
+class TestRenameIsGatedOnVolumeBase:
+    """#1671 (found in review of PR #1666): #1664 made one row claim one volume
+    base and gated CREATE on it — but rename is the other producer of
+    `volume_base_name`, and it was ungated. An ordinary ops swap could mint the
+    collision the create gate refuses:
+
+        rename `prod` -> `prod-old`   (row keeps pin `prod`)
+        rename `staging` -> `prod`    (name free, base NOT free)  <-- was allowed
+
+    Two rows then claim base `prod`. Because `get_public_volume_name` names off
+    the LIVE name, the new `prod` get-then-creates onto the old agent's
+    `agent-prod-public` — the #1667 disclosure through the ungated path — and
+    with two claimants the purge guard skips BOTH bases, so the volumes are
+    stranded forever.
+    """
+
+    @pytest.fixture
+    def agent_ops(self, db_backend):
+        try:
+            from db.agents import AgentOperations
+            from db.users import UserOperations
+        except ImportError:  # pragma: no cover - env guard
+            pytest.skip("backend venv required")
+        return AgentOperations(UserOperations())
+
+    def _seed(self, name):
+        _hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+            "VALUES (:n, 1, '2026-01-01T00:00:00Z')",
+            n=name,
+        )
+
+    def test_reviewers_repro_rename_into_a_claimed_base_is_refused(self, agent_ops):
+        self._seed("prod")
+        self._seed("staging")
+        assert agent_ops.rename_agent("prod", "prod-old") is True   # pin = 'prod'
+
+        # The name 'prod' is free; the BASE 'prod' is not.
+        assert agent_ops.is_agent_name_reserved("prod") is False
+        assert agent_ops.is_volume_base_reserved("prod") is True
+
+        assert agent_ops.rename_agent("staging", "prod") is False   # refused
+
+        # ...and nothing moved: still exactly one claimant of base 'prod'.
+        assert agent_ops.get_volume_base_name("prod-old") == "prod"
+        assert agent_ops.get_volume_base_name("staging") == "staging"
+        assert agent_ops.is_agent_name_reserved("prod") is False
+
+    def test_rename_back_to_a_base_this_agent_already_owns_is_allowed(self, agent_ops):
+        """The self-exclusion case a naive gate breaks: the agent's OWN pin must
+        not refuse it. `B` -> `A` -> `B` leaves a single claimant, and telling
+        the owner their own volumes belong to someone else would be wrong."""
+        self._seed("B")
+        assert agent_ops.rename_agent("B", "A") is True     # pin = 'B'
+        assert agent_ops.is_volume_base_reserved("B") is True          # by itself
+        assert agent_ops.is_volume_base_reserved("B", exclude_agent="A") is False
+
+        assert agent_ops.rename_agent("A", "B") is True     # rename-back allowed
+        assert agent_ops.get_volume_base_name("B") == "B"
+
+    def test_exclude_agent_only_ignores_that_row(self, agent_ops):
+        self._seed("one")
+        self._seed("two")
+        agent_ops.rename_agent("one", "one-renamed")        # pin = 'one'
+        # 'two' asking about base 'one' still sees the other row's claim.
+        assert agent_ops.is_volume_base_reserved("one", exclude_agent="two") is True
+        assert agent_ops.is_volume_base_reserved("one", exclude_agent="one-renamed") is False
+
+    def test_ordinary_rename_to_a_free_base_still_works(self, agent_ops):
+        self._seed("plain")
+        assert agent_ops.rename_agent("plain", "plain-v2") is True
+        assert agent_ops.get_volume_base_name("plain-v2") == "plain"
+
+    @pytest.mark.asyncio
+    async def test_router_refuses_with_409_before_touching_the_container(self):
+        """The gate must fire before the container is stopped/renamed — a refusal
+        must not leave a half-renamed agent — and must 409, not fall through to
+        rename_agent's generic 500."""
+        import routers.agent_rename as mod
+        from fastapi import HTTPException
+
+        db = MagicMock()
+        db.is_volume_base_reserved.return_value = True     # base claimed by another
+        db.can_user_access_agent.return_value = True
+        get_container = MagicMock(return_value=None)
+        stop = AsyncMock()
+        # A human caller: rename is human-only (ent#69 Part 2 rejects agent
+        # principals earlier), and an unstubbed MagicMock reads as agent-scoped.
+        user = MagicMock()
+        user.agent_name = None
+        user.scope = "user"
+        user.username = "alice"
+
+        with patch.object(mod, "db", db), \
+             patch.object(mod, "get_agent_container", get_container), \
+             patch.object(mod, "container_stop", stop, create=True):
+            with pytest.raises(HTTPException) as exc:
+                await mod.rename_agent_endpoint(
+                    "staging", MagicMock(new_name="prod"), MagicMock(), user
+                )
+
+        assert exc.value.status_code == 409
+        assert "data volumes" in str(exc.value.detail)
+        db.rename_agent.assert_not_called()
+        stop.assert_not_awaited()
+        # Asked with the exclusion, so a rename-back can't trip this gate.
+        assert db.is_volume_base_reserved.call_args.kwargs.get("exclude_agent") == "staging"

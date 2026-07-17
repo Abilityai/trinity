@@ -2889,9 +2889,10 @@ def _migrate_agent_ownership_volume_base_name(cursor, conn):
     than from the volume's self-description. Backfill is a no-op by
     construction: NULL already means "same as agent_name", which is correct for
     every pre-existing row EXCEPT agents renamed before this migration — those
-    are healed at boot by ``heal_renamed_volume_bases`` (db/agents.py), which
-    reads Docker's container mounts (the only surviving record of the old
-    volume name). Mirrored by Alembic 0024_agent_ownership_volume_base_name.
+    are healed at boot by ``CleanupService._heal_renamed_volume_bases``
+    (services/cleanup_service.py), which reads Docker's container mounts (the
+    only surviving record of the old volume name). Mirrored by Alembic
+    0024_agent_ownership_volume_base_name.
     """
     _safe_add_column(
         cursor,
