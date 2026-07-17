@@ -393,6 +393,11 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
     agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    # ent#181: the detail endpoint is what AgentHeader loads on page open — it
+    # must carry the label too, or the header shows the slug until the first
+    # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
+    # path, so a per-agent call is fine here.
+    agent_dict["display_label"] = db.get_display_label(agent_name)
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
@@ -883,10 +888,15 @@ async def set_agent_label_endpoint(
     label = db.get_display_label(agent_name)
     if manager:
         await manager.broadcast(json.dumps({
+            # `event` is the field the frontend WS client switches on; `type`
+            # is the normalized filter field. Both, matching agent_started etc.
+            "event": "agent_label_changed",
             "type": "agent_label_changed",
-            "agent_name": agent_name,
-            "display_label": label,
-            "display_name": label or agent_name,
+            "data": {
+                "name": agent_name,
+                "display_label": label,
+                "display_name": label or agent_name,
+            },
         }))
     return {
         "agent_name": agent_name,

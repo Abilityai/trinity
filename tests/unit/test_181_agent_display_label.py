@@ -209,7 +209,13 @@ class TestEndpoints:
         assert out["display_name"] == "Marketing Bot"
         db.set_display_label.assert_called_once_with("prod-agent", "Marketing Bot")
         ws.broadcast.assert_awaited_once()
-        assert "agent_label_changed" in ws.broadcast.await_args.args[0]
+        import json as _json
+        payload = _json.loads(ws.broadcast.await_args.args[0])
+        # `event` is what the frontend WS client switches on; `data.name` is the
+        # slug (it never moves). Both must be present or the broadcast is dead.
+        assert payload["event"] == "agent_label_changed"
+        assert payload["data"]["name"] == "prod-agent"
+        assert payload["data"]["display_label"] == "Marketing Bot"
 
     @pytest.mark.asyncio
     async def test_put_null_clears(self):
