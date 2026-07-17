@@ -45,6 +45,7 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services.dispatch_breaker import DispatchBreaker
+from services import event_dispatch_service
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
@@ -790,6 +791,7 @@ async def _write_terminal_and_gate(
     context_used: Optional[int] = None,
     context_max: Optional[int] = None,
     retry_count: Optional[int] = None,
+    agent_name: Optional[str] = None,
 ) -> bool:
     """Write a non-success terminal through the CAS and gate the activity
     completion on winning it (#671/H4).
@@ -824,6 +826,20 @@ async def _write_terminal_and_gate(
             activity_id=activity_id,
             status=activity_status,
             error=error,
+        )
+    # #1578: the timeout / budget-exhausted / unexpected-exception (+ inline
+    # circuit-open/capacity/ephemeral) failure terminals that never reach
+    # apply_result also emit agent.task.failed — the exact "long task wedged,
+    # orchestrator never woken" case the feature exists for. CAS-won only;
+    # fire-and-forget + fail-open. `agent_name` threaded from the execute_task
+    # callers (all have it in scope).
+    if won and agent_name:
+        event_dispatch_service.spawn_task_terminal_event(
+            agent_name,
+            execution_id,
+            terminal_status=status,
+            summary_or_error=error,
+            cost=cost,
         )
     return won
 
@@ -1119,6 +1135,7 @@ class TaskExecutionService:
                     status=TaskExecutionStatus.FAILED,
                     activity_status=ActivityState.FAILED,
                     error=error_msg,
+                    agent_name=agent_name,  # #1578: emit agent.task.failed on won
                 )
                 return TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1554,6 +1571,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1584,6 +1602,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1675,6 +1694,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1855,6 +1875,18 @@ class TaskExecutionService:
             # trinity-enterprise#69: post-CAS-win budget check, backgrounded
             # AFTER slot release so a discard can never wedge the finalizer.
             _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
+            # #1578: fire the deterministic completion event on the CAS-won branch
+            # only (a lost CAS reconciles above and never reaches here — no
+            # double-wake). Fire-and-forget + fail-open — never affects the
+            # billed terminal.
+            event_dispatch_service.spawn_task_terminal_event(
+                agent_name,
+                eid,
+                terminal_status=TaskExecutionStatus.SUCCESS,
+                summary_or_error=sanitized_resp,
+                duration_ms=envelope.execution_time_ms,
+                cost=total_cost,
+            )
 
             return TaskExecutionResult(
                 execution_id=eid or "",
@@ -1945,6 +1977,17 @@ class TaskExecutionService:
             # trinity-enterprise#69: failed/cancelled terminals consume budget
             # too — same backgrounded post-release hook as the success branch.
             _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
+            # #1578: fire agent.task.failed on the CAS-won branch only. The
+            # persisted status (FAILED or CANCELLED, #679) is carried in the
+            # event payload; a lost CAS skips all side effects (no emit).
+            event_dispatch_service.spawn_task_terminal_event(
+                agent_name,
+                eid,
+                terminal_status=envelope.status,
+                summary_or_error=envelope.error,
+                duration_ms=envelope.execution_time_ms,
+                cost=salvage_cost,
+            )
 
         return TaskExecutionResult(
             execution_id=eid or "",
