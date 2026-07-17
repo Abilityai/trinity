@@ -49,11 +49,44 @@ if _TESTS not in sys.path:
 
 from db_harness import db_backend, run, seed_agent, seed_user  # noqa: E402,F401
 
-# Capture the real services package so a sibling test's sys.modules Mock can't
-# leak a truthy docker probe into handlers that resolve container state (#186).
+# Capture the REAL service modules at collection time so a sibling unit test's
+# sys.modules stub can't leak into the handler bodies this suite drives
+# (learnings #762/#1446/#1533). Two concrete leaks this guards against:
+#   * a Mock ``services.docker_service`` leaking a truthy container probe (#186);
+#   * ``test_inject_assigned_credentials`` permanently installing a fake
+#     ``services.agent_service`` package (``agent_service_pkg_under_test_612``,
+#     lacking ``start_agent_internal``) at ITS import — which the owner-admit
+#     path (``subscriptions.clear_agent_subscription`` /
+#     ``assign_subscription_to_agent`` lazy-import ``start_agent_internal`` at
+#     call time) would otherwise trip with a bare ``ImportError`` that escapes
+#     ``_raised``. Collection imports every selected file before any test runs,
+#     so that fake is present regardless of execution order — the ``_pin_real_service_modules``
+#     autouse fixture below re-pins these per test (monkeypatch auto-restores the
+#     sibling's stub afterward). This file sorts first in collection order, so
+#     the captures here bind the genuine modules.
 import services  # noqa: E402
+
+# If a sibling already installed a fake ``services.agent_service`` stub package
+# that persists for the session (``test_inject_assigned_credentials`` does this
+# at its own import), evict the subtree and import the genuine package from disk
+# BEFORE the router imports below — ``routers/agents.py`` binds
+# ``start_agent_internal`` from it at ITS module top, so a cached fake would
+# abort THIS module's collection with an ImportError. In natural sorted
+# collection order this file sorts ahead of every persistent stubber, so the
+# eviction is a no-op there; the guard just makes the capture order-independent.
+_cached_agent_service = sys.modules.get("services.agent_service")
+if _cached_agent_service is not None and getattr(
+    _cached_agent_service, "__name__", ""
+) != "services.agent_service":
+    for _k in [
+        k for k in list(sys.modules)
+        if k == "services.agent_service" or k.startswith("services.agent_service.")
+    ]:
+        sys.modules.pop(_k, None)
+import services.agent_service  # noqa: E402
 import services.docker_service  # noqa: E402
 _REAL_SERVICES_PKG = sys.modules["services"]
+_REAL_AGENT_SERVICE = sys.modules["services.agent_service"]
 _REAL_DOCKER_SERVICE = sys.modules["services.docker_service"]
 
 # Routers that import cleanly in the bare unit env (framework python). schedules
@@ -90,6 +123,19 @@ _OWNER_ID, _STRANGER_ID, _ADMIN_ID = 1, 2, 3
 _OWNER, _STRANGER, _ADMIN = "owner-a", "stranger-b", "admin-c"
 _AGENT = "agent-a"
 _MISSING = "does-not-exist-xyz"
+
+
+@pytest.fixture(autouse=True)
+def _pin_real_service_modules(monkeypatch):
+    """Re-pin the genuine service modules for the duration of every test so a
+    sibling unit file's persistent sys.modules stub (notably the fake
+    ``services.agent_service`` package ``test_inject_assigned_credentials``
+    installs at import) can't leak into the handler bodies this suite drives.
+    ``monkeypatch.setitem`` auto-restores the sibling's stub afterward, so this
+    file stays a well-behaved sys.modules citizen."""
+    monkeypatch.setitem(sys.modules, "services", _REAL_SERVICES_PKG)
+    monkeypatch.setitem(sys.modules, "services.agent_service", _REAL_AGENT_SERVICE)
+    monkeypatch.setitem(sys.modules, "services.docker_service", _REAL_DOCKER_SERVICE)
 
 
 @pytest.fixture
