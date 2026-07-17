@@ -17,15 +17,15 @@ Fresh PG builds already get the column + index via ``0001_baseline``'s reuse of
 the schema DDL; ``ADD COLUMN IF NOT EXISTS`` / ``CREATE UNIQUE INDEX IF NOT
 EXISTS`` keep this a no-op there.
 
-Revision ID: 0025_operator_queue_request_id
-Revises: 0024_agent_ownership_volume_base_name
+Revision ID: 0026_operator_queue_request_id
+Revises: 0025_agent_ownership_display_label
 Create Date: 2026-07-17
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0025_operator_queue_request_id"
-down_revision = "0024_agent_ownership_volume_base_name"
+revision = "0026_operator_queue_request_id"
+down_revision = "0025_agent_ownership_display_label"
 branch_labels = None
 depends_on = None
 

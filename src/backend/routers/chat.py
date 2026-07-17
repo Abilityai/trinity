@@ -1385,6 +1385,47 @@ async def execute_parallel_task(
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
 
+    # EXEC-023 (#1672): validate + authorize a resume target before it becomes
+    # `claude --resume <id>` (or `codex resume <id>`) in the container.
+    # resume_session_id arrives from a user-editable URL query param (ExecutionDetail
+    # "Continue as Chat"); untrusted. Two gates:
+    #   1. Reject the dispatch sentinels — 'dispatched'/'dispatched_async' land in
+    #      claude_session_id before the real session id and stay permanently on
+    #      reaper-FAILED async rows (#1083). Such a row IS owned by its triggerer, so
+    #      the ownership gate below would pass it — but resuming it runs
+    #      `--resume dispatched_async`, which cannot resolve. Reject up front.
+    #   2. Authorize ownership — execution rows are AGENT-scoped
+    #      (accessible_agent_names), but claude_session_id is a per-user secret
+    #      (routers/sessions.py gates the Session tab on it and 404s to avoid leaking
+    #      its existence). Without this check, any operator on a *shared* agent could
+    #      read a peer's session id from the executions list and resume their private
+    #      conversation (IDOR). 404 (not 403) mirrors that enumeration-safe response.
+    #
+    # The gate is keyed ONLY on resume_session_id being present — deliberately NOT
+    # `and not x_source_agent`. x_source_agent is a raw client header; a regular user
+    # (current_user.agent_name is None, so the SELF-EXEC-001 spoof-guard below never
+    # fires for them) could otherwise set it to skip the gate entirely and keep the
+    # IDOR open. Every principal is handled correctly by ownership: a human is checked
+    # against their own user id; an agent-scoped key resolves to its owner and is
+    # checked against the owner's id; admin bypasses (mirrors the Session tab). No
+    # legitimate agent-to-agent path carries a resume id, so gating them costs nothing.
+    #
+    # Ownership is the real guard, so NO id-shape check is needed: a value that
+    # matches a real row's claude_session_id is a system-generated id (a Claude
+    # str(uuid4()) OR a Codex thread_id — a shape check would wrongly reject Codex),
+    # and a bogus/injection string matches no row → 404.
+    if request.resume_session_id:
+        rid = request.resume_session_id
+        if rid in ("dispatched", "dispatched_async"):
+            raise HTTPException(
+                status_code=400,
+                detail="This execution was never assigned a resumable session.",
+            )
+        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+            name, rid, current_user.id
+        ):
+            raise HTTPException(status_code=404, detail="Session not found.")
+
     # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
     # here — in place, so every downstream site (acquire, execute_task, backlog
     # payload) sees the clamped value and the warning fires once. No-override path skipped.

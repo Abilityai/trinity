@@ -291,9 +291,19 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 metadata.error_type = "rate_limit"
                 metadata.error_message = result_text
             else:
+                # #1673: `error_during_execution` carries its text in
+                # ``errors``, not ``result`` (which is ""), so reading only
+                # result_text left error_message empty and the failure
+                # unattributable downstream.
+                errors = msg.get("errors", [])
                 metadata.error_type = "execution_error"
-                metadata.error_message = result_text
-                logger.warning(f"Claude Code result is_error=true: type={metadata.error_type}, message={result_text}")
+                metadata.error_message = (
+                    result_text or (errors[0] if errors else "Execution error")
+                )
+                logger.warning(
+                    f"Claude Code result is_error=true: type={metadata.error_type}, "
+                    f"message={metadata.error_message}"
+                )
 
         if result_text:
             response_parts.clear()
