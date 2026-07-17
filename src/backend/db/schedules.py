@@ -75,6 +75,19 @@ _BUCKET_ORDER = [
 ]
 _OTHER_BUCKET = "Other"
 
+# #1449: authoritative terminal states whose `backlog_metadata` (the drain-replay
+# request blob — carries `user_message`/`user_email`/`system_prompt` PII) is safe
+# to scrub. Mirrors ``routers.agents._AUTHORITATIVE_TERMINALS`` /
+# ``services.pull_coordination_service._AUTHORITATIVE_TERMINALS`` (#1083). FAILED is
+# deliberately EXCLUDED: a FAILED row is resurrectable to SUCCESS via a late
+# token-gated CAS (``park_expired_lease`` keeps the ``claim_token``), so its intent
+# blob must survive; FAILED PII stays bounded by the 90-day ``prune_execution_rows``.
+_AUTHORITATIVE_TERMINALS = (
+    TaskExecutionStatus.SUCCESS,
+    TaskExecutionStatus.CANCELLED,
+    TaskExecutionStatus.SKIPPED,
+)
+
 
 def _bucket_for_trigger(trigger: Optional[str]) -> str:
     """Map a raw `triggered_by` value to its user-facing bucket (#1107)."""
@@ -3449,6 +3462,65 @@ class ScheduleOperations:
                     delete(schedule_executions).where(
                         schedule_executions.c.id.in_(ids)
                     )
+                )
+                total += result.rowcount
+            if len(ids) < chunk_size:
+                break
+        return total
+
+    def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
+        """NULL `backlog_metadata` on authoritative-terminal executions (#1449).
+
+        ``backlog_service.enqueue`` json.dumps the full drain-replay request —
+        including ``user_message``/``user_email``/``system_prompt`` — into
+        ``backlog_metadata`` so a queued task can be reconstructed at drain.
+        Nothing reads that blob once a row leaves ``status='queued'``: the drain
+        claims only queued rows, the #1083/#1081 result callbacks read the POST
+        payload (not the row's metadata), and canary E-04/G-04 are queued-scoped.
+        On a terminal row it is therefore stale PII sitting in the DB indefinitely
+        (bounded only by the 90-day ``prune_execution_rows``). Scrub it.
+
+        Unlike the #772 sweeps this is **not age-gated** — it is a security
+        invariant, not a retention window — but it mirrors their chunked
+        SELECT-ids-then-UPDATE shape so the write lock stays short (each chunk is
+        its own transaction). Only ``_AUTHORITATIVE_TERMINALS`` (success/cancelled/
+        skipped) are scrubbed; a FAILED row's intent is kept because it is
+        resurrectable to SUCCESS via a late CAS.
+
+        Args:
+            chunk_size: Max rows nulled per commit cycle (default 500).
+
+        Returns:
+            Total rows scrubbed across all chunks.
+        """
+        if chunk_size <= 0:
+            return 0
+
+        total = 0
+        engine = get_engine()
+        while True:
+            with engine.begin() as conn:
+                ids = [
+                    row["id"]
+                    for row in conn.execute(
+                        select(schedule_executions.c.id)
+                        .where(
+                            and_(
+                                schedule_executions.c.status.in_(
+                                    _AUTHORITATIVE_TERMINALS
+                                ),
+                                schedule_executions.c.backlog_metadata.isnot(None),
+                            )
+                        )
+                        .limit(chunk_size)
+                    ).mappings()
+                ]
+                if not ids:
+                    break
+                result = conn.execute(
+                    update(schedule_executions)
+                    .where(schedule_executions.c.id.in_(ids))
+                    .values(backlog_metadata=None)
                 )
                 total += result.rowcount
             if len(ids) < chunk_size:
