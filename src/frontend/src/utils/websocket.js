@@ -124,6 +124,13 @@ export function useWebSocket() {
       case 'agent_stopped':
         agentsStore.updateAgentStatus(data.data.name, 'stopped')
         break
+      case 'agent_label_changed': {
+        // ent#181: reflect a label change made on another client. The slug
+        // (name) never moves, so this is a pure re-render, no list mutation.
+        const target = agentsStore.agents.find(a => a.name === data.data.name)
+        if (target) target.display_label = data.data.display_label
+        break
+      }
       case 'agent_notification':
         // Real-time notification from an agent
         // The WebSocket event contains: notification_id, agent_name, notification_type, title, priority, category, timestamp
