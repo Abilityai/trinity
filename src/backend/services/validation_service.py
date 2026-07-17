@@ -354,10 +354,16 @@ class ValidationService:
         agent_name: str,
         validation_result: ValidationResult,
     ):
-        """Notify operator queue when validation fails.
+        """Notify the operator queue when validation fails.
 
-        Writes to the agent's operator-queue.json file for the
-        OperatorQueueSyncService to pick up.
+        Creates the item via a **direct DB create** (#1632), NOT by writing the
+        agent's operator-queue.json. This is a *platform* notification, so it must
+        bypass the agent-authored sync-ingestion caps (per-agent rate/depth/size)
+        — routing it through the agent file would flow it through `_sync_agent`
+        and cap it. The direct create also fixes a pre-existing latent bug: this
+        method used to `.append` to a bare list (`queue_data = []`), but the sync
+        service expects `{"requests": [...]}`, so the notification was never
+        actually ingested.
 
         Args:
             execution_id: The original execution that failed validation.
@@ -365,9 +371,9 @@ class ValidationService:
             validation_result: The validation result details.
         """
         try:
-            from services.agent_client import AgentClient
-
-            # Build the notification payload
+            # Build the notification payload. `val_` is a platform-reserved id
+            # prefix at the sync boundary (#1632), so an agent cannot pre-create
+            # (and thereby suppress) one.
             notification = {
                 "id": f"val_{execution_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
                 "type": "alert",
@@ -385,27 +391,10 @@ class ValidationService:
                 "created_at": utc_now_iso(),
             }
 
-            # Read existing queue, append, write back
-            client = AgentClient(agent_name)
-            queue_path = ".trinity/operator-queue.json"
-
-            try:
-                result = await client.read_file(queue_path)
-                if result.get("success") and result.get("content"):
-                    queue_data = json.loads(result["content"])
-                else:
-                    queue_data = []
-            except Exception:
-                queue_data = []
-
-            queue_data.append(notification)
-
-            await client.write_file(
-                queue_path,
-                json.dumps(queue_data, indent=2),
-                platform=True  # Allow writes to .trinity directory
+            db.create_operator_queue_item(agent_name, notification)
+            logger.info(
+                f"Added validation failure notification to operator queue for agent '{agent_name}'"
             )
-            logger.info(f"Added validation failure notification to operator queue for agent '{agent_name}'")
 
         except Exception as e:
             # Best effort — don't fail validation because notification failed
