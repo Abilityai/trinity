@@ -321,7 +321,7 @@ async function updateUserRole(username, role) {
 | `src/backend/dependencies.py` | `ROLE_HIERARCHY` | 503 | Ordered list defining role precedence |
 | `src/backend/dependencies.py` | `require_role(min_role)` | 506 | Dependency factory for role-gated endpoints |
 | `src/backend/dependencies.py` | `require_admin` | 486 | Enforces role == "admin" exactly (also rejects connector principals) |
-| `src/backend/dependencies.py` | `assert_admin` / `assert_agent_access` / `assert_agent_owner` / `assert_owns_or_admin` / `assert_owns` | 744-786 | INV-8 imperative auth-guard family (#1310) |
+| `src/backend/dependencies.py` | `assert_admin` / `assert_agent_access` / `assert_agent_owner` / `assert_owns_or_admin` / `assert_owns` | 740-801 | INV-8 imperative auth-guard family (#1310) |
 | `src/backend/routers/users.py` | `list_users` | 22 | GET /api/users — returns all users (admin-only) |
 | `src/backend/routers/users.py` | `update_user_role` | 46 | PUT /api/users/{username}/role (admin-only) |
 | `src/backend/db/users.py` | `update_user_role` | 225 | SQL UPDATE on users.role column |
