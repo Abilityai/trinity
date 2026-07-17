@@ -339,10 +339,11 @@ class TestPurgeUsesTheVolumeBase:
              patch("services.docker_utils.remove_agent_volumes", rm):
             await svc._sweep_soft_deleted_agents(report)
 
-        # Purging `new-name` must drop `agent-old-name-*`, not `agent-new-name-*`
-        # (which never existed) — else the real volumes leak forever.
-        rm.assert_awaited_once_with("old-name")
-        assert report.agent_volumes_removed == 3
+        # Purging `new-name` must drop BOTH identities: the workspace kept the
+        # pre-rename base, while public/shared (which name off the live agent
+        # name) are under the current one. Dropping only one leaks the other.
+        assert [c.args[0] for c in rm.await_args_list] == ["old-name", "new-name"]
+        assert report.agent_volumes_removed == 6
 
     @pytest.mark.asyncio
     async def test_purge_falls_back_to_agent_name(self):
@@ -365,6 +366,7 @@ class TestPurgeUsesTheVolumeBase:
              patch("services.docker_utils.remove_agent_volumes", rm):
             await svc._sweep_soft_deleted_agents(CleanupReport())
 
+        # Un-renamed: both identities are the same name, so it stays ONE call.
         rm.assert_awaited_once_with("plain")
 
 
@@ -401,11 +403,16 @@ class TestVolumeIdentityDb:
 
         # The volume `agent-old-name-workspace` still belongs to someone...
         assert agent_ops.is_volume_base_reserved("old-name") is True
-        # ...namely new-name, and NOT under its own name.
+        # ...namely new-name.
         assert agent_ops.get_volume_base_name("new-name") == "old-name"
-        assert agent_ops.is_volume_base_reserved("new-name") is False
         # The predicate the sweep used before #1664 is exactly the trap.
         assert agent_ops.is_agent_name_reserved("old-name") is False
+
+        # ...AND it still owns its CURRENT name: `get_public_volume_name` /
+        # `get_shared_volume_name` name off the LIVE agent name, so enabling
+        # file-sharing after a rename creates `agent-new-name-public`. Ownership
+        # is a union of both identities — anything less deletes those.
+        assert agent_ops.is_volume_base_reserved("new-name") is True
 
     def test_second_rename_keeps_the_original_base(self, agent_ops):
         self._seed("v1")
@@ -416,6 +423,19 @@ class TestVolumeIdentityDb:
         assert agent_ops.get_volume_base_name("v3") == "v1"
         assert agent_ops.is_volume_base_reserved("v1") is True
         assert agent_ops.is_volume_base_reserved("v2") is False
+
+    def test_renamed_agent_owns_volumes_under_both_bases(self, agent_ops):
+        """A renamed agent's public/shared volumes are created under its CURRENT
+        name (they name off the live name), while its workspace keeps the old
+        base. Both are live data; the public one is unmounted whenever
+        file-sharing is off, so the sweep's attached-check cannot save it —
+        only the DB predicate can."""
+        self._seed("old-name")
+        agent_ops.rename_agent("old-name", "new-name")
+
+        assert agent_ops.is_volume_base_reserved("old-name") is True   # workspace
+        assert agent_ops.is_volume_base_reserved("new-name") is True   # public/shared
+        assert agent_ops.is_volume_base_reserved("unrelated") is False
 
     def test_soft_deleted_renamed_agent_still_owns_its_volumes(self, agent_ops):
         """The recovery window (#834) applies to the renamed base too."""

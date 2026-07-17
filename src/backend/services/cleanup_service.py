@@ -836,9 +836,16 @@ class CleanupService:
                             # (in-use) volume retries via the orphan sweep, so a
                             # failure here never blocks the purge.
                             try:
-                                volumes_removed += await remove_agent_volumes(
-                                    volume_base
-                                )
+                                # Both identities: a renamed agent's workspace
+                                # kept the old base, but any volume created
+                                # after the rename (public/shared — those name
+                                # off the LIVE name) is under the new one. The
+                                # set is deduped, so an un-renamed agent is one
+                                # call as before (#1664).
+                                for base in dict.fromkeys((volume_base, name)):
+                                    volumes_removed += await remove_agent_volumes(
+                                        base
+                                    )
                             except Exception as e:
                                 logger.warning(
                                     f"[#1581] volume removal after purge of {name} "

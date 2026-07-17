@@ -185,8 +185,24 @@ class AgentOperations(
         question and marks live data an orphan; asking "does any agent own
         volumes under this base?" answers the right one.
 
-        NULL ``volume_base_name`` means "same as agent_name" — the case for
-        every agent that was never renamed, so no backfill is needed.
+        A row owns volumes under BOTH of its identities — the check is a
+        UNION, not a switch:
+
+        - ``agent_name``: NULL ``volume_base_name`` means "same as agent_name"
+          (every agent that was never renamed, so no backfill is needed), AND
+          a renamed agent still creates *new* volumes under its CURRENT name —
+          `get_public_volume_name` / `get_shared_volume_name` are called with
+          the live name, so enabling file-sharing after a rename produces
+          `agent-{new}-public`. A renamed agent therefore legitimately owns
+          volumes under two bases, and the public volume is unmounted whenever
+          file-sharing is off — matching only the pin would mark that live
+          agent's shared files an orphan and delete them.
+        - ``volume_base_name``: the pre-rename base its workspace kept.
+
+        Union-of-both is also strictly safer than the pre-#1664 predicate it
+        replaces (`is_agent_name_reserved` ≡ the first branch alone), so this
+        can only protect more than before, never less. A purged row matches
+        neither, so a genuine orphan is still reclaimable.
         """
         if not volume_base:
             return False
@@ -194,11 +210,8 @@ class AgentOperations(
             row = conn.execute(
                 select(agent_ownership.c.agent_name).where(
                     or_(
+                        agent_ownership.c.agent_name == volume_base,
                         agent_ownership.c.volume_base_name == volume_base,
-                        and_(
-                            agent_ownership.c.volume_base_name.is_(None),
-                            agent_ownership.c.agent_name == volume_base,
-                        ),
                     )
                 )
             ).first()
