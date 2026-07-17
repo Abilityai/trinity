@@ -11,7 +11,7 @@ Issue: https://github.com/abilityai/trinity/issues/42
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import docker
 
@@ -235,6 +235,9 @@ _AGENT_VOLUME_PLATFORMS = frozenset(
 # Label key present on every agent data volume — the cheap list filter for the
 # orphan sweep (catches all three platforms in one call).
 _AGENT_VOLUME_LABEL_KEY = "trinity.agent-name"
+# Mount destination of the agent's durable home volume (#1169) — the bind every
+# `agent-{base}-workspace` volume is attached at.
+AGENT_HOME_PATH = "/home/developer"
 
 
 def _volume_labels(volume) -> Dict[str, str]:
@@ -244,41 +247,58 @@ def _volume_labels(volume) -> Dict[str, str]:
         return {}
 
 
-def is_reclaimable_agent_volume(volume, agent_name: str) -> bool:
-    """Fail-closed guard: True ONLY if ``volume`` is safe to destroy for
-    ``agent_name`` (name AND label both match; #1581 double-guard).
+def is_reclaimable_agent_volume(volume, volume_base: str) -> bool:
+    """Fail-closed guard: True ONLY if ``volume`` is one of ``volume_base``'s
+    agent data volumes (name AND label both match; #1581 double-guard).
 
-    Refuses when the name isn't exactly ``agent-{agent_name}-{suffix}``, the
+    Refuses when the name isn't exactly ``agent-{volume_base}-{suffix}``, the
     ``trinity.agent-name`` label is absent or differs, or the
     ``trinity.platform`` label isn't an agent-data platform.
+
+    Scope (#1664): this checks that the volume's identity is INTERNALLY
+    CONSISTENT and is the one the caller asked for — it is the last line of
+    defence against a mis-targeted removal, NOT evidence that the data is
+    dead. It cannot be: after a rename both the name and the (immutable) label
+    keep describing an agent that no longer exists, so a live agent's home
+    volume passes this guard for its former name. Liveness is the caller's
+    burden — `db.is_volume_base_reserved` for ownership plus
+    `list_attached_volume_names` for in-use — and `volume_base` must therefore
+    come from `db.get_volume_base_name(agent)`, never from f-stringing an
+    agent's current name.
     """
-    if not agent_name:
+    if not volume_base:
         return False
     name = getattr(volume, "name", None)
-    if name not in {f"agent-{agent_name}-{s}" for s in _AGENT_VOLUME_SUFFIXES}:
+    if name not in {f"agent-{volume_base}-{s}" for s in _AGENT_VOLUME_SUFFIXES}:
         return False
     labels = _volume_labels(volume)
-    if labels.get("trinity.agent-name") != agent_name:
+    if labels.get("trinity.agent-name") != volume_base:
         return False
     if labels.get("trinity.platform") not in _AGENT_VOLUME_PLATFORMS:
         return False
     return True
 
 
-async def remove_agent_volumes(agent_name: str) -> int:
-    """Remove an agent's data volumes (workspace/public/shared) — #1581.
+async def remove_agent_volumes(volume_base: str) -> int:
+    """Remove the data volumes (workspace/public/shared) under ``volume_base``
+    — #1581.
 
     Called at the retention hard-purge (the instant the agent becomes
     unrecoverable), NEVER at soft-delete. Each candidate is re-checked by
     :func:`is_reclaimable_agent_volume` before removal (name + label). Missing
     volumes are a no-op; an in-use volume is left for the next sweep (the
     container should already be gone at purge time). Returns the count removed.
+
+    ``volume_base`` is a VOLUME base, not necessarily an agent name (#1664):
+    a renamed agent's volumes keep the pre-rename base, so callers holding an
+    agent name must resolve it via ``db.get_volume_base_name(agent)`` — while
+    the ownership row still exists.
     """
     if docker_client is None:
         return 0
     removed = 0
     for suffix in _AGENT_VOLUME_SUFFIXES:
-        vol_name = f"agent-{agent_name}-{suffix}"
+        vol_name = f"agent-{volume_base}-{suffix}"
         try:
             volume = await volume_get(vol_name)
         except docker.errors.NotFound:
@@ -286,10 +306,10 @@ async def remove_agent_volumes(agent_name: str) -> int:
         except Exception as e:
             logger.warning(f"[#1581] could not read volume {vol_name}: {e}")
             continue
-        if not is_reclaimable_agent_volume(volume, agent_name):
+        if not is_reclaimable_agent_volume(volume, volume_base):
             logger.error(
                 f"[#1581] refusing to remove volume {vol_name}: guard "
-                f"(name+label) did not match agent {agent_name}"
+                f"(name+label) did not match base {volume_base}"
             )
             continue
         try:
@@ -306,6 +326,91 @@ async def remove_agent_volumes(agent_name: str) -> int:
         except Exception as e:
             logger.warning(f"[#1581] failed to remove volume {vol_name}: {e}")
     return removed
+
+
+async def list_attached_volume_names() -> Optional[Set[str]]:
+    """Names of every named volume mounted by ANY container, running or not
+    (#1664). Returns None when the answer can't be established.
+
+    Docker-as-truth liveness signal for the #1581 orphan sweep (Invariant #11):
+    a volume someone mounts is somebody's live data regardless of what its own
+    name and labels claim — the case a renamed agent creates, since its home
+    volume keeps the pre-rename name AND label forever.
+
+    Deliberately unfiltered by label: a volume mounted by a container Trinity
+    doesn't recognize is still in use, and the sweep's job is to refuse to
+    destroy it. Fail-closed — the None on error means "unknown", and the caller
+    must skip the cycle rather than reclaim on a blind guess.
+    """
+    if docker_client is None:
+        return None
+    loop = asyncio.get_event_loop()
+
+    def _collect() -> Set[str]:
+        names: Set[str] = set()
+        # Mounts come back on the list payload itself (/containers/json), so
+        # this is one API call — no per-container inspect.
+        for container in docker_client.containers.list(all=True):
+            for mount in (container.attrs.get("Mounts") or []):
+                if mount.get("Type") == "volume" and mount.get("Name"):
+                    names.add(mount["Name"])
+        return names
+
+    try:
+        return await loop.run_in_executor(_docker_executor, _collect)
+    except Exception as e:
+        logger.error(f"[#1664] listing attached volumes failed: {e}")
+        return None
+
+
+async def get_agent_workspace_volume_map() -> Dict[str, str]:
+    """Map each agent container's agent name → the volume it mounts at the
+    agent home path (#1664). Best-effort: returns {} on error.
+
+    The container *name* is authoritative for the agent's current name (rename
+    renames the container, and `list_all_agents_fast` reads it the same way);
+    the mount is authoritative for which volume that agent actually uses. The
+    pair is the only surviving record of a rename that happened before
+    `agent_ownership.volume_base_name` existed, which is what the boot-time
+    heal reconstructs it from.
+    """
+    if docker_client is None:
+        return {}
+    loop = asyncio.get_event_loop()
+
+    def _collect() -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for container in docker_client.containers.list(
+            all=True, filters={"label": "trinity.platform=agent"}
+        ):
+            agent_name = container.name.removeprefix("agent-")
+            if not agent_name:
+                continue
+            for mount in (container.attrs.get("Mounts") or []):
+                if (
+                    mount.get("Type") == "volume"
+                    and mount.get("Destination") == AGENT_HOME_PATH
+                    and mount.get("Name")
+                ):
+                    mapping[agent_name] = mount["Name"]
+                    break
+        return mapping
+
+    try:
+        return await loop.run_in_executor(_docker_executor, _collect)
+    except Exception as e:
+        logger.error(f"[#1664] reading agent workspace mounts failed: {e}")
+        return {}
+
+
+def volume_base_from_workspace_volume(volume_name: str) -> Optional[str]:
+    """``agent-foo-workspace`` → ``foo``; None for anything else (#1664)."""
+    if not volume_name or not volume_name.startswith("agent-"):
+        return None
+    if not volume_name.endswith("-workspace"):
+        return None
+    base = volume_name[len("agent-"):-len("-workspace")]
+    return base or None
 
 
 async def list_agent_data_volumes() -> List[Any]:

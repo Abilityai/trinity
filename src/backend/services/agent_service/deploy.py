@@ -68,6 +68,11 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
     Failures raise HTTPException(500) — partial pre-population would
     leave the deploy in an inconsistent state.
     """
+    # #1665 audit: naming off `version_name` is correct HERE by construction —
+    # a deploy version is a brand-new name whose ownership row doesn't exist
+    # yet (this runs before creation), so there is no pin to resolve and no
+    # rename in its past. Every OTHER "this agent's volume" lookup must go
+    # through `db.get_volume_base_name` (see lifecycle._workspace_volume_name).
     workspace_vol = f"agent-{version_name}-workspace"
     client = docker.from_env()
 
@@ -573,7 +578,12 @@ async def deploy_local_agent_logic(
             agent_config,
             current_user,
             request,
-            skip_name_sanitization=True
+            skip_name_sanitization=True,
+            # #1667: THE one legitimate adopt — the workspace volume was just
+            # pre-populated with the template above, so create must mount it
+            # rather than refuse it. Every other caller is refused a
+            # pre-existing volume (it would be another agent's leftover data).
+            adopt_existing_workspace=True,
         )
 
         # 11. Return response
