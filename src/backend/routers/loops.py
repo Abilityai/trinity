@@ -14,7 +14,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
 from database import db
-from dependencies import get_authorized_agent, get_current_user
+from dependencies import get_authorized_agent, get_current_user, assert_agent_access
 from models import (
     LoopRunResponse,
     LoopStatusResponse,
@@ -121,9 +121,7 @@ def _check_loop_access(loop: dict, user: User) -> None:
     if loop["started_by_user_id"] == user.id:
         return
     # Fall back to agent ownership/sharing check.
-    if db.can_user_access_agent(user.username, loop["agent_name"]):
-        return
-    raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(user, loop["agent_name"])
 
 
 # ---------------------------------------------------------------------------

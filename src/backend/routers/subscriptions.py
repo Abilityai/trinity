@@ -16,7 +16,7 @@ from typing import Optional, List
 
 from models import User
 from database import db
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
 from db_models import (
     SubscriptionCredentialCreate,
     SubscriptionCredential,
@@ -248,8 +248,7 @@ async def assign_subscription_to_agent(
     interleave with a concurrent auto-switch on the same agent.
     """
     # Owner or admin only — shared users must not mutate subscription assignments
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the agent owner or an admin can manage subscriptions")
+    assert_agent_owner(current_user, agent_name, detail="Only the agent owner or an admin can manage subscriptions")
 
     # Get subscription by name
     subscription = db.get_subscription_by_name(subscription_name)
@@ -342,8 +341,7 @@ async def clear_agent_subscription(
     Owner access required. Agent will fall back to API key authentication.
     """
     # Owner or admin only — shared users must not mutate subscription assignments
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the agent owner or an admin can manage subscriptions")
+    assert_agent_owner(current_user, agent_name, detail="Only the agent owner or an admin can manage subscriptions")
 
     # Get current subscription for logging
     current_sub = db.get_agent_subscription(agent_name)
@@ -395,8 +393,7 @@ async def get_agent_auth_status(
     Owner access required.
     """
     # Check agent access
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied to this agent")
+    assert_agent_access(current_user, agent_name, detail="Access denied to this agent")
 
     try:
         from services.subscription_service import get_agent_auth_mode

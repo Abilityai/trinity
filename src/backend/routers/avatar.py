@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from database import db
-from dependencies import OwnedAgentByName, get_current_user, assert_admin
+from dependencies import OwnedAgentByName, get_current_user, assert_admin, assert_agent_access
 from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
@@ -289,8 +289,7 @@ async def get_avatar_identity(
     current_user: User = Depends(get_current_user),
 ):
     """Return avatar identity prompt and metadata."""
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, agent_name)
 
     identity = db.get_avatar_identity(agent_name)
     has_avatar = (AVATAR_DIR / f"{agent_name}.webp").exists() or (AVATAR_DIR / f"{agent_name}.png").exists()

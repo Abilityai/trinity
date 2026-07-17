@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -310,11 +310,7 @@ async def update_event_subscription(
         raise HTTPException(status_code=404, detail="Event subscription not found")
 
     # Only owner or admin can update
-    if not db.can_user_share_agent(current_user.username, existing.subscriber_agent):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner can modify event subscriptions",
-        )
+    assert_agent_owner(current_user, existing.subscriber_agent, detail="Only the owner can modify event subscriptions")
 
     if data.event_type and not re.match(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$", data.event_type):
         raise HTTPException(
@@ -342,11 +338,7 @@ async def delete_event_subscription(
         raise HTTPException(status_code=404, detail="Event subscription not found")
 
     # Only owner or admin can delete
-    if not db.can_user_share_agent(current_user.username, existing.subscriber_agent):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner can delete event subscriptions",
-        )
+    assert_agent_owner(current_user, existing.subscriber_agent, detail="Only the owner can delete event subscriptions")
 
     db.delete_event_subscription(subscription_id)
     return {"status": "deleted", "subscription_id": subscription_id}
