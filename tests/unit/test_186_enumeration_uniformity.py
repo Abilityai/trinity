@@ -258,7 +258,16 @@ def test_tier4_config_gets_are_access_gated():
         ann = fn.__annotations__["agent_name"]
         meta = getattr(ann, "__metadata__", ())
         deps = [getattr(m, "dependency", None) for m in meta]
-        assert get_authorized_agent_by_name in deps, (
+        # Compare by qualified identity (name), NOT object identity: the unit
+        # conftest pops `dependencies` from sys.modules between tests while the
+        # already-imported `agent_config` module persists, so a co-resident test
+        # that imported agent_config in an earlier generation would leave its
+        # annotations bound to a stale `get_authorized_agent_by_name` object that
+        # is no longer `is`-equal to a freshly re-imported one. The invariant
+        # under test is "the access dependency gates this handler" — a name match
+        # proves that without depending on re-import object identity.
+        dep_names = {getattr(d, "__name__", None) for d in deps}
+        assert get_authorized_agent_by_name.__name__ in dep_names, (
             f"{fn.__name__} is not bound to get_authorized_agent_by_name"
         )
 
