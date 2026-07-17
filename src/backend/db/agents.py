@@ -15,7 +15,7 @@ to focused mixin classes in db/agent_settings/:
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, delete, func, and_, or_
+from sqlalchemy import select, insert, update, delete, func, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine

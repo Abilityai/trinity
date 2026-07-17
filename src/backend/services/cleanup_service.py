@@ -843,6 +843,24 @@ class CleanupService:
                                 # set is deduped, so an un-renamed agent is one
                                 # call as before (#1664).
                                 for base in dict.fromkeys((volume_base, name)):
+                                    # `volume_base_name` carries no unique
+                                    # constraint, and installs predating the
+                                    # create-time gate (crud.py, #1664) can hold
+                                    # a collision: agent `new` pinned to base
+                                    # `old` PLUS a live agent literally named
+                                    # `old`, both on the same volumes. This row
+                                    # is already purged, so a still-True answer
+                                    # means a DIFFERENT row claims the base —
+                                    # its data is live and not ours to drop.
+                                    if db.is_volume_base_reserved(base):
+                                        logger.warning(
+                                            "[#1664] purge of %s: volume base %r "
+                                            "still claimed by another agent — "
+                                            "skipping removal",
+                                            name,
+                                            base,
+                                        )
+                                        continue
                                     volumes_removed += await remove_agent_volumes(
                                         base
                                     )

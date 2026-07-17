@@ -332,6 +332,7 @@ class TestPurgeUsesTheVolumeBase:
         db.find_soft_deleted_agents_past_retention.return_value = ["new-name"]
         db.get_volume_base_name.return_value = "old-name"
         db.purge_agent_ownership.return_value = True
+        db.is_volume_base_reserved.return_value = False  # no other row claims them
 
         rm = AsyncMock(return_value=3)
         with patch.object(cs, "db", db), \
@@ -344,6 +345,39 @@ class TestPurgeUsesTheVolumeBase:
         # name) are under the current one. Dropping only one leaks the other.
         assert [c.args[0] for c in rm.await_args_list] == ["old-name", "new-name"]
         assert report.agent_volumes_removed == 6
+
+    @pytest.mark.asyncio
+    async def test_purge_skips_a_base_another_agent_still_claims(self):
+        """`volume_base_name` has no unique constraint, and installs predating
+        the create-time gate can hold a collision: agent `new` pinned to base
+        `old` PLUS a live agent named `old`, sharing the volumes. Purging the
+        first must not delete the second's live data."""
+        from services.cleanup_service import CleanupReport
+        import services.cleanup_service as cs
+
+        svc = _Svc.build()
+        report = CleanupReport()
+
+        db = MagicMock()
+        db.get_setting_value.side_effect = lambda k, d=None: (
+            "180" if k == "agent_soft_delete_retention_days" else d
+        )
+        db.find_soft_deleted_agents_past_retention.return_value = ["new-name"]
+        db.get_volume_base_name.return_value = "old-name"
+        db.purge_agent_ownership.return_value = True
+        # This row is already purged, so True = a DIFFERENT row claims `old-name`
+        # (the live agent that reused the freed name); `new-name` is unclaimed.
+        db.is_volume_base_reserved.side_effect = lambda base: base == "old-name"
+
+        rm = AsyncMock(return_value=1)
+        with patch.object(cs, "db", db), \
+             patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
+             patch("services.docker_utils.remove_agent_volumes", rm):
+            await svc._sweep_soft_deleted_agents(report)
+
+        # `old-name` skipped (someone's live data); `new-name` still reclaimed.
+        assert [c.args[0] for c in rm.await_args_list] == ["new-name"]
+        assert report.soft_deleted_agents_purged == 1
 
     @pytest.mark.asyncio
     async def test_purge_falls_back_to_agent_name(self):
@@ -359,6 +393,7 @@ class TestPurgeUsesTheVolumeBase:
         db.purge_agent_ownership.return_value = True
         # A DB hiccup reading the pin must not strand the volumes.
         db.get_volume_base_name.side_effect = RuntimeError("db down")
+        db.is_volume_base_reserved.return_value = False
 
         rm = AsyncMock(return_value=1)
         with patch.object(cs, "db", db), \

@@ -189,6 +189,7 @@ class TestCleanupOrchestration:
         db.purge_agent_ownership.return_value = True
         # #1664: un-renamed agents — volume base == agent name (one call each).
         db.get_volume_base_name.side_effect = lambda n: n
+        db.is_volume_base_reserved.return_value = False  # #1664: no other claimant
 
         removed = AsyncMock(return_value=2)  # 2 volumes per agent
         with patch.object(cs, "db", db), \
@@ -214,6 +215,7 @@ class TestCleanupOrchestration:
         db.find_soft_deleted_agents_past_retention.return_value = ["ag1"]
         db.purge_agent_ownership.return_value = True
         db.get_volume_base_name.side_effect = lambda n: n
+        db.is_volume_base_reserved.return_value = False  # #1664: no other claimant
 
         with patch.object(cs, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
