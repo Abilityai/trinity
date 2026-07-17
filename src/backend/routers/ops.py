@@ -19,7 +19,7 @@ import httpx
 
 from models import User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_admin
 from services.docker_service import get_agent_container, docker_client, list_all_agents_fast
 from services.docker_utils import container_stop, container_start
 from services.agent_client import get_agent_client
@@ -29,12 +29,6 @@ from services.platform_audit_service import platform_audit_service, AuditEventTy
 
 router = APIRouter(prefix="/api/ops", tags=["operations"])
 logger = logging.getLogger(__name__)
-
-
-def require_admin(current_user: User):
-    """Verify user is an admin."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
 
 
 # ============================================================================
@@ -52,7 +46,7 @@ async def get_fleet_status(
     Admin-only. Returns a comprehensive list of all agents with their
     container status, context usage, last activity time, and system agent flag.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     agents = list_all_agents_fast()
 
@@ -130,7 +124,7 @@ async def get_fleet_health(
     Admin-only. Identifies unhealthy agents based on context usage,
     container errors, and idle time.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     agents = list_all_agents_fast()
 
@@ -237,7 +231,7 @@ async def restart_fleet(
 
     Admin-only. Excludes the system agent.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     agents = list_all_agents_fast()
 
@@ -341,7 +335,7 @@ async def stop_fleet(
 
     Admin-only. Excludes the system agent.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     agents = list_all_agents_fast()
 
@@ -440,7 +434,7 @@ async def list_all_schedules(
     Admin-only. Returns schedule information including next run times
     and recent execution status.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     schedules = db.list_all_schedules()
 
@@ -509,7 +503,7 @@ async def pause_all_schedules(
 
     Admin-only. Use for maintenance windows or incident response.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Get all enabled schedules
     schedules = db.list_all_enabled_schedules()
@@ -546,7 +540,7 @@ async def resume_all_schedules(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Get all disabled schedules
     schedules = db.list_all_disabled_schedules() if hasattr(db, 'list_all_disabled_schedules') else []
@@ -616,7 +610,7 @@ async def emergency_stop(
     Args:
         system_prefix: Optional filter to only stop agents with names starting with this prefix
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     results = {
         "schedules_paused": 0,
@@ -720,7 +714,7 @@ async def list_alerts(
 
     Admin-only. Alerts are derived from platform events.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # TODO: Implement dedicated alerts table
     # For now, return placeholder - check fleet health for issues
@@ -743,7 +737,7 @@ async def acknowledge_alert(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # TODO: Implement when alerts table is added
     return {
@@ -772,7 +766,7 @@ async def get_ops_costs(
     Admin-only. Returns OTel metrics including cost breakdown,
     token usage, and productivity metrics.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     if not OTEL_ENABLED:
         return {
@@ -961,7 +955,7 @@ async def get_auth_report(
 
     Admin-only. Shows subscription/API key usage across the fleet.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     agents = list_all_agents_fast()
 

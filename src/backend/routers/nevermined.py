@@ -13,7 +13,7 @@ from typing import List
 
 from models import User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_admin
 from db_models import NeverminedConfigCreate, NeverminedConfig, NeverminedPaymentLog
 from services.nevermined_payment_service import (
     get_nevermined_payment_service,
@@ -157,8 +157,7 @@ async def get_settlement_failures(
     current_user: User = Depends(get_current_user),
 ):
     """List unsettled payments across all agents (admin only)."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+    assert_admin(current_user)
     return db.get_nevermined_settlement_failures(limit)
 
 
@@ -180,8 +179,7 @@ async def retry_settlement(
     ``payment:{agent_request_id}`` effect guard (#1084) — no re-charge, no re-run.
     """
     _check_sdk()
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+    assert_admin(current_user)
 
     log_entry = db.get_nevermined_payment_log_entry(log_id)
     if not log_entry:

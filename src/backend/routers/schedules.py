@@ -26,7 +26,13 @@ from models import (
     User,
     WebhookStatusResponse,
 )
-from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
+from dependencies import (
+    get_current_user,
+    get_authorized_agent,
+    AuthorizedAgent,
+    CurrentUser,
+    assert_admin,
+)
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.schedule_validation import (
@@ -63,11 +69,7 @@ async def get_scheduler_status(
     Returns information about the scheduler state and scheduled jobs
     from the dedicated scheduler service.
     """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
-        )
+    assert_admin(current_user)
 
     # Call dedicated scheduler service for status
     try:

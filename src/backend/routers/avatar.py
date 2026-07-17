@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from database import db
-from dependencies import OwnedAgentByName, get_current_user
+from dependencies import OwnedAgentByName, get_current_user, assert_admin
 from models import AvatarGenerateRequest, User
 from services.agent_auth import agent_httpx_client
 from services.image_generation_prompts import AVATAR_EMOTIONS, AVATAR_EMOTION_PROMPTS
@@ -148,8 +148,7 @@ async def generate_default_avatars(
     auto-generated prompt derived from each agent's name and type.
     No emotion variants or reference images for defaults.
     """
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can generate default avatars")
+    assert_admin(current_user, detail="Only admins can generate default avatars")
 
     service = get_image_generation_service()
     if not service.available:
