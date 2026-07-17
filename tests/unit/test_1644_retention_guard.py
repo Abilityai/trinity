@@ -38,10 +38,17 @@ def _days_ago_iso(days: int) -> str:
 
 
 @pytest.fixture
-def ops(db_backend):
-    """Fresh operation classes bound to the harness engine."""
+def ops(db_backend, monkeypatch):
+    """Fresh operation classes bound to the harness engine.
+
+    `monkeypatch.delitem` rather than a bare `sys.modules.pop`: the pop leaks the
+    eviction into every later test in the session (the module stays gone, or
+    re-imports against a different engine), which is the class of cross-test
+    coupling `tests/lint_sys_modules.py` exists to catch. monkeypatch restores it
+    at teardown.
+    """
     for mod in ("db.connection", "db.schedules", "db.monitoring", "db.reports"):
-        sys.modules.pop(mod, None)
+        monkeypatch.delitem(sys.modules, mod, raising=False)
     from db.schedules import ScheduleOperations
     from db.monitoring import MonitoringOperations
 
