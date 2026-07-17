@@ -23,6 +23,21 @@ from .tables import operator_queue
 from utils.helpers import utc_now_iso, iso_cutoff
 
 
+# #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
+# ingestion boundary (services/operator_queue_service.py) clamps to far smaller
+# service caps *before* calling create_item, so a clamped agent item never trips
+# these; platform items are small and never trip them either. They exist only as
+# a second layer (#1525's validate-at-boundary-AND-at-sink philosophy) so the
+# "platform bypasses the boundary" exemption stops being solely load-bearing —
+# a caller that skips the service clamp still can't persist a multi-MB field.
+# An order of magnitude above the service caps (title 300 / question 4000 /
+# context 8 KiB / id 256).
+_DB_BELT_TITLE_MAX_BYTES = 4 * 1024
+_DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
+_DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
+_DB_BELT_ID_MAX = 512
+
+
 class OperatorQueueOperations:
     """Database operations for the operator queue."""
 
@@ -91,8 +106,30 @@ class OperatorQueueOperations:
         item_id = item.get("id")
         if not item_id:
             raise ValueError("operator-queue item is missing a required 'id'")
+
+        # #1632: generous DB-sink belt. Reject a pathologically large field an
+        # order of magnitude past the service caps (a clamped agent item or a
+        # small platform item never trips this). Raised as ValueError so the sync
+        # loop quarantines it (#1525) rather than hot-looping on an opaque error.
+        if len(str(item_id)) > _DB_BELT_ID_MAX:
+            raise ValueError(f"operator-queue item 'id' exceeds {_DB_BELT_ID_MAX} chars")
+        title = item.get("title")
+        if title and len(str(title).encode("utf-8")) > _DB_BELT_TITLE_MAX_BYTES:
+            raise ValueError(f"operator-queue 'title' exceeds {_DB_BELT_TITLE_MAX_BYTES} bytes")
+        question = item.get("question")
+        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
+            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
+        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
+            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
+
+        # #1632: context may be authored as a non-dict (agents write free-form
+        # JSON). Only pull execution_id when it is actually a dict — a str/list
+        # `.get(...)` used to raise AttributeError here and hot-loop the sync.
+        context = item.get("context")
+        context_execution_id = context.get("execution_id") if isinstance(context, dict) else None
 
         # Agents author operator-queue.json free-form, so the sync boundary must
         # be defensive (#1426): a required field missing from one item used to
@@ -112,7 +149,7 @@ class OperatorQueueOperations:
             question=item.get("question") or item.get("title") or "(no details provided)",
             options=options_json,
             context=context_json,
-            execution_id=item.get("context", {}).get("execution_id") if item.get("context") else None,
+            execution_id=context_execution_id,
             created_at=item.get("created_at") or utc_now_iso(),
             expires_at=item.get("expires_at"),
         ).on_conflict_do_nothing(index_elements=["id"])
@@ -595,3 +632,20 @@ class OperatorQueueOperations:
         stmt = select(operator_queue.c.id).where(operator_queue.c.id == item_id)
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None
+
+    def count_pending_for_agent(self, agent_name: str) -> int:
+        """#1632: count an agent's currently-pending operator-queue rows.
+
+        The primary, Redis-independent depth bound for the ingestion cap: the
+        sync service admits new agent items only while this count (plus what it
+        has admitted this cycle) stays under OPERATOR_QUEUE_MAX_PENDING_PER_AGENT.
+        Dialect-agnostic (SQLite + PostgreSQL, #300).
+        """
+        stmt = select(func.count()).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status == "pending",
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)

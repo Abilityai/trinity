@@ -2388,6 +2388,10 @@ class DatabaseManager:
     def operator_queue_item_exists(self, item_id):
         return self._operator_queue_ops.item_exists(item_id)
 
+    def count_operator_queue_pending_for_agent(self, agent_name):
+        # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
+        return self._operator_queue_ops.count_pending_for_agent(agent_name)
+
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001
     # =========================================================================
