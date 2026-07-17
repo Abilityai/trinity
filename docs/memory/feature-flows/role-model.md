@@ -110,15 +110,16 @@ As a whitelisted user signing up via email, I get the `creator` role by default 
 
 ### 1. Role Check on Protected Endpoint
 
-**File**: `src/backend/dependencies.py:173-198`
+**File**: `src/backend/dependencies.py` — `ROLE_HIERARCHY` @503, `require_role` @506-528, `require_admin` @486-499 (line numbers current as of #1310).
 
 ```python
-# Role hierarchy definition (line 174)
+# Role hierarchy definition (dependencies.py:503)
 ROLE_HIERARCHY = ["user", "operator", "creator", "admin"]
 
-# Factory function (lines 177-198)
+# Factory function (dependencies.py:506-528)
 def require_role(min_role: str):
     def _require_role(current_user: User = Depends(get_current_user)) -> User:
+        _reject_connector_principal(current_user)  # connectors are consumption-only
         user_level = ROLE_HIERARCHY.index(current_user.role) if current_user.role in ROLE_HIERARCHY else -1
         min_level = ROLE_HIERARCHY.index(min_role) if min_role in ROLE_HIERARCHY else len(ROLE_HIERARCHY)
         if user_level < min_level:
@@ -131,6 +132,20 @@ def require_role(min_role: str):
 ```
 
 **Key behavior**: A user with role `admin` (index 3) passes a `require_role("creator")` (index 2) check because `3 >= 2`. Roles unknown to `ROLE_HIERARCHY` receive index `-1` and fail all role checks.
+
+### 1b. Imperative auth-guard family (INV-8, #1310)
+
+For sites where the agent name is *derived from a resolved resource* or the gate is *composite* — where a path-dependency can't reach — routers call the leaf helpers in `dependencies.py` (all raise 403, access-first → self-uniform; the agent-name helpers run `_enforce_connector_scope` first):
+
+| Helper | Wraps | Replaces |
+|---|---|---|
+| `assert_admin` | `_reject_connector_principal` + `role != "admin"` | inline admin + 4 router-local `require_admin` dupes |
+| `assert_agent_access` | `_enforce_connector_scope` + `can_user_access_agent` | inline `can_user_access_agent` → 403 |
+| `assert_agent_owner` | `_enforce_connector_scope(owner_op=True)` + `can_user_share_agent` (owner-or-admin; **NOT** delete-auth — no `is_system` guard) | inline `can_user_share_agent` → 403 |
+| `assert_owns_or_admin` | `id != owner AND role != "admin"` | strict-self-or-admin session gates (voice/chat) |
+| `assert_owns` | `id != owner` (**no admin**) | strict-self session gate (public-link session) |
+
+Rule of thumb: agent name *in the path* → the uniform-404 path-dependency; *derived / composite* → the imperative helper (403). Guarded by `tests/unit/test_1310_auth_wiring.py`; behavioral proof in `tests/unit/test_1310_auth_consolidation.py`.
 
 ### 2. Agent Creation Gated at Creator Level
 
@@ -303,9 +318,10 @@ async function updateUserRole(username, role) {
 
 | File | Function/Symbol | Line | Purpose |
 |------|----------------|------|---------|
-| `src/backend/dependencies.py` | `ROLE_HIERARCHY` | 174 | Ordered list defining role precedence |
-| `src/backend/dependencies.py` | `require_role(min_role)` | 177 | Dependency factory for role-gated endpoints |
-| `src/backend/dependencies.py` | `require_admin` | 158 | Unchanged; still enforces role == "admin" exactly |
+| `src/backend/dependencies.py` | `ROLE_HIERARCHY` | 503 | Ordered list defining role precedence |
+| `src/backend/dependencies.py` | `require_role(min_role)` | 506 | Dependency factory for role-gated endpoints |
+| `src/backend/dependencies.py` | `require_admin` | 486 | Enforces role == "admin" exactly (also rejects connector principals) |
+| `src/backend/dependencies.py` | `assert_admin` / `assert_agent_access` / `assert_agent_owner` / `assert_owns_or_admin` / `assert_owns` | 744-786 | INV-8 imperative auth-guard family (#1310) |
 | `src/backend/routers/users.py` | `list_users` | 22 | GET /api/users — returns all users (admin-only) |
 | `src/backend/routers/users.py` | `update_user_role` | 46 | PUT /api/users/{username}/role (admin-only) |
 | `src/backend/db/users.py` | `update_user_role` | 225 | SQL UPDATE on users.role column |
@@ -389,7 +405,7 @@ Admin-only. Changes the role of the specified user.
 | Invalid role value | 400 | `Invalid role. Must be one of: admin, creator, operator, user` | `routers/users.py:61-64` |
 | Target user not found | 404 | `User '{username}' not found` | `routers/users.py:72` |
 | Operator tries to create agent | 403 | `Role 'creator' or above required` | `require_role` factory |
-| Unknown role in hierarchy check | (treated as index -1) | Fails all `require_role` checks | `dependencies.py:190` |
+| Unknown role in hierarchy check | (treated as index -1) | Fails all `require_role` checks | `dependencies.py:522` |
 
 ---
 

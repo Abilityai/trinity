@@ -184,6 +184,8 @@ Using these dependencies instead of inline `db.can_user_access_agent()` calls pr
 - **OpenAPI schema visibility**: Authorization requirements shown in API docs
 - **Automatic enforcement**: New endpoints automatically get proper authorization
 
+For **router** sites where the agent name is derived from a resolved resource or the gate is composite (a path-dependency can't reach), INV-8 (#1310) adds the imperative-guard family in `dependencies.py` — `assert_admin` / `assert_agent_access` / `assert_agent_owner` / `assert_owns_or_admin` / `assert_owns` (all raise **403**, access-first; the agent-name ones run `_enforce_connector_scope` first). The **service-layer** inline checks shown below (`services/agent_service/permissions.py`) are outside that router refactor and unchanged. See [role-model.md](role-model.md) §1b.
+
 #### Example: Dependency-based Pattern (recommended)
 
 ```python
