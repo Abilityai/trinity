@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from models import ActivityState, TaskExecutionStatus
+from services import event_dispatch_service
 from services.agent_auth import build_agent_auth_headers
 from services.capacity_manager import get_capacity_manager
 from services.slot_service import SLOT_TTL_BUFFER
@@ -1352,6 +1353,18 @@ class CleanupService:
                                 # #1083: close the dispatch activity the (now-absent)
                                 # fire-and-forget coroutine `finally` would have closed.
                                 await self._close_stale_slot_activity(execution_id)
+                                # #1578: the async #1083 lease expired with no
+                                # result callback — emit agent.task.failed so a
+                                # subscribed orchestrator is woken on the wedge.
+                                event_dispatch_service.spawn_task_terminal_event(
+                                    agent_name,
+                                    execution_id,
+                                    terminal_status=TaskExecutionStatus.FAILED,
+                                    summary_or_error=(
+                                        f"{_LEASE_EXPIRED_TAG}: agent '{agent_name}' "
+                                        f"unresponsive during cleanup re-verify"
+                                    ),
+                                )
                             else:
                                 # Race-guard refused — a real terminal write
                                 # arrived first. Expected and benign.
@@ -1403,6 +1416,18 @@ class CleanupService:
                             # #1083: close the dispatch activity the (now-absent)
                             # fire-and-forget coroutine `finally` would have closed.
                             await self._close_stale_slot_activity(execution_id)
+                            # #1578: async #1083 lease expired (no result
+                            # callback) — emit agent.task.failed to wake a
+                            # subscribed orchestrator on the wedge.
+                            event_dispatch_service.spawn_task_terminal_event(
+                                agent_name,
+                                execution_id,
+                                terminal_status=TaskExecutionStatus.FAILED,
+                                summary_or_error=(
+                                    f"{_LEASE_EXPIRED_TAG}: slot TTL expired for "
+                                    f"agent '{agent_name}' (no result callback)"
+                                ),
+                            )
                     except Exception as e:
                         logger.error(
                             f"[Cleanup] Error failing {execution_id} after slot reclaim: {e}"
