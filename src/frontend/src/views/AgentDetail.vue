@@ -64,6 +64,7 @@
             @add-tag="addTag"
             @remove-tag="removeTag"
             @rename="renameAgent"
+            @set-label="setAgentLabel"
             @open-avatar-modal="showAvatarModal = true"
             @cycle-emotion="cycleEmotion"
             @change-subscription="changeSubscription"
@@ -589,6 +590,21 @@ async function toggleRunning() {
 }
 
 // Rename agent (RENAME-001)
+// ent#181: the pencil edits the LABEL — one column, no restart, no re-key.
+// `label === null` clears it and the agent renders under its slug again.
+async function setAgentLabel(label) {
+  if (!agent.value) return
+  try {
+    const res = await agentsStore.setAgentLabel(agent.value.name, label)
+    // Reflect it locally so the header updates without a refetch; the slug
+    // (agent.value.name) is deliberately untouched.
+    agent.value.display_label = res.label
+  } catch (e) {
+    console.error('Failed to set agent label:', e)
+    error.value = e.response?.data?.detail || 'Failed to update the label'
+  }
+}
+
 const renameLoading = ref(false)
 
 async function renameAgent(newName) {

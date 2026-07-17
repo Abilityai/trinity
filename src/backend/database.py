@@ -559,6 +559,20 @@ class DatabaseManager:
     # volume-ownership predicate the #1581 orphan sweep must use instead of
     # `is_agent_name_reserved` — a renamed agent's volumes keep the pre-rename
     # base, so asking "is this a live agent NAME?" marks live data an orphan.
+    # ent#181: the human-facing label. `display_label` is presentation only —
+    # `agent_name` (the slug) remains the identity everything else keys on.
+    def get_display_label(self, agent_name: str):
+        return self._agent_ops.get_display_label(agent_name)
+
+    def get_display_name(self, agent_name: str):
+        return self._agent_ops.get_display_name(agent_name)
+
+    def get_display_labels_for_agents(self, agent_names):
+        return self._agent_ops.get_display_labels_for_agents(agent_names)
+
+    def set_display_label(self, agent_name: str, label):
+        return self._agent_ops.set_display_label(agent_name, label)
+
     def is_volume_base_reserved(self, volume_base: str, exclude_agent=None):
         # #1671: `exclude_agent` = "does anyone ELSE claim this base?" — the
         # rename gate passes the renaming agent so a rename-back isn't refused.

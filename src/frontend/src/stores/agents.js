@@ -363,6 +363,22 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // ent#181: set or clear an agent's human-facing label. `label: null` clears
+    // it and the agent renders under its slug again. Goes through the shared
+    // axios client + auth interceptor (Invariant #7) — unlike the legacy slug
+    // rename in AgentDetail.vue, which hand-rolls fetch + Authorization.
+    async setAgentLabel(name, label) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/label`, { label }, {
+        headers: authStore.authHeader
+      })
+      // Keep the cached agent in step so every surface re-renders with the new
+      // label without a refetch.
+      const cached = this.agents.find(a => a.name === name)
+      if (cached) cached.display_label = response.data.label
+      return response.data
+    },
+
     async getAgentInfo(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/info`, {
