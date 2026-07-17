@@ -199,3 +199,23 @@ both gave 404; an exposed agent served a `0.3.0` card.
   does with an A2A-triggered turn
 - [idempotency-keys.md](idempotency-keys.md) — the trigger-boundary dedup layer
   `messageId` plugs into (Invariant #18)
+
+## Exposed-skills filter (ent#180)
+
+The card's `skills[]` is derived from the agent's `template.yaml capabilities[]`
+(§32.1). `services/a2a_gate.py` carries a second provider hook —
+`exposed_skills(agent_name) -> Optional[List[str]]` — and
+`routers/a2a.py::_card_with_exposed_skills` applies it to **both** card surfaces
+(public well-known + authenticated per-agent), so they can never disagree and a
+future third surface inherits the filter.
+
+OSS registers no provider, so the filter is the identity function and cards are
+unchanged. `None` from a provider means "no opinion" → advertise everything (the
+unconfigured default); `[]` means advertise nothing. A provider error or a
+malformed return advertises unfiltered and logs at WARNING — fail-open, matching
+the seam's other hook.
+
+**Disclosure only.** `message/send` dispatches free-form text via `execute_task`,
+so an unadvertised skill is hidden, not unreachable. Anything that constrains
+what an external caller can actually reach would be a different mechanism
+(`allowed_tools`/guardrails) with its own threat model.

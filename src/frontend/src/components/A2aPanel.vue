@@ -67,23 +67,79 @@
         </div>
       </div>
 
-      <!-- Advertised skills (read-only) -->
+      <!-- Advertised skills (ent#180: curated) -->
       <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
-        <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Advertised skills</h4>
+        <div class="flex items-center justify-between mb-1">
+          <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Advertised skills</h4>
+          <button
+            v-if="!skillsEditing && capabilities.length"
+            @click="startEditSkills"
+            class="text-xs text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Choose…</button>
+        </div>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-          What an external caller sees on the card (derived from the agent's <code class="font-mono">template.yaml</code>).
+          What an external caller sees on the card. Hiding a skill stops it being
+          <em>advertised</em> — it does not stop a caller asking for it, since A2A messages are free-form text.
         </p>
-        <div v-if="cardLoading" class="text-sm text-gray-500 dark:text-gray-400">Loading card…</div>
-        <div v-else-if="skills.length" class="flex flex-wrap gap-2">
-          <span
-            v-for="s in skills"
-            :key="s.id || s.name"
-            class="px-2 py-0.5 text-xs rounded-full bg-action-primary-50 dark:bg-action-primary-900/30 text-action-primary-700 dark:text-action-primary-300 border border-action-primary-200 dark:border-action-primary-800"
-          >{{ s.name || s.id }}</span>
-        </div>
-        <div v-else class="text-sm text-gray-500 dark:text-gray-400">
-          No skills advertised — the agent's template declares no capabilities.
-        </div>
+
+        <!-- read view -->
+        <template v-if="!skillsEditing">
+          <div v-if="cardLoading" class="text-sm text-gray-500 dark:text-gray-400">Loading card…</div>
+          <div v-else-if="skills.length" class="flex flex-wrap gap-2">
+            <span
+              v-for="s in skills"
+              :key="s.id || s.name"
+              class="px-2 py-0.5 text-xs rounded-full bg-action-primary-50 dark:bg-action-primary-900/30 text-action-primary-700 dark:text-action-primary-300 border border-action-primary-200 dark:border-action-primary-800"
+            >{{ s.name || s.id }}</span>
+          </div>
+          <div v-else-if="config.curated_skills && !config.curated_skills.length" class="text-sm text-gray-500 dark:text-gray-400">
+            Nothing advertised — the card lists no skills by your choice.
+          </div>
+          <div v-else class="text-sm text-gray-500 dark:text-gray-400">
+            No skills advertised — the agent's template declares no capabilities.
+          </div>
+          <p v-if="!config.curated_skills && capabilities.length" class="mt-2 text-xs text-gray-400 dark:text-gray-500">
+            Advertising all {{ capabilities.length }} capabilities (default).
+          </p>
+        </template>
+
+        <!-- edit view -->
+        <template v-else>
+          <div class="space-y-1.5">
+            <label
+              v-for="cap in capabilities"
+              :key="cap"
+              class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+            >
+              <input type="checkbox" :value="cap" v-model="skillDraft" class="rounded" />
+              <span class="font-mono text-xs">{{ cap }}</span>
+            </label>
+          </div>
+          <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ skillDraft.length === capabilities.length
+               ? 'All selected — the card advertises everything (the default).'
+               : skillDraft.length
+                 ? `${skillDraft.length} of ${capabilities.length} advertised.`
+                 : 'None selected — the card will advertise no skills.' }}
+          </p>
+          <div class="mt-3 flex items-center gap-2">
+            <button
+              @click="saveSkills"
+              :disabled="busy"
+              class="px-3 py-1 text-xs rounded bg-action-primary-600 text-white hover:bg-action-primary-700 disabled:opacity-50"
+            >Save</button>
+            <button
+              @click="skillsEditing = false"
+              class="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300"
+            >Cancel</button>
+            <button
+              v-if="config.curated_skills"
+              @click="clearSkillCuration"
+              :disabled="busy"
+              class="ml-auto text-xs text-gray-500 dark:text-gray-400 hover:underline disabled:opacity-50"
+            >Reset to all</button>
+          </div>
+        </template>
       </div>
 
       <!-- Inbound allow-list -->
@@ -215,6 +271,14 @@ const busy = ref(false)
 const skills = ref([])
 const cardLoading = ref(false)
 
+// ent#180 — curated skills. `capabilities` is the full set the template
+// declares (what CAN be advertised); the card only returns the curated subset,
+// so the selectable list has to come from the agent's template info, not the
+// card. `config.curated_skills === null` means "no curation" = advertise all.
+const capabilities = ref([])
+const skillsEditing = ref(false)
+const skillDraft = ref([])
+
 const newIdentity = ref('')
 const newEndpoint = ref({ name: '', url: '', credentials: '' })
 
@@ -238,11 +302,63 @@ async function load() {
   loading.value = true
   try {
     config.value = await agentsStore.getA2aConfig(props.agentName)
-    if (config.value.a2a_exposed) loadSkills()
+    if (config.value.a2a_exposed) {
+      loadSkills()
+      loadCapabilities()
+    }
   } catch (e) {
     notifyUser(e.response?.data?.detail || `Failed to load A2A config: ${e.message}`, 'error')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadCapabilities() {
+  try {
+    const info = await agentsStore.getAgentInfo(props.agentName)
+    capabilities.value = Array.isArray(info?.capabilities) ? info.capabilities : []
+  } catch {
+    capabilities.value = []  // best-effort — without it we just hide the editor
+  }
+}
+
+function startEditSkills() {
+  // No curation yet => everything is advertised, so start with all ticked.
+  skillDraft.value = config.value.curated_skills
+    ? [...config.value.curated_skills]
+    : [...capabilities.value]
+  skillsEditing.value = true
+}
+
+async function saveSkills() {
+  busy.value = true
+  try {
+    // Ticking everything is the same as "no opinion" — store null so the agent
+    // keeps advertising whatever its template declares as the template evolves,
+    // instead of freezing today's list.
+    const all = skillDraft.value.length === capabilities.value.length
+    config.value = await agentsStore.setA2aSkills(props.agentName, all ? null : skillDraft.value)
+    skillsEditing.value = false
+    await loadSkills()
+    notifyUser('Advertised skills updated')
+  } catch (e) {
+    notifyUser(e.response?.data?.detail || `Failed to update skills: ${e.message}`, 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function clearSkillCuration() {
+  busy.value = true
+  try {
+    config.value = await agentsStore.setA2aSkills(props.agentName, null)
+    skillsEditing.value = false
+    await loadSkills()
+    notifyUser('Advertising all skills')
+  } catch (e) {
+    notifyUser(e.response?.data?.detail || `Failed to reset skills: ${e.message}`, 'error')
+  } finally {
+    busy.value = false
   }
 }
 

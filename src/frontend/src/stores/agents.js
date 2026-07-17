@@ -869,6 +869,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // ent#180: choose which skills the agent's A2A card advertises.
+    // `skills: null` clears the curation (advertise all — the default);
+    // `skills: []` advertises nothing. The two are different on purpose.
+    async setA2aSkills(name, skills) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/enterprise/a2a/${name}/skills`, { skills }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     async updateA2aAllowlist(name, { add = [], remove = [] }) {
       const authStore = useAuthStore()
       const response = await axios.post(`/api/enterprise/a2a/${name}/inbound-allowlist`,
