@@ -41,7 +41,9 @@ export function createEventTools(
         "Emit a named event to the Trinity platform. " +
         "Other agents can subscribe to your events and receive automated tasks when they fire. " +
         "Use namespaced event types (e.g., 'prediction.resolved', 'report.generated', 'anomaly.detected'). " +
-        "Include structured data in the payload - subscribers can reference it via {{payload.field}} templates.",
+        "Include structured data in the payload - subscribers can reference it via {{payload.field}} templates. " +
+        "NOTE: the 'agent.task.*' namespace (agent.task.completed / agent.task.failed) is RESERVED — the backend " +
+        "emits those deterministically when your executions finish (#1578); emitting into it is rejected.",
       parameters: z.object({
         event_type: z.string()
           .describe(
@@ -99,7 +101,11 @@ export function createEventTools(
         "When the source agent emits a matching event, you will automatically receive a task " +
         "with the target_message (payload fields interpolated). " +
         "Requires permission to communicate with the source agent. " +
-        "Use {{payload.field}} placeholders in target_message to include event data.",
+        "Use {{payload.field}} placeholders in target_message to include event data. " +
+        "TIP: subscribe to a source agent's backend-emitted 'agent.task.completed' / 'agent.task.failed' events " +
+        "(#1578) to be woken with an automatic report-back task when its execution finishes — instead of polling " +
+        "get_execution_result. Payload carries {execution_id, status, triggered_by, summary_or_error, duration_ms, " +
+        "cost, fan_out_id, loop_id}. You cannot self-subscribe to your own 'agent.task.*' events (self-wake loop).",
       parameters: z.object({
         source_agent: z.string()
           .describe("Name of the agent to subscribe to events from"),
