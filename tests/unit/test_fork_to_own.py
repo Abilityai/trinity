@@ -459,6 +459,12 @@ def _load_crud(docker_available=True):
     db = database_mod.db
     db.get_agent_owner.return_value = None
     db.is_agent_name_reserved.return_value = False
+    # #1664: the name-free check has a volume-identity sibling — a rename frees
+    # the NAME while the agent keeps its volumes, so create also refuses a base
+    # another agent still owns. Fork destinations are fresh names, so: free.
+    # (Stub it explicitly: an unstubbed MagicMock attribute is truthy, which
+    # reads as "base taken" and 409s every create in this module.)
+    db.is_volume_base_reserved.return_value = False
     db.get_agents_by_owner.return_value = []
     db.get_guardrails_config.return_value = None
     db.create_agent_mcp_api_key.return_value = MagicMock(

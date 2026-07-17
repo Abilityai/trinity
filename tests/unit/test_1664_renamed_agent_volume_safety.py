@@ -584,3 +584,28 @@ class TestCreateRefusesAReservedVolumeBase:
         assert "data volumes" in str(exc.value.detail)
         # Fail BEFORE any container/volume work — no half-built agent.
         db.get_agents_by_owner.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ephemeral_creation_is_not_gated(self):
+        """Ghosts are volume-less by construction, so there is nothing to
+        collide with — and the gate must not put a DB read on the burst path."""
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = MagicMock()
+        db.get_agent_owner.return_value = None
+        db.is_agent_name_reserved.return_value = False
+        db.is_volume_base_reserved.return_value = True   # would 409 a durable agent
+
+        config = MagicMock()
+        config.name = "ghost"
+        config.ephemeral = True
+
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(config, MagicMock())
+
+        # It fails later (entitlement/quota), never on the volume-base gate.
+        assert "data volumes" not in str(exc.value.detail)
+        db.is_volume_base_reserved.assert_not_called()

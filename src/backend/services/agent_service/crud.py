@@ -284,7 +284,10 @@ async def create_agent_internal(
     # be the same person, which makes it a cross-tenant credential disclosure,
     # not just corruption. Refuse instead: the volumes are somebody's live data
     # until their owning row is purged.
-    if db.is_volume_base_reserved(config.name):
+    # Ghosts are exempt: they are volume-less by construction (the volume block
+    # below is `if not config.ephemeral`), so there is nothing to collide with —
+    # and this would put a DB read on the burst-spawn path for no reason.
+    if not config.ephemeral and db.is_volume_base_reserved(config.name):
         raise HTTPException(
             status_code=409,
             detail=(
