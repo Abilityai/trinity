@@ -989,6 +989,17 @@
         "regression"
       ],
       "description": "Claude Code error_during_execution must not be recorded as success (#1673): stream_parser falls back to errors[] when result text is empty; _finalize_headless_result surfaces error_type=execution_error as 502 instead of falling through to the #160 `context: fork` placeholder. Guards the Sessions-tab resume-not-found fallback contract (detail carries 'no conversation found') and pins that the #160 placeholder still fires for genuine clean exits."
+    },
+    {
+      "file": "unit/test_1402_prompt_contract.py",
+      "feature": "#1402",
+      "added": "2026-07-15",
+      "categories": [
+        "backend",
+        "prompt",
+        "reliability"
+      ],
+      "description": "Async operator human-gate contract (#1402): sentinel phrases (fire-and-park / End your turn / ask-before-irreversible / globally-unique derived request ids / expires_at) present in every runtime build of the platform prompt; old block-inviting wording gone; Operator Communication section MCP-name-free and byte-identical across runtimes; task-mode _mode_guidance park carve-out (chat mode unchanged); composed task prompt end-to-end; meta-prompt reference copy + agent guide kept in sync."
     }
   ]
 }

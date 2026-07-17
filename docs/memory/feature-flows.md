@@ -230,7 +230,7 @@
 |------|----------|-------------|
 | Agent Notifications | [agent-notifications.md](feature-flows/agent-notifications.md) | Agent-to-platform notifications (NOTIF-001) |
 | Events Page UI | [events-page.md](feature-flows/events-page.md) | Consolidated into Operating Room Notifications tab |
-| Operating Room | [operating-room.md](feature-flows/operating-room.md) | Unified operator command center: queue, notifications, resolved (OPS-001) |
+| Operating Room | [operating-room.md](feature-flows/operating-room.md) | Unified operator command center: queue, notifications, resolved (OPS-001); async fire-and-park contract + derived request ids + lease-reaper poison-park items (#1402) |
 | Proactive Messaging | [proactive-messaging.md](feature-flows/proactive-messaging.md) | Proactive agent-to-user messaging (#321) |
 
 ### Configuration & Settings
