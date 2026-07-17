@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import NamedTuple, NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource, activity_state_for_terminal
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent
+from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.agent_auth import agent_httpx_client
 from services.model_context import DEFAULT_CONTEXT_WINDOW
@@ -2359,8 +2359,7 @@ async def get_chat_session_detail(
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
 
     # Non-admins can only see their own sessions
-    if current_user.role != "admin" and session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You don't have access to this session")
+    assert_owns_or_admin(current_user, session.user_id, detail="You don't have access to this session")
 
     messages = db.get_chat_messages(session_id, limit=limit)
 
@@ -2390,8 +2389,7 @@ async def close_chat_session(
     if session.agent_name != name:
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
 
-    if current_user.role != "admin" and session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You don't have access to this session")
+    assert_owns_or_admin(current_user, session.user_id, detail="You don't have access to this session")
 
     success = db.close_chat_session(session_id)
 
