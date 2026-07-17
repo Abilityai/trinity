@@ -1164,6 +1164,13 @@ class DatabaseManager:
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
 
+    def resume_session_belongs_to_user(
+        self, agent_name: str, claude_session_id: str, user_id: int
+    ) -> bool:
+        return self._schedule_ops.resume_session_belongs_to_user(
+            agent_name, claude_session_id, user_id
+        )
+
     def get_schedule_executions(self, schedule_id: str, limit: int = 50):
         return self._schedule_ops.get_schedule_executions(schedule_id, limit)
 
