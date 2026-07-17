@@ -49,8 +49,19 @@ Dataclass holding results from a single cleanup cycle:
 - `stale_activities: int` - Activities marked failed
 - `stale_slots: int` - Redis slots cleaned
 - `stale_slot_executions: int` - Execution records failed when their slot was reclaimed (Issue #219)
-- `total` property: Sum of all eight fields
+- `ssh_credentials_expired: int` - Expired ephemeral SSH keys removed from agent `authorized_keys` — Issue #1616
+- `total` property: Sum of all report fields
 - `to_dict()` method: Serializes for API responses
+
+> **Note (stale):** this doc enumerates the original cycle; many sweeps have since
+> been added (soft-delete purge #834, volume reclaim #1581, operator_queue
+> retention #1142, ephemeral GC, lease-reaper #429/#1402, expired-SSH #1616, …) and
+> the `CleanupReport` has grown accordingly. The **authoritative, current sweep
+> list** is the `cleanup_service` row in the [architecture.md Background Services
+> table](../architecture.md). The expired-SSH sweep (`_sweep_expired_ssh_credentials`,
+> #1616) calls `SshService.cleanup_expired_credentials()` to remove an expired key's
+> line from the container `authorized_keys` sshd reads — TTL was previously enforced
+> only on the Redis metadata; see [ssh-access.md](ssh-access.md).
 
 #### CleanupService class (line 48)
 Singleton pattern via global `cleanup_service` instance (line 141).
