@@ -1,0 +1,481 @@
+"""Unit tests for renamed-agent volume safety in the #1581 orphan sweep (#1664).
+
+Rename keeps the agent's Docker data volumes: the volume name AND its immutable
+`trinity.agent-name` label both stay at the PRE-rename name. The #1581 orphan
+sweep read that stale identity as ownership truth, found no agent by that name,
+and force-removed what is actually the LIVE agent's `/home/developer` — a silent,
+unrecoverable loss of #1169 `data_paths` data the moment a container recreate
+left the volume briefly unattached.
+
+These tests pin the fix, layer by layer:
+- ownership is resolved from the DB (`is_volume_base_reserved`), not from the
+  volume's self-description,
+- rename pins `volume_base_name` atomically, and freezes it across re-renames,
+- the sweep refuses to touch a mounted volume, and skips the whole cycle when
+  Docker can't say what is mounted (fail-closed),
+- an unattached sighting only counts as an orphan after N consecutive cycles
+  (the recreate race),
+- agents renamed before the column existed are healed from Docker's mounts.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+import pytest
+
+_project_root = Path(__file__).resolve().parents[2]
+_backend = str(_project_root / "src" / "backend")
+while _backend in sys.path:
+    sys.path.remove(_backend)
+sys.path.insert(0, _backend)
+
+from db_harness import db_backend, run as _hrun  # noqa: E402,F401
+
+
+def _load_docker_utils():
+    """Fresh docker_utils with a mocked docker_client (no daemon)."""
+    mock_client = Mock()
+    with patch.dict(
+        "sys.modules",
+        {"services.docker_service": Mock(docker_client=mock_client)},
+    ):
+        spec = importlib.util.spec_from_file_location(
+            "docker_utils", f"{_backend}/services/docker_utils.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        mod.docker_client = mock_client
+        spec.loader.exec_module(mod)
+    return mod, mock_client
+
+
+def _volume(name, agent_name, created="2020-01-01T00:00:00Z"):
+    v = Mock()
+    v.name = name
+    v.attrs = {
+        "Labels": {
+            "trinity.agent-name": agent_name,
+            "trinity.platform": "agent-workspace",
+        },
+        "CreatedAt": created,
+    }
+    return v
+
+
+def _container(name, mounts):
+    c = Mock()
+    c.name = name
+    c.attrs = {"Mounts": mounts}
+    return c
+
+
+def _vol_mount(volume_name, dest="/home/developer"):
+    return {"Type": "volume", "Name": volume_name, "Destination": dest}
+
+
+class _Svc:
+    """CleanupService with the unrelated sweeps stubbed out."""
+
+    @staticmethod
+    def build():
+        from services.cleanup_service import CleanupService
+
+        svc = CleanupService(poll_interval=300)
+        svc._reconcile_orphaned_executions = AsyncMock(return_value=(0, 0, set()))
+        svc._process_stale_slot_reclaims = AsyncMock(return_value=None)
+        return svc
+
+
+class TestDockerMountHelpers:
+    @pytest.mark.asyncio
+    async def test_attached_volume_names_spans_all_containers(self):
+        mod, client = _load_docker_utils()
+        client.containers.list.return_value = [
+            _container("agent-a", [_vol_mount("agent-a-workspace")]),
+            # A non-agent container's mount counts too: in-use is in-use.
+            _container("some-other", [_vol_mount("agent-old-name-workspace")]),
+            _container("no-mounts", []),
+        ]
+
+        names = await mod.list_attached_volume_names()
+
+        assert names == {"agent-a-workspace", "agent-old-name-workspace"}
+        # all=True — a stopped container still owns its volume.
+        assert client.containers.list.call_args.kwargs["all"] is True
+
+    @pytest.mark.asyncio
+    async def test_bind_mounts_are_not_volume_names(self):
+        mod, client = _load_docker_utils()
+        client.containers.list.return_value = [
+            _container("agent-a", [
+                {"Type": "bind", "Source": "/data", "Destination": "/data"},
+                _vol_mount("agent-a-workspace"),
+            ])
+        ]
+        assert await mod.list_attached_volume_names() == {"agent-a-workspace"}
+
+    @pytest.mark.asyncio
+    async def test_attached_volume_names_fails_closed_on_docker_error(self):
+        mod, client = _load_docker_utils()
+        client.containers.list.side_effect = RuntimeError("docker down")
+
+        # None = "unknown", never an empty set (which would read as
+        # "nothing is mounted" and green-light every removal).
+        assert await mod.list_attached_volume_names() is None
+
+    @pytest.mark.asyncio
+    async def test_workspace_volume_map_reads_renamed_container(self):
+        mod, client = _load_docker_utils()
+        client.containers.list.return_value = [
+            # The rename fingerprint: container is `agent-new-name`, mount is
+            # still the pre-rename volume.
+            _container("agent-new-name", [_vol_mount("agent-old-name-workspace")]),
+            _container("agent-plain", [_vol_mount("agent-plain-workspace")]),
+        ]
+
+        assert await mod.get_agent_workspace_volume_map() == {
+            "new-name": "agent-old-name-workspace",
+            "plain": "agent-plain-workspace",
+        }
+
+    @pytest.mark.asyncio
+    async def test_workspace_volume_map_ignores_non_home_mounts(self):
+        mod, client = _load_docker_utils()
+        client.containers.list.return_value = [
+            _container("agent-a", [
+                _vol_mount("agent-a-public", dest="/home/developer/public"),
+                _vol_mount("agent-a-workspace"),
+            ])
+        ]
+        assert await mod.get_agent_workspace_volume_map() == {
+            "a": "agent-a-workspace"
+        }
+
+    def test_volume_base_parsing(self):
+        mod, _ = _load_docker_utils()
+        assert mod.volume_base_from_workspace_volume("agent-foo-workspace") == "foo"
+        assert mod.volume_base_from_workspace_volume("agent-a-b-workspace") == "a-b"
+        assert mod.volume_base_from_workspace_volume("agent-foo-public") is None
+        assert mod.volume_base_from_workspace_volume("redis-data") is None
+        assert mod.volume_base_from_workspace_volume("agent--workspace") is None
+
+
+class TestOrphanSweepRenameSafety:
+    async def _run_cycles(self, svc, report, *, db, vols, attached, n=1):
+        import services.cleanup_service as cs
+
+        rm = AsyncMock(return_value=1)
+        with patch.object(cs, "db", db), \
+             patch("services.docker_utils.list_agent_data_volumes",
+                   AsyncMock(return_value=vols)), \
+             patch("services.docker_utils.list_attached_volume_names",
+                   AsyncMock(return_value=attached)), \
+             patch("services.docker_utils.remove_agent_volumes", rm):
+            for _ in range(n):
+                await svc._sweep_orphan_agent_volumes(report)
+        return rm
+
+    @pytest.mark.asyncio
+    async def test_renamed_agents_volume_is_never_reclaimed(self):
+        """THE bug: pinned base ⇒ the stale-named volume has an owner."""
+        from services.cleanup_service import CleanupReport
+
+        svc = _Svc.build()
+        vols = [_volume("agent-old-name-workspace", "old-name")]
+
+        db = MagicMock()
+        # No agent is *named* old-name any more...
+        db.is_agent_name_reserved.side_effect = lambda n: n == "new-name"
+        # ...but new-name owns the volumes based on old-name.
+        db.is_volume_base_reserved.side_effect = lambda base: base == "old-name"
+
+        # Even with the container gone (mid-recreate) and many cycles.
+        rm = await self._run_cycles(
+            svc, CleanupReport(), db=db, vols=vols, attached=set(), n=5
+        )
+
+        rm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mounted_volume_is_never_reclaimed_even_if_unowned(self):
+        """Docker-as-truth backstop: in use ⇒ someone's live data."""
+        from services.cleanup_service import CleanupReport
+
+        svc = _Svc.build()
+        vols = [_volume("agent-old-name-workspace", "old-name")]
+        db = MagicMock()
+        # Worst case: the DB pin is missing (heal never ran).
+        db.is_volume_base_reserved.return_value = False
+
+        rm = await self._run_cycles(
+            svc,
+            CleanupReport(),
+            db=db,
+            vols=vols,
+            attached={"agent-old-name-workspace"},
+            n=5,
+        )
+
+        rm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sweep_skipped_when_mounts_unknown(self):
+        """Fail-closed: can't prove unused ⇒ don't delete."""
+        from services.cleanup_service import CleanupReport
+
+        svc = _Svc.build()
+        db = MagicMock()
+        db.is_volume_base_reserved.return_value = False
+
+        rm = await self._run_cycles(
+            svc,
+            CleanupReport(),
+            db=db,
+            vols=[_volume("agent-gone-workspace", "gone")],
+            attached=None,
+            n=5,
+        )
+
+        rm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_orphan_needs_consecutive_unattached_cycles(self):
+        """The recreate race: one unattached sighting is not an orphan."""
+        from services.cleanup_service import CleanupReport
+        from services.cleanup_service import ORPHAN_VOLUME_UNATTACHED_STRIKES as K
+
+        svc = _Svc.build()
+        report = CleanupReport()
+        vols = [_volume("agent-gone-workspace", "gone")]
+        db = MagicMock()
+        db.is_volume_base_reserved.return_value = False
+
+        rm = await self._run_cycles(
+            svc, report, db=db, vols=vols, attached=set(), n=K - 1
+        )
+        rm.assert_not_awaited()
+
+        rm = await self._run_cycles(svc, report, db=db, vols=vols, attached=set())
+        rm.assert_awaited_once_with("gone")
+        assert report.orphan_agent_volumes_reclaimed == 1
+
+    @pytest.mark.asyncio
+    async def test_attached_sighting_resets_the_streak(self):
+        """A recreate gap on cycle 3 of 3 must not accumulate into a delete."""
+        from services.cleanup_service import CleanupReport
+        from services.cleanup_service import ORPHAN_VOLUME_UNATTACHED_STRIKES as K
+
+        svc = _Svc.build()
+        report = CleanupReport()
+        vols = [_volume("agent-flappy-workspace", "flappy")]
+        db = MagicMock()
+        db.is_volume_base_reserved.return_value = False
+
+        for _ in range(4):
+            # Recreate window (unattached) ... K-1 times, never reaching K ...
+            await self._run_cycles(
+                svc, report, db=db, vols=vols, attached=set(), n=K - 1
+            )
+            # ... then the new container comes up and the streak dies.
+            rm = await self._run_cycles(
+                svc, report, db=db, vols=vols,
+                attached={"agent-flappy-workspace"},
+            )
+            rm.assert_not_awaited()
+
+        assert report.orphan_agent_volumes_reclaimed == 0
+
+    @pytest.mark.asyncio
+    async def test_strike_state_does_not_leak_for_vanished_volumes(self):
+        from services.cleanup_service import CleanupReport
+
+        svc = _Svc.build()
+        db = MagicMock()
+        db.is_volume_base_reserved.return_value = False
+
+        await self._run_cycles(
+            svc,
+            CleanupReport(),
+            db=db,
+            vols=[_volume("agent-gone-workspace", "gone")],
+            attached=set(),
+        )
+        assert "agent-gone-workspace" in svc._unattached_volume_strikes
+
+        # Volume disappears (removed elsewhere) → its strike record goes too.
+        await self._run_cycles(
+            svc,
+            CleanupReport(),
+            db=db,
+            vols=[_volume("agent-other-workspace", "other")],
+            attached=set(),
+        )
+        assert "agent-gone-workspace" not in svc._unattached_volume_strikes
+
+
+class TestPurgeUsesTheVolumeBase:
+    @pytest.mark.asyncio
+    async def test_purge_removes_the_renamed_agents_real_volumes(self):
+        """The pin must be read BEFORE the purge deletes the row holding it."""
+        from services.cleanup_service import CleanupReport
+        import services.cleanup_service as cs
+
+        svc = _Svc.build()
+        report = CleanupReport()
+
+        db = MagicMock()
+        db.get_setting_value.side_effect = lambda k, d=None: (
+            "180" if k == "agent_soft_delete_retention_days" else d
+        )
+        db.find_soft_deleted_agents_past_retention.return_value = ["new-name"]
+        db.get_volume_base_name.return_value = "old-name"
+        db.purge_agent_ownership.return_value = True
+
+        rm = AsyncMock(return_value=3)
+        with patch.object(cs, "db", db), \
+             patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
+             patch("services.docker_utils.remove_agent_volumes", rm):
+            await svc._sweep_soft_deleted_agents(report)
+
+        # Purging `new-name` must drop `agent-old-name-*`, not `agent-new-name-*`
+        # (which never existed) — else the real volumes leak forever.
+        rm.assert_awaited_once_with("old-name")
+        assert report.agent_volumes_removed == 3
+
+    @pytest.mark.asyncio
+    async def test_purge_falls_back_to_agent_name(self):
+        from services.cleanup_service import CleanupReport
+        import services.cleanup_service as cs
+
+        svc = _Svc.build()
+        db = MagicMock()
+        db.get_setting_value.side_effect = lambda k, d=None: (
+            "180" if k == "agent_soft_delete_retention_days" else d
+        )
+        db.find_soft_deleted_agents_past_retention.return_value = ["plain"]
+        db.purge_agent_ownership.return_value = True
+        # A DB hiccup reading the pin must not strand the volumes.
+        db.get_volume_base_name.side_effect = RuntimeError("db down")
+
+        rm = AsyncMock(return_value=1)
+        with patch.object(cs, "db", db), \
+             patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
+             patch("services.docker_utils.remove_agent_volumes", rm):
+            await svc._sweep_soft_deleted_agents(CleanupReport())
+
+        rm.assert_awaited_once_with("plain")
+
+
+class TestVolumeIdentityDb:
+    """The predicate + the rename pin, on the real schema (both backends)."""
+
+    @pytest.fixture
+    def agent_ops(self, db_backend):
+        try:
+            from db.agents import AgentOperations
+            from db.users import UserOperations
+        except ImportError:  # pragma: no cover - env guard
+            pytest.skip("backend venv required (no `db.agents` import)")
+        return AgentOperations(UserOperations())
+
+    def _seed(self, name, deleted_at=None):
+        _hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at) "
+            "VALUES (:n, 1, :ts, :d)",
+            n=name, ts="2026-01-01T00:00:00Z", d=deleted_at,
+        )
+
+    def test_unrenamed_agent_owns_its_own_base(self, agent_ops):
+        self._seed("plain")
+        # NULL volume_base_name ⇒ "same as agent_name": no backfill needed.
+        assert agent_ops.is_volume_base_reserved("plain") is True
+        assert agent_ops.get_volume_base_name("plain") == "plain"
+        assert agent_ops.is_volume_base_reserved("nobody") is False
+        assert agent_ops.is_volume_base_reserved("") is False
+
+    def test_rename_pins_the_old_name_as_the_volume_base(self, agent_ops):
+        self._seed("old-name")
+        assert agent_ops.rename_agent("old-name", "new-name") is True
+
+        # The volume `agent-old-name-workspace` still belongs to someone...
+        assert agent_ops.is_volume_base_reserved("old-name") is True
+        # ...namely new-name, and NOT under its own name.
+        assert agent_ops.get_volume_base_name("new-name") == "old-name"
+        assert agent_ops.is_volume_base_reserved("new-name") is False
+        # The predicate the sweep used before #1664 is exactly the trap.
+        assert agent_ops.is_agent_name_reserved("old-name") is False
+
+    def test_second_rename_keeps_the_original_base(self, agent_ops):
+        self._seed("v1")
+        agent_ops.rename_agent("v1", "v2")
+        agent_ops.rename_agent("v2", "v3")
+
+        # The volumes never moved — the pin must not follow the name.
+        assert agent_ops.get_volume_base_name("v3") == "v1"
+        assert agent_ops.is_volume_base_reserved("v1") is True
+        assert agent_ops.is_volume_base_reserved("v2") is False
+
+    def test_soft_deleted_renamed_agent_still_owns_its_volumes(self, agent_ops):
+        """The recovery window (#834) applies to the renamed base too."""
+        self._seed("old-name")
+        agent_ops.rename_agent("old-name", "new-name")
+        _hrun(
+            "UPDATE agent_ownership SET deleted_at = :d WHERE agent_name = 'new-name'",
+            d="2026-02-01T00:00:00Z",
+        )
+        assert agent_ops.is_volume_base_reserved("old-name") is True
+
+    def test_purged_agent_releases_its_base(self, agent_ops):
+        self._seed("old-name")
+        agent_ops.rename_agent("old-name", "new-name")
+        _hrun("DELETE FROM agent_ownership WHERE agent_name = 'new-name'")
+        # Row gone ⇒ genuinely an orphan ⇒ reclaimable.
+        assert agent_ops.is_volume_base_reserved("old-name") is False
+
+    def test_set_volume_base_name_never_overwrites_a_pin(self, agent_ops):
+        self._seed("old-name")
+        agent_ops.rename_agent("old-name", "new-name")
+
+        # The boot heal must not clobber the rename's pin with a later guess.
+        assert agent_ops.set_volume_base_name("new-name", "wrong") is False
+        assert agent_ops.get_volume_base_name("new-name") == "old-name"
+
+    def test_set_volume_base_name_fills_an_unpinned_row(self, agent_ops):
+        self._seed("healed")
+        assert agent_ops.set_volume_base_name("healed", "pre-rename") is True
+        assert agent_ops.get_volume_base_name("healed") == "pre-rename"
+        assert agent_ops.set_volume_base_name("missing-agent", "x") is False
+        assert agent_ops.get_volume_base_name("missing-agent") is None
+
+
+class TestVolumeBaseHeal:
+    @pytest.mark.asyncio
+    async def test_heal_pins_base_for_agent_renamed_before_the_column(self):
+        import services.cleanup_service as cs
+
+        svc = _Svc.build()
+        db = MagicMock()
+        db.set_volume_base_name.return_value = True
+
+        with patch.object(cs, "db", db), \
+             patch("services.docker_utils.get_agent_workspace_volume_map",
+                   AsyncMock(return_value={
+                       "new-name": "agent-old-name-workspace",  # renamed
+                       "plain": "agent-plain-workspace",        # never renamed
+                   })):
+            healed = await svc._heal_renamed_volume_bases()
+
+        assert healed == 1
+        db.set_volume_base_name.assert_called_once_with("new-name", "old-name")
+
+    @pytest.mark.asyncio
+    async def test_heal_survives_docker_failure(self):
+        import services.cleanup_service as cs
+
+        svc = _Svc.build()
+        with patch.object(cs, "db", MagicMock()), \
+             patch("services.docker_utils.get_agent_workspace_volume_map",
+                   AsyncMock(side_effect=RuntimeError("docker down"))):
+            assert await svc._heal_renamed_volume_bases() == 0

@@ -146,11 +146,36 @@ class MetadataMixin:
                     return False
 
                 # Update all tables in order
-                # Primary table
+                # Primary table.
+                #
+                # #1664: pin the volume identity in the SAME statement that
+                # moves the name. Rename keeps the agent's Docker data volumes
+                # (`agent-{old}-{workspace|public|shared}`) — Docker can rename
+                # neither a volume nor its immutable `trinity.agent-name`
+                # label — so from here on the row is the only record of which
+                # volumes are this agent's. Without it the #1581 orphan sweep
+                # reads the stale volume name/label, finds no agent by that
+                # name, and force-removes the LIVE agent's home volume the
+                # moment a container recreate leaves it briefly unattached
+                # (#1664).
+                #
+                # COALESCE, not a plain SET: on a second rename the base must
+                # stay pinned to the FIRST rename's name — that is where the
+                # volumes actually live. Atomic with the rename by
+                # construction (same transaction), so a crash can never leave
+                # a renamed row with an unpinned base.
+                existing_base = conn.execute(
+                    select(agent_ownership.c.volume_base_name).where(
+                        agent_ownership.c.agent_name == old_name
+                    )
+                ).scalar()
                 conn.execute(
                     update(agent_ownership)
                     .where(agent_ownership.c.agent_name == old_name)
-                    .values(agent_name=new_name)
+                    .values(
+                        agent_name=new_name,
+                        volume_base_name=existing_base or old_name,
+                    )
                 )
 
                 # Sharing

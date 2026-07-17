@@ -126,12 +126,21 @@ async def rename_agent_endpoint(
         # re-injects derive(new_name). Same recreate-on-next-start path the label/
         # volume changes above already depend on.
 
-        # Rename Docker volume
-        # Docker doesn't support renaming volumes directly
-        # We need to create a new volume, copy data, and remove old one
-        # For simplicity in this implementation, we'll keep the volume name
-        # and update the container mount on next start
-        # This is handled by recreate_container_with_updated_config
+        # Docker volumes are NOT renamed: Docker supports neither renaming a
+        # volume nor editing its (immutable) labels, so copying gigabytes of
+        # `/home/developer` on every rename is the only alternative. The agent
+        # keeps its existing `agent-{old_name}-*` volumes and the container
+        # carries the same mounts forward (recreate_container_with_updated_config
+        # rebuilds the mount set from the old container's Mounts).
+        #
+        # #1664: that makes the volume's own identity (name + `trinity.agent-name`
+        # label) permanently stale, which the #1581 orphan sweep once read as
+        # "this volume's agent no longer exists" — and force-removed the LIVE
+        # agent's home volume during a recreate gap. `db.rename_agent` therefore
+        # pins `agent_ownership.volume_base_name = old_name` atomically with the
+        # rename; the sweep resolves ownership from that, never from the volume.
+        # Anything that needs this agent's volume names must ask
+        # `db.get_volume_base_name(agent)` — NOT f"agent-{agent_name}-workspace".
 
         # Update database references
         if not db.rename_agent(agent_name, sanitized_name):

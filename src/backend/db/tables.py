@@ -112,6 +112,7 @@ agent_ownership = Table(
     Column("ephemeral_expires_at", Text),          # trinity-enterprise#69: ALWAYS set for ghosts (no immortal ghost)
     Column("spawned_by_agent", Text),              # trinity-enterprise#69 Part 2: parent agent name (provenance)
     Column("spawned_by_key_id", Text),             # trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
+    Column("volume_base_name", Text),              # #1664: data-volume identity (NULL = agent_name); frozen at rename
 )
 
 agent_sharing = Table(

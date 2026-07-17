@@ -244,7 +244,9 @@ class TestCleanupOrchestration:
         ]
 
         db = MagicMock()
-        db.is_agent_name_reserved.side_effect = lambda n: n == "live-agent"
+        # #1664: ownership is resolved by volume base, not by agent name — a
+        # renamed agent owns volumes named after its former self.
+        db.is_volume_base_reserved.side_effect = lambda base: base == "live-agent"
 
         async def fake_remove(name):
             return 1
@@ -252,9 +254,15 @@ class TestCleanupOrchestration:
         with patch.object(cs, "db", db), \
              patch("services.docker_utils.list_agent_data_volumes",
                    AsyncMock(return_value=vols)), \
+             patch("services.docker_utils.list_attached_volume_names",
+                   AsyncMock(return_value=set())), \
              patch("services.docker_utils.remove_agent_volumes",
                    AsyncMock(side_effect=fake_remove)) as rm:
-            await svc._sweep_orphan_agent_volumes(report)
+            # #1664: reclaim needs a streak of unattached cycles, so the
+            # recreate window (a live volume momentarily unmounted) can't be
+            # mistaken for an orphan.
+            for _ in range(cs.ORPHAN_VOLUME_UNATTACHED_STRIKES):
+                await svc._sweep_orphan_agent_volumes(report)
 
         rm.assert_awaited_once_with("orphan-old")
         assert report.orphan_agent_volumes_reclaimed == 1
