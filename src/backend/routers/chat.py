@@ -32,6 +32,7 @@ from services import idempotency_service
 from services.event_dispatch_service import (
     RESERVED_EVENT_TRIGGER,
     RESERVED_EVENT_TRIGGER_HEADER_VALUE,
+    verify_internal_dispatch_secret,
 )
 from services.task_execution_service import (
     _compute_context_used,
@@ -1369,6 +1370,7 @@ async def execute_parallel_task(
     x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
     x_event_trigger: Optional[str] = Header(None),
+    x_internal_secret: Optional[str] = Header(None),
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -1432,8 +1434,14 @@ async def execute_parallel_task(
     # `agent.task.*` completion event carries X-Event-Trigger. Persist it as
     # `triggered_by="event"` so the emit helper suppresses this task's OWN
     # terminal event — breaking self / A↔B / A→B→C→A auto-emit cycles at the
-    # root. Only trigger_subscription (backend, admin JWT) ever sets this header.
-    reserved_event_dispatch = x_event_trigger == RESERVED_EVENT_TRIGGER_HEADER_VALUE
+    # root. The tag is honored ONLY when accompanied by a valid backend-internal
+    # `X-Internal-Secret` (C-003) — trigger_subscription stamps both, so an
+    # external `/task` caller spoofing X-Event-Trigger alone cannot suppress a
+    # real agent's completion event.
+    reserved_event_dispatch = (
+        x_event_trigger == RESERVED_EVENT_TRIGGER_HEADER_VALUE
+        and verify_internal_dispatch_secret(x_internal_secret)
+    )
     if reserved_event_dispatch:
         triggered_by = RESERVED_EVENT_TRIGGER
 

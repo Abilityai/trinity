@@ -213,6 +213,46 @@ class TestEmitHelper:
         payload = mock_db.create_agent_event.call_args.kwargs["payload"]
         assert len(payload["summary_or_error"]) == eds.TASK_EVENT_SUMMARY_MAX
 
+    def test_summary_credential_sanitized(self):
+        """The emit chokepoint redacts credentials in summary_or_error even when
+        the producing terminal writer passed a raw (un-sanitized) error string —
+        the failure paths (envelope.error / str(exc)) reach the helper raw."""
+        from models import TaskExecutionStatus
+
+        secret = "sk-" + "A" * 48
+        mock_db, _ = self._run(
+            terminal_status=TaskExecutionStatus.FAILED,
+            execution=_execution(status="failed"),
+            summary_or_error=f"worker failed leaking {secret} in its error",
+        )
+        emitted = mock_db.create_agent_event.call_args.kwargs["payload"]["summary_or_error"]
+        assert secret not in emitted
+        assert "***REDACTED***" in emitted
+
+    def test_summary_credential_sanitized_across_truncation_boundary(self):
+        """A secret straddling the TASK_EVENT_SUMMARY_MAX boundary is still fully
+        redacted: the chokepoint sanitizes a 2×cap window BEFORE the final
+        truncation, so a secret whose tail falls past the cap can't leak its
+        head. A naive `[:cap]`-then-sanitize would slice the token and leave an
+        unmatchable (un-redactable) head fragment in the delivered summary."""
+        from models import TaskExecutionStatus
+        from services import event_dispatch_service as eds
+
+        secret = "sk-" + "B" * 48  # same shape the sanitizer redacts
+        cap = eds.TASK_EVENT_SUMMARY_MAX
+        # Start the secret ~30 chars before the cap so its tail lands past it.
+        summary = ("x" * (cap - 30)) + secret + " tail"
+        mock_db, _ = self._run(
+            terminal_status=TaskExecutionStatus.FAILED,
+            execution=_execution(status="failed"),
+            summary_or_error=summary,
+        )
+        emitted = mock_db.create_agent_event.call_args.kwargs["payload"]["summary_or_error"]
+        assert secret not in emitted
+        assert "sk-BBB" not in emitted  # no head fragment survives the boundary
+        assert "***REDACTED***" in emitted
+        assert len(emitted) <= cap
+
     def test_fail_open_on_db_error(self):
         """A broken emit never raises into the (already billed) terminal."""
         from models import TaskExecutionStatus
@@ -525,6 +565,226 @@ class TestPullSinkEmit:
         outcome, eds = self._run(status="success", row_status="success")
         assert outcome.kind == "replayed"
         eds.spawn_task_terminal_event.assert_not_called()
+
+
+# ===========================================================================
+# Layer B2 — recursion-break header authentication (spoof guard, finding #2)
+# ===========================================================================
+class TestInternalDispatchSecret:
+    """The recursion-break X-Event-Trigger is honored by the /task router ONLY
+    with a valid backend-internal X-Internal-Secret (C-003). Without it an
+    external caller can't spoof the tag to suppress a real completion event."""
+
+    def test_valid_secret_accepted(self):
+        import os
+        from unittest.mock import patch as _patch
+        from services import event_dispatch_service as eds
+
+        with _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}):
+            assert eds.verify_internal_dispatch_secret("top-secret-xyz") is True
+
+    def test_wrong_secret_rejected(self):
+        import os
+        from unittest.mock import patch as _patch
+        from services import event_dispatch_service as eds
+
+        with _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}):
+            assert eds.verify_internal_dispatch_secret("guessed") is False
+
+    def test_missing_secret_rejected(self):
+        from services import event_dispatch_service as eds
+
+        # None / empty must never authenticate (constant-time short-circuit).
+        assert eds.verify_internal_dispatch_secret(None) is False
+        assert eds.verify_internal_dispatch_secret("") is False
+
+    def test_trigger_subscription_stamps_internal_secret_on_reserved(self):
+        """trigger_subscription must send BOTH the tag and the authenticating
+        secret for a reserved-namespace dispatch, so the router's gate passes."""
+        import os
+        from unittest.mock import patch as _patch
+        from services import event_dispatch_service as eds
+
+        captured = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                captured["headers"] = headers
+                return _Resp()
+
+        sub = SimpleNamespace(id="s1", subscriber_agent="orch", target_message="done")
+        event = SimpleNamespace(
+            id="e1", source_agent="worker-a", event_type="agent.task.completed", payload={}
+        )
+        with (
+            _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}),
+            _patch("httpx.AsyncClient", _Client),
+        ):
+            _await(eds.trigger_subscription(sub, event))
+
+        assert captured["headers"]["X-Event-Trigger"] == eds.RESERVED_EVENT_TRIGGER_HEADER_VALUE
+        assert captured["headers"]["X-Internal-Secret"] == "top-secret-xyz"
+
+    def test_trigger_subscription_no_secret_leak_on_non_reserved(self):
+        """A normal agent-emitted event dispatch must NOT carry the internal
+        secret (only reserved-namespace loopbacks are backend-authenticated)."""
+        import os
+        from unittest.mock import patch as _patch
+        from services import event_dispatch_service as eds
+
+        captured = {}
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, json=None, headers=None):
+                captured["headers"] = headers
+                return _Resp()
+
+        sub = SimpleNamespace(id="s1", subscriber_agent="orch", target_message="done")
+        event = SimpleNamespace(
+            id="e1", source_agent="worker-a", event_type="prediction.resolved", payload={}
+        )
+        with (
+            _patch.dict(os.environ, {"INTERNAL_API_SECRET": "top-secret-xyz"}),
+            _patch("httpx.AsyncClient", _Client),
+        ):
+            _await(eds.trigger_subscription(sub, event))
+
+        assert "X-Internal-Secret" not in captured["headers"]
+        assert "X-Event-Trigger" not in captured["headers"]
+
+
+# ===========================================================================
+# Layer B3 — the /task ROUTER gate: the recursion-break is honored ONLY with a
+# valid X-Internal-Secret (the actual spoof-guard call-site, finding #2)
+# ===========================================================================
+class TestRouterRecursionBreakGate:
+    """execute_parallel_task promotes triggered_by → 'event' from
+    X-Event-Trigger ONLY when a valid backend-internal X-Internal-Secret
+    accompanies it. TestInternalDispatchSecret above pins the helper + the
+    header-stamping in isolation; THIS pins the router call-site so a refactor
+    can't silently drop the `and verify_internal_dispatch_secret(...)` and let
+    an external /task caller spoof the tag to suppress a real agent's completion
+    event.
+
+    Modeled on tests/unit/test_946_task_idempotency_on_deny.py: the real
+    endpoint with collaborators mocked, capacity.acquire forced to raise
+    CapacityFull so it short-circuits just AFTER create_task_execution (where
+    triggered_by is persisted, chat.py:1541) — before any real dispatch.
+    """
+
+    _SECRET = "backend-internal-xyz"
+
+    def _triggered_by(self, *, x_event_trigger, x_internal_secret):
+        import os
+        from fastapi import HTTPException
+        from routers.chat import execute_parallel_task
+        from models import ParallelTaskRequest
+        from services.capacity_manager import CapacityFull
+
+        chat = sys.modules[execute_parallel_task.__module__]
+
+        container = MagicMock()
+        container.status = "running"
+
+        isvc = MagicMock()
+        isvc.begin.return_value = SimpleNamespace(
+            replay=False, in_flight=False, execution_id="e1", snapshot=None
+        )
+        isvc.make_agent_scope.return_value = "agent:worker-a"
+
+        cap = MagicMock()
+        cap.acquire = AsyncMock(
+            side_effect=CapacityFull(
+                agent_name="worker-a", max_concurrent=3, reason="full", depth=50
+            )
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_execution_timeout.return_value = 3600
+        mock_db.get_max_parallel_tasks.return_value = 3
+        mock_db.get_agent_subscription_id.return_value = None
+        mock_db.create_task_execution.return_value = SimpleNamespace(id="e1")
+
+        user = SimpleNamespace(id=1, email="u@e.com", username="u", agent_name=None)
+
+        with (
+            patch.dict(os.environ, {"INTERNAL_API_SECRET": self._SECRET}),
+            patch.object(chat, "get_agent_container", return_value=container),
+            patch.object(chat, "idempotency_service", isvc),
+            patch.object(chat, "dispatch_breaker_active", return_value=False),
+            patch.object(chat, "get_capacity_manager", return_value=cap),
+            patch.object(chat, "platform_audit_service", MagicMock(log=AsyncMock())),
+            patch.object(
+                chat, "activity_service",
+                MagicMock(track_activity=AsyncMock(return_value="act1")),
+            ),
+            patch.object(chat, "db", mock_db),
+        ):
+            with pytest.raises(HTTPException):  # CapacityFull → 429 after create
+                _await(
+                    execute_parallel_task(
+                        request=ParallelTaskRequest(message="hi", async_mode=True),
+                        name="worker-a",
+                        current_user=user,
+                        x_source_agent=None,
+                        x_via_mcp=None,
+                        x_mcp_key_id=None,
+                        x_mcp_key_name=None,
+                        idempotency_key=None,
+                        x_event_trigger=x_event_trigger,
+                        x_internal_secret=x_internal_secret,
+                    )
+                )
+        return mock_db.create_task_execution.call_args.kwargs["triggered_by"]
+
+    def test_valid_secret_promotes_to_event(self):
+        from services.event_dispatch_service import RESERVED_EVENT_TRIGGER
+
+        assert (
+            self._triggered_by(x_event_trigger="agent_task", x_internal_secret=self._SECRET)
+            == RESERVED_EVENT_TRIGGER
+        )
+
+    def test_spoofed_tag_without_secret_stays_manual(self):
+        """The security case: an external /task caller sends X-Event-Trigger
+        alone. The tag must NOT flip triggered_by, so the caller's OWN terminal
+        still emits a completion event (no suppression-by-spoof)."""
+        assert (
+            self._triggered_by(x_event_trigger="agent_task", x_internal_secret=None)
+            == "manual"
+        )
+
+    def test_tag_with_wrong_secret_stays_manual(self):
+        assert (
+            self._triggered_by(x_event_trigger="agent_task", x_internal_secret="wrong")
+            == "manual"
+        )
 
 
 # ===========================================================================

@@ -60,7 +60,19 @@ the invariant: any *future* terminal writer that bypasses the helper silently wo
 
 Both #1083 caller paths (inline sync + async result-callback) converge on `apply_result`,
 so both are covered there. The async-callback replay-ACK (`_AUTHORITATIVE_TERMINALS`,
-`routers/agents.py`) + the CAS block guarantee no double-emit.
+`routers/agents.py`) + the CAS block guarantee no double-emit **for a replayed or
+CAS-lost terminal** (AC #2).
+
+**Known second-terminal correction (not a replay double-fire).** `_AUTHORITATIVE_TERMINALS`
+is `{SUCCESS, CANCELLED, SKIPPED}` — deliberately **excluding FAILED** so the #1083
+"late SUCCESS corrects a reaper `LEASE_EXPIRED`" path stays open. In that narrow race the
+lease-reaper first CAS-wins `RUNNING→FAILED` (emits `agent.task.failed`), then a late
+result callback CAS-wins `FAILED→SUCCESS` (emits `agent.task.completed`) — **two distinct
+CAS-won terminals ⇒ two events** for one `execution_id`. Both wins are legitimate (genuinely
+changing state, not a replay), so the CAS gating is correct; the subscriber is woken twice
+and MUST treat a later `agent.task.completed` for the same `execution_id` as **superseding**
+an earlier `agent.task.failed`. The flat payload's `execution_id` is the correlation key that
+makes this de-dup possible on the subscriber side.
 
 ## Flow
 
@@ -111,10 +123,13 @@ so both are covered there. The async-callback replay-ACK (`_AUTHORITATIVE_TERMIN
    rejected on **create AND update** (400). The PUT guard closes the bypass where a benign
    `foo.bar` self-sub is updated into `agent.task.completed`.
 3. **Recursion-break (the decisive one)** — `trigger_subscription`, when the dispatched
-   event is reserved-namespace, stamps the loopback `/task` with `X-Event-Trigger`;
-   `routers/chat.py` persists that spawned execution's `triggered_by = "event"`
-   (`RESERVED_EVENT_TRIGGER`, already a reserved value in `_AUTONOMOUS_TRIGGERS`); and the
-   emit helper suppresses re-emission when the terminating execution carries it. Breaks
+   event is reserved-namespace, stamps the loopback `/task` with `X-Event-Trigger` **plus a
+   backend-internal `X-Internal-Secret`** (C-003); `routers/chat.py` persists that spawned
+   execution's `triggered_by = "event"` (`RESERVED_EVENT_TRIGGER`, already a reserved value
+   in `_AUTONOMOUS_TRIGGERS`) **only when the internal secret verifies** — so an external
+   `/task` caller spoofing `X-Event-Trigger` alone cannot suppress a real agent's completion
+   event (`event_dispatch_service.verify_internal_dispatch_secret`, constant-time). The emit
+   helper then suppresses re-emission when the terminating execution carries the tag. Breaks
    self / A↔B / A→B→C→A auto-emit cycles at the root — the autonomous-runaway class
    deterministic backend auto-emit would otherwise introduce (each hop = a full LLM turn +
    spend). A benign `foo.bar`→completion chain is unaffected (its task keeps its normal

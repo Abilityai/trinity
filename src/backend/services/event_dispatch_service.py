@@ -31,6 +31,7 @@ import re
 from typing import Any, Optional
 
 from database import db
+from utils.credential_sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,39 @@ RESERVED_EVENT_TRIGGER_HEADER = "X-Event-Trigger"
 RESERVED_EVENT_TRIGGER_HEADER_VALUE = "agent_task"
 
 # Truncate the (best-effort, content-trusted) summary/error injected into a
-# subscriber's task prompt. The value is credential-sanitized upstream but is
-# still raw worker output — the same interpolation surface EVT-001 already has,
-# now produced deterministically.
+# subscriber's task prompt. Credential-sanitized at the emit chokepoint below
+# (`emit_task_terminal_event`) so the payload is uniformly safe whatever the
+# producer — the success/pull terminals also sanitize upstream, but the failure
+# error strings (`envelope.error` / `str(exc)`) reach the helper raw. It is still
+# worker output — the same interpolation surface EVT-001 already has, now
+# produced deterministically.
 TASK_EVENT_SUMMARY_MAX = 2000
+
+
+def _internal_dispatch_secret() -> str:
+    """The shared secret proving a ``/task`` dispatch originated from backend
+    internals — the C-003 ``X-Internal-Secret`` contract (``INTERNAL_API_SECRET``
+    env, ``SECRET_KEY`` fallback), read the same way ``routers/internal.py`` reads
+    it. Read at call time so a rotated secret is picked up without a restart."""
+    import os
+    from config import SECRET_KEY
+
+    return os.getenv("INTERNAL_API_SECRET") or SECRET_KEY
+
+
+def verify_internal_dispatch_secret(provided: Optional[str]) -> bool:
+    """Constant-time check that ``provided`` is the backend-internal dispatch
+    secret. The ``/task`` router calls this to authenticate the #1578
+    recursion-break header: only ``trigger_subscription`` (backend, which stamps
+    ``X-Internal-Secret``) can make a spawned execution persist
+    ``triggered_by="event"`` — an external ``/task`` caller spoofing
+    ``X-Event-Trigger`` alone is ignored, so it cannot suppress a real agent's
+    completion event."""
+    import hmac
+
+    if not provided:
+        return False
+    return hmac.compare_digest(provided, _internal_dispatch_secret())
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +168,13 @@ async def trigger_subscription(subscription, event):
         "X-Via-MCP": "true",
     }
     # #1578: tag reserved-namespace dispatches so the spawned task's terminal is
-    # suppressed by the recursion-break (no A→B→A auto-emit loop).
+    # suppressed by the recursion-break (no A→B→A auto-emit loop). The tag is
+    # authenticated as backend-internal via the C-003 `X-Internal-Secret` so an
+    # external `/task` caller can't spoof `X-Event-Trigger` to suppress a real
+    # agent's completion event (the router verifies it before honoring the tag).
     if str(event.event_type).startswith(RESERVED_EVENT_PREFIX):
         headers[RESERVED_EVENT_TRIGGER_HEADER] = RESERVED_EVENT_TRIGGER_HEADER_VALUE
+        headers["X-Internal-Secret"] = _internal_dispatch_secret()
 
     try:
         # Call the agent's task endpoint directly (async, fire-and-forget)
@@ -272,7 +306,15 @@ async def emit_task_terminal_event(
 
         summary = summary_or_error
         if summary is not None:
-            summary = str(summary)[:TASK_EVENT_SUMMARY_MAX]
+            # Redact credentials at this single chokepoint so the payload is
+            # uniformly safe whatever the producer (the failure error strings
+            # reach here un-sanitized). Sanitize a bounded 2×cap window BEFORE the
+            # final truncation so a secret straddling the cap boundary is still
+            # fully matched+redacted (a bare `[:cap]` slice could leave an
+            # unmatchable secret head), then truncate for delivery.
+            summary = sanitize_text(str(summary)[: TASK_EVENT_SUMMARY_MAX * 2])[
+                :TASK_EVENT_SUMMARY_MAX
+            ]
 
         payload = {
             "execution_id": execution_id,
