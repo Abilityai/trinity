@@ -266,8 +266,9 @@ class TestAsyncCleanupOperations:
         """cleanup_agent_credentials() removes all credentials for an agent."""
         ssh_service, mocks = get_ssh_service()
 
-        # Configure Redis mock
-        mocks['redis_client'].keys.return_value = [
+        # Configure Redis mock. #1616: ssh_service iterates via scan_iter (KEYS is
+        # blocked for the `-@dangerous` backend ACL user), so mock scan_iter.
+        mocks['redis_client'].scan_iter.return_value = [
             "ssh_access:test-agent:key1",
             "ssh_access:test-agent:pwd1"
         ]
@@ -351,7 +352,8 @@ class TestRedisMetadataStorage:
         """list_active_keys() returns all active credentials from Redis."""
         ssh_service, mocks = get_ssh_service()
 
-        mocks['redis_client'].keys.return_value = [
+        # #1616: scan_iter, not keys (KEYS blocked for the backend ACL user).
+        mocks['redis_client'].scan_iter.return_value = [
             "ssh_access:agent1:key1",
             "ssh_access:agent2:key2"
         ]

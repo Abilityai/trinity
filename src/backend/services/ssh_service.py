@@ -319,7 +319,10 @@ class SshService:
             List of key metadata dictionaries
         """
         pattern = f"{SSH_ACCESS_PREFIX}{agent_name or '*'}:*"
-        keys = self.redis_client.keys(pattern)
+        # SCAN, not KEYS: the backend Redis ACL user is `-@dangerous`, which
+        # blocks `KEYS` (#1616 — caught live: it raises NoPermissionError). SCAN
+        # is allowed and is the production-safe incremental iteration anyway.
+        keys = list(self.redis_client.scan_iter(match=pattern))
 
         result = []
         for key in keys:
@@ -347,8 +350,12 @@ class SshService:
         cleaned = 0
         pattern = f"{SSH_ACCESS_PREFIX}*"
 
-        # Get all credentials that are about to expire (within cleanup interval)
-        for redis_key in self.redis_client.keys(pattern):
+        # Get all credentials that are about to expire (within cleanup interval).
+        # SCAN, not KEYS: the backend Redis ACL user is `-@dangerous`, which
+        # blocks `KEYS` (#1616 — caught live: it raises NoPermissionError, which
+        # would make this whole sweep fail-open to 0 every cycle and leave the
+        # security fix inert). SCAN is allowed and is production-safe anyway.
+        for redis_key in self.redis_client.scan_iter(match=pattern):
             ttl = self.redis_client.ttl(redis_key)
 
             # If TTL is very low or negative, the credential is about to expire
@@ -413,7 +420,11 @@ class SshService:
             Number of credentials cleaned up
         """
         pattern = f"{SSH_ACCESS_PREFIX}{agent_name}:*"
-        redis_keys = self.redis_client.keys(pattern)
+        # SCAN, not KEYS: the backend Redis ACL user is `-@dangerous` and blocks
+        # `KEYS` (#1616). This method is called on agent stop/delete — under KEYS
+        # it raised NoPermissionError, so per-agent SSH cleanup was silently
+        # broken too. SCAN is allowed.
+        redis_keys = list(self.redis_client.scan_iter(match=pattern))
 
         has_password_creds = False
         for key in redis_keys:

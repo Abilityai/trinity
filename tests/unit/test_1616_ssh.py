@@ -265,7 +265,7 @@ def _load_with_redis(redis_client):
 @pytest.mark.asyncio
 async def test_cleanup_removes_near_expiry_key_from_file(tmp_path):
     redis_client = Mock()
-    redis_client.keys.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
     redis_client.ttl.return_value = 30  # within the 0..60 near-expiry window
     redis_client.get.return_value = json.dumps(
         {
@@ -287,7 +287,7 @@ async def test_cleanup_removes_near_expiry_key_from_file(tmp_path):
 @pytest.mark.asyncio
 async def test_cleanup_leaves_live_key_untouched(tmp_path):
     redis_client = Mock()
-    redis_client.keys.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:trinity-ephemeral-agentA-1"]
     redis_client.ttl.return_value = 3600  # far from expiry
     redis_client.get.return_value = json.dumps(
         {"agent_name": "agentA", "auth_type": "key", "credential_id": "c1"}
@@ -305,7 +305,7 @@ async def test_cleanup_leaves_live_key_untouched(tmp_path):
 @pytest.mark.asyncio
 async def test_cleanup_is_fail_open_on_redis_error():
     redis_client = Mock()
-    redis_client.keys.return_value = ["ssh_access:agentA:c1"]
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
     redis_client.ttl.return_value = 10
     redis_client.get.side_effect = RuntimeError("redis down")
 
@@ -321,9 +321,32 @@ async def test_cleanup_is_fail_open_on_redis_error():
 @pytest.mark.asyncio
 async def test_cleanup_alias_delegates():
     redis_client = Mock()
-    redis_client.keys.return_value = []
+    redis_client.scan_iter.return_value = []
     _, svc = _load_with_redis(redis_client)
     assert await svc.cleanup_expired_keys() == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_scan_not_keys():
+    """The sweep must iterate with SCAN, never the blocking KEYS — the backend
+    Redis ACL user is `-@dangerous` and `KEYS` raises NoPermissionError, which
+    would make the whole sweep fail-open to 0 every cycle (#1616, caught live)."""
+    redis_client = Mock()
+    redis_client.scan_iter.return_value = ["ssh_access:agentA:c1"]
+    redis_client.ttl.return_value = 30
+    redis_client.get.return_value = json.dumps(
+        {"agent_name": "agentA", "auth_type": "key", "credential_id": "c1"}
+    )
+    # Make KEYS blow up the way the real ACL does, so a regression to it fails loudly.
+    redis_client.keys.side_effect = AssertionError("KEYS is blocked for the backend ACL user")
+
+    _, svc = _load_with_redis(redis_client)
+    svc.remove_ssh_key = AsyncMock(return_value=True)
+
+    cleaned = await svc.cleanup_expired_credentials()
+    assert cleaned == 1
+    redis_client.scan_iter.assert_called_once()
+    redis_client.keys.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -372,3 +395,15 @@ def test_cleanup_service_registers_the_sweep():
     method that exists but is never called — the exact #1616 dead-code class)."""
     src = Path(_BACKEND, "services", "cleanup_service.py").read_text()
     assert "await self._sweep_expired_ssh_credentials(report)" in src
+
+
+def test_ssh_service_never_uses_blocking_keys_command():
+    """Durable static guard: ssh_service must NEVER call `redis_client.keys(` —
+    the backend Redis ACL user is `-@dangerous`, so `KEYS` raises
+    NoPermissionError at runtime (invisible to a mocked unit test that stubs
+    `.keys`). Every keyspace scan must go through `scan_iter` (#1616)."""
+    src = Path(_BACKEND, "services", "ssh_service.py").read_text()
+    assert "redis_client.keys(" not in src, (
+        "ssh_service uses the ACL-blocked KEYS command; use scan_iter (#1616)"
+    )
+    assert "scan_iter(" in src

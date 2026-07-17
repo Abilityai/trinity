@@ -9,7 +9,7 @@ As a platform admin, I want to generate temporary SSH credentials for agent cont
 ## Revision History
 | Date | Change |
 |------|--------|
-| 2026-07-17 | **Enforce key TTL on the filesystem + injection-safe inject/remove (#1616)**. The expired-key security gap: an ephemeral key's TTL was enforced ONLY on its Redis metadata — `SshService.cleanup_expired_credentials()` (which removes the line from the `authorized_keys` file sshd reads) had **zero callers** (`SSH_ACCESS_CLEANUP_INTERVAL` was unused), so on a preserved (never-recreated) volume an **expired** key lingered in the file and still granted login. Wired it into the 5-min `cleanup_service` loop (`_sweep_expired_ssh_credentials`, report field `ssh_credentials_expired`; fail-open). `inject_ssh_key` now passes the public key via the exec **environment** (never string-interpolated) in one atomic `sh -c` and gained `skip_if_present=True` (append-if-absent via `grep -qxF`), killing both the repeat-inject double-add and the docker-py `shlex.split`→`sh -c` double-unquoting injection class. `remove_ssh_key` (now load-bearing for cleanup) matches the comment as an exact awk `$NF` last-field via `ENVIRON` (no regex/shell metachar escaping, no substring over-delete). **Scope note:** #1616's reported *recreate-wipe* symptom is a SEPARATE, unidentified mechanism — a normal never-renamed agent is volume-safe on recreate (`/home/developer` is a named volume, forwarded by the config-recreate path), the #1664/#1665/#1667 volume-identity family (fixed by #1666) postdates the reporter's build, and no start-time re-injection hook was added (it is near-inert and would mask data loss). |
+| 2026-07-17 | **Enforce key TTL on the filesystem + injection-safe inject/remove (#1616)**. The expired-key security gap: an ephemeral key's TTL was enforced ONLY on its Redis metadata — `SshService.cleanup_expired_credentials()` (which removes the line from the `authorized_keys` file sshd reads) had **zero callers** (`SSH_ACCESS_CLEANUP_INTERVAL` was unused), so on a preserved (never-recreated) volume an **expired** key lingered in the file and still granted login. Wired it into the 5-min `cleanup_service` loop (`_sweep_expired_ssh_credentials`, report field `ssh_credentials_expired`; fail-open). A **live probe caught** that the sweep's keyspace scan used `redis_client.keys()`, which the backend's `-@dangerous` Redis ACL user **blocks** (`NoPermissionError`) — the fail-open handler would have swallowed it to 0-cleaned every cycle, leaving the fix inert; switched all three `ssh_service` scans (`cleanup_expired_credentials`, `list_active_keys`, `cleanup_agent_credentials`) to `scan_iter`. `inject_ssh_key` now passes the public key via the exec **environment** (never string-interpolated) in one atomic `sh -c` and gained `skip_if_present=True` (append-if-absent via `grep -qxF`), killing both the repeat-inject double-add and the docker-py `shlex.split`→`sh -c` double-unquoting injection class. `remove_ssh_key` (now load-bearing for cleanup) matches the comment as an exact awk `$NF` last-field via `ENVIRON` (no regex/shell metachar escaping, no substring over-delete). **Scope note:** #1616's reported *recreate-wipe* symptom is a SEPARATE, unidentified mechanism — a normal never-renamed agent is volume-safe on recreate (`/home/developer` is a named volume, forwarded by the config-recreate path), the #1664/#1665/#1667 volume-identity family (fixed by #1666) postdates the reporter's build, and no start-time re-injection hook was added (it is near-inert and would mask data loss). |
 | 2026-07-16 | **Removed password auth (#1615)**: the option was broken end-to-end — host-side hashing imported the stdlib `crypt` module (removed in Python 3.13, so every request 500'd), and the agent sshd runs `PasswordAuthentication no`, so a password login could never succeed even with a hash set. `auth_method` now accepts only `"key"`; `"password"` returns 400. Removed `generate_password()` and `set_container_password()`. `clear_container_password()` is **retained** as a cleanup-only path (it locks a password left by a pre-#1615 backend on Python <3.13); nothing sets passwords any more. |
 | 2026-04-18 | **SEC: Admin-only access**: Changed from owner/admin to admin-only. Uses `require_admin` dependency instead of `can_user_delete_agent` check. |
 | 2026-03-26 | **SEC: Removed server-side keypair generation (#175)**: Key auth now requires client-supplied `public_key`. Private keys never leave the client. Removed `generate_ssh_keypair()` and `cryptography` dependency. |
@@ -359,6 +359,18 @@ skips a Redis/exec error, and `remove_ssh_key` tolerates a missing container/fil
 — so a stopped or deleted agent is a no-op. The short Redis TTL is still the
 primary guarantee; this makes it real on the filesystem.
 
+**SCAN, not KEYS (#1616).** The keyspace iteration uses `redis_client.scan_iter`,
+not `keys()`. The backend Redis ACL user is `-@dangerous` (see Network Topology),
+which blocks `KEYS` — a live probe of the wired sweep raised
+`NoPermissionError: User backend has no permissions to run the 'keys' command`,
+which the fail-open handler would have swallowed to 0-cleaned every cycle, leaving
+the fix **inert**. `SCAN` is allowed and is the production-safe incremental scan
+anyway. The same fix applies to `list_active_keys()` and
+`cleanup_agent_credentials()` (agent stop/delete), which were silently broken by
+the identical ACL cause. A mocked unit test can't see this (it stubs the Redis
+client), so `test_1616_ssh.py` carries a static guard that `redis_client.keys(`
+never reappears in `ssh_service.py`.
+
 ```python
 async def cleanup_expired_credentials(self) -> int:
     """
@@ -370,8 +382,9 @@ async def cleanup_expired_credentials(self) -> int:
     cleaned = 0
     pattern = f"{SSH_ACCESS_PREFIX}*"
 
+    # SCAN, not KEYS — the backend Redis ACL user is -@dangerous (#1616).
     # Find credentials about to expire (within 60 seconds)
-    for redis_key in self.redis_client.keys(pattern):
+    for redis_key in self.redis_client.scan_iter(match=pattern):
         ttl = self.redis_client.ttl(redis_key)
 
         # If TTL is very low or negative, credential is about to expire
