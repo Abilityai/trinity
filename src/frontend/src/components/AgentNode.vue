@@ -36,10 +36,10 @@
         <div class="flex items-center flex-1 mr-2 min-w-0">
           <div
             class="nodrag text-gray-900 dark:text-white font-bold text-base truncate cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 hover:underline transition-colors"
-            :title="data.label"
+            :title="nodeNameTooltip"
             @click="viewDetails"
           >
-            {{ data.label }}
+            {{ nodeDisplayName }}
           </div>
           <!-- Runtime badge (Claude/Gemini) -->
           <RuntimeBadge :runtime="data.runtime" :show-label="false" class="ml-2 flex-shrink-0" />
@@ -239,6 +239,7 @@ import RuntimeBadge from './RuntimeBadge.vue'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
 import { useNetworkStore } from '../stores/network'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 
 const props = defineProps({
   id: String,
@@ -250,6 +251,13 @@ const props = defineProps({
 
 const router = useRouter()
 const networkStore = useNetworkStore()
+
+// #1643: render the human display name (data.display_label, else the slug);
+// every action below still keys on data.label (the slug). The tooltip surfaces
+// the slug too when a distinct label is shown, so the identity is one hover away.
+const agentRef = computed(() => ({ name: props.data.label, display_label: props.data.display_label }))
+const nodeDisplayName = computed(() => agentDisplayName(agentRef.value))
+const nodeNameTooltip = computed(() => agentNameTooltip(agentRef.value))
 
 // Autonomy toggle loading state
 const autonomyLoading = ref(false)

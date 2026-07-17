@@ -7,7 +7,10 @@
       <!-- Content -->
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2 mb-0.5">
-          <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ item.agent_name }}</span>
+          <span
+            class="text-sm font-medium text-gray-700 dark:text-gray-300"
+            :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
+          >{{ item.agent_name }}</span>
           <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
           <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(item.created_at) }}</span>
         </div>
@@ -47,6 +50,7 @@
 import { computed } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
+import { agentNameTooltip } from '../../utils/agentName'
 import AgentAvatar from '../AgentAvatar.vue'
 
 const props = defineProps({

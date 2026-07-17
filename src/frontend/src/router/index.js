@@ -2,6 +2,20 @@ import { createRouter, createWebHistory } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
+import { useAgentsStore } from '../stores/agents'
+
+// #1643: browser-tab title for an agent-scoped page. The :name param stays the
+// canonical slug (routing/keys); the tab shows the human display name when the
+// agents store is warm, falling back to the slug on a cold direct load (the
+// store isn't fetched yet). SPA navigation self-heals to the label on the next
+// nav. try/catch guards the pre-pinia edge.
+function agentTabTitle(slug) {
+  try {
+    return useAgentsStore().displayNameForSlug(slug)
+  } catch {
+    return slug
+  }
+}
 
 const routes = [
   {
@@ -45,13 +59,14 @@ const routes = [
     name: 'AgentDetail',
     component: () => import('../views/AgentDetail.vue'),
     // #1418 — the :name param IS the canonical agent identifier in Trinity.
-    meta: { requiresAuth: true, title: (to) => to.params.name }
+    // #1643 — the rendered tab title resolves to the display name (slug fallback).
+    meta: { requiresAuth: true, title: (to) => agentTabTitle(to.params.name) }
   },
   {
     path: '/agents/:name/workspace',
     name: 'AgentWorkspace',
     component: () => import('../views/AgentWorkspace.vue'),
-    meta: { requiresAuth: true, title: (to) => `${to.params.name} · Workspace` },
+    meta: { requiresAuth: true, title: (to) => `${agentTabTitle(to.params.name)} · Workspace` },
     beforeEnter: async (to, from) => {
       const sessionsStore = useSessionsStore()
       await sessionsStore.loadFeatureFlags()
@@ -90,7 +105,7 @@ const routes = [
     path: '/agents/:name/executions/:executionId',
     name: 'ExecutionDetail',
     component: () => import('../views/ExecutionDetail.vue'),
-    meta: { requiresAuth: true, title: (to) => `${to.params.name} · Execution` }
+    meta: { requiresAuth: true, title: (to) => `${agentTabTitle(to.params.name)} · Execution` }
   },
   // REMOVED: /files route - file management is now per-agent via Files tab in AgentDetail
   // REMOVED: /credentials route - credentials are now managed per-agent only

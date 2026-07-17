@@ -127,7 +127,7 @@
               :class="alert.priority === 'urgent' ? 'text-status-danger-600' : 'text-status-warning-600'"
             />
             <div>
-              <span class="font-medium text-gray-900 dark:text-white">{{ alert.agent_name }}</span>
+              <span class="font-medium text-gray-900 dark:text-white" :title="agentNameTooltip(agentsStore.agentRefForSlug(alert.agent_name))">{{ alert.agent_name }}</span>
               <span class="text-gray-500 dark:text-gray-400 ml-2">{{ alert.title }}</span>
             </div>
           </div>
@@ -180,7 +180,7 @@
 
               <div>
                 <div class="flex items-center gap-2">
-                  <span class="font-medium text-gray-900 dark:text-white">{{ agent.name }}</span>
+                  <span class="font-medium text-gray-900 dark:text-white" :title="agentNameTooltip(agentsStore.agentRefForSlug(agent.name))">{{ agent.name }}</span>
                   <span
                     class="px-2 py-0.5 text-xs font-medium rounded capitalize"
                     :class="getStatusBadgeClass(agent.status)"
@@ -254,6 +254,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMonitoringStore } from '../stores/monitoring'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip } from '../utils/agentName'
 import {
   ArrowPathIcon,
   BellAlertIcon,
@@ -269,6 +271,7 @@ import {
 const router = useRouter()
 const monitoringStore = useMonitoringStore()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 
 // Admin status drives the per-action buttons (Check All, per-agent check)
 // and gates the fleet-wide alerts fetch. Read from the auth store getter

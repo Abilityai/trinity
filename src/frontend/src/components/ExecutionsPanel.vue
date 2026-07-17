@@ -228,6 +228,7 @@
                 <router-link
                   :to="'/agents/' + row.agent_name"
                   @click.stop
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(row.agent_name))"
                   class="text-sm font-medium text-gray-900 dark:text-white hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 >
                   {{ row.agent_name }}
@@ -291,6 +292,7 @@ import { parseUTC } from '@/utils/timestamps'
 import { useExecutionsStore } from '../stores/executions'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip } from '../utils/agentName'
 import { useWebSocket } from '../utils/websocket'
 
 const router = useRouter()

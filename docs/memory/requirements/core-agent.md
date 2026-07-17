@@ -58,6 +58,24 @@
   genuinely need it keep it; it stops being the default gesture for "call it
   something else".
 - **API**: `GET`/`PUT /api/agents/{name}/label` — owner-only, `{label: string|null}`.
+- **FR-6 — Remaining surfaces resolve the label off the agents store, not new
+  payloads (#1643)**: operator queue, monitoring, executions, the collaboration
+  graph, tab titles and prose/toasts render only a slug in their own payloads.
+  Rather than grow a mutable `display_name` on each of those high-volume
+  endpoints (staleness risk, N duplicated presentation fields), the frontend
+  resolves slug → label off the loaded agents (store getters
+  `displayNameForSlug` / `agentRefForSlug`, live via the `agent_label_changed`
+  WS handler). An unloaded slug falls back to itself, so nothing regresses on a
+  cold surface. Render rule by class: **dense operational tables** (executions,
+  operator/monitoring rows, RACI matrix) keep the **slug primary** and surface
+  the label as a hover tooltip (`agentNameTooltip`); **prose / toasts** use the
+  label alone (`agentDisplayName`); the **collaboration graph** renders the
+  label but keeps `data.label` = slug as the action key (`router.push` /
+  toggles). `AgentAvatar` always receives the slug. Tab titles resolve the
+  label on warm SPA nav and fall back to the slug on a cold direct load (the
+  store isn't fetched yet); the next navigation self-heals. Comma-joined agent
+  lists (e.g. the GitHub-PAT propagation failure list) keep the slug — long
+  labels make them unreadable.
 
 ### 1.4 Agent Deletion
 - **Status**: ✅ Implemented

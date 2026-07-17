@@ -1096,8 +1096,8 @@ async function handleReadOnlyToggle(agent) {
       agentReadOnlyStates.value[agent.name] = newState
       showNotification(
         newState
-          ? `Read-only mode enabled for ${agent.name}`
-          : `Read-only mode disabled for ${agent.name}`,
+          ? `Read-only mode enabled for ${agentDisplayName(agent)}`
+          : `Read-only mode disabled for ${agentDisplayName(agent)}`,
         'success'
       )
     }
@@ -1117,7 +1117,7 @@ const toggleAgentRunning = async (agent) => {
     const result = await agentsStore.toggleAgentRunning(agent.name)
     if (result.success) {
       const action = result.status === 'running' ? 'started' : 'stopped'
-      showNotification(`Agent ${agent.name} ${action}`, 'success')
+      showNotification(`Agent ${agentDisplayName(agent)} ${action}`, 'success')
     } else {
       showNotification(result.error || 'Failed to toggle agent', 'error')
     }

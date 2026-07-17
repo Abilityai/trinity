@@ -30,9 +30,10 @@
               <p class="text-sm text-gray-500 dark:text-gray-400">
                 <router-link
                   :to="{ name: 'AgentDetail', params: { name: agentName } }"
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(agentName))"
                   class="hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 >
-                  {{ agentName }}
+                  {{ agentsStore.displayNameForSlug(agentName) }}
                 </router-link>
                 <span class="mx-2">/</span>
                 <span class="font-mono text-xs">{{ executionId.substring(0, 8) }}...</span>
@@ -187,9 +188,10 @@
             <span class="text-gray-500 dark:text-gray-400">Source Agent:</span>
             <router-link
               :to="{ name: 'AgentDetail', params: { name: execution.source_agent_name } }"
+              :title="agentNameTooltip(agentsStore.agentRefForSlug(execution.source_agent_name))"
               class="ml-2 text-action-primary-600 dark:text-action-primary-400 font-medium hover:underline"
             >
-              {{ execution.source_agent_name }}
+              {{ agentsStore.displayNameForSlug(execution.source_agent_name) }}
             </router-link>
           </div>
           <!-- MCP Key (for MCP calls) -->
@@ -406,10 +408,13 @@ import axios from 'axios'
 import { renderMarkdown } from '../utils/markdown'
 import { formatCost } from '../composables/useFormatters'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 
 const agentName = computed(() => route.params.name)
 const executionId = computed(() => route.params.executionId)

@@ -1284,7 +1284,7 @@
                                       :key="agent.name"
                                       :value="agent.name"
                                     >
-                                      {{ agent.name }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
+                                      {{ agentDisplayName(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
                                     </option>
                                   </select>
                                   <button
@@ -2253,6 +2253,8 @@ import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { useEnterpriseStore } from '../stores/enterprise'
@@ -2266,6 +2268,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the
 // admin's own Brain tab / route gating updates without a page reload.
@@ -3967,7 +3970,7 @@ async function assignAgentToSubscription(subName, agentName) {
 }
 
 async function unassignAgentFromSubscription(agentName) {
-  if (!confirm(`Remove "${agentName}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
+  if (!confirm(`Remove "${agentsStore.displayNameForSlug(agentName)}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
   unassigningAgent.value = agentName
   error.value = null
   try {

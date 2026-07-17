@@ -158,7 +158,7 @@
                   <span
                     class="text-sm font-semibold text-gray-900 dark:text-white truncate cursor-pointer hover:text-blue-600 dark:hover:text-blue-400"
                     @click="navigateToAgent(row.name)"
-                    :title="row.name"
+                    :title="agentNameTooltip(agentsStore.agentRefForSlug(row.name))"
                   >
                     {{ row.name }}
                   </span>
@@ -387,12 +387,15 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useRouter } from 'vue-router'
+import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip } from '../utils/agentName'
 import { parseUTC, getTimestampMs, formatLocalTime } from '@/utils/timestamps'
 import AutonomyToggle from './AutonomyToggle.vue'
 import CapacityMeter from './CapacityMeter.vue'
 import AgentAvatar from './AgentAvatar.vue'
 
 const router = useRouter()
+const agentsStore = useAgentsStore()
 
 const props = defineProps({
   agents: { type: Array, default: () => [] },
