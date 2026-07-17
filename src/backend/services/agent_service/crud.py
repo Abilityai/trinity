@@ -273,6 +273,26 @@ async def create_agent_internal(
     ):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
+    # #1664: the name being free does NOT mean its volumes are. Rename frees the
+    # NAME while the agent keeps its volumes under the old base (Docker can
+    # rename neither a volume nor its label), so `agent-{name}-workspace` can
+    # still be a live agent's `/home/developer`. The volume block below is
+    # get-then-create — an existing volume is REUSED, not rejected — so without
+    # this gate a new agent created under a freed name silently boots on the
+    # renamed agent's home volume: its `.env`, its `.credentials.enc`, its
+    # workspace, with both containers writing the same disk. The owners need not
+    # be the same person, which makes it a cross-tenant credential disclosure,
+    # not just corruption. Refuse instead: the volumes are somebody's live data
+    # until their owning row is purged.
+    if db.is_volume_base_reserved(config.name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Agent name unavailable: its data volumes still belong to "
+                "another agent (it was renamed). Pick a different name."
+            ),
+        )
+
     # #1560: reaching here means the name is free — but `is_agent_name_reserved`
     # only stops matching once the retention purge hard-deletes the row, and the
     # breakers are keyed by name with no TTL. Clear any predecessor's verdict

@@ -499,3 +499,53 @@ class TestVolumeBaseHeal:
              patch("services.docker_utils.get_agent_workspace_volume_map",
                    AsyncMock(side_effect=RuntimeError("docker down"))):
             assert await svc._heal_renamed_volume_bases() == 0
+
+
+class TestCreateRefusesAReservedVolumeBase:
+    """#1664: rename frees the NAME while the volumes stay. `crud.py`'s volume
+    block is get-then-create (an existing volume is REUSED), so without a gate a
+    new agent created under the freed name boots on the renamed agent's
+    `/home/developer` — its `.env` included, across owners."""
+
+    def test_gate_refuses_when_the_volume_base_is_still_owned(self):
+        """The predicate the create gate must consult, on the real schema."""
+        try:
+            from db.agents import AgentOperations
+            from db.users import UserOperations
+        except ImportError:  # pragma: no cover - env guard
+            pytest.skip("backend venv required")
+        ops = AgentOperations(UserOperations())
+        _hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+            "VALUES ('victim', 1, '2026-01-01T00:00:00Z')"
+        )
+        ops.rename_agent("victim", "victim-renamed")
+
+        # The name is free — this is exactly what fooled the create path...
+        assert ops.is_agent_name_reserved("victim") is False
+        # ...but `agent-victim-workspace` is still the renamed agent's home.
+        assert ops.is_volume_base_reserved("victim") is True
+
+    @pytest.mark.asyncio
+    async def test_create_returns_409_for_a_renamed_agents_volume_base(self):
+        import services.agent_service.crud as crud
+        from fastapi import HTTPException
+
+        db = MagicMock()
+        db.get_agent_owner.return_value = None
+        db.is_agent_name_reserved.return_value = False   # name freed by a rename
+        db.is_volume_base_reserved.return_value = True   # volumes still owned
+
+        config = MagicMock(name="cfg")
+        config.name = "victim"
+        config.ephemeral = False
+
+        with patch.object(crud, "db", db), \
+             patch.object(crud, "get_agent_by_name", MagicMock(return_value=None)):
+            with pytest.raises(HTTPException) as exc:
+                await crud.create_agent_internal(config, MagicMock())
+
+        assert exc.value.status_code == 409
+        assert "data volumes" in str(exc.value.detail)
+        # Fail BEFORE any container/volume work — no half-built agent.
+        db.get_agents_by_owner.assert_not_called()
