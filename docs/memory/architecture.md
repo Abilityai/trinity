@@ -167,6 +167,7 @@
 *Real-time delivery:*
 - `event_bus.py` - Redis Streams transport for WebSocket delivery — see [Real-time Delivery](#real-time-delivery-reliability-003-306)
 - `ws_ticket_service.py` - Single-use WebSocket auth tickets (C-002, #550) — see [Real-time Delivery](#real-time-delivery-reliability-003-306)
+- `event_dispatch_service.py` - EVT-001 subscription dispatch primitives (`trigger_subscription`, extracted from the router) + the shared system-emit helper `emit_task_terminal_event`/`spawn_task_terminal_event` — see [Task Completion Events](#task-completion-events-1578) (#1578)
 
 *Monitoring & Activities:*
 - `activity_service.py` - Activity tracking and timeline
@@ -271,7 +272,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `monitoring.ts` (3) | `get_fleet_health`, `get_agent_health`, `trigger_health_check` | Fleet health monitoring |
 | `nevermined.ts` (4) | `configure_nevermined`, `get_nevermined_config`, `toggle_nevermined`, `get_nevermined_payments` | x402 payment configuration |
 | `notifications.ts` (1) | `send_notification` | Agent-to-platform notifications |
-| `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001) |
+| `events.ts` (4) | `emit_event`, `subscribe_to_event`, `list_event_subscriptions`, `delete_event_subscription` | Agent event pub/sub (EVT-001). The `agent.task.*` namespace is **reserved** for backend-emitted task-completion events (#1578) — `emit_event` rejects it; `subscribe_to_event` to a source agent's `agent.task.completed`/`failed` yields an automatic report-back task (no self-subscription) — see [Task Completion Events](#task-completion-events-1578) |
 | `docs.ts` (1) | `get_agent_requirements` | Agent documentation |
 | `channels.ts` (2) | `list_channel_groups`, `send_group_message` | Channel group discovery and proactive group messaging — Telegram (#349) and Slack channels (#350); `channel_type: telegram\|slack`, Slack send accepts optional `thread_ts` |
 | `messages.ts` (1) | `send_message` | Proactive user messaging by verified email (#321) |
@@ -333,7 +334,7 @@ Services that run continuously in the backend process:
 
 | Service | Module | Description |
 |---------|--------|-------------|
-| **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps and the #740 startup orphan-loop hook — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772). Runs the additive **lease-reaper** (`lease_reaper_service`) each cycle — re-queues (preserving `execution_id`) or poison-parks expired pull leases (#1081 Phase 3, #429/#1402; inert until an agent is piloted) |
+| **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps, the **expired-SSH sweep** (`_sweep_expired_ssh_credentials` → `SshService.cleanup_expired_credentials` — removes an expired ephemeral key's line from the container `authorized_keys` sshd reads; TTL was previously enforced only on Redis metadata, #1616), and the #740 startup orphan-loop hook — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772). Runs the additive **lease-reaper** (`lease_reaper_service`) each cycle — re-queues (preserving `execution_id`) or poison-parks expired pull leases (#1081 Phase 3, #429/#1402; inert until an agent is piloted) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back (OPS-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s — see [Git Sync Health](#git-sync-health-389390) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval (30s default); authoritative for aggregate status. **Lifespan-resumed (#1121):** boot reads the persisted `monitoring_config` (staggered +12s) and starts the loop only when `enabled` — the flag is the single source of truth, **defaults OFF**, persisted by `enable`/`disable`/`PUT /config` (which also reconcile the running loop) so the choice survives restarts; `*_check_interval` rejects non-positive values (422), loop clamps sleep ≥1s (MON-001). **Cross-worker leader lock (#1464):** the loop runs in every uvicorn worker but only the holder of the Redis `monitoring:leader` lease (SET NX, TTL 3×interval, own-lease-only refresh; fail-open to leader when Redis is down) performs each probe cycle, so `--workers 2` no longer double-probes the fleet or double-feeds the circuit breaker; leadership fails over automatically when the holder dies |
@@ -403,6 +404,19 @@ Removes backend-thread pinning for autonomous turns by construction: an eligible
 - **Lease reaper** (`cleanup_service`): an expired lease (no callback before the slot TTL) FAILs the row with the `lease_expired` tag (`TaskExecutionErrorCode.LEASE_EXPIRED`) and closes its open activity. The stale-execution sweep uses each agent's `timeout + SLOT_TTL_BUFFER` window (not the flat 120-min default) so a legitimately-running max-timeout async turn isn't failed early.
 
 **v1 boundaries**: lease-expiry = FAIL (not re-queue); async empty-result = FAIL (the #678 inline auto-retry stays sync-only); SUB-003 auto-switch stays inline-only (the breaker still protects the fleet); 504/503 async failures write a null-cost row until `execute_headless_task` exposes `ctx.metadata` on those paths (T8 / #1201 fast-follow).
+
+Every CAS-won terminal on this path (the callback's `apply_result` and the lease-reaper) additionally emits a system **completion event** — see [Task Completion Events](#task-completion-events-1578).
+
+### Task Completion Events (#1578)
+
+The **backend** deterministically emits `agent.task.completed` / `agent.task.failed` at **every CAS-won execution terminal**, delivered over the existing EVT-001 subscription-dispatch machinery ([agent-event-subscriptions.md](feature-flows/agent-event-subscriptions.md)), so a subscribed caller/orchestrator is **woken with a report-back task** when a long async task finishes instead of polling `get_execution_result`. Implements the missing half of `TARGET_ARCHITECTURE.md` §Async-First Communication; a down-payment on Epic #1045 → #1081. Full flow: [task-completion-events.md](feature-flows/task-completion-events.md).
+
+- **System- vs agent-emitted.** EVT-001 carries only **agent-emitted** events (an agent's LLM calls `emit_event`, `source_agent` from the MCP auth context). These are the first **system-emitted** events — synthesized by the deterministic backend chokepoint with no LLM in the loop, `source_agent` = the executing agent, reserved `agent.task.*` namespace. Same tables (`agent_events` :1528, `agent_event_subscriptions`), same `find_matching → trigger_subscription` delivery; different producer.
+- **Shared emit helper** (`services/event_dispatch_service.py`): `emit_task_terminal_event` (async, fail-open, matching-sub gated — empty ⇒ no `agent_events` row, no dispatch) + `spawn_task_terminal_event` (strong-ref `create_task` wrapper every terminal writer calls). Status→event maps on the **status string** (never `TaskExecutionErrorCode` identity — the fieldless `@dataclass` `__eq__` #1085 footgun); the payload `status` is `.value` (`"success"`, not `"TaskExecutionStatus.SUCCESS"`). Flat payload `{execution_id, status, triggered_by, summary_or_error, duration_ms, cost, fan_out_id, loop_id}` (`fan_out_id`/`loop_id` carried for the future pull fan-out join envelope). Dispatch primitives (`trigger_subscription`/`_interpolate_template`/`_get_internal_token`) were moved verbatim out of `routers/event_subscriptions.py` so a service can reuse them without importing a router (Invariant #1; verified cycle-free).
+- **CAS-won terminal-writer coverage** (the fix): `apply_result` success + failure branches, `_write_terminal_and_gate` (**timeout / budget / crash** + inline circuit-open/capacity/ephemeral — the terminals that never reach `apply_result`, the exact wedge case the feature exists for; `agent_name` threaded from its `execute_task` callers), the #1083 **lease-reaper** (`cleanup_service::_process_stale_slot_reclaims`), and the **pull sink** (`pull_coordination_service::apply_task_result`, dark until a pull pilot). Both #1083 caller paths (inline sync + async callback) converge on `apply_result`. Bulk watchdog sweeps (COUNT, no per-row context) are a documented residual + follow-up.
+- **Reserved namespace + 3-layer loop safety** (`routers/event_subscriptions.py`): agents cannot `emit_event` into `agent.task.*` (400 on both emit routes); reserved self-subscription (`source==subscriber`) is blocked on create **and** update (400 — the PUT guard closes the "PUT a benign self-sub into the reserved namespace" bypass); and the decisive **recursion-break** — `trigger_subscription` tags a reserved-namespace loopback with `X-Event-Trigger`, `routers/chat.py` persists that spawned execution's `triggered_by="event"` (already a reserved value in `_AUTONOMOUS_TRIGGERS`), and the emit helper suppresses re-emission when the terminating execution carries it. Breaks self / A↔B / A→B→C→A auto-emit cycles at the root (each hop = a full LLM turn + spend).
+- **Delivery = best-effort, pull-transitional (honest).** `trigger_subscription` is an HTTP loopback (`POST /api/agents/{subscriber}/task`, admin JWT). It wakes a **running** subscriber (incl. a #1402 parked-but-running orchestrator); a *stopped* subscriber's 503 is swallowed — the `agent_events` row persists, the wake does not. NOT durable and NOT the WS `event_bus` (a broadcast can't wake a parked agent); the durable queue is the pull migration's future. `summary_or_error` (worker output, credential-sanitized at the emit chokepoint + truncated ~2000) is the same content-trust interpolation surface EVT-001 already has, now deterministic. The recursion-break `X-Event-Trigger` header is honored only with a valid backend-internal `X-Internal-Secret` (C-003), so an external `/task` caller can't spoof it to suppress a real completion.
+- **Additive & inert**: reuses `agent_events`/`agent_event_subscriptions` + the existing `triggered_by` TEXT column — no schema change, no migration, no feature flag, no config. Zero matching subs ⇒ zero rows, unchanged behavior.
 
 ### Correlated-Failure / Thundering-Herd Controls (#1085)
 
@@ -1542,12 +1556,14 @@ CREATE TABLE agent_event_subscriptions (
 CREATE TABLE agent_events (
     id TEXT PRIMARY KEY,
     source_agent TEXT NOT NULL,
-    event_type TEXT NOT NULL,
+    event_type TEXT NOT NULL,             -- agent-emitted, OR backend-emitted 'agent.task.completed'/'agent.task.failed' (#1578)
     payload TEXT,                         -- JSON
     subscriptions_triggered INTEGER DEFAULT 0,
     created_at TEXT NOT NULL
 );
 ```
+
+`agent_events` rows are written by **agent-emitted** `emit_event` (EVT-001) AND by the **system-emitted** task-completion emitter (#1578), which persists a row ONLY when a matching subscription exists — see [Task Completion Events](#task-completion-events-1578).
 
 **slack_workspaces** (SLACK-002):
 ```sql

@@ -1232,6 +1232,40 @@ class ScheduleOperations:
             )
             return result.rowcount > 0
 
+    def resume_session_belongs_to_user(
+        self, agent_name: str, claude_session_id: str, user_id: int
+    ) -> bool:
+        """Does an execution on ``agent_name`` carry ``claude_session_id`` and belong to ``user_id``?
+
+        The authorization primitive behind EXEC-023 "Continue as Chat" (#1672).
+        ``resume_session_id`` becomes ``claude --resume <id>`` inside the container,
+        replaying that Claude conversation. Execution rows are **agent**-scoped
+        (``accessible_agent_names``), not user-scoped, and the row's
+        ``claude_session_id`` is returned in the execution payload — so on a *shared*
+        agent one operator can read another's session id and resume their private
+        conversation (IDOR). The caller gates on this: no owning row → 404 (uniform
+        with the Session tab's per-user 404 in ``routers/sessions.py``, which
+        deliberately does not leak session-id existence).
+
+        Matches a session id a turn actually ran under (Claude ``str(uuid4())`` or a
+        Codex ``thread_id``) — the ``'dispatched'`` / ``'dispatched_async'`` dispatch
+        sentinels are also stored in this column but are never a resumable session, so
+        the caller rejects them before ever reaching here.
+        """
+        stmt = (
+            select(schedule_executions.c.id)
+            .where(
+                and_(
+                    schedule_executions.c.agent_name == agent_name,
+                    schedule_executions.c.claude_session_id == claude_session_id,
+                    schedule_executions.c.source_user_id == user_id,
+                )
+            )
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            return conn.execute(stmt).first() is not None
+
     # =========================================================================
     # Persistent Backlog (BACKLOG-001)
     # =========================================================================

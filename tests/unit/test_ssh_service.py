@@ -15,6 +15,7 @@ from unittest.mock import Mock, MagicMock, patch, AsyncMock
 import sys
 import json
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Add backend path for imports (relative to this file)
@@ -98,7 +99,12 @@ class TestAsyncSshKeyInjection:
 
     @pytest.mark.asyncio
     async def test_inject_ssh_key_uses_async_exec(self):
-        """inject_ssh_key() uses async container_exec_run()."""
+        """inject_ssh_key() runs one atomic exec, passing the key via env (#1616).
+
+        The whole operation (mkdir/chmod/append-if-absent/chmod) is a single
+        ``sh -c`` script; the public key flows in through the exec ``environment``
+        and is NEVER interpolated into the command string.
+        """
         ssh_service, mocks = get_ssh_service()
         service = ssh_service.SshService()
 
@@ -110,14 +116,20 @@ class TestAsyncSshKeyInjection:
         mocks['get_agent_container'].return_value = mock_container
         mocks['container_exec_run'].return_value = mock_exec_result
 
-        result = await service.inject_ssh_key(
-            "test-agent",
-            "ssh-ed25519 AAAA... trinity-ephemeral-test"
-        )
+        key = "ssh-ed25519 AAAA... trinity-ephemeral-test"
+        result = await service.inject_ssh_key("test-agent", key)
 
         assert result is True
-        # Should call exec 3 times: mkdir, append key, chmod
-        assert mocks['container_exec_run'].call_count == 3
+        # One consolidated exec (was 3 separate calls pre-#1616).
+        assert mocks['container_exec_run'].call_count == 1
+        call = mocks['container_exec_run'].call_args
+        # cmd is a LIST (bypasses docker-py's shlex.split — the injection layer).
+        cmd = call.args[1] if len(call.args) > 1 else call.kwargs["cmd"]
+        assert isinstance(cmd, list)
+        assert cmd[:2] == ["sh", "-c"]
+        # The key travels via environment, never baked into the script text.
+        assert call.kwargs["environment"]["TRINITY_SSH_KEY"] == key
+        assert key not in cmd[2]
 
     @pytest.mark.asyncio
     async def test_inject_ssh_key_returns_false_on_container_not_found(self):
@@ -133,21 +145,40 @@ class TestAsyncSshKeyInjection:
 
     @pytest.mark.asyncio
     async def test_inject_ssh_key_returns_false_on_exec_failure(self):
-        """inject_ssh_key() returns False when exec command fails."""
+        """inject_ssh_key() returns False when the exec script fails."""
         ssh_service, mocks = get_ssh_service()
         service = ssh_service.SshService()
 
         mock_container = Mock()
         mocks['get_agent_container'].return_value = mock_container
 
-        # First call succeeds (mkdir), second fails (append key)
-        mock_success = Mock(exit_code=0, output=b"")
+        # The single consolidated exec fails (e.g. permission denied on chmod).
         mock_failure = Mock(exit_code=1, output=b"Permission denied")
-        mocks['container_exec_run'].side_effect = [mock_success, mock_failure]
+        mocks['container_exec_run'].return_value = mock_failure
 
         result = await service.inject_ssh_key("test-agent", "ssh-ed25519 AAAA...")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_inject_ssh_key_skip_if_present_toggles_grep_guard(self):
+        """skip_if_present controls whether the script guards with grep (#1616)."""
+        ssh_service, mocks = get_ssh_service()
+        service = ssh_service.SshService()
+
+        mock_container = Mock()
+        mocks['get_agent_container'].return_value = mock_container
+        mocks['container_exec_run'].return_value = Mock(exit_code=0, output=b"")
+
+        # Default (True): append-if-absent — the script grep-guards.
+        await service.inject_ssh_key("a", "ssh-ed25519 AAAA... c1")
+        script_default = mocks['container_exec_run'].call_args.args[1][2]
+        assert "grep -qxF" in script_default
+
+        # Explicit False: always append — no grep guard.
+        await service.inject_ssh_key("a", "ssh-ed25519 AAAA... c1", skip_if_present=False)
+        script_always = mocks['container_exec_run'].call_args.args[1][2]
+        assert "grep -qxF" not in script_always
 
 
 @pytest.mark.unit
@@ -236,8 +267,9 @@ class TestAsyncCleanupOperations:
         """cleanup_agent_credentials() removes all credentials for an agent."""
         ssh_service, mocks = get_ssh_service()
 
-        # Configure Redis mock
-        mocks['redis_client'].keys.return_value = [
+        # Configure Redis mock. #1616: ssh_service iterates via scan_iter (KEYS is
+        # blocked for the `-@dangerous` backend ACL user), so mock scan_iter.
+        mocks['redis_client'].scan_iter.return_value = [
             "ssh_access:test-agent:key1",
             "ssh_access:test-agent:pwd1"
         ]
@@ -308,20 +340,27 @@ class TestRedisMetadataStorage:
         # Verify key format
         assert call_args[0][0] == "ssh_access:test-agent:key-123"
 
-        # Verify TTL (4 hours = 14400 seconds)
-        assert call_args[0][1] == 14400
+        # Verify Redis TTL = true expiry (4h = 14400s) + the cleanup grace (#1616):
+        # the metadata outlives the key's `expires_at` so the 5-min sweep can
+        # observe it as expired before Redis forgets it.
+        grace = ssh_service.SSH_ACCESS_CLEANUP_GRACE_SECONDS
+        assert call_args[0][1] == 14400 + grace
 
         # Verify JSON content
         stored_data = json.loads(call_args[0][2])
         assert stored_data["agent_name"] == "test-agent"
         assert stored_data["auth_type"] == "key"
         assert stored_data["public_key"] == "ssh-ed25519 AAAA..."
+        # `expires_at` remains the TRUE deadline — grace touches only the Redis TTL.
+        expires_at = datetime.fromisoformat(stored_data["expires_at"].replace("Z", "+00:00"))
+        assert timedelta(hours=3, minutes=59) < (expires_at - datetime.now(timezone.utc)) < timedelta(hours=4, minutes=1)
 
     def test_list_active_keys_returns_all_credentials(self):
         """list_active_keys() returns all active credentials from Redis."""
         ssh_service, mocks = get_ssh_service()
 
-        mocks['redis_client'].keys.return_value = [
+        # #1616: scan_iter, not keys (KEYS blocked for the backend ACL user).
+        mocks['redis_client'].scan_iter.return_value = [
             "ssh_access:agent1:key1",
             "ssh_access:agent2:key2"
         ]
