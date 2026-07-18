@@ -21,7 +21,7 @@ from services.agent_service.helpers import accessible_agent_names
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
 _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled", "skipped"}
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop"}
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 
