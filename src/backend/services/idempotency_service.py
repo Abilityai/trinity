@@ -91,6 +91,26 @@ def derive_schedule_key(execution_id: str) -> str:
     return f"sched:{execution_id}"
 
 
+def derive_reminder_key(agent_name: str, message: str, raw_fire_spec: str) -> str:
+    """Stable create-idempotency key over the RAW reminder input (#1296).
+
+    Hashes ``(agent_name, message, raw_fire_spec)`` where ``raw_fire_spec`` is the
+    literal ``delay_seconds=N`` or ``fire_at=<string>`` as supplied — NOT the
+    resolved instant. A ``delay_seconds`` client-retry resolves ``now+delay``
+    differently on each call, so keying on the resolved ``fire_at`` would defeat
+    dedup; the raw spec is the native client-retry unit (mirrors
+    ``derive_webhook_key``). A caller-supplied ``Idempotency-Key`` header still
+    wins (the router prefers it).
+    """
+    h = hashlib.sha256()
+    h.update(agent_name.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(message.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(raw_fire_spec.encode("utf-8"))
+    return f"reminder:{h.hexdigest()}"
+
+
 def derive_payment_key(
     access_token: Optional[str], body: Optional[bytes]
 ) -> Optional[str]:
