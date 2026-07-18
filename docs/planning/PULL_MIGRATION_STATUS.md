@@ -139,9 +139,10 @@ Full walkthrough, gaps, and the two ops fixes surfaced (G1 compose-forwarding, G
 - **Canary E-05 / E-01 lease-awareness** — E-05 *will* false-fire on a pull lease (running >60s,
   `claude_session_id` NULL). Apply the same `lease_expires_at IS NULL` exclusion, or retire with the ZSET at
   Phase 5 — **decide before opting a pilot in** for a clean canary.
-- **Canary collector is SQLite-only (G3, draft #1540)** — `db/connection.py` hardcodes `sqlite3`; on a PG
-  instance the SQL-tier checks read a frozen/empty `/data/trinity.db` → vacuously green. Material to any
-  default-ON decision.
+- **Canary collector on PG (G3) — ✅ closed by #1540** — the SQL-tier collector reads now route through the
+  `get_engine()`/`DATABASE_URL` seam, so on a PG instance the SQL-tier checks read the live PG database
+  instead of a frozen/empty `/data/trinity.db`. The canary is a trustworthy signal for a default-ON decision
+  on PG. (`db/connection.py` stays the sqlite-only maintenance seam; the canary is routed around it.)
 - **Tier-6 side-effect safety** — `effect_guard` is fail-open without trusted `execution_id` injection; a
   **BLOCKING prerequisite** before default-ON for side-effect agents (read-only agents reach Phase 5 without it).
 - **Phase 4** — sync edge adapter + async fan-out join.
