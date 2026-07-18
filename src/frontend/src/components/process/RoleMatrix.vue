@@ -72,7 +72,7 @@
               :key="agent"
               class="px-3 py-3 text-center font-medium text-gray-700 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700 min-w-[100px]"
             >
-              <div class="truncate max-w-[120px]" :title="agent">{{ agent }}</div>
+              <div class="truncate max-w-[120px]" :title="agentNameTooltip(agentsStore.agentRefForSlug(agent))">{{ agent }}</div>
             </th>
             <th
               v-if="editMode"
@@ -194,6 +194,12 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { UsersIcon, ExclamationTriangleIcon } from '@heroicons/vue/24/outline';
+import { useAgentsStore } from '../../stores/agents';
+import { agentNameTooltip } from '../../utils/agentName';
+
+// #1643: the 100px column header stays slug-only (RACI matrix is machine-facing);
+// the display name is one hover away via the title tooltip. No layout change.
+const agentsStore = useAgentsStore();
 
 const props = defineProps({
   // Steps array: [{ id, name, type, roles: { executor, monitors, informed } }, ...]

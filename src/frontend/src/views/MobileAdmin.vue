@@ -180,7 +180,7 @@
             <div v-else class="ops-list">
               <div v-for="item in queueItems" :key="item.id" class="ops-card">
                 <div class="ops-card-header">
-                  <span class="ops-agent-name">{{ item.agent_name }}</span>
+                  <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + item.priority">{{ item.priority }}</span>
                 </div>
                 <div class="ops-card-type">{{ item.request_type }}</div>
@@ -223,7 +223,7 @@
             <div v-else class="ops-list">
               <div v-for="notif in notifications" :key="notif.id" class="ops-card">
                 <div class="ops-card-header">
-                  <span class="ops-agent-name">{{ notif.agent_name }}</span>
+                  <span class="ops-agent-name" :title="agentNameTooltip(agentsStore.agentRefForSlug(notif.agent_name))">{{ notif.agent_name }}</span>
                   <span class="ops-priority" :class="'priority-' + notif.priority">{{ notif.priority }}</span>
                 </div>
                 <p class="ops-card-message">{{ notif.title || notif.message }}</p>
@@ -440,9 +440,12 @@ import { ref, computed, onMounted, onUnmounted, watch, reactive, nextTick } from
 import { useRoute } from 'vue-router'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip } from '../utils/agentName'
 
 const route = useRoute()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
