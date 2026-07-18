@@ -40,7 +40,14 @@
         <!-- Settings Content -->
         <div v-else class="space-y-6">
           <!-- MCP Keys Tab Content (extracted to component, #302) -->
-          <McpKeysTab v-if="activeTab === 'mcp-keys'" />
+          <template v-if="activeTab === 'mcp-keys'">
+            <McpKeysTab />
+            <!-- ent#162: personal GitHub token lives with the user's other
+                 personal credentials on this non-admin tab. -->
+            <div class="mt-6">
+              <UserGitHubPatPanel />
+            </div>
+          </template>
 
           <!-- ent#84 — Fleet-wide agent-to-agent permissions matrix -->
           <div v-if="activeTab === 'agent-permissions'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -2262,6 +2269,7 @@ import { apiErrorMessage } from '../utils/apiError'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
