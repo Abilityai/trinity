@@ -204,3 +204,20 @@ def test_reserved_prefix_agent_ids_are_rejected_by_sync_loop(monkeypatch):
 
     # Warned exactly once for this (agent, id).
     assert svc._rejected_reserved == {("a", "poison-hijack")}
+
+
+def test_reserved_prefix_guard_folds_case_and_whitespace(monkeypatch):
+    """A lookalike id (` Poison-…`, uppercase/padded) must still be rejected —
+    the platform mints these prefixes lowercase and unpadded, so a normalized
+    match can only be an impersonation attempt (an operator-phishing surface)."""
+    db_mock = MagicMock()
+    db_mock.operator_queue_item_exists.return_value = False
+    db_mock.get_operator_queue_responded_for_agent.return_value = []
+    db_mock.get_operator_queue_terminal_for_agent.return_value = []
+
+    lookalikes = [_item(" Poison-x"), _item("SYNC-FAILING-x"), _item("\tgit-bloat-x")]
+    svc = _wire_sync(monkeypatch, db_mock, lookalikes)
+    asyncio.run(svc._sync_agent("a"))
+
+    # None of the lookalikes were created — all folded onto a reserved prefix.
+    assert db_mock.create_operator_queue_item.call_count == 0
