@@ -36,6 +36,15 @@ _SUMMARY_COLUMNS = (
 )
 
 
+def _agent_reports_prune_predicate(cutoff: str):
+    """WHERE clause for the #918 agent_reports retention sweep.
+
+    #1644: shared with `count_agent_reports_candidates` so the guard's count and
+    the prune's delete can never describe different row sets.
+    """
+    return agent_reports.c.created_at < cutoff
+
+
 class ReportOperations:
     """Agent report database operations (#918)."""
 
@@ -237,6 +246,22 @@ class ReportOperations:
             )
         return result.rowcount > 0
 
+    def count_agent_reports_candidates(self, retention_days: int, limit: int) -> int:
+        """#1644: how many rows `prune_agent_reports(retention_days)` would DELETE."""
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        inner = (
+            select(agent_reports.c.id)
+            .where(_agent_reports_prune_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
+
     def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000) -> int:
         """Delete reports older than ``retention_days`` (#918 retention sweep).
 
@@ -255,7 +280,7 @@ class ReportOperations:
                     row["id"]
                     for row in conn.execute(
                         select(agent_reports.c.id)
-                        .where(agent_reports.c.created_at < cutoff)
+                        .where(_agent_reports_prune_predicate(cutoff))
                         .limit(chunk_size)
                     ).mappings()
                 ]

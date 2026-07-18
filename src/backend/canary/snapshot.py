@@ -119,6 +119,12 @@ _TERMINAL_ROWS_CAP = 5000
 #
 # The list intentionally errs on the side of catching more orphans rather
 # than fewer; false positives surface as L-03 violations operators triage.
+# #1644: mirrors services.retention_guard.ALARM_AGENT_NAME. Duplicated as a
+# literal rather than imported: `canary/` is a deterministic read-only library
+# that must not pull a service (which imports `database`) into its import graph.
+# `tests/unit/test_1644_retention_guard.py` asserts the two stay equal.
+_RETENTION_GUARD_AGENT = "_retention-guard"
+
 ORPHAN_SCAN_TABLES = [
     ("agent_sharing", "agent_name", None),
     ("agent_schedules", "agent_name", None),
@@ -135,7 +141,18 @@ ORPHAN_SCAN_TABLES = [
     ("agent_tags", "agent_name", None),
     ("agent_shared_files", "agent_name", None),
     ("agent_public_links", "agent_name", None),
-    ("operator_queue", "agent_name", "status = 'pending'"),
+    # #1644: exclude the retention guard's reserved sentinel. L-03 hunts GHOST
+    # AGENTS — rows referencing an agent_name that a delete should have cascaded
+    # away. `_retention-guard` is not an agent and never was: it is a platform
+    # alarm host, deliberately un-createable (leading '_' is stripped by
+    # sanitize_agent_name), so it can never appear in agent_ownership and would
+    # otherwise report a permanent, un-fixable orphan. This narrows the predicate
+    # to what the invariant actually means; it does not weaken it.
+    (
+        "operator_queue",
+        "agent_name",
+        f"status = 'pending' AND agent_name != '{_RETENTION_GUARD_AGENT}'",
+    ),
     ("access_requests", "agent_name", "status = 'pending'"),
     # #918 — CASCADE table holding agent-published report payloads (can be
     # sensitive); watch for orphans referencing a deleted agent.

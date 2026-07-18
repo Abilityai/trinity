@@ -991,6 +991,19 @@
       "description": "Claude Code error_during_execution must not be recorded as success (#1673): stream_parser falls back to errors[] when result text is empty; _finalize_headless_result surfaces error_type=execution_error as 502 instead of falling through to the #160 `context: fork` placeholder. Guards the Sessions-tab resume-not-found fallback contract (detail carries 'no conversation found') and pins that the #160 placeholder still fires for genuine clean exits."
     },
     {
+      "file": "unit/test_1644_retention_guard.py",
+      "feature": "#1644",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "cleanup",
+        "safety"
+      ],
+      "description": "Retention blast-radius guard: predicate parity between each prune and its bounded count, fail-closed on every error path (count/ack/threshold), ack bound to the window in force and single-use, threshold clamped and its default's direction pinned (not its value), sentinel parity with the canary L-03 exclusion and uncreatable as an agent name, and the #1638 scenario refused end-to-end."
+    },
+    {
       "file": "unit/test_1402_prompt_contract.py",
       "feature": "#1402",
       "added": "2026-07-15",

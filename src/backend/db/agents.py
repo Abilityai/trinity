@@ -15,7 +15,7 @@ to focused mixin classes in db/agent_settings/:
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, delete, func, or_
+from sqlalchemy import select, insert, update, delete, func, and_, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -39,6 +39,21 @@ from utils.helpers import utc_now_iso
 
 # System agent name constant
 SYSTEM_AGENT_NAME = "trinity-system"
+
+
+def _soft_deleted_agents_predicate(cutoff: str):
+    """WHERE clause for the #834 Phase 1a soft-deleted agent hard-purge.
+
+    #1644: shared between `find_soft_deleted_agents_past_retention` (what the
+    sweep purges) and `count_soft_deleted_agents_past_retention` (what the guard
+    counts) so the two can never diverge. This purge chains into
+    `remove_agent_volumes` (#1581) — the count MUST describe exactly the set that
+    is about to become unrecoverable.
+    """
+    return and_(
+        agent_ownership.c.deleted_at.is_not(None),
+        agent_ownership.c.deleted_at < cutoff,
+    )
 
 
 class AgentOperations(
@@ -411,14 +426,36 @@ class AgentOperations(
         cutoff = iso_cutoff(hours=retention_days * 24)
         stmt = (
             select(agent_ownership.c.agent_name)
-            .where(
-                agent_ownership.c.deleted_at.is_not(None),
-                agent_ownership.c.deleted_at < cutoff,
-            )
+            .where(_soft_deleted_agents_predicate(cutoff))
             .limit(limit)
         )
         with get_engine().connect() as conn:
             return [row["agent_name"] for row in conn.execute(stmt).mappings()]
+
+    def count_soft_deleted_agents_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """#1644: how many agents `_sweep_soft_deleted_agents` would hard-purge.
+
+        Every candidate here is one agent whose Docker data volumes are destroyed
+        (#1581) — this count is not "rows", it is "unrecoverable losses". The guard
+        floors this sweep at 0 for that reason: any purge at all is worth one ack.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        from utils.helpers import iso_cutoff
+
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        inner = (
+            select(agent_ownership.c.agent_name)
+            .where(_soft_deleted_agents_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
 
     def recover_agent_ownership(self, agent_name: str) -> bool:
         """Recover a soft-deleted agent by clearing `deleted_at` (#834).

@@ -2330,6 +2330,17 @@ class OpsSettingsUpdate(BaseModel):
     settings: Dict[str, str]
 
 
+class RetentionAcknowledge(BaseModel):
+    """Approve one over-threshold retention prune (#1644).
+
+    `window_days` is not advisory — the endpoint rejects (409) unless it matches
+    the window actually in force, so an ack always names the deletion it authorizes.
+    """
+    key: str = Field(..., min_length=1, max_length=100)
+    window_days: int = Field(..., ge=0, le=3650)
+
+
+
 class SlackSettingsUpdate(BaseModel):
     """Request body for updating Slack settings."""
     client_id: str = None

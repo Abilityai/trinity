@@ -1477,6 +1477,51 @@ class DatabaseManager:
         """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""
         return self._schedule_ops.scrub_terminal_backlog_metadata(chunk_size)
 
+    # --- #1644 blast-radius counts (bounded; share each prune's predicate) ---
+
+    def count_execution_log_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_execution_logs would null (#1644)."""
+        return self._schedule_ops.count_execution_log_candidates(retention_days, limit)
+
+    def count_execution_row_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_execution_rows would delete (#1644)."""
+        return self._schedule_ops.count_execution_row_candidates(retention_days, limit)
+
+    def count_soft_deleted_schedules_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of schedules the #834 sweep would purge (#1644)."""
+        return self._schedule_ops.count_soft_deleted_schedules_past_retention(
+            retention_days, limit
+        )
+
+    def count_health_check_candidates(self, days: int, limit: int) -> int:
+        """Bounded count of what cleanup_old_health_records would delete (#1644)."""
+        return self._monitoring_ops.count_health_check_candidates(days, limit)
+
+    def count_agent_reports_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_agent_reports would delete (#1644)."""
+        return self._report_ops.count_agent_reports_candidates(retention_days, limit)
+
+    def count_operator_queue_terminal_candidates(
+        self, retention_days: int, responded_retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of what prune_terminal_items would delete (#1644)."""
+        return self._operator_queue_ops.count_terminal_candidates(
+            retention_days, responded_retention_days, limit
+        )
+
+    def count_soft_deleted_agents_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of agents the #834 sweep would hard-purge (#1644).
+
+        Each candidate is one agent whose data volumes are destroyed (#1581).
+        """
+        return self._agent_ops.count_soft_deleted_agents_past_retention(
+            retention_days, limit
+        )
+
     def get_running_executions_with_agent_info(self):
         """Get all running executions with schedule timeout info (Issue #129)."""
         return self._schedule_ops.get_running_executions_with_agent_info()

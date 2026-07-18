@@ -24,6 +24,34 @@ from .tables import operator_queue
 from utils.helpers import utc_now_iso, iso_cutoff
 
 
+def _operator_queue_prune_predicate(
+    retention_days: int, responded_retention_days: int
+):
+    """WHERE clause for the #1142 terminal operator_queue retention sweep.
+
+    #1644: extracted so `prune_terminal_items` and `count_terminal_candidates`
+    share one definition. This predicate is the reason sharing is mandatory rather
+    than merely tidy — it derives a second cutoff (`resp_days`) internally, so any
+    hand-mirrored copy drifts the moment either window is edited.
+
+    `pending` rows are never matched (and so never deleted) — see the caller.
+    """
+    terminal_cutoff = iso_cutoff(hours=retention_days * 24)
+    # `responded` never uses a shorter window than the terminal one.
+    resp_days = max(responded_retention_days, retention_days)
+    responded_cutoff = iso_cutoff(hours=resp_days * 24)
+    return or_(
+        and_(
+            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            operator_queue.c.created_at < terminal_cutoff,
+        ),
+        and_(
+            operator_queue.c.status == "responded",
+            operator_queue.c.created_at < responded_cutoff,
+        ),
+    )
+
+
 class OperatorQueueOperations:
     """Database operations for the operator queue."""
 
@@ -406,26 +434,11 @@ class OperatorQueueOperations:
         """
         if retention_days <= 0 or limit <= 0:
             return 0
-        terminal_cutoff = iso_cutoff(hours=retention_days * 24)
-        # `responded` never uses a shorter window than the terminal one.
-        resp_days = max(responded_retention_days, retention_days)
-        responded_cutoff = iso_cutoff(hours=resp_days * 24)
 
         id_stmt = (
             select(operator_queue.c.id)
             .where(
-                or_(
-                    and_(
-                        operator_queue.c.status.in_(
-                            ("acknowledged", "cancelled", "expired")
-                        ),
-                        operator_queue.c.created_at < terminal_cutoff,
-                    ),
-                    and_(
-                        operator_queue.c.status == "responded",
-                        operator_queue.c.created_at < responded_cutoff,
-                    ),
-                )
+                _operator_queue_prune_predicate(retention_days, responded_retention_days)
             )
             .limit(limit)
         )
@@ -437,6 +450,34 @@ class OperatorQueueOperations:
                 delete(operator_queue).where(operator_queue.c.id.in_(ids))
             )
             return result.rowcount
+
+    def count_terminal_candidates(
+        self,
+        retention_days: int,
+        responded_retention_days: int,
+        limit: int,
+    ) -> int:
+        """#1644: how many rows `prune_terminal_items` would DELETE.
+
+        Shares the prune's predicate — which matters more here than anywhere else,
+        because that predicate derives a *second* cutoff internally
+        (``resp_days = max(responded_retention_days, retention_days)``). A
+        hand-mirrored count would drift the first time either knob is edited.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        inner = (
+            select(operator_queue.c.id)
+            .where(
+                _operator_queue_prune_predicate(retention_days, responded_retention_days)
+            )
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
 
     def mark_acknowledged(self, agent_name: str, request_id: str) -> Optional[str]:
         """Mark an item as acknowledged by the agent.

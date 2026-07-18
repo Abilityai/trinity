@@ -34,6 +34,11 @@ sys.path.insert(0, _backend)
 
 from db_harness import db_backend, run as _hrun  # noqa: E402,F401
 
+# #1644: the blast-radius guard is a separate module with its OWN
+# `from database import db` binding — patching cleanup_service.db does not
+# reach it, so the guard would read the real database mid-test.
+import services.retention_guard as _RG  # noqa: E402
+
 
 def _load_docker_utils():
     """Fresh docker_utils with a mocked docker_client (no daemon)."""
@@ -326,9 +331,14 @@ class TestPurgeUsesTheVolumeBase:
         report = CleanupReport()
 
         db = MagicMock()
+        # #1644: the guard floors the agent purge at 0 (every purge destroys
+        # volumes), so the sweep reaches `purge_agent_ownership` only with a
+        # candidate count and an ack bound to the window in force.
         db.get_setting_value.side_effect = lambda k, d=None: (
-            "180" if k == "agent_soft_delete_retention_days" else d
+            "180" if k in ("agent_soft_delete_retention_days",
+                           "retention_ack_agent_soft_delete_retention_days") else d
         )
+        db.count_soft_deleted_agents_past_retention.return_value = 1
         db.find_soft_deleted_agents_past_retention.return_value = ["new-name"]
         db.get_volume_base_name.return_value = "old-name"
         db.purge_agent_ownership.return_value = True
@@ -336,6 +346,7 @@ class TestPurgeUsesTheVolumeBase:
 
         rm = AsyncMock(return_value=3)
         with patch.object(cs, "db", db), \
+             patch.object(_RG, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
              patch("services.docker_utils.remove_agent_volumes", rm):
             await svc._sweep_soft_deleted_agents(report)
@@ -359,9 +370,14 @@ class TestPurgeUsesTheVolumeBase:
         report = CleanupReport()
 
         db = MagicMock()
+        # #1644: the guard floors the agent purge at 0 (every purge destroys
+        # volumes), so the sweep reaches `purge_agent_ownership` only with a
+        # candidate count and an ack bound to the window in force.
         db.get_setting_value.side_effect = lambda k, d=None: (
-            "180" if k == "agent_soft_delete_retention_days" else d
+            "180" if k in ("agent_soft_delete_retention_days",
+                           "retention_ack_agent_soft_delete_retention_days") else d
         )
+        db.count_soft_deleted_agents_past_retention.return_value = 1
         db.find_soft_deleted_agents_past_retention.return_value = ["new-name"]
         db.get_volume_base_name.return_value = "old-name"
         db.purge_agent_ownership.return_value = True
@@ -371,6 +387,7 @@ class TestPurgeUsesTheVolumeBase:
 
         rm = AsyncMock(return_value=1)
         with patch.object(cs, "db", db), \
+             patch.object(_RG, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
              patch("services.docker_utils.remove_agent_volumes", rm):
             await svc._sweep_soft_deleted_agents(report)
@@ -386,9 +403,14 @@ class TestPurgeUsesTheVolumeBase:
 
         svc = _Svc.build()
         db = MagicMock()
+        # #1644: the guard floors the agent purge at 0 (every purge destroys
+        # volumes), so the sweep reaches `purge_agent_ownership` only with a
+        # candidate count and an ack bound to the window in force.
         db.get_setting_value.side_effect = lambda k, d=None: (
-            "180" if k == "agent_soft_delete_retention_days" else d
+            "180" if k in ("agent_soft_delete_retention_days",
+                           "retention_ack_agent_soft_delete_retention_days") else d
         )
+        db.count_soft_deleted_agents_past_retention.return_value = 1
         db.find_soft_deleted_agents_past_retention.return_value = ["plain"]
         db.purge_agent_ownership.return_value = True
         # A DB hiccup reading the pin must not strand the volumes.
@@ -397,6 +419,7 @@ class TestPurgeUsesTheVolumeBase:
 
         rm = AsyncMock(return_value=1)
         with patch.object(cs, "db", db), \
+             patch.object(_RG, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
              patch("services.docker_utils.remove_agent_volumes", rm):
             await svc._sweep_soft_deleted_agents(CleanupReport())
