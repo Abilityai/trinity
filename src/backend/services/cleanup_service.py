@@ -337,6 +337,8 @@ class CleanupReport:
     operator_queue_pruned: int = 0
     # Issue #1616: expired ephemeral SSH keys removed from agent authorized_keys
     ssh_credentials_expired: int = 0
+    # Issue #1296: terminal agent_reminders rows deleted past their retention window
+    agent_reminders_pruned: int = 0
 
     @property
     def total(self) -> int:
@@ -352,7 +354,8 @@ class CleanupReport:
                 self.expired_leases_requeued + self.expired_leases_parked +
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
-                self.operator_queue_pruned + self.ssh_credentials_expired)
+                self.operator_queue_pruned + self.ssh_credentials_expired +
+                self.agent_reminders_pruned)
 
     def to_dict(self) -> Dict:
         return {
@@ -379,6 +382,7 @@ class CleanupReport:
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
             "operator_queue_pruned": self.operator_queue_pruned,
             "ssh_credentials_expired": self.ssh_credentials_expired,
+            "agent_reminders_pruned": self.agent_reminders_pruned,
             "total": self.total,
         }
 
@@ -457,6 +461,7 @@ class CleanupService:
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
         self._sweep_operator_queue_retention(report)
+        self._sweep_agent_reminders_retention(report)
         await self._sweep_soft_deleted_agents(report)
         await self._sweep_orphan_agent_volumes(report)
         await self._sweep_ephemeral_agents(report)
@@ -884,6 +889,48 @@ class CleanupService:
                     )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning operator_queue: {e}")
+
+    def _sweep_agent_reminders_retention(self, report: CleanupReport) -> None:
+        """4c-sexies. Issue #1296: delete TERMINAL agent_reminders rows
+        (fired/cancelled/failed) past their retention window. The AGENT_REFS
+        CASCADE only cleans on agent delete; terminal rows on a LIVE agent
+        accumulate. `pending`/`firing` are never deleted. `0` disables; gated
+        through the #1644 blast-radius guard like every other window sweep.
+        """
+        try:
+            from services.settings_service import OPS_SETTINGS_DEFAULTS
+            raw = db.get_setting_value(
+                "agent_reminders_retention_days",
+                OPS_SETTINGS_DEFAULTS.get("agent_reminders_retention_days", "90"),
+            )
+            try:
+                days = max(int(raw), 0)
+            except (TypeError, ValueError):
+                days = 0
+        except Exception as e:
+            logger.error(f"[Cleanup] Error reading agent_reminders retention setting: {e}")
+            days = 0
+
+        if days <= 0:
+            return
+        try:
+            if _guard_allows(
+                "agent_reminders_retention_days", "agent_reminders", days,
+                lambda limit: db.count_agent_reminders_candidates(days, limit),
+            ):
+                pruned = db.prune_agent_reminders(
+                    retention_days=days,
+                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+                )
+                report.agent_reminders_pruned = pruned
+                _after_guarded_prune("agent_reminders_retention_days")
+                if pruned > 0:
+                    logger.info(
+                        f"[Cleanup] Deleted {pruned} terminal agent_reminders rows "
+                        f"older than {days} days (#1296)"
+                    )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error pruning agent_reminders: {e}")
 
     async def _sweep_soft_deleted_agents(self, report: CleanupReport) -> None:
         """4c-bis. Issue #834 Phase 1a: hard-purge soft-deleted agents past

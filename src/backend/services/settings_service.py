@@ -82,6 +82,9 @@ RETENTION_OPS_KEYS = (
     # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
     "agent_reports_retention_days",
     "operator_queue_retention_days",
+    # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
+    # window (surfaced/logged/reset-protected), NOT a community-floor key.
+    "agent_reminders_retention_days",
 )
 
 
@@ -134,6 +137,10 @@ OPS_SETTINGS_DEFAULTS = {
     # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
     # get a more generous fixed floor (never deleted younger than #772's guard).
     "operator_queue_retention_days": "90",
+    # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
+    # failed). Rows older than this many days are deleted; pending/firing never
+    # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
+    "agent_reminders_retention_days": "90",
 }
 
 # Descriptions for each ops setting
@@ -154,6 +161,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
+    "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
 }
 
 
