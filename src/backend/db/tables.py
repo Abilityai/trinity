@@ -113,6 +113,7 @@ agent_ownership = Table(
     Column("spawned_by_agent", Text),              # trinity-enterprise#69 Part 2: parent agent name (provenance)
     Column("spawned_by_key_id", Text),             # trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
     Column("volume_base_name", Text),              # #1664: data-volume identity (NULL = agent_name); frozen at rename
+    Column("display_label", Text),                 # ent#181: human-facing name (NULL = render agent_name); slug never moves
 )
 
 agent_sharing = Table(
@@ -918,6 +919,7 @@ operator_queue = Table(
     metadata,
     Column("id", Text, primary_key=True),
     Column("agent_name", Text),
+    Column("request_id", Text),  # #1631 — agent-authored id (UNIQUE per agent)
     Column("type", Text),
     Column("status", Text),
     Column("priority", Text),

@@ -246,3 +246,4 @@ No dedicated UI components. This feature is consumed entirely through the MCP to
 ## Related Flows
 - [agent-permissions.md](agent-permissions.md) -- Permission model gating subscriptions
 - [agent-chat.md](agent-chat.md) -- Task endpoint used for subscription triggers
+- [task-completion-events.md](task-completion-events.md) -- #1578 SYSTEM-emitted `agent.task.completed`/`failed` reusing this delivery machinery (deterministic backend producer, reserved `agent.task.*` namespace); the dispatch primitives (`trigger_subscription`) now live in `services/event_dispatch_service.py`

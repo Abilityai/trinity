@@ -559,6 +559,20 @@ class DatabaseManager:
     # volume-ownership predicate the #1581 orphan sweep must use instead of
     # `is_agent_name_reserved` — a renamed agent's volumes keep the pre-rename
     # base, so asking "is this a live agent NAME?" marks live data an orphan.
+    # ent#181: the human-facing label. `display_label` is presentation only —
+    # `agent_name` (the slug) remains the identity everything else keys on.
+    def get_display_label(self, agent_name: str):
+        return self._agent_ops.get_display_label(agent_name)
+
+    def get_display_name(self, agent_name: str):
+        return self._agent_ops.get_display_name(agent_name)
+
+    def get_display_labels_for_agents(self, agent_names):
+        return self._agent_ops.get_display_labels_for_agents(agent_names)
+
+    def set_display_label(self, agent_name: str, label):
+        return self._agent_ops.set_display_label(agent_name, label)
+
     def is_volume_base_reserved(self, volume_base: str, exclude_agent=None):
         # #1671: `exclude_agent` = "does anyone ELSE claim this base?" — the
         # rename gate passes the renaming agent so a rename-back isn't refused.
@@ -1164,6 +1178,13 @@ class DatabaseManager:
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
 
+    def resume_session_belongs_to_user(
+        self, agent_name: str, claude_session_id: str, user_id: int
+    ) -> bool:
+        return self._schedule_ops.resume_session_belongs_to_user(
+            agent_name, claude_session_id, user_id
+        )
+
     def get_schedule_executions(self, schedule_id: str, limit: int = 50):
         return self._schedule_ops.get_schedule_executions(schedule_id, limit)
 
@@ -1451,6 +1472,10 @@ class DatabaseManager:
     def prune_execution_rows(self, retention_days: int, chunk_size: int = 500) -> int:
         """Delete terminal schedule_executions rows older than retention_days (#772)."""
         return self._schedule_ops.prune_execution_rows(retention_days, chunk_size)
+
+    def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
+        """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""
+        return self._schedule_ops.scrub_terminal_backlog_metadata(chunk_size)
 
     # --- #1644 blast-radius counts (bounded; share each prune's predicate) ---
 
@@ -2418,8 +2443,9 @@ class DatabaseManager:
             agent_name, since_hours
         )
 
-    def mark_operator_queue_acknowledged(self, item_id):
-        return self._operator_queue_ops.mark_acknowledged(item_id)
+    def mark_operator_queue_acknowledged(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
     def mark_operator_queue_expired(self):
         return self._operator_queue_ops.mark_expired()
@@ -2430,8 +2456,9 @@ class DatabaseManager:
     def get_operator_queue_responded_for_agent(self, agent_name):
         return self._operator_queue_ops.get_responded_items_for_agent(agent_name)
 
-    def operator_queue_item_exists(self, item_id):
-        return self._operator_queue_ops.item_exists(item_id)
+    def operator_queue_item_exists(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.item_exists(agent_name, item_id)
 
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001

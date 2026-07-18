@@ -510,3 +510,4 @@ Expected response from agent:
 - [continue-execution-as-chat.md](continue-execution-as-chat.md) -- EXEC-023, resume_session_id support
 - [scheduler-service.md](scheduler-service.md) -- dedicated scheduler that calls this service via internal API
 - [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) -- #526 per-agent dispatch breaker; this service is its outcome-recording producer (AUTH-only) and owns the drain-on-open backgrounding
+- [task-completion-events.md](task-completion-events.md) -- #1578 system-emitted `agent.task.completed`/`failed` at this service's CAS-won terminals (`apply_result` ×2 + `_write_terminal_and_gate`)

@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from models import ActivityState, TaskExecutionStatus
+from services import event_dispatch_service
 from services.agent_auth import build_agent_auth_headers
 from services.capacity_manager import get_capacity_manager
 from services.slot_service import SLOT_TTL_BUFFER
@@ -311,6 +312,8 @@ class CleanupReport:
     execution_logs_pruned: int = 0
     execution_rows_pruned: int = 0
     health_checks_pruned: int = 0
+    # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
+    backlog_metadata_scrubbed: int = 0
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -332,6 +335,8 @@ class CleanupReport:
     ephemeral_orphans_reclaimed: int = 0
     # Issue #1142: terminal operator_queue rows deleted past their retention window
     operator_queue_pruned: int = 0
+    # Issue #1616: expired ephemeral SSH keys removed from agent authorized_keys
+    ssh_credentials_expired: int = 0
 
     @property
     def total(self) -> int:
@@ -340,13 +345,14 @@ class CleanupReport:
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
+                self.backlog_metadata_scrubbed +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned +
                 self.expired_leases_requeued + self.expired_leases_parked +
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
-                self.operator_queue_pruned)
+                self.operator_queue_pruned + self.ssh_credentials_expired)
 
     def to_dict(self) -> Dict:
         return {
@@ -361,6 +367,7 @@ class CleanupReport:
             "shared_files_purged": self.shared_files_purged,
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
+            "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -371,6 +378,7 @@ class CleanupReport:
             "agent_volumes_removed": self.agent_volumes_removed,
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
             "operator_queue_pruned": self.operator_queue_pruned,
+            "ssh_credentials_expired": self.ssh_credentials_expired,
             "total": self.total,
         }
 
@@ -454,6 +462,7 @@ class CleanupService:
         await self._sweep_ephemeral_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
+        await self._sweep_expired_ssh_credentials(report)
         self._maybe_wal_checkpoint(report)
 
         self._cycle_count += 1
@@ -810,6 +819,25 @@ class CleanupService:
                         )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
+
+        # #1449: scrub stale drain-replay PII (user_message/user_email/
+        # system_prompt) from backlog_metadata on authoritative-terminal rows.
+        # NOT gated on a retention window — it is a security invariant, not an
+        # operator knob (a fixed default avoids the #1638 floor-by-seed trap).
+        # Count-only logging — the blob carries PII and must never be logged.
+        try:
+            scrubbed = db.scrub_terminal_backlog_metadata(
+                chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+            )
+            report.backlog_metadata_scrubbed = scrubbed
+            if scrubbed > 0:
+                _log_prune(
+                    scrubbed,
+                    f"[Cleanup] Scrubbed backlog_metadata on {scrubbed} "
+                    f"terminal executions (#1449)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past
@@ -1314,6 +1342,44 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error purging idempotency keys: {e}")
 
+    async def _sweep_expired_ssh_credentials(self, report: CleanupReport) -> None:
+        """4c-sexies. Issue #1616: remove near-expired ephemeral SSH keys from
+        agent ``authorized_keys``.
+
+        The security gap this closes: an ephemeral SSH key's TTL was enforced
+        ONLY on its Redis metadata. `SshService.cleanup_expired_credentials()`
+        — the code that removes the actual line from the file `sshd` reads —
+        existed but had ZERO callers (`SSH_ACCESS_CLEANUP_INTERVAL` was unused),
+        so on a preserved (never-recreated) volume an expired key lingered in
+        `authorized_keys` and still granted login after its stated expiry. For a
+        key-auth credential the Redis TTL revokes nothing — only this file-side
+        removal does — so wiring the sweep is what actually enforces the TTL.
+
+        The sweep removes a key's line once its stored `expires_at` has passed;
+        `store_credential_metadata` keeps the Redis row alive
+        `SSH_ACCESS_CLEANUP_GRACE_SECONDS` past that deadline so every expired key
+        is observed by at least one 5-min cycle before Redis forgets it (the
+        earlier `ttl in [0,60]` heuristic missed ~80% of keys across the cadence).
+
+        Best-effort and self-contained (#1026): owns its try/except, never
+        raises to the cycle. `cleanup_expired_credentials` is itself fail-open
+        per key (a Redis or `docker exec` error on one key is logged and
+        skipped), and `remove_ssh_key` tolerates a missing container/file — so a
+        stopped or deleted agent is a no-op rather than an error.
+        """
+        try:
+            from services.ssh_service import get_ssh_service
+
+            cleaned = await get_ssh_service().cleanup_expired_credentials()
+            report.ssh_credentials_expired = cleaned
+            if cleaned > 0:
+                logger.info(
+                    f"[Cleanup] Removed {cleaned} expired SSH key(s) from agent "
+                    f"authorized_keys (#1616)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error sweeping expired SSH credentials: {e}")
+
     def _maybe_wal_checkpoint(self, report: CleanupReport) -> None:
         """4d. Issue #772: after a retention sweep reclaims meaningful space,
         truncate the WAL so the OS sees the free pages. Checkpoint is cheap and
@@ -1322,6 +1388,7 @@ class CleanupService:
         """
         retention_total = (report.execution_logs_pruned
                            + report.execution_rows_pruned
+                           + report.backlog_metadata_scrubbed  # #1449
                            + report.health_checks_pruned
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
@@ -1469,6 +1536,18 @@ class CleanupService:
                                 # #1083: close the dispatch activity the (now-absent)
                                 # fire-and-forget coroutine `finally` would have closed.
                                 await self._close_stale_slot_activity(execution_id)
+                                # #1578: the async #1083 lease expired with no
+                                # result callback — emit agent.task.failed so a
+                                # subscribed orchestrator is woken on the wedge.
+                                event_dispatch_service.spawn_task_terminal_event(
+                                    agent_name,
+                                    execution_id,
+                                    terminal_status=TaskExecutionStatus.FAILED,
+                                    summary_or_error=(
+                                        f"{_LEASE_EXPIRED_TAG}: agent '{agent_name}' "
+                                        f"unresponsive during cleanup re-verify"
+                                    ),
+                                )
                             else:
                                 # Race-guard refused — a real terminal write
                                 # arrived first. Expected and benign.
@@ -1520,6 +1599,18 @@ class CleanupService:
                             # #1083: close the dispatch activity the (now-absent)
                             # fire-and-forget coroutine `finally` would have closed.
                             await self._close_stale_slot_activity(execution_id)
+                            # #1578: async #1083 lease expired (no result
+                            # callback) — emit agent.task.failed to wake a
+                            # subscribed orchestrator on the wedge.
+                            event_dispatch_service.spawn_task_terminal_event(
+                                agent_name,
+                                execution_id,
+                                terminal_status=TaskExecutionStatus.FAILED,
+                                summary_or_error=(
+                                    f"{_LEASE_EXPIRED_TAG}: slot TTL expired for "
+                                    f"agent '{agent_name}' (no result callback)"
+                                ),
+                            )
                     except Exception as e:
                         logger.error(
                             f"[Cleanup] Error failing {execution_id} after slot reclaim: {e}"

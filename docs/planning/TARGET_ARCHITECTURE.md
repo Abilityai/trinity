@@ -251,7 +251,9 @@ The unit of gating is the **effect**, so an agent is no longer coarsely "auto-re
 `chat_with_agent` (MCP tool) never blocks. It:
 1. Enqueues a `queued` row in the target agent's queue (idempotency key derived from call args)
 2. Returns immediately: `{execution_id, status: "queued"}`
-3. Caller subscribes to `agent.task.completed` / `agent.task.failed` events via the event bus, or polls `get_execution_result` — the existing polling path remains valid (including the #914 `queued_timeout` contract).
+3. Caller subscribes to `agent.task.completed` / `agent.task.failed` events, or polls `get_execution_result` — the existing polling path remains valid (including the #914 `queued_timeout` contract).
+
+> **Completion-event contract — IMPLEMENTED (#1578, 2026-07-17).** The backend now deterministically emits `agent.task.completed` / `agent.task.failed` at **every CAS-won execution terminal** (`apply_result` success+failure, the timeout/budget/crash writer `_write_terminal_and_gate`, the #1083 lease-reaper, and the pull sink `apply_task_result` — dark until a pilot). **Divergence from this section's "via the event bus" wording:** it ships via **EVT-001 subscription dispatch** (a matching subscription → an async report-back `/task` into the subscriber's queue), NOT the WS `event_bus.py` — because a WebSocket broadcast can't wake a stopped/parked orchestrator, whereas a queued task can (the "reply lands in the caller's queue" shape this section wants). Delivery is **best-effort today** (wakes a *running*, incl. #1402 parked-but-running, subscriber; a stopped subscriber's wake is dropped though the `agent_events` row persists); the **durable** queue delivery is the pull migration's job (the same `agent.task.*` names + flat payload carry over unchanged, incl. `fan_out_id`/`loop_id` for the fan-out join envelope below). Reserved `agent.task.*` namespace with a 3-layer loop guard (no agent-emit, no reserved self-sub, recursion-break). See `docs/memory/feature-flows/task-completion-events.md`.
 
 Human-facing chat is the edge adapter: the WebSocket (or a `?wait=true` MCP call) holds open, enqueues, and forwards the reply when the completion event arrives. The user experience is synchronous; the internals are not. The held connection must time out so it never pins a worker. **The operator/human gate is likewise asynchronous:** an effect or task that needs a person is parked into the operator queue (OPS-001) and the turn ends — nothing blocks a worker waiting on a human (#1402).
 
@@ -548,6 +550,7 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | **Pull / work-stealing migration — umbrella** (schema → dark pull endpoints → agent worker-pool → capacity-physical + lease-reaper → sync edge + fan-out join → default-on + delete) | **#1081** |
 | ├─ Bankable win 1 — status-as-projection (CAS-guarded; retires canary S-01; ships independently) — **shipped** | #1082 |
 | ├─ Bankable win 2 — fire-and-forget dispatch (a hung turn holds zero backend resource) — **shipped** | #1083 |
+| ├─ Bankable win 3 — system-emitted `agent.task.completed`/`failed` at every CAS-won terminal (the async report-back half; EVT-001 dispatch, best-effort today, pull-queue delivery later) — **shipped** | #1578 |
 | ├─ **v2 — Structured recovery trace + injection** (retry **and** next execution; the Direction-B center of gravity) | **#1401** |
 | ├─ **v2 — MAX_REDELIVERY cap + async operator-queue human-gate lever** (bounds the lease-reaper; no synchronous user gates) | **#1402** |
 | ├─ Effect-scoped idempotency `effect_guard` (Direction A — reversible/backend-sink slice; universal coverage retired, **re-scope pending**) | #1084 |

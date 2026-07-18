@@ -48,7 +48,7 @@
         "brain-orb",
         "feature-flags"
       ],
-      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old\u2192new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base \u2227 voice \u2227 key; 200 despite brain-orb DB failure)."
+      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old→new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base ∧ voice ∧ key; 200 despite brain-orb DB failure)."
     },
     {
       "file": "unit/test_1332_cancelled_activity_state.py",
@@ -60,7 +60,7 @@
         "activities",
         "observability"
       ],
-      "description": "A user-cancelled execution's dispatch activity is recorded as ActivityState.CANCELLED, not FAILED. Covers the enum value + activity_state_for_terminal mapping helper, the operator-terminate handler (Path B) closing the open dispatch activity as CANCELLED (terminated\u2192close, already_finished\u2192no-op, no-activity\u2192no-op, close-raises\u2192swallowed), and the collaboration/self-task close helpers mapping a cancelled result to CANCELLED (#1332)."
+      "description": "A user-cancelled execution's dispatch activity is recorded as ActivityState.CANCELLED, not FAILED. Covers the enum value + activity_state_for_terminal mapping helper, the operator-terminate handler (Path B) closing the open dispatch activity as CANCELLED (terminated→close, already_finished→no-op, no-activity→no-op, close-raises→swallowed), and the collaboration/self-task close helpers mapping a cancelled result to CANCELLED (#1332)."
     },
     {
       "file": "unit/test_voip_audio.py",
@@ -72,7 +72,7 @@
         "voip",
         "audio"
       ],
-      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio\u2194Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
+      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio↔Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
     },
     {
       "file": "unit/test_voip_db.py",
@@ -455,7 +455,7 @@
         "lifecycle",
         "file-sharing"
       ],
-      "description": "check_public_folder_mount_matches truth table: enabled+mounted \u2192 True, enabled+unmounted \u2192 False (needs recreation to attach), disabled+mounted \u2192 False (needs recreation to detach), disabled+unmounted \u2192 True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
+      "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
     },
     {
       "file": "unit/test_slack_dm_default.py",
@@ -467,7 +467,7 @@
         "db",
         "slack"
       ],
-      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote \u2014 router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
+      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote — router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
     },
     {
       "file": "test_public_chat_history.py",
@@ -479,7 +479,7 @@
         "public",
         "chat"
       ],
-      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} \u2014 auth requirements, 404 on invalid tokens, response shape, limit param"
+      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} — auth requirements, 404 on invalid tokens, response shape, limit param"
     },
     {
       "file": "unit/test_voice_tools.py",
@@ -492,7 +492,7 @@
         "gemini",
         "tools"
       ],
-      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout \u2192 error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
+      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -531,7 +531,7 @@
         "files",
         "chat"
       ],
-      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) \u2014 14 tests"
+      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) — 14 tests"
     },
     {
       "file": "unit/test_slack_mrkdwn.py",
@@ -557,7 +557,7 @@
         "webhooks",
         "lint"
       ],
-      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI \u2014 would have caught WEBHOOK-001 before #291 landed."
+      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI — would have caught WEBHOOK-001 before #291 landed."
     },
     {
       "file": "unit/test_slack_token_encryption.py",
@@ -585,7 +585,7 @@
         "credentials",
         "encryption"
       ],
-      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path \u2014 Telegram never shipped plaintext."
+      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path — Telegram never shipped plaintext."
     },
     {
       "file": "unit/test_whatsapp_token_encryption.py",
@@ -600,7 +600,7 @@
         "credentials",
         "encryption"
       ],
-      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier \u2014 pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
+      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier — pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
     },
     {
       "file": "unit/test_slack_workspaces_encryption.py",
@@ -659,7 +659,7 @@
         "resilience",
         "circuit-breaker"
       ],
-      "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening \u2014 HTTP errors, read/write/pool failures, and protocol errors are excluded"
+      "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening — HTTP errors, read/write/pool failures, and protocol errors are excluded"
     },
     {
       "file": "integration/test_circuit_breaker.py",
@@ -673,7 +673,7 @@
         "circuit-breaker",
         "redis"
       ],
-      "description": "Drives the real AgentClient through httpx.MockTransport against real Redis circuit state \u2014 hard vs soft failures, mixed interleave, open-circuit fast-fail, recovery on 200, and the deferred half-open soft-failure probe-lock behaviour"
+      "description": "Drives the real AgentClient through httpx.MockTransport against real Redis circuit state — hard vs soft failures, mixed interleave, open-circuit fast-fail, recovery on 200, and the deferred half-open soft-failure probe-lock behaviour"
     },
     {
       "file": "integration/test_monitoring_service.py",
@@ -686,7 +686,7 @@
         "monitoring",
         "circuit-breaker"
       ],
-      "description": "Mirrors the #474 classification rule on the /health probe path and pins the `status_code >= 500 \u2192 UNHEALTHY` aggregator branch"
+      "description": "Mirrors the #474 classification rule on the /health probe path and pins the `status_code >= 500 → UNHEALTHY` aggregator branch"
     },
     {
       "file": "unit/test_platform_default_model_regression.py",
@@ -757,7 +757,7 @@
         "migrations",
         "reliability"
       ],
-      "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots \u2014 multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
+      "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots — multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
     },
     {
       "file": "unit/test_compatibility_checks.py",
@@ -782,7 +782,7 @@
         "voip",
         "voice"
       ],
-      "description": "Per-agent persisted voice + VoIP enable/disable toggle (#28). db/agents.py get_voice_name/set_voice_name: unset->'Kore' fallback, set/get roundtrip, invalid-persisted-value->default (reviewer M1 read-path validation), clear->default, set-on-missing-agent->False. db/voip.py set_enabled toggle + the create_binding 'preserve enabled on re-PUT' fix (reviewer H3 \u2014 re-saving credentials on a disabled binding must not silently re-enable it) + set_enabled on a missing binding returns False (router 404s). config.GEMINI_VOICE_NAMES default + parity guard asserting the frontend src/constants/voices.js VOICE ids and DEFAULT_VOICE_NAME mirror the backend constants (reviewer M2 cross-language drift guard). Runs on db_harness backends (SQLite always, PostgreSQL when TEST_POSTGRES_URL set); no Docker/API/Redis."
+      "description": "Per-agent persisted voice + VoIP enable/disable toggle (#28). db/agents.py get_voice_name/set_voice_name: unset->'Kore' fallback, set/get roundtrip, invalid-persisted-value->default (reviewer M1 read-path validation), clear->default, set-on-missing-agent->False. db/voip.py set_enabled toggle + the create_binding 'preserve enabled on re-PUT' fix (reviewer H3 — re-saving credentials on a disabled binding must not silently re-enable it) + set_enabled on a missing binding returns False (router 404s). config.GEMINI_VOICE_NAMES default + parity guard asserting the frontend src/constants/voices.js VOICE ids and DEFAULT_VOICE_NAME mirror the backend constants (reviewer M2 cross-language drift guard). Runs on db_harness backends (SQLite always, PostgreSQL when TEST_POSTGRES_URL set); no Docker/API/Redis."
     },
     {
       "file": "unit/test_28_voip_voice_endpoints.py",
@@ -878,7 +878,7 @@
         "circuit-breaker",
         "autonomy"
       ],
-      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard \u2014 fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
+      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
     },
     {
       "file": "integration/test_1557_autonomy_inbound.py",
@@ -939,7 +939,7 @@
         "proactive-messaging",
         "regression"
       ],
-      "description": "Proactive messages persist to channel session history (#1600). Core property is session-identifier EQUALITY: the key the proactive path derives must equal the key an inbound DM resolves to, per channel (telegram/whatsapp/slack) \u2014 persisting into a different session looks like a fix but leaves the agent unaware of its own outreach. Also: #903 attribution (assistant role, agent sender_label, recipient sender_email for the single-participant DM), persist only on confirmed delivery (no phantom turn on failure), fail-soft on DB error (message already sent), session created when absent (the chat-link session_id column is never written by any code path), and access-grant notifications deliberately NOT persisted (#951 out of scope)."
+      "description": "Proactive messages persist to channel session history (#1600). Core property is session-identifier EQUALITY: the key the proactive path derives must equal the key an inbound DM resolves to, per channel (telegram/whatsapp/slack) — persisting into a different session looks like a fix but leaves the agent unaware of its own outreach. Also: #903 attribution (assistant role, agent sender_label, recipient sender_email for the single-participant DM), persist only on confirmed delivery (no phantom turn on failure), fail-soft on DB error (message already sent), session created when absent (the chat-link session_id column is never written by any code path), and access-grant notifications deliberately NOT persisted (#951 out of scope)."
     },
     {
       "file": "unit/test_1649_group_message_history.py",
@@ -951,7 +951,7 @@
         "proactive-messaging",
         "regression"
       ],
-      "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only \u2014 group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
+      "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only — group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
     },
     {
       "file": "unit/test_1615_ssh_password_removed.py",
@@ -963,7 +963,7 @@
         "security",
         "regression"
       ],
-      "description": "Password SSH auth removed (#1615, router surface): an explicit auth_method='password' returns 400 naming key auth as the alternative \u2014 not the pre-fix 500 (ModuleNotFoundError: crypt, removed from the stdlib in Python 3.13) and not a silent fall-through; refusal is case-insensitive and covers unknown methods; the request never reaches the container; key auth still works and remains the default; the response carries neither private_key (#175) nor password. Complements test_ssh_service.py, which guards the service layer (helpers deleted, no crypt import)."
+      "description": "Password SSH auth removed (#1615, router surface): an explicit auth_method='password' returns 400 naming key auth as the alternative — not the pre-fix 500 (ModuleNotFoundError: crypt, removed from the stdlib in Python 3.13) and not a silent fall-through; refusal is case-insensitive and covers unknown methods; the request never reaches the container; key auth still works and remains the default; the response carries neither private_key (#175) nor password. Complements test_ssh_service.py, which guards the service layer (helpers deleted, no crypt import)."
     },
     {
       "file": "test_ssh_access.py",
@@ -976,7 +976,19 @@
         "live",
         "integration"
       ],
-      "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) \u2014 including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works \u2014 mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
+      "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) — including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works — mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
+    },
+    {
+      "file": "unit/test_1673_execution_error_not_success.py",
+      "feature": "#1673",
+      "added": "2026-07-17",
+      "categories": [
+        "agent-runtime",
+        "unit",
+        "sessions",
+        "regression"
+      ],
+      "description": "Claude Code error_during_execution must not be recorded as success (#1673): stream_parser falls back to errors[] when result text is empty; _finalize_headless_result surfaces error_type=execution_error as 502 instead of falling through to the #160 `context: fork` placeholder. Guards the Sessions-tab resume-not-found fallback contract (detail carries 'no conversation found') and pins that the #160 placeholder still fires for genuine clean exits."
     },
     {
       "file": "unit/test_1644_retention_guard.py",
@@ -1001,6 +1013,28 @@
         "reliability"
       ],
       "description": "Async operator human-gate contract (#1402): sentinel phrases (fire-and-park / End your turn / ask-before-irreversible / globally-unique derived request ids / expires_at) present in every runtime build of the platform prompt; old block-inviting wording gone; Operator Communication section MCP-name-free and byte-identical across runtimes; task-mode _mode_guidance park carve-out (chat mode unchanged); composed task prompt end-to-end; meta-prompt reference copy + agent guide kept in sync."
+    },
+    {
+      "file": "unit/test_181_agent_display_label.py",
+      "feature": "ent#181",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "agents",
+        "unit"
+      ],
+      "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved — the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, and two agents may share one (labels aren't identities). NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL, not an empty string that would render a nameless agent. Soft-deleted agents are not editable (deleted_at guard, mirroring the other settings setters). Batch read for the fleet list (absent = no label = slug) so the hottest endpoint stays 1 query. Router: owner-gated PUT, `label` never coerced to the slug on read (the UI must tell 'no label' from 'label equals slug'), null clears, 404 when the row vanished, WS agent_label_changed broadcast."
+    },
+    {
+      "file": "unit/test_181_agent_display_label.py",
+      "feature": "ent#181",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "agents",
+        "unit"
+      ],
+      "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved - the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, two agents may share one. NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL. Soft-deleted agents are not editable. Batch read for the fleet list keeps the hottest endpoint at one query. Router: owner-gated PUT, label never coerced to the slug on read, null clears, 404 when the row vanished, WS agent_label_changed broadcast."
     }
   ]
 }

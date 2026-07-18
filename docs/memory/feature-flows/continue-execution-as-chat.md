@@ -565,7 +565,16 @@ Claude Code may clean up old session files. If resume fails:
 ## Security Considerations
 
 1. **Session Isolation**: Each agent has its own session files; no cross-agent access possible
-2. **User Authorization**: Only users with agent access (owner/shared) can access execution details and continue as chat
+2. **Resume ownership (IDOR guard, #1672)**: agent *access* is NOT sufficient to resume a
+   session. Execution rows are agent-scoped (`accessible_agent_names`) and expose
+   `claude_session_id`, so on a **shared** agent one operator could read a peer's session id
+   and resume their private conversation. The `POST /api/agents/{name}/task` resume path now
+   authorizes ownership via `db.resume_session_belongs_to_user(agent, session_id, user_id)` —
+   the session id must belong to an execution **this user** triggered on **this agent** (admin
+   bypasses, mirroring the Session tab). A foreign/unknown id returns **404** (enumeration-safe,
+   never confirming the id exists); the `dispatched`/`dispatched_async` #1083 sentinels return
+   **400**. The gate keys on the resume id's presence, **not** on the spoofable `X-Source-Agent`
+   header. See `routers/chat.py` (gate) + `db/schedules.py::resume_session_belongs_to_user`.
 3. **No Credential Exposure**: Session files may contain tool outputs but credentials are already sanitized by Trinity's credential sanitizer
 
 ## Related Flows
@@ -580,6 +589,7 @@ Claude Code may clean up old session files. If resume fails:
 
 | Date | Change |
 |------|--------|
+| 2026-07-17 | **Bug Fix (#1672) — reliability + security.** "Continue as Chat" was broken/unreliable across cases. Root cause: **`AgentDetail` is KeepAlive-cached**, so `routeForcedMode='legacy'` (set only in `onMounted`) never ran on the common nav path (open agent → execution → Continue as Chat re-activates the cached instance via `onActivated`); `SessionPanel` rendered instead of the legacy `ChatPanel` and the resume id was silently dropped — worked only after a hard reload. Fixes: (1) extracted `applyDeepLinkRouting()` called from **both** `onMounted` and `onActivated`, and it clears `routeForcedMode` on non-resume landings so legacy mode can't stick for the SPA session; (2) **IDOR** — the `/task` resume path was unvalidated/unauthorized (any operator on a shared agent could resume a peer's private session), now gated by `db.resume_session_belongs_to_user` + sentinel-reject, keyed on the resume id's presence **not** the spoofable `X-Source-Agent` header (see Security Considerations); (3) the button + `continueAsChat()` now hide/reject the `dispatched`/`dispatched_async` sentinels (`canContinueAsChat`); (4) `ChatPanel` auto-select guard changed `!isResumeMode` → `!resumeSessionIdLocal` so **dismissing the banner** no longer lets auto-select null the resume id and drop `--resume`. Codex resume preserved (no id-shape check — ownership is the guard; a Codex `thread_id` is not a UUID). Tests: `tests/unit/test_1672_continue_as_chat_resume_auth.py` (real accessor SQL + endpoint gate incl. the header-spoof case), `src/frontend/e2e/continue-as-chat.spec.js` (KeepAlive path, CI/`ui`-label). Follow-ups: no index on `claude_session_id` (rare-action full scan, LOW); paid `/api/paid/{name}/chat` resume has only the sentinel guard — full payer→session authorization needs a payer-identity binding that doesn't exist yet. |
 | 2026-02-21 | **Bug Fix (EXEC-023)**: Fixed resume mode context lost after first message. The `/task` endpoint is stateless (doesn't use `--continue`), but `resumeSessionIdLocal` was cleared after the first message, causing subsequent messages to start fresh without context. **Fix**: (1) Added `resumeBannerDismissed` flag to separate banner visibility from session ID state, (2) Removed clearing of `resumeSessionIdLocal` after first message - now ALL messages pass `resume_session_id`, (3) `dismissResumeMode()` only sets banner flag (doesn't clear session ID), (4) `selectSession()` clears resume mode when switching sessions, (5) Reset `resumeBannerDismissed` in `startNewChat()` and resume mode watcher. See `ChatPanel.vue` lines 202-204, 314-319, 370-377, 274-278, 302-312, 425-436. |
 | 2026-02-21 | **Bug Fix (EXEC-023)**: Fixed `ChatPanel.vue` auto-selecting old session in resume mode. The `loadSessions()` function auto-selected the most recent active session even when in resume mode because `messages.length === 0` was true after the watch handler cleared messages. Fix: Added `!isResumeMode.value` condition at line 253. |
 | 2026-02-21 | **Bug Fix (EXEC-023)**: Fixed scheduled executions missing `claude_session_id`. The dedicated scheduler service had its own code path that didn't capture session_id from agent responses. Updated 4 files in `src/scheduler/`: models.py (added `session_id` field), agent_client.py (extract session_id), database.py (accept claude_session_id param), service.py (pass session_id to DB). |
