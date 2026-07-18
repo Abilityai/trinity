@@ -44,6 +44,11 @@ keywords = ["re_"]
 description = "Test fixtures + documented placeholders + historical trees (#1164)"
 paths = [
   '''(^|/)tests/''',                 # ~192 fake secret-shaped fixtures — BLANKET, documented non-scanned zone
+  '''(^|/)docs/memory/''',           # live engineering docs (architecture/requirements/feature-flows) carry
+                                     # API-usage examples — curl `Authorization: Bearer` commands, truncated
+                                     # JWTs, `KEY=`/`condition=` samples — that the DEFAULT rules flag
+                                     # (curl-auth-header/generic-api-key). Verified 8 such FPs this session
+                                     # (#1164). Same accepted docs-are-not-code tradeoff as tests/; documented zone.
   '''(^|/)docs/archive/''',          # historical trees — enterprise-docs-guard excludes the same; documented zone
   '''(^|/)docs/releases/''',
   '''(^|/)docs/security-reports/''', # CSO reports literally contain secret-pattern examples
