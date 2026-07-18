@@ -30,9 +30,10 @@
               <p class="text-sm text-gray-500 dark:text-gray-400">
                 <router-link
                   :to="{ name: 'AgentDetail', params: { name: agentName } }"
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(agentName))"
                   class="hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 >
-                  {{ agentName }}
+                  {{ agentsStore.displayNameForSlug(agentName) }}
                 </router-link>
                 <span class="mx-2">/</span>
                 <span class="font-mono text-xs">{{ executionId.substring(0, 8) }}...</span>
@@ -58,7 +59,7 @@
             </button>
             <!-- Continue as Chat button (EXEC-023) -->
             <button
-              v-if="execution?.claude_session_id && execution?.status !== 'running'"
+              v-if="canContinueAsChat"
               @click="continueAsChat"
               class="px-3 py-1.5 bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center space-x-1"
               title="Continue this execution as an interactive chat"
@@ -187,9 +188,10 @@
             <span class="text-gray-500 dark:text-gray-400">Source Agent:</span>
             <router-link
               :to="{ name: 'AgentDetail', params: { name: execution.source_agent_name } }"
+              :title="agentNameTooltip(agentsStore.agentRefForSlug(execution.source_agent_name))"
               class="ml-2 text-action-primary-600 dark:text-action-primary-400 font-medium hover:underline"
             >
-              {{ execution.source_agent_name }}
+              {{ agentsStore.displayNameForSlug(execution.source_agent_name) }}
             </router-link>
           </div>
           <!-- MCP Key (for MCP calls) -->
@@ -406,10 +408,13 @@ import axios from 'axios'
 import { renderMarkdown } from '../utils/markdown'
 import { formatCost } from '../composables/useFormatters'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 
 const agentName = computed(() => route.params.name)
 const executionId = computed(() => route.params.executionId)
@@ -765,9 +770,20 @@ function copyExecutionId() {
   navigator.clipboard.writeText(executionId.value)
 }
 
+// EXEC-023 (#1672): a resumable execution needs a REAL session id, not one of the
+// #1083 dispatch sentinels. 'dispatched'/'dispatched_async' are written into
+// claude_session_id before the real id lands and stay there permanently on a
+// reaper-FAILED async row — both are truthy, so a bare truthiness check let the
+// button offer a resume that runs `--resume dispatched_async` and cannot resolve.
+const RESUME_SENTINELS = ['dispatched', 'dispatched_async']
+const canContinueAsChat = computed(() => {
+  const sid = execution.value?.claude_session_id
+  return !!sid && !RESUME_SENTINELS.includes(sid) && execution.value?.status !== 'running'
+})
+
 // Continue execution as chat (EXEC-023)
 function continueAsChat() {
-  if (!execution.value?.claude_session_id) return
+  if (!canContinueAsChat.value) return
 
   router.push({
     name: 'AgentDetail',

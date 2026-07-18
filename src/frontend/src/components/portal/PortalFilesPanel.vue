@@ -13,7 +13,7 @@
     >
       <div class="shrink-0 flex items-center justify-between px-4 h-14 border-b border-gray-200 dark:border-gray-800">
         <div class="min-w-0">
-          <div class="font-medium truncate">Files · {{ agent.name }}</div>
+          <div class="font-medium truncate">Files · {{ agentDisplayName(agent) }}</div>
           <div class="text-xs text-gray-400">Send files to the agent or download what it shares</div>
         </div>
         <button class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200" aria-label="Close" @click="$emit('close')">
@@ -28,7 +28,7 @@
           :class="[dragging ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/20' : 'border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800', uploading ? 'opacity-60 pointer-events-none' : '']"
         >
           <svg class="w-6 h-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.9A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
-          <span class="font-medium">{{ uploading ? 'Sending…' : `Drop a file, or click to send to ${agent.name}` }}</span>
+          <span class="font-medium">{{ uploading ? 'Sending…' : `Drop a file, or click to send to ${agentDisplayName(agent)}` }}</span>
           <input type="file" class="hidden" :disabled="uploading" @change="onPick" />
         </label>
         <p v-if="uploadMsg" class="mt-2 text-xs" :class="uploadMsg.type === 'error' ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-600 dark:text-status-success-400'">{{ uploadMsg.text }}</p>
@@ -53,7 +53,7 @@
             </ul>
           </section>
           <section>
-            <h4 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Files from {{ agent.name }}</h4>
+            <h4 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">Files from {{ agentDisplayName(agent) }}</h4>
             <div v-if="error" class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</div>
             <div v-else-if="!docs.length" class="text-xs text-gray-400 py-1">Nothing shared with you yet.</div>
             <ul v-else class="space-y-2">
@@ -76,6 +76,7 @@
 <script setup>
 import { ref, onMounted, h } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({ agent: { type: Object, required: true } })
 defineEmits(['close'])
@@ -110,7 +111,7 @@ async function upload(file) {
   uploadMsg.value = null
   try {
     const res = await store.uploadDocument(props.agent.name, file)
-    uploadMsg.value = { type: 'success', text: `Sent “${res.filename || file.name}” to ${props.agent.name}.` }
+    uploadMsg.value = { type: 'success', text: `Sent “${res.filename || file.name}” to ${agentDisplayName(props.agent)}.` }
     await refreshUploads()
   } catch (err) {
     uploadMsg.value = { type: 'error', text: err.response?.data?.detail || 'Upload failed.' }

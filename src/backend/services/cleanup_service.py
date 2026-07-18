@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from models import ActivityState, TaskExecutionStatus
+from services import event_dispatch_service
 from services.agent_auth import build_agent_auth_headers
 from services.capacity_manager import get_capacity_manager
 from services.slot_service import SLOT_TTL_BUFFER
@@ -65,12 +66,23 @@ _TERMINAL_EXECUTION_STATUSES = {"success", "failed", "cancelled", "skipped"}
 _DRAIN_SENTINEL_PREFIX = "drain-"
 ERROR_FETCH_TIMEOUT = 2.0  # Issue #286: short timeout for fetching error context from agent
 MAX_ERROR_MESSAGE_LENGTH = 2000  # Issue #286: truncate combined error messages
-# Issue #772: per-cycle row budget for retention sweeps. Caps the work each
-# 5-min tick performs so the first post-deploy backfill (potentially GB of
-# execution_log on production instances) is spread over hours, not held in a
-# single multi-minute write lock. At 5000 rows/cycle the worst observed prod
-# backlog (~9000 terminal rows past 30 days) drains in 2 cycles; for the
-# 90-day row-delete sweep on the same fleet that's roughly one cycle.
+# Issue #772: per-TRANSACTION row budget for retention sweeps. Bounds how many
+# rows each commit touches, so a large backfill isn't held in a single
+# multi-minute write lock.
+#
+# #1644 — READ THIS, THE NAME LIES. This is NOT a per-cycle cap. Six of the seven
+# prune accessors (`prune_execution_logs`, `prune_execution_rows`,
+# `cleanup_old_health_records`, `prune_agent_reports`, and the two soft-delete
+# finders) loop `while True` and drain the ENTIRE candidate set in one call —
+# `chunk_size` only sizes each transaction inside that loop. So a single sweep
+# deletes everything past the cutoff, immediately. #1638 is the proof: it
+# destroyed 5352 rows in one startup sweep, which a real 5000-row cap could not
+# have produced. Only `prune_operator_queue_terminal_items` (`limit=`) truly caps.
+#
+# This matters for anyone reasoning about blast radius: there is no "spread over
+# hours" to rely on. The bound on destruction is `retention_guard`, not this
+# constant. `_log_prune`'s `pruned >= 5000` WARNING is therefore a heuristic
+# ("this was a big prune"), not the cap-detector its name suggests.
 RETENTION_CHUNK_SIZE_PER_CYCLE = 5000
 
 # Issue #1581: orphan agent-volume reclaim. A data volume whose ownership row is
@@ -182,6 +194,51 @@ def _log_prune(pruned: int, message: str) -> None:
         logger.info(message)
 
 
+def _guard_allows(
+    setting_key: str,
+    label: str,
+    window_days: int,
+    count_fn,
+    floor=None,
+) -> bool:
+    """#1644 blast-radius gate. True = the prune may run.
+
+    Called INLINE inside each sweep's existing try/except and immediately before
+    its `db.prune_*` call — so even an unexpected raise here skips the prune
+    (fail-closed) rather than falling through to it. `retention_guard.evaluate`
+    also never raises on its own; this is belt and braces on the one code path
+    where being wrong is unrecoverable.
+    """
+    from services import retention_guard
+
+    verdict = retention_guard.evaluate(setting_key, window_days, count_fn, floor)
+    if verdict.allowed:
+        retention_guard.note_allowed(setting_key)
+        return True
+    retention_guard.announce_refusal(setting_key, label, window_days, verdict)
+    return False
+
+
+def _after_guarded_prune(setting_key: str) -> None:
+    """Consume a single-use ack once its prune has actually completed (#1644).
+
+    No-op when no ack exists (the common, under-threshold path). Called only after
+    the prune returns — if it raised, the ack survives so the operator isn't asked
+    to approve the same intent twice.
+    """
+    from services import retention_guard
+
+    try:
+        retention_guard.consume_acknowledgement(setting_key)
+    except Exception as e:
+        # A stale ack is a (small) safety hole, not a data-loss one: it would let
+        # ONE more mass prune through at this same window. Log loudly, never raise
+        # into a sweep that has already deleted rows.
+        logger.error(
+            f"[Cleanup] Could not consume retention ack for {setting_key}: {e}"
+        )
+
+
 def log_effective_retention_windows() -> None:
     """Log each retention window and WHERE IT CAME FROM, before any sweep (#1638).
 
@@ -255,6 +312,8 @@ class CleanupReport:
     execution_logs_pruned: int = 0
     execution_rows_pruned: int = 0
     health_checks_pruned: int = 0
+    # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
+    backlog_metadata_scrubbed: int = 0
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -276,6 +335,8 @@ class CleanupReport:
     ephemeral_orphans_reclaimed: int = 0
     # Issue #1142: terminal operator_queue rows deleted past their retention window
     operator_queue_pruned: int = 0
+    # Issue #1616: expired ephemeral SSH keys removed from agent authorized_keys
+    ssh_credentials_expired: int = 0
 
     @property
     def total(self) -> int:
@@ -284,13 +345,14 @@ class CleanupReport:
                 self.orphaned_skipped + self.stale_activities + self.stale_slots +
                 self.stale_slot_executions + self.shared_files_purged +
                 self.execution_logs_pruned + self.execution_rows_pruned +
+                self.backlog_metadata_scrubbed +
                 self.health_checks_pruned + self.soft_deleted_agents_purged +
                 self.soft_deleted_schedules_purged + self.idempotency_keys_purged +
                 self.agent_reports_pruned +
                 self.expired_leases_requeued + self.expired_leases_parked +
                 self.agent_volumes_removed + self.orphan_agent_volumes_reclaimed +
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
-                self.operator_queue_pruned)
+                self.operator_queue_pruned + self.ssh_credentials_expired)
 
     def to_dict(self) -> Dict:
         return {
@@ -305,6 +367,7 @@ class CleanupReport:
             "shared_files_purged": self.shared_files_purged,
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
+            "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -315,6 +378,7 @@ class CleanupReport:
             "agent_volumes_removed": self.agent_volumes_removed,
             "orphan_agent_volumes_reclaimed": self.orphan_agent_volumes_reclaimed,
             "operator_queue_pruned": self.operator_queue_pruned,
+            "ssh_credentials_expired": self.ssh_credentials_expired,
             "total": self.total,
         }
 
@@ -398,6 +462,7 @@ class CleanupService:
         await self._sweep_ephemeral_agents(report)
         self._sweep_soft_deleted_schedules(report)
         self._sweep_idempotency_keys(report)
+        await self._sweep_expired_ssh_credentials(report)
         self._maybe_wal_checkpoint(report)
 
         self._cycle_count += 1
@@ -671,66 +736,108 @@ class CleanupService:
 
         if log_days > 0:
             try:
-                pruned = db.prune_execution_logs(
-                    retention_days=log_days,
-                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
-                )
-                report.execution_logs_pruned = pruned
-                if pruned > 0:
-                    _log_prune(
-                        pruned,
-                        f"[Cleanup] Nulled execution_log on {pruned} executions "
-                        f"older than {log_days} days (#772)",
+                if _guard_allows(
+                    "execution_log_retention_days", "execution_log", log_days,
+                    lambda limit: db.count_execution_log_candidates(log_days, limit),
+                ):
+                    pruned = db.prune_execution_logs(
+                        retention_days=log_days,
+                        chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
                     )
+                    report.execution_logs_pruned = pruned
+                    _after_guarded_prune("execution_log_retention_days")
+                    if pruned > 0:
+                        _log_prune(
+                            pruned,
+                            f"[Cleanup] Nulled execution_log on {pruned} executions "
+                            f"older than {log_days} days (#772)",
+                        )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning execution_log: {e}")
 
         if row_days > 0:
             try:
-                pruned = db.prune_execution_rows(
-                    retention_days=row_days,
-                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
-                )
-                report.execution_rows_pruned = pruned
-                if pruned > 0:
-                    _log_prune(
-                        pruned,
-                        f"[Cleanup] Deleted {pruned} schedule_executions rows "
-                        f"older than {row_days} days (#772)",
+                if _guard_allows(
+                    "execution_row_retention_days", "schedule_executions rows",
+                    row_days,
+                    lambda limit: db.count_execution_row_candidates(row_days, limit),
+                ):
+                    pruned = db.prune_execution_rows(
+                        retention_days=row_days,
+                        chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
                     )
+                    report.execution_rows_pruned = pruned
+                    _after_guarded_prune("execution_row_retention_days")
+                    if pruned > 0:
+                        _log_prune(
+                            pruned,
+                            f"[Cleanup] Deleted {pruned} schedule_executions rows "
+                            f"older than {row_days} days (#772)",
+                        )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning execution rows: {e}")
 
         if hc_days > 0:
             try:
-                pruned = db.cleanup_old_health_records(
-                    days=hc_days,
-                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
-                )
-                report.health_checks_pruned = pruned
-                if pruned > 0:
-                    _log_prune(
-                        pruned,
-                        f"[Cleanup] Deleted {pruned} agent_health_checks rows "
-                        f"older than {hc_days} days (#772)",
+                if _guard_allows(
+                    "health_check_retention_days", "agent_health_checks", hc_days,
+                    lambda limit: db.count_health_check_candidates(hc_days, limit),
+                ):
+                    pruned = db.cleanup_old_health_records(
+                        days=hc_days,
+                        chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
                     )
+                    report.health_checks_pruned = pruned
+                    _after_guarded_prune("health_check_retention_days")
+                    if pruned > 0:
+                        _log_prune(
+                            pruned,
+                            f"[Cleanup] Deleted {pruned} agent_health_checks rows "
+                            f"older than {hc_days} days (#772)",
+                        )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning health checks: {e}")
 
         if reports_days > 0:
             try:
-                pruned = db.prune_agent_reports(
-                    retention_days=reports_days,
-                    chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
-                )
-                report.agent_reports_pruned = pruned
-                if pruned > 0:
-                    logger.info(
-                        f"[Cleanup] Deleted {pruned} agent_reports rows "
-                        f"older than {reports_days} days (#918)"
+                if _guard_allows(
+                    "agent_reports_retention_days", "agent_reports", reports_days,
+                    lambda limit: db.count_agent_reports_candidates(
+                        reports_days, limit
+                    ),
+                ):
+                    pruned = db.prune_agent_reports(
+                        retention_days=reports_days,
+                        chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
                     )
+                    report.agent_reports_pruned = pruned
+                    _after_guarded_prune("agent_reports_retention_days")
+                    if pruned > 0:
+                        logger.info(
+                            f"[Cleanup] Deleted {pruned} agent_reports rows "
+                            f"older than {reports_days} days (#918)"
+                        )
             except Exception as e:
                 logger.error(f"[Cleanup] Error pruning agent_reports: {e}")
+
+        # #1449: scrub stale drain-replay PII (user_message/user_email/
+        # system_prompt) from backlog_metadata on authoritative-terminal rows.
+        # NOT gated on a retention window — it is a security invariant, not an
+        # operator knob (a fixed default avoids the #1638 floor-by-seed trap).
+        # Count-only logging — the blob carries PII and must never be logged.
+        try:
+            scrubbed = db.scrub_terminal_backlog_metadata(
+                chunk_size=RETENTION_CHUNK_SIZE_PER_CYCLE,
+            )
+            report.backlog_metadata_scrubbed = scrubbed
+            if scrubbed > 0:
+                _log_prune(
+                    scrubbed,
+                    f"[Cleanup] Scrubbed backlog_metadata on {scrubbed} "
+                    f"terminal executions (#1449)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past
@@ -757,17 +864,24 @@ class CleanupService:
         if days <= 0:
             return
         try:
-            pruned = db.prune_operator_queue_terminal_items(
-                retention_days=days,
-                responded_retention_days=OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS,
-                limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
-            )
-            report.operator_queue_pruned = pruned
-            if pruned > 0:
-                logger.info(
-                    f"[Cleanup] Deleted {pruned} terminal operator_queue rows "
-                    f"older than their retention window (#1142)"
+            if _guard_allows(
+                "operator_queue_retention_days", "operator_queue", days,
+                lambda limit: db.count_operator_queue_terminal_candidates(
+                    days, OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS, limit
+                ),
+            ):
+                pruned = db.prune_operator_queue_terminal_items(
+                    retention_days=days,
+                    responded_retention_days=OPERATOR_QUEUE_RESPONDED_MIN_RETENTION_DAYS,
+                    limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
                 )
+                report.operator_queue_pruned = pruned
+                _after_guarded_prune("operator_queue_retention_days")
+                if pruned > 0:
+                    logger.info(
+                        f"[Cleanup] Deleted {pruned} terminal operator_queue rows "
+                        f"older than their retention window (#1142)"
+                    )
         except Exception as e:
             logger.error(f"[Cleanup] Error pruning operator_queue: {e}")
 
@@ -806,6 +920,23 @@ class CleanupService:
 
         if sd_days > 0:
             try:
+                # #1644: floor 0 — every candidate here destroys an agent's Docker
+                # volumes (#1581) and is unrecoverable, so ANY purge is worth one
+                # acknowledgement. A row-scale threshold would wave this through:
+                # 3 agents is ~0% of any table but 3 destroyed volume sets, which
+                # is precisely the inversion that killed the percentage design.
+                from services.retention_guard import FLOOR_AGENTS
+
+                if not _guard_allows(
+                    "agent_soft_delete_retention_days", "soft-deleted agents",
+                    sd_days,
+                    lambda limit: db.count_soft_deleted_agents_past_retention(
+                        sd_days, limit
+                    ),
+                    floor=FLOOR_AGENTS,
+                ):
+                    return
+
                 names = db.find_soft_deleted_agents_past_retention(
                     retention_days=sd_days,
                     limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
@@ -875,6 +1006,7 @@ class CleanupService:
                         )
                 report.soft_deleted_agents_purged = purged
                 report.agent_volumes_removed = volumes_removed
+                _after_guarded_prune("agent_soft_delete_retention_days")
                 if purged > 0:
                     # Always WARNING (#1638): unlike a row prune, this destroys
                     # the agent's data volumes (#1581) and is unrecoverable —
@@ -1160,6 +1292,18 @@ class CleanupService:
 
         if schedule_days > 0:
             try:
+                from services.retention_guard import FLOOR_SCHEDULES
+
+                if not _guard_allows(
+                    "schedule_soft_delete_retention_days", "soft-deleted schedules",
+                    schedule_days,
+                    lambda limit: db.count_soft_deleted_schedules_past_retention(
+                        schedule_days, limit
+                    ),
+                    floor=FLOOR_SCHEDULES,
+                ):
+                    return
+
                 ids = db.find_soft_deleted_schedules_past_retention(
                     retention_days=schedule_days,
                     limit=RETENTION_CHUNK_SIZE_PER_CYCLE,
@@ -1174,6 +1318,7 @@ class CleanupService:
                             f"[Cleanup] Failed to purge soft-deleted schedule {sid}: {e}"
                         )
                 report.soft_deleted_schedules_purged = purged
+                _after_guarded_prune("schedule_soft_delete_retention_days")
                 if purged > 0:
                     logger.info(
                         f"[Cleanup] Hard-purged {purged} soft-deleted schedule(s) "
@@ -1197,6 +1342,44 @@ class CleanupService:
         except Exception as e:
             logger.error(f"[Cleanup] Error purging idempotency keys: {e}")
 
+    async def _sweep_expired_ssh_credentials(self, report: CleanupReport) -> None:
+        """4c-sexies. Issue #1616: remove near-expired ephemeral SSH keys from
+        agent ``authorized_keys``.
+
+        The security gap this closes: an ephemeral SSH key's TTL was enforced
+        ONLY on its Redis metadata. `SshService.cleanup_expired_credentials()`
+        — the code that removes the actual line from the file `sshd` reads —
+        existed but had ZERO callers (`SSH_ACCESS_CLEANUP_INTERVAL` was unused),
+        so on a preserved (never-recreated) volume an expired key lingered in
+        `authorized_keys` and still granted login after its stated expiry. For a
+        key-auth credential the Redis TTL revokes nothing — only this file-side
+        removal does — so wiring the sweep is what actually enforces the TTL.
+
+        The sweep removes a key's line once its stored `expires_at` has passed;
+        `store_credential_metadata` keeps the Redis row alive
+        `SSH_ACCESS_CLEANUP_GRACE_SECONDS` past that deadline so every expired key
+        is observed by at least one 5-min cycle before Redis forgets it (the
+        earlier `ttl in [0,60]` heuristic missed ~80% of keys across the cadence).
+
+        Best-effort and self-contained (#1026): owns its try/except, never
+        raises to the cycle. `cleanup_expired_credentials` is itself fail-open
+        per key (a Redis or `docker exec` error on one key is logged and
+        skipped), and `remove_ssh_key` tolerates a missing container/file — so a
+        stopped or deleted agent is a no-op rather than an error.
+        """
+        try:
+            from services.ssh_service import get_ssh_service
+
+            cleaned = await get_ssh_service().cleanup_expired_credentials()
+            report.ssh_credentials_expired = cleaned
+            if cleaned > 0:
+                logger.info(
+                    f"[Cleanup] Removed {cleaned} expired SSH key(s) from agent "
+                    f"authorized_keys (#1616)"
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error sweeping expired SSH credentials: {e}")
+
     def _maybe_wal_checkpoint(self, report: CleanupReport) -> None:
         """4d. Issue #772: after a retention sweep reclaims meaningful space,
         truncate the WAL so the OS sees the free pages. Checkpoint is cheap and
@@ -1205,6 +1388,7 @@ class CleanupService:
         """
         retention_total = (report.execution_logs_pruned
                            + report.execution_rows_pruned
+                           + report.backlog_metadata_scrubbed  # #1449
                            + report.health_checks_pruned
                            + report.soft_deleted_agents_purged
                            + report.soft_deleted_schedules_purged
@@ -1352,6 +1536,18 @@ class CleanupService:
                                 # #1083: close the dispatch activity the (now-absent)
                                 # fire-and-forget coroutine `finally` would have closed.
                                 await self._close_stale_slot_activity(execution_id)
+                                # #1578: the async #1083 lease expired with no
+                                # result callback — emit agent.task.failed so a
+                                # subscribed orchestrator is woken on the wedge.
+                                event_dispatch_service.spawn_task_terminal_event(
+                                    agent_name,
+                                    execution_id,
+                                    terminal_status=TaskExecutionStatus.FAILED,
+                                    summary_or_error=(
+                                        f"{_LEASE_EXPIRED_TAG}: agent '{agent_name}' "
+                                        f"unresponsive during cleanup re-verify"
+                                    ),
+                                )
                             else:
                                 # Race-guard refused — a real terminal write
                                 # arrived first. Expected and benign.
@@ -1403,6 +1599,18 @@ class CleanupService:
                             # #1083: close the dispatch activity the (now-absent)
                             # fire-and-forget coroutine `finally` would have closed.
                             await self._close_stale_slot_activity(execution_id)
+                            # #1578: async #1083 lease expired (no result
+                            # callback) — emit agent.task.failed to wake a
+                            # subscribed orchestrator on the wedge.
+                            event_dispatch_service.spawn_task_terminal_event(
+                                agent_name,
+                                execution_id,
+                                terminal_status=TaskExecutionStatus.FAILED,
+                                summary_or_error=(
+                                    f"{_LEASE_EXPIRED_TAG}: slot TTL expired for "
+                                    f"agent '{agent_name}' (no result callback)"
+                                ),
+                            )
                     except Exception as e:
                         logger.error(
                             f"[Cleanup] Error failing {execution_id} after slot reclaim: {e}"

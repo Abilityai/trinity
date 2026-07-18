@@ -592,6 +592,13 @@ class TestLeaderLock:
 # 7. DB layer — belt + count helper
 # ---------------------------------------------------------------------------
 
+# #1631: create_item mints a platform uuid `id`, inserts, then re-reads the
+# surviving row's id (on conflict that is the pre-existing row's uuid, not the
+# one this call minted). The stub returns a fixed sentinel so a belt-passing
+# create returns that re-read id.
+_STUB_ROW_ID = "__row_uuid__"
+
+
 class _FakeConn:
     def __init__(self, scalar=0):
         self._scalar = scalar
@@ -601,6 +608,10 @@ class _FakeConn:
 
     def scalar(self):
         return self._scalar
+
+    def first(self):
+        # #1631: the create re-read (`select(id).where(...)`) returns the row.
+        return (_STUB_ROW_ID,)
 
     def __enter__(self):
         return self
@@ -656,7 +667,9 @@ class TestDbBelt:
             "type": "alert",
             "question": "Execution validation failed: " + "detail " * 20,
         })
-        assert rid == "val_exec_20260717"
+        # #1631: the belt passed and the create proceeded, so create_item returns
+        # the re-read row's platform uuid (not the agent's request_id).
+        assert rid == _STUB_ROW_ID
 
     def test_missing_id_still_raises_valueerror(self):
         # #1525 belt preserved.
@@ -670,7 +683,8 @@ class TestDbBelt:
         monkeypatch.setattr("db.operator_queue.make_insert", lambda t: MagicMock())
         ops = _ops()
         rid = ops.create_item("agent", {"id": "x", "context": "not-a-dict"})
-        assert rid == "x"  # no AttributeError
+        # No AttributeError on the non-dict context; #1631 returns the row uuid.
+        assert rid == _STUB_ROW_ID
 
     def test_count_pending_returns_int(self, monkeypatch):
         monkeypatch.setattr("db.operator_queue.get_engine", lambda: _FakeEngine(scalar=7))

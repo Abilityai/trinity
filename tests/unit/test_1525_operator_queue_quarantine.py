@@ -68,7 +68,8 @@ class TestQuarantine:
 
         # Create attempted at most the cap, NOT once per cycle (the #1525 loop).
         assert db.create_operator_queue_item.call_count == MAX_CREATE_ATTEMPTS
-        assert svc._create_failures.get("req-1") == MAX_CREATE_ATTEMPTS
+        # #1631: quarantine map is keyed by the (agent, req_id) tuple.
+        assert svc._create_failures.get(("a", "req-1")) == MAX_CREATE_ATTEMPTS
 
     def test_success_clears_the_counter(self, monkeypatch):
         # Fail once, then succeed on the next cycle.
@@ -76,10 +77,10 @@ class TestQuarantine:
         svc = _wire(monkeypatch, db)
 
         _run_cycles(svc, 1)
-        assert svc._create_failures.get("req-1") == 1   # one failure recorded
+        assert svc._create_failures.get(("a", "req-1")) == 1   # one failure recorded
 
         _run_cycles(svc, 1)
-        assert "req-1" not in svc._create_failures       # recovered → cleared
+        assert ("a", "req-1") not in svc._create_failures       # recovered → cleared
         assert db.create_operator_queue_item.call_count == 2
 
     def test_healthy_request_is_created_once_and_not_recounted(self, monkeypatch):

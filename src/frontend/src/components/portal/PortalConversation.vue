@@ -17,7 +17,7 @@
           @click="pickerOpen = !pickerOpen"
         >
           <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="26" />
-          <span class="font-semibold truncate">{{ agent.name }}</span>
+          <span class="font-semibold truncate">{{ agentDisplayName(agent) }}</span>
           <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
         </button>
         <div
@@ -33,7 +33,7 @@
             <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="28" />
             <span class="min-w-0">
               <span class="block text-sm font-medium truncate">
-                {{ a.name === agent.name ? a.name : `New chat with ${a.name}` }}
+                {{ a.name === agent.name ? agentDisplayName(a) : `New chat with ${agentDisplayName(a)}` }}
               </span>
               <span v-if="a.description" class="block text-xs text-gray-400 truncate">{{ a.description }}</span>
             </span>
@@ -152,7 +152,7 @@
             ref="textarea"
             v-model="input"
             rows="1"
-            :placeholder="listening ? 'Listening…' : `Message ${agent.name}…`"
+            :placeholder="listening ? 'Listening…' : `Message ${agentDisplayName(agent)}…`"
             class="flex-1 resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
             @input="autoGrow"
             @keydown.enter.exact.prevent="send"
@@ -177,6 +177,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
+import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
 
 const props = defineProps({

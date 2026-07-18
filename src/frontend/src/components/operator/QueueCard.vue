@@ -16,7 +16,10 @@
         <div class="flex-1 min-w-0">
           <!-- Agent name + time -->
           <div class="flex items-center gap-2 mb-0.5">
-            <span class="text-sm font-semibold text-gray-900 dark:text-white">{{ item.agent_name }}</span>
+            <span
+              class="text-sm font-semibold text-gray-900 dark:text-white"
+              :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
+            >{{ item.agent_name }}</span>
             <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
             <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(item.created_at) }}</span>
           </div>
@@ -169,6 +172,7 @@ import { ref, computed, watch } from 'vue'
 import { renderMarkdown } from '../../utils/markdown'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
+import { agentNameTooltip } from '../../utils/agentName'
 import AgentAvatar from '../AgentAvatar.vue'
 
 const props = defineProps({
