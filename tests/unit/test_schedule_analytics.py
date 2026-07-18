@@ -336,7 +336,7 @@ class TestSampling:
     kwarg through the production signature."""
 
     def test_sampled_when_over_cap(self, tmp_db, ops, monkeypatch):
-        import db.schedules as schedules_mod
+        import db.schedules.analytics as schedules_mod  # #1481: constant now defined here
         monkeypatch.setattr(schedules_mod, "_PERCENTILE_ROWSET_CAP", 5)
 
         _seed_schedule(tmp_db, "sid-1")
@@ -354,7 +354,7 @@ class TestSampling:
         assert out["sample_size"] == 5
 
     def test_not_sampled_when_under_cap(self, tmp_db, ops, monkeypatch):
-        import db.schedules as schedules_mod
+        import db.schedules.analytics as schedules_mod  # #1481: constant now defined here
         monkeypatch.setattr(schedules_mod, "_PERCENTILE_ROWSET_CAP", 5)
 
         _seed_schedule(tmp_db, "sid-1")
