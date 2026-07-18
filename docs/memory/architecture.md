@@ -1946,6 +1946,7 @@ Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on
 - **WebSocket security (C-002, #550)**: single-use ticket auth — see [Real-time Delivery](#real-time-delivery-reliability-003-306).
 - **Frontend XSS (H-005)**: all markdown rendering uses DOMPurify via `utils/markdown.js`; no direct `v-html` with unsanitized content.
 - **Rate limiting (#1023)**: shared sliding-window limiter `services/rate_limiter.py` — Redis sorted-set rolling window (no fixed-window boundary burst), fail-open with bounded per-worker in-process fallback; `enforce(key, limit, window)` raises 429 + `Retry-After`. New request-rate limits reuse this primitive — don't hand-roll Redis counters. Intentionally NOT unified under it: the auth login/OTP limiters in `routers/auth.py` are failure-counters (increment on failure, reset on success) — a different pattern. A global ASGI middleware with a route→policy table is a tracked follow-up.
+- **Secret scanning (#1164)**: `.github/workflows/secret-scan.yml` runs the gitleaks MIT CLI on every PR (commit-range scope, `contents: read`, `--redact=100`) to block a re-landed credential (the `re_`-prefixed Resend key removed in #1158); config + custom `re_` rule + allowlists in `.gitleaks.toml`. Commit-time source scanning — complementary to GUARD-002's runtime output scanning. Non-blocking until a repo admin makes it a required check (follow-up).
 
 ---
 
