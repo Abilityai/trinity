@@ -189,6 +189,7 @@
 - `git_service.py` - Git sync operations for GitHub-native agents; persistent-state allowlist primitive (S4, #383)
 - `github_service.py` - GitHub API client (repo creation, validation, org detection, branch listing)
 - `agent_service/fork_to_own.py` - Fork-to-own template copy (trinity-enterprise#93): a template declaring `fork_to_own: required` is copied at creation into a **user-owned** repo (private by default; the user's PAT creates + pushes, then persists as the per-agent PAT #347 so recreates never fall back to the platform PAT). Origin = the user's repo; `GIT_UPSTREAM_REPO` env + a credential-less `upstream` remote (startup.sh) keep template updates one `git pull upstream` away. Destination collisions: empty or template-tip SHA-match → reuse; already bound to a live agent or holding other data → 409
+- `agent_service/crud.py` - Agent create/delete. `create_agent_internal` is a **thin orchestrator over fenced phase-helpers** (#1484): CC-trivial gates + the `if docker_client: try/except/else` stay inline (so *what* is caught is byte-identical), while each fat phase (ephemeral pre-gate, template/fork resolution, config staging, env build, volume mounts, container create, register, materialize) is a private `_*` helper returning into the orchestrator's locals. The except/else read a single orchestrator-populated `_RollbackHandles` dataclass (agent MCP key + git-config reservation + ephemeral slot). **Do not re-monolith it** and keep every helper < 100 SLOC / CC < 20. The `github:`+fork phase stays OUTSIDE the try (so `FORK_*` 4xx don't flatten to 500), and the network is hard-coded in `_create_agent_container` (AC #5). Module split to `creation_phases.py` is the deferred #1028 follow-up.
 
 *Integrations:*
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
@@ -1923,7 +1924,7 @@ Two Docker bridge networks, by design — agents physically cannot route to Redi
 
 Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on platform side, agents on agent side), `mcp-server` (agents reach `http://mcp-server:8080/mcp` via Docker DNS), `otel-collector` (agents push metrics), `cloudflared` (prod only — proxies to backend and public agents).
 
-**Rule:** agents are *never* on `trinity-platform-network`. Any new service that mounts the agent network must NOT connect to Redis — full stop. The agent-creation sites (`services/agent_service/crud.py:583`, `services/agent_service/lifecycle.py:495`, `services/system_agent_service.py:238`) hard-code the network name `trinity-agent-network`.
+**Rule:** agents are *never* on `trinity-platform-network`. Any new service that mounts the agent network must NOT connect to Redis — full stop. The three agent-container-create sites hard-code the network name `trinity-agent-network` (cited by function so the reference survives line drift): `crud.py::_create_agent_container` (#1484), `lifecycle.py::_provision_folders_and_run_agent_container`, and `system_agent_service.py::SystemAgentService._create_system_agent`.
 
 **Redis ACL users:**
 
