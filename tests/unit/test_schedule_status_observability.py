@@ -279,6 +279,7 @@ _EXPECTED_UPDATE_SITES = {
     "mark_execution_dispatched",           # sets claude_session_id
     "update_business_status",              # sets business_status
     "prune_execution_logs",                # nulls execution_log
+    "scrub_terminal_backlog_metadata",     # #1449: nulls backlog_metadata (reads status in a WHERE filter only)
 }
 
 

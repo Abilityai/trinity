@@ -121,6 +121,39 @@ class GitHubService:
         except Exception:
             return False, None
 
+    async def validate_token_detailed(self) -> Tuple[str, Optional[str]]:
+        """Validate the PAT, distinguishing an invalid token from an unreachable API.
+
+        ``validate_token`` collapses both a rejected token and a network failure
+        to ``(False, None)``, so a caller can only ever say "invalid" — which is a
+        lie when GitHub was merely unreachable (ent#162 honest-validation). This
+        variant separates the two:
+
+        Returns ``(status, username)``:
+          - ``("valid", login)``    — 200, the token authenticates
+          - ``("invalid", None)``   — 401/403, GitHub rejected the token
+          - ``("unreachable", None)`` — network error or unexpected status; the
+            token may be fine, so callers must NOT report it as invalid.
+        """
+        try:
+            response = await self._request("GET", "/user")
+        except Exception as e:  # httpx transport / timeout / DNS
+            logger.warning(f"GitHub token validation could not reach the API: {e}")
+            return "unreachable", None
+
+        if response.status_code == 200:
+            return "valid", response.json().get("login")
+        if response.status_code == 401:
+            # 401 is GitHub's definitive bad/expired-token signal on GET /user.
+            return "invalid", None
+        # 403 on GET /user is not a scope problem (the endpoint needs no scope) —
+        # it's almost always secondary rate-limiting, so treat it (and any other
+        # non-200) as transient rather than telling the user their token is bad.
+        logger.warning(
+            f"GitHub token validation got non-200 status {response.status_code}"
+        )
+        return "unreachable", None
+
     async def get_owner_type(self, owner: str) -> Optional[OwnerType]:
         """
         Determine if an owner is a user or organization.

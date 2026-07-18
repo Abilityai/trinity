@@ -7,7 +7,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from models import User, UserRoleUpdate, UpdateMyEmailRequest
+from models import User, UserRoleUpdate, UpdateMyEmailRequest, GitHubPATRequest
 from database import db
 from dependencies import require_admin, get_current_user
 
@@ -49,6 +49,82 @@ async def update_my_email(
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
     return {"success": True, "email": email}
+
+
+# ---------------------------------------------------------------------------
+# Per-user GitHub PAT (ent#162) — self-service, on the caller's OWN account.
+#
+# A user stores one GitHub token here; agent creation then resolves per-agent →
+# this owner's per-user → global (services/settings_service.resolve_github_pat),
+# so a non-admin is not confined to the admin PAT's repo scope. Any authenticated
+# user may manage their own credential (NOT admin-gated) — it is theirs. The
+# token is never echoed back on read (status only), mirroring the per-agent
+# `GET /{agent}/github-pat` and the ElevenLabs key surface.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/me/github-pat")
+async def get_my_github_pat_status(current_user: User = Depends(get_current_user)):
+    """Personal GitHub PAT status — configured flag only, never the token."""
+    from services.settings_service import get_github_pat
+
+    return {
+        "configured": db.has_user_github_pat(current_user.id),
+        # Lets the UI say "your agents fall back to the platform token" when the
+        # user has none of their own but a global PAT exists.
+        "has_global": bool(get_github_pat()),
+    }
+
+
+@router.put("/me/github-pat")
+async def set_my_github_pat(
+    body: GitHubPATRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Store the caller's personal GitHub PAT (validated + encrypted at rest).
+
+    Honest validation (ent#162): a token GitHub *rejects* is a 400; a token we
+    simply could not verify because GitHub was unreachable is a 503 — we do not
+    tell the user their token is bad when we never got an answer.
+    """
+    from services.github_service import GitHubService
+
+    pat = (body.pat or "").strip()
+    if not pat:
+        raise HTTPException(status_code=400, detail="PAT cannot be empty")
+
+    status, username = await GitHubService(pat).validate_token_detailed()
+    if status == "invalid":
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub rejected this token. Check it hasn't expired and has repo scope.",
+        )
+    if status == "unreachable":
+        raise HTTPException(
+            status_code=503,
+            detail="Couldn't reach GitHub to verify the token. Try again shortly.",
+        )
+
+    if not db.set_user_github_pat(current_user.id, pat):
+        raise HTTPException(status_code=500, detail="Failed to save GitHub token")
+
+    return {
+        "configured": True,
+        "github_username": username,
+        "message": "Personal GitHub token saved. New agents you create from a repo will use it.",
+    }
+
+
+@router.delete("/me/github-pat")
+async def clear_my_github_pat(current_user: User = Depends(get_current_user)):
+    """Clear the caller's personal GitHub PAT — reverts them to the global PAT.
+
+    Agents already created under it keep their own persisted per-agent copy
+    (#347) and are unaffected; only future creations fall back to the platform
+    token (ent#162 AC #10).
+    """
+    db.clear_user_github_pat(current_user.id)
+    return {"configured": False, "message": "Personal GitHub token cleared."}
 
 
 @router.get("")

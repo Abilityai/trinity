@@ -33,7 +33,7 @@ from services.template_service import (
     generate_credential_files,
 )
 from services import git_service
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from . import ephemeral as ephemeral_service
@@ -391,6 +391,7 @@ async def create_agent_internal(
     github_template_path = None
     github_repo_for_agent = None
     github_pat_for_agent = None
+    github_pat_tier = "none"  # ent#162: which tier supplied the PAT (per_user/fork → persist)
     git_instance_id = None
     git_working_branch = None
     # trinity-enterprise#93: template repo the fork-to-own copy came from —
@@ -450,18 +451,36 @@ async def create_agent_internal(
             template_lookup = f"github:{template_str}" if url_branch else config.template
             gh_template = get_github_template(template_lookup)
 
+            # ent#162: the PAT resolver prefers THIS creator's personal token
+            # over the shared admin PAT. `current_user.id` is the owner user id
+            # (agent-scoped keys resolve to their owner), so resolution keys on
+            # ownership only — never a calling/sharing principal. `github_pat_tier`
+            # records which tier supplied the token, so the persist site below
+            # writes a per-agent PAT only for a deliberate identity (per-user /
+            # fork), never the global fallback (see Decision 2 in the resolver
+            # docstring). NOTE: agent creation requires role creator+ (ROLE-001);
+            # an invited user seeded as `user` (#314) cannot reach this path until
+            # promoted — a per-user PAT does not itself grant creation rights.
+            creator_user_id = current_user.id
+
             if gh_template:
                 # Pre-defined GitHub template from config.py
                 github_repo = gh_template["github_repo"]
 
-                # Get system GitHub PAT from settings (SQLite) or env var.
+                # Resolve the GitHub PAT: per-agent → this owner's per-user
+                # (live) → global (ent#162). Prefers the creator's own token so a
+                # non-admin is not confined to the admin PAT's repo scope.
                 # Fork-to-own (#93) doesn't need it — the user's PAT is the
                 # write identity and public templates clone unauthenticated.
-                github_pat = get_github_pat()
+                github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
                 if not github_pat and not config.fork_to_own:
                     raise HTTPException(
-                        status_code=500,
-                        detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
+                        status_code=400,
+                        detail=(
+                            "No GitHub token available to clone this template. "
+                            "Add your personal GitHub token in Settings, or ask an "
+                            "admin to configure the platform token."
+                        ),
                     )
 
                 github_repo_for_agent = github_repo
@@ -480,12 +499,18 @@ async def create_agent_internal(
                         detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch"
                     )
 
-                # Get system GitHub PAT from settings (SQLite) or env var
-                github_pat = get_github_pat()
+                # Resolve the GitHub PAT: per-agent → this owner's per-user
+                # (live) → global (ent#162). Prefers the creator's own token so a
+                # non-admin can clone a private repo the admin PAT can't see.
+                github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
                 if not github_pat and not config.fork_to_own:
                     raise HTTPException(
-                        status_code=500,
-                        detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
+                        status_code=400,
+                        detail=(
+                            "No GitHub token available to clone this repository. "
+                            "Add your personal GitHub token in Settings, or ask an "
+                            "admin to configure the platform token."
+                        ),
                     )
 
                 github_repo_for_agent = repo_path
@@ -553,6 +578,7 @@ async def create_agent_internal(
                 fork_upstream_repo = github_repo_for_agent
                 github_repo_for_agent = fork_result.destination_repo
                 github_pat_for_agent = user_pat
+                github_pat_tier = "fork"  # ent#162: a deliberate per-agent identity → persist
                 # Pinned semantics: the user's default branch IS the brain —
                 # origin main holds captures; auto-sync pushes there.
                 config.source_branch = fork_result.default_branch
@@ -998,13 +1024,23 @@ async def create_agent_internal(
 
     if docker_client:
         try:
-            # trinity-enterprise#93: persist the user's PAT as the per-agent
-            # PAT (#347) onto the agent_git_config row the reservation above
-            # just created. Inside this try so a failure hits the except
-            # below and rolls back the reserved row + MCP key. Fail-closed:
-            # a fork-to-own agent must never fall back to the platform PAT
-            # on recreate (get_github_pat_for_agent resolves per-agent first).
-            if config.fork_to_own and github_repo_for_agent:
+            # Persist the resolved PAT as the per-agent PAT (#347) onto the
+            # agent_git_config row the reservation above just created. Inside
+            # this try so a failure hits the except below and rolls back the
+            # reserved row + MCP key. Fail-closed: the agent must never fall
+            # back to the platform PAT on recreate (get_github_pat_for_agent
+            # resolves per-agent first).
+            #
+            # ent#162 — persist ONLY for a deliberate identity: fork-to-own (#93)
+            # or the creator's per-user PAT. NEVER for the `global` tier: a
+            # global-fallback agent must keep github_pat_encrypted NULL so
+            # github_pat_propagation_service keeps reaching it on admin global
+            # rotation (persisting the global PAT would freeze it on a token the
+            # admin later revokes — the exact bug Decision 2 avoids). The recreate
+            # ladder (get_github_pat_for_agent) stays 2-tier per-agent → global,
+            # so a per-user agent that persists here re-resolves its own copy on
+            # recreate without ever re-deriving the live per-user tier.
+            if github_pat_tier in ("fork", "per_user") and github_repo_for_agent:
                 if not db.set_agent_github_pat(config.name, github_pat_for_agent):
                     raise RuntimeError(
                         f"failed to persist per-agent GitHub PAT for {config.name}"

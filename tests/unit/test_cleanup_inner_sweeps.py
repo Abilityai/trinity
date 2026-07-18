@@ -29,6 +29,11 @@ from services.cleanup_service import CleanupService, CleanupReport
 # the running code looks up.
 _CS = sys.modules[CleanupService.__module__]
 
+# #1644: the blast-radius guard is a separate module with its OWN
+# `from database import db` binding, so patching `_CS.db` does not reach it —
+# the guard would read the real database mid-test. Patch both to the same mock.
+import services.retention_guard as _RG  # noqa: E402
+
 
 def _make_service():
     """A CleanupService with the HTTP-bearing methods stubbed out."""
@@ -44,6 +49,11 @@ def _setting_side_effect(key, default=None):
         return "180"
     if key == "schedule_soft_delete_retention_days":
         return "30"
+    # #1644: the agent purge is floored at 0 (every candidate destroys Docker
+    # volumes, #1581), so the happy path only reaches `purge_agent_ownership`
+    # with an acknowledgement on file. The ack is bound to the window in force.
+    if key == "retention_ack_agent_soft_delete_retention_days":
+        return "180"
     return default
 
 
@@ -57,6 +67,7 @@ def _configure_db(db):
     db.delete_expired_and_revoked_shared_files.return_value = ["a", "b"]
     db.prune_execution_logs.return_value = 5
     db.prune_execution_rows.return_value = 6
+    db.scrub_terminal_backlog_metadata.return_value = 12  # #1449
     db.cleanup_old_health_records.return_value = 7
     db.get_setting_value.side_effect = _setting_side_effect
     db.find_soft_deleted_agents_past_retention.return_value = ["ag1"]
@@ -67,6 +78,21 @@ def _configure_db(db):
     db.prune_agent_reports.return_value = 3  # #918 agent_reports retention
     db.find_expired_leases.return_value = []  # #1081 Phase 3 lease reaper — inert by default
     db.prune_operator_queue_terminal_items.return_value = 8  # #1142 operator_queue retention
+    # #1644 blast-radius guard: every destructive sweep now counts its candidate
+    # set before pruning and REFUSES if it's over threshold. These must be real
+    # ints — the guard is fail-closed, so a bare MagicMock (uncomparable to int)
+    # correctly aborts the prune, which is what this suite would otherwise see.
+    # Small values keep the happy path under the guard's threshold.
+    db.count_execution_log_candidates.return_value = 5
+    db.count_execution_row_candidates.return_value = 6
+    db.count_health_check_candidates.return_value = 7
+    db.count_agent_reports_candidates.return_value = 3
+    db.count_operator_queue_terminal_candidates.return_value = 8
+    db.count_soft_deleted_schedules_past_retention.return_value = 2
+    # FLOOR_AGENTS is 0 (any volume destruction is acked), so the agent sweep is
+    # only allowed through here because an ack is present — see the guard's
+    # get_setting_value side effect below.
+    db.count_soft_deleted_agents_past_retention.return_value = 1
 
 
 def _run(svc):
@@ -78,6 +104,7 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     capacity = MagicMock()
     capacity.reclaim_stale = AsyncMock(return_value={})
     with patch.object(_CS, "db") as db, \
+         patch.object(_RG, "db", new=db), \
          patch.object(_CS, "get_capacity_manager", return_value=capacity), \
          patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
          patch.object(_CS, "_wal_checkpoint_truncate") as wal:
@@ -93,13 +120,14 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     assert report.shared_files_purged == 2
     assert report.execution_logs_pruned == 5
     assert report.execution_rows_pruned == 6
+    assert report.backlog_metadata_scrubbed == 12  # #1449
     assert report.health_checks_pruned == 7
     assert report.soft_deleted_agents_purged == 1
     assert report.soft_deleted_schedules_purged == 2
     assert report.idempotency_keys_purged == 11
     assert report.agent_reports_pruned == 3  # #918
     assert report.operator_queue_pruned == 8  # #1142
-    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3 + 8  # +8 #1142
+    assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3 + 8 + 12  # +12 #1449
     # retention reclaimed rows ⇒ WAL checkpoint fires
     wal.assert_called_once()
     # cycle counter advanced
@@ -158,6 +186,7 @@ def test_wal_checkpoint_skipped_when_no_retention_work():
         # nothing reclaimed by any retention sweep
         db.prune_execution_logs.return_value = 0
         db.prune_execution_rows.return_value = 0
+        db.scrub_terminal_backlog_metadata.return_value = 0  # #1449 (unconditional sweep, no work)
         db.cleanup_old_health_records.return_value = 0
         db.find_soft_deleted_agents_past_retention.return_value = []
         db.find_soft_deleted_schedules_past_retention.return_value = []
@@ -190,10 +219,58 @@ def test_wal_checkpoint_fires_when_only_agent_reports_pruned():
         db.find_soft_deleted_agents_past_retention.return_value = []
         db.find_soft_deleted_schedules_past_retention.return_value = []
         db.idempotency_purge_expired.return_value = 0
+        db.scrub_terminal_backlog_metadata.return_value = 0  # #1449 — no scrub work
         db.prune_agent_reports.return_value = 4  # #918 — the only work this cycle
         db.prune_operator_queue_terminal_items.return_value = 0  # #1142
         _run(svc)
     wal.assert_called_once()
+
+
+def test_wal_checkpoint_fires_when_only_backlog_scrubbed():
+    """#1449: scrubbing backlog_metadata alone must still trigger the WAL checkpoint.
+
+    Regression guard — `backlog_metadata_scrubbed` must be in the
+    `_maybe_wal_checkpoint` retention_total, else a cycle whose only work was the
+    PII scrub would leave the freed pages in the WAL.
+    """
+    svc = _make_service()
+    capacity = MagicMock()
+    capacity.reclaim_stale = AsyncMock(return_value={})
+    with patch.object(_CS, "db") as db, \
+         patch.object(_CS, "get_capacity_manager", return_value=capacity), \
+         patch.object(_CS, "_read_retention_settings", return_value=(30, 90, 7, 90)), \
+         patch.object(_CS, "_wal_checkpoint_truncate") as wal:
+        _configure_db(db)
+        # Every other retention sweep reclaims nothing; only the scrub does work.
+        db.prune_execution_logs.return_value = 0
+        db.prune_execution_rows.return_value = 0
+        db.cleanup_old_health_records.return_value = 0
+        db.find_soft_deleted_agents_past_retention.return_value = []
+        db.find_soft_deleted_schedules_past_retention.return_value = []
+        db.idempotency_purge_expired.return_value = 0
+        db.prune_agent_reports.return_value = 0  # #918
+        db.prune_operator_queue_terminal_items.return_value = 0  # #1142
+        db.scrub_terminal_backlog_metadata.return_value = 5  # #1449 — the only work
+        _run(svc)
+    wal.assert_called_once()
+
+
+def test_backlog_scrub_runs_even_when_retention_disabled():
+    """#1449: the PII scrub is a security invariant, NOT gated on a retention
+    window — it must run even when every #772 window is 0 (disabled)."""
+    svc = _make_service()
+    capacity = MagicMock()
+    capacity.reclaim_stale = AsyncMock(return_value={})
+    with patch.object(_CS, "db") as db, \
+         patch.object(_CS, "get_capacity_manager", return_value=capacity), \
+         patch.object(_CS, "_read_retention_settings", return_value=(0, 0, 0, 0)), \
+         patch.object(_CS, "_wal_checkpoint_truncate"):
+        _configure_db(db)
+        db.get_setting_value.side_effect = lambda key, default=None: "0"
+        _run(svc)
+        # the age-gated sweeps skip, but the scrub still runs unconditionally
+        db.prune_execution_logs.assert_not_called()
+        db.scrub_terminal_backlog_metadata.assert_called_once()
 
 
 def test_retention_sweeps_skipped_when_disabled():

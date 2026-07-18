@@ -48,6 +48,7 @@ ENCRYPTED_COLUMNS = [
     ("subscription_credentials", "id", "encrypted_credentials"),
     ("nevermined_agent_config", "id", "encrypted_credentials"),
     ("agent_git_config", "id", "github_pat_encrypted"),
+    ("users", "id", "github_pat_encrypted"),  # ent#162 — per-user GitHub PAT
     ("slack_workspaces", "id", "bot_token"),
     ("slack_link_connections", "id", "slack_bot_token"),
     ("telegram_bindings", "id", "bot_token_encrypted"),

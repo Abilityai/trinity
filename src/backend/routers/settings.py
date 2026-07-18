@@ -27,6 +27,7 @@ from models import (
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
+    RetentionAcknowledge,
     SlackConnectRequest,
     SlackSettingsUpdate,
     User,
@@ -202,6 +203,88 @@ async def get_public_feature_flags(
     }
 
 
+@router.post("/retention/acknowledge")
+async def acknowledge_retention_prune(
+    body: RetentionAcknowledge,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Approve one over-threshold retention prune (#1644).
+
+    THIS ENDPOINT IS THE GATE. The operator-queue alarm the guard raises is
+    informational only — responding to it authorizes nothing. That split is
+    deliberate: the queue item is reachable by principals that must never be able
+    to approve a mass deletion of their own audit trail, and it lives in a table
+    one of the guarded sweeps prunes.
+
+    Human-only. `require_admin` alone is NOT sufficient today: an agent-scoped MCP
+    key resolves to its owner *carrying the owner's role*, so on an install whose
+    agents are admin-owned (the default — see cornelius_agent_service.CORNELIUS_OWNER)
+    an agent key passes `require_admin`. `reject_agent_principal` is therefore
+    applied explicitly here rather than relied upon from `require_admin`. See
+    abilityai/trinity-ops-agent#232 for the underlying fix.
+
+    The ack is bound to `window_days`: approving a prune at 30 days does not
+    approve one at 1 day. It is single-use — `cleanup_service` consumes it once the
+    prune has actually run, so the guard re-arms.
+    """
+    # Imported in-function: several suites stub `dependencies`, and a
+    # module-level import of a newer symbol breaks them (matches this file's
+    # existing in-function import style).
+    from dependencies import reject_agent_principal
+
+    require_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services.retention_guard import record_acknowledgement
+    from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+    if body.key not in OPS_SETTINGS_DEFAULTS:
+        raise HTTPException(
+            status_code=422, detail=f"unknown retention setting: {body.key}"
+        )
+
+    # Bind the ack to the window actually in force right now, not to whatever the
+    # caller says. Otherwise an operator could be socially-engineered into acking a
+    # window that isn't the one about to run, and the guard would honour it.
+    effective_raw = db.get_setting_value(
+        body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
+    )
+    try:
+        effective = max(int(effective_raw), 0)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{body.key} currently holds a non-integer value; fix it first",
+        )
+    if effective != body.window_days:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{body.key} is currently {effective} days, not {body.window_days}. "
+                "Re-read the alarm and acknowledge the window in force."
+            ),
+        )
+
+    record_acknowledgement(body.key, effective)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="retention_prune_acknowledged",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"key": body.key, "window_days": effective},
+    )
+    logger.warning(
+        "[#1644] %s acknowledged an over-threshold retention prune for %s at "
+        "%d days — the next cleanup cycle will delete.",
+        current_user.username, body.key, effective,
+    )
+    return {"success": True, "key": body.key, "window_days": effective}
+
+
 @router.get("/retention")
 async def get_retention_status(
     current_user: User = Depends(get_current_user),
@@ -250,6 +333,10 @@ async def get_retention_status(
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
 
+    # #1644: the guard's threshold is a fixed constant, not an operator setting —
+    # reported here for visibility only.
+    from services.retention_guard import MAX_ROWS_PER_SWEEP
+
     return {
         "edition": "enterprise" if entitled else "community",
         "community_floor_days": COMMUNITY_RETENTION_FLOOR_DAYS,
@@ -261,6 +348,15 @@ async def get_retention_status(
         # operators with no way to pre-empt #1638.
         "precedence": "db-row → code-default (OPS windows); env (log archival only)",
         "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
+        # #1644 blast-radius guard. Reported separately from `windows` because it
+        # is not a retention window — it is the threshold above which a prune is
+        # refused pending an explicit acknowledgement. Editable in EVERY edition
+        # (unlike the windows, whose write path is entitlement-gated): it is a
+        # safety mechanism, not a paid feature.
+        "guard": {
+            "max_rows": MAX_ROWS_PER_SWEEP,
+            "agents_always_require_acknowledgement": True,
+        },
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
@@ -1972,6 +2068,24 @@ async def update_setting(
             detail=(
                 f"{key} must be set via PUT /api/settings/proactive-rate-limits "
                 f"(range-validated 0–{PROACTIVE_RATE_LIMIT_MAX}, 0 = unlimited)"
+            ),
+        )
+
+    # #1644: the blast-radius guard's own state cannot be writable through an
+    # unvalidated endpoint, or the guard is trivially disarmed by the same route
+    # that causes the bug it exists to catch.
+    #   - an ack row WRITTEN here would pre-approve a mass deletion;
+    #   - the threshold RAISED here would disable the guard fleet-wide.
+    # (DELETE of an ack is deliberately NOT blocked: removing an ack re-arms the
+    # guard, which fails safe.)
+    from services.retention_guard import ACK_KEY_PREFIX
+
+    if key.startswith(ACK_KEY_PREFIX):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "retention acknowledgements must be recorded via "
+                "POST /api/settings/retention/acknowledge (#1644)"
             ),
         )
 

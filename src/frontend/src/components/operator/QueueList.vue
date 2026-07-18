@@ -82,7 +82,7 @@
 
             <!-- Bottom row: agent + time + status -->
             <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span class="truncate">{{ item.agent_name }}</span>
+              <span class="truncate" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
               <span>&middot;</span>
               <span class="flex-shrink-0">{{ timeAgo(item.created_at) }}</span>
               <span v-if="item.status !== 'pending'" class="flex-shrink-0">
@@ -117,8 +117,11 @@
 <script setup>
 import { h } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
+import { useAgentsStore } from '../../stores/agents'
+import { agentNameTooltip } from '../../utils/agentName'
 
 const store = useOperatorQueueStore()
+const agentsStore = useAgentsStore()
 
 function priorityColor(priority) {
   const colors = {

@@ -496,16 +496,12 @@ The dependency automatically:
 
 ### Settings Service Integration
 
-GitHub PAT resolution follows a per-agent → platform fallback chain (#735):
+There are **two** PAT resolvers, and they are deliberately different ladders (ent#162):
+
+**Recreate / restart / sync-init — 2-tier** (`get_github_pat_for_agent`, per-agent → platform, #735). Relocated from `routers/git.py` into `services/settings_service.py` (Invariant #1: services must not import a router — the router now re-exports it); `sync-init`, `lifecycle` env-rebuild, and `helpers.check_github_pat_env_matches` all call it. It **must never** consult the per-user tier: that comparison drives `needs_recreation`, so re-deriving a live per-user PAT here would force-recreate a running agent (and kill in-flight work) the instant its owner adds/rotates a personal token in Settings.
 
 ```python
-# src/backend/routers/git.py — initialize_github_sync endpoint
-# Uses get_github_pat_for_agent so per-agent PAT is tried first
-github_pat = get_github_pat_for_agent(agent_name)
-```
-
-**Helper Function** (`src/backend/routers/git.py`):
-```python
+# src/backend/services/settings_service.py
 def get_github_pat_for_agent(agent_name: str) -> str:
     """Per-agent PAT first, then platform PAT (DB then env var)."""
     agent_pat = db.get_agent_github_pat(agent_name)
@@ -513,6 +509,8 @@ def get_github_pat_for_agent(agent_name: str) -> str:
         return agent_pat
     return get_github_pat()  # platform fallback: DB then GITHUB_PAT env var
 ```
+
+**Agent creation — 3-tier with provenance** (`resolve_github_pat(agent_name, owner_id)`, per-agent → owner's per-user → global). Called at both `github:` create sites in `services/agent_service/crud.py`; it returns `(pat, tier)` so the creator's own token (`users.github_pat_encrypted`, self-service `/api/users/me/github-pat`) is preferred over the shared admin PAT — a non-admin is no longer confined to the admin's repo scope. The resolved PAT is persisted as the #347 per-agent PAT **only** when `tier ∈ {per_user, fork}`, never `global`: a global-fallback agent keeps `github_pat_encrypted` NULL so `github_pat_propagation_service` still reaches it on admin rotation. Resolution keys on `owner_id` (the creator/owner) only — never a sharee — so a shared agent's git identity can't be hijacked. (Public-repo-no-PAT is out of scope here → #123.)
 
 **Platform PAT** (`src/backend/services/settings_service.py`):
 ```python

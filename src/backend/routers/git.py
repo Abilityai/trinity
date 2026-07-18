@@ -521,29 +521,13 @@ async def initialize_github_sync(
 # Per-Agent GitHub PAT Configuration (#347)
 # =============================================================================
 
-def get_github_pat_for_agent(agent_name: str) -> str:
-    """
-    Get GitHub PAT for an agent, with fallback to global PAT.
-
-    Priority:
-    1. Per-agent PAT (if configured and decryption succeeds)
-    2. Global PAT from system settings / env var
-
-    Args:
-        agent_name: Name of the agent
-
-    Returns:
-        GitHub PAT string (may be empty if neither configured)
-    """
-    from services.settings_service import get_github_pat
-
-    # Try per-agent PAT first
-    agent_pat = db.get_agent_github_pat(agent_name)
-    if agent_pat:
-        return agent_pat
-
-    # Fall back to global PAT
-    return get_github_pat()
+# get_github_pat_for_agent moved to services/settings_service.py (ent#162) so
+# services (crud/lifecycle/helpers) stop importing a router (Invariant #1:
+# Router → Service → DB, not the reverse). Re-exported here so existing callers
+# `from routers.git import get_github_pat_for_agent` keep working unchanged.
+# It stays the 2-tier per-agent → global ladder; the 3-tier create-path resolver
+# is settings_service.resolve_github_pat (see the safety pin in that module).
+from services.settings_service import get_github_pat_for_agent  # noqa: E402,F401
 
 
 @router.get("/{agent_name}/github-pat")

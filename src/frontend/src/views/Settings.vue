@@ -40,7 +40,14 @@
         <!-- Settings Content -->
         <div v-else class="space-y-6">
           <!-- MCP Keys Tab Content (extracted to component, #302) -->
-          <McpKeysTab v-if="activeTab === 'mcp-keys'" />
+          <template v-if="activeTab === 'mcp-keys'">
+            <McpKeysTab />
+            <!-- ent#162: personal GitHub token lives with the user's other
+                 personal credentials on this non-admin tab. -->
+            <div class="mt-6">
+              <UserGitHubPatPanel />
+            </div>
+          </template>
 
           <!-- ent#84 — Fleet-wide agent-to-agent permissions matrix -->
           <div v-if="activeTab === 'agent-permissions'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -93,7 +100,7 @@
                         type="number" min="0" max="3650"
                         v-model.number="retentionForm[f.key]"
                         :disabled="!retentionEntitled || retentionSaving"
-                        class="block w-28 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 shadow-sm text-sm disabled:opacity-60"
+                        :class="RETENTION_INPUT_CLASS"
                       />
                       <span class="text-sm text-gray-500 dark:text-gray-400">days</span>
                     </div>
@@ -103,7 +110,7 @@
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Audit log</label>
                     <div class="mt-1 flex items-center gap-2">
                       <input type="number" :value="retention.windows.audit_log_retention_days" disabled
-                        class="block w-28 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-400 shadow-sm text-sm opacity-60" />
+                        :class="RETENTION_INPUT_CLASS" />
                       <span class="text-xs text-gray-400">days (365-day integrity floor)</span>
                     </div>
                   </div>
@@ -117,6 +124,7 @@
                   <span v-if="retentionSaved" class="text-sm text-green-600 dark:text-green-400">Saved — applied live.</span>
                   <span class="text-xs text-gray-400">0 disables a sweep · values below the {{ retention.community_floor_days }}-day floor are raised to it.</span>
                 </div>
+
               </div>
             </div>
           </div>
@@ -1284,7 +1292,7 @@
                                       :key="agent.name"
                                       :value="agent.name"
                                     >
-                                      {{ agent.name }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
+                                      {{ agentDisplayName(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
                                     </option>
                                   </select>
                                   <button
@@ -2253,11 +2261,15 @@ import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
+import { apiErrorMessage } from '../utils/apiError'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
@@ -2266,6 +2278,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the
 // admin's own Brain tab / route gating updates without a page reload.
@@ -2363,6 +2376,26 @@ const RETENTION_FIELDS = [
 ]
 const retention = ref(null)        // { edition, community_floor_days, windows{} }
 const retentionForm = reactive({}) // editable copy of the OPS/log windows
+
+// Shared styling for this panel's number inputs.
+//
+// The panel's inputs specified `border-gray-300` WITHOUT the `border` class, so
+// no border-width was ever applied and browsers fell back to their default
+// number-input chrome — which is what made them look unstyled. They also had no
+// padding and no focus ring. This matches the app-wide convention used by ~17
+// other inputs (`px-3 py-2 border … focus:ring-action-primary-500`).
+//
+// The `[appearance:textfield]` + `::-webkit-*-spin-button` triple removes the
+// native steppers: nobody nudges a retention window to 90 one click at a time,
+// and the arrows were the loudest thing in a panel whose numbers are typed.
+const RETENTION_INPUT_CLASS =
+  'w-24 px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 ' +
+  'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 ' +
+  'focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:border-transparent ' +
+  'disabled:opacity-60 disabled:cursor-not-allowed ' +
+  '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none ' +
+  '[&::-webkit-inner-spin-button]:appearance-none'
+
 const retentionLoading = ref(false)
 const retentionSaving = ref(false)
 const retentionError = ref('')
@@ -2378,11 +2411,12 @@ async function loadRetention() {
       retentionForm[f.key] = r.data?.windows?.[f.key]
     }
   } catch (e) {
-    retentionError.value = e?.response?.data?.detail || e?.message || 'Failed to load retention'
+    retentionError.value = apiErrorMessage(e, 'Failed to load retention settings.')
   } finally {
     retentionLoading.value = false
   }
 }
+
 
 async function saveRetention() {
   if (!retentionEntitled.value) return
@@ -2399,7 +2433,7 @@ async function saveRetention() {
     retentionSaved.value = true
     await loadRetention()
   } catch (e) {
-    retentionError.value = e?.response?.data?.detail || e?.message || 'Failed to save retention'
+    retentionError.value = apiErrorMessage(e, 'Failed to save retention settings.')
   } finally {
     retentionSaving.value = false
   }
@@ -3967,7 +4001,7 @@ async function assignAgentToSubscription(subName, agentName) {
 }
 
 async function unassignAgentFromSubscription(agentName) {
-  if (!confirm(`Remove "${agentName}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
+  if (!confirm(`Remove "${agentsStore.displayNameForSlug(agentName)}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
   unassigningAgent.value = agentName
   error.value = null
   try {

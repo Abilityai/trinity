@@ -170,6 +170,20 @@
   - **Backward-compatible**: existing `cleanup_old_records()` (agent_health_checks) is reused with added `chunk_size` parameter; previously orphaned (not invoked from any tick), now wired into the cleanup service.
 - **Constants**: Cleanup tick 300s, per-cycle row budget 5000, vacuum cron 04:30 UTC.
 
+### 12.11 Terminal `backlog_metadata` PII Scrub (Issue #1449)
+- **Status**: ✅ Implemented (2026-07-17, Issue #1449)
+- **Requirement ID**: RETENTION-002
+- **GitHub Issue**: #1449
+- **Description**: `services/backlog_service.py::enqueue` `json.dumps`es the full drain-replay request — including `user_message`, `user_email`, and `system_prompt` — into `schedule_executions.backlog_metadata` so a queued task can be reconstructed at drain. That blob is read **only while `status='queued'`** (the backlog drain claims only queued rows; the #1083/#1081 result callbacks read the POST payload, not the row's metadata; canary E-04/G-04 are queued-scoped). On a **terminal** row it is stale PII sitting in the DB indefinitely, bounded only by the 90-day `execution_row_retention_days` DELETE. The scrub NULLs it as soon as the row reaches an authoritative terminal.
+- **Key Features**:
+  - **`db.scrub_terminal_backlog_metadata(chunk_size)`** — chunked `SELECT id ... LIMIT N` → `UPDATE ... SET backlog_metadata=NULL WHERE id IN (...)`, each chunk its own transaction (short write lock), mirroring `prune_execution_logs`.
+  - **Authoritative terminals only** — `status IN ('success','cancelled','skipped')` (the `_AUTHORITATIVE_TERMINALS` set). **FAILED is deliberately EXCLUDED**: a FAILED row is resurrectable to SUCCESS via a late token-gated CAS (`park_expired_lease` keeps its `claim_token`), so its drain-replay intent must survive; FAILED PII stays bounded by the 90-day `prune_execution_rows`.
+  - **Not age-gated, not operator-configurable** — the scrub is a **security invariant**, not a retention window. It runs unconditionally every cleanup tick (even when every #772 window is `0`) and has **no ops-settings key** — a fixed default sidesteps the #1638 floor-by-seed trap.
+  - **Count-only logging** — the scrubbed count feeds the sweep report + the `_maybe_wal_checkpoint` sum (a scrub-only cycle still truncates the WAL); the `backlog_metadata` blob itself is **never** logged (it carries PII).
+- **Location**: `services/cleanup_service.py::_sweep_retention_772` (sub-sweep), `db/schedules.py::scrub_terminal_backlog_metadata`.
+- **No schema change, no migration, no new service.**
+- **Deferred sibling (not in this change)**: callback/pull-path chat-session persistence (the other #1444 carve-out) is deferred to the pull single-applier work (#1081) — it must land WITH the FAILED-exclusion already shipped here.
+
 ---
 
 ## 30. CLI Tool (CLI-001)

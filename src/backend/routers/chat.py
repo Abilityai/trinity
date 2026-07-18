@@ -29,6 +29,11 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services import idempotency_service
+from services.event_dispatch_service import (
+    RESERVED_EVENT_TRIGGER,
+    RESERVED_EVENT_TRIGGER_HEADER_VALUE,
+    verify_internal_dispatch_secret,
+)
 from services.task_execution_service import (
     _compute_context_used,
     dispatch_breaker_active,
@@ -1116,6 +1121,7 @@ async def _run_async_task_with_persistence(
     self_task_activity_id: Optional[str] = None,
     images: Optional[list] = None,
     dispatch_gate_checked: bool = False,
+    triggered_by_override: Optional[str] = None,
 ):
     """
     Async /task background wrapper (issue #95).
@@ -1133,7 +1139,9 @@ async def _run_async_task_with_persistence(
     """
     start_time = datetime.utcnow()
     task_service = get_task_execution_service()
-    triggered_by = "agent" if x_source_agent else "manual"
+    # #1578: a reserved agent.task.* dispatch persists triggered_by="event" (the
+    # recursion-break sentinel); every other async task keeps the derived value.
+    triggered_by = triggered_by_override or ("agent" if x_source_agent else "manual")
 
     # Outer try/finally so a sync long-poll waiter (issue #498) is always
     # signaled even if the post-task side effects below raise.
@@ -1361,6 +1369,8 @@ async def execute_parallel_task(
     x_mcp_key_id: Optional[str] = Header(None),
     x_mcp_key_name: Optional[str] = Header(None),
     idempotency_key: Optional[str] = Header(None),
+    x_event_trigger: Optional[str] = Header(None),
+    x_internal_secret: Optional[str] = Header(None),
 ):
     """
     Execute a stateless task in parallel mode (no conversation context).
@@ -1384,6 +1394,47 @@ async def execute_parallel_task(
 
     if container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
+
+    # EXEC-023 (#1672): validate + authorize a resume target before it becomes
+    # `claude --resume <id>` (or `codex resume <id>`) in the container.
+    # resume_session_id arrives from a user-editable URL query param (ExecutionDetail
+    # "Continue as Chat"); untrusted. Two gates:
+    #   1. Reject the dispatch sentinels — 'dispatched'/'dispatched_async' land in
+    #      claude_session_id before the real session id and stay permanently on
+    #      reaper-FAILED async rows (#1083). Such a row IS owned by its triggerer, so
+    #      the ownership gate below would pass it — but resuming it runs
+    #      `--resume dispatched_async`, which cannot resolve. Reject up front.
+    #   2. Authorize ownership — execution rows are AGENT-scoped
+    #      (accessible_agent_names), but claude_session_id is a per-user secret
+    #      (routers/sessions.py gates the Session tab on it and 404s to avoid leaking
+    #      its existence). Without this check, any operator on a *shared* agent could
+    #      read a peer's session id from the executions list and resume their private
+    #      conversation (IDOR). 404 (not 403) mirrors that enumeration-safe response.
+    #
+    # The gate is keyed ONLY on resume_session_id being present — deliberately NOT
+    # `and not x_source_agent`. x_source_agent is a raw client header; a regular user
+    # (current_user.agent_name is None, so the SELF-EXEC-001 spoof-guard below never
+    # fires for them) could otherwise set it to skip the gate entirely and keep the
+    # IDOR open. Every principal is handled correctly by ownership: a human is checked
+    # against their own user id; an agent-scoped key resolves to its owner and is
+    # checked against the owner's id; admin bypasses (mirrors the Session tab). No
+    # legitimate agent-to-agent path carries a resume id, so gating them costs nothing.
+    #
+    # Ownership is the real guard, so NO id-shape check is needed: a value that
+    # matches a real row's claude_session_id is a system-generated id (a Claude
+    # str(uuid4()) OR a Codex thread_id — a shape check would wrongly reject Codex),
+    # and a bogus/injection string matches no row → 404.
+    if request.resume_session_id:
+        rid = request.resume_session_id
+        if rid in ("dispatched", "dispatched_async"):
+            raise HTTPException(
+                status_code=400,
+                detail="This execution was never assigned a resumable session.",
+            )
+        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+            name, rid, current_user.id
+        ):
+            raise HTTPException(status_code=404, detail="Session not found.")
 
     # #1068 (demotion PR 1): normalize the deprecated per-task timeout override once
     # here — in place, so every downstream site (acquire, execute_task, backlog
@@ -1419,6 +1470,21 @@ async def execute_parallel_task(
     else:
         source = ExecutionSource.USER
         triggered_by = "manual"
+
+    # #1578 recursion-break: a task the backend dispatched for a reserved
+    # `agent.task.*` completion event carries X-Event-Trigger. Persist it as
+    # `triggered_by="event"` so the emit helper suppresses this task's OWN
+    # terminal event — breaking self / A↔B / A→B→C→A auto-emit cycles at the
+    # root. The tag is honored ONLY when accompanied by a valid backend-internal
+    # `X-Internal-Secret` (C-003) — trigger_subscription stamps both, so an
+    # external `/task` caller spoofing X-Event-Trigger alone cannot suppress a
+    # real agent's completion event.
+    reserved_event_dispatch = (
+        x_event_trigger == RESERVED_EVENT_TRIGGER_HEADER_VALUE
+        and verify_internal_dispatch_secret(x_internal_secret)
+    )
+    if reserved_event_dispatch:
+        triggered_by = RESERVED_EVENT_TRIGGER
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicates before
     # any file upload / execution-record creation. Optional header — absent →
@@ -1703,6 +1769,9 @@ async def execute_parallel_task(
                 self_task_activity_id=self_task_activity_id,
                 images=_image_data,
                 dispatch_gate_checked=True,  # #526: router already gated at acquire()
+                triggered_by_override=(
+                    RESERVED_EVENT_TRIGGER if reserved_event_dispatch else None
+                ),  # #1578 recursion-break
             )
         )
         bg_task.add_done_callback(_on_task_done)

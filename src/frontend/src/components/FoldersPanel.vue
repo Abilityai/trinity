@@ -123,7 +123,7 @@
                     'w-2 h-2 rounded-full',
                     consumer.status === 'running' ? 'bg-status-success-500' : 'bg-gray-400'
                   ]"></span>
-                  <span class="font-medium dark:text-gray-200">{{ consumer.agent_name }}</span>
+                  <span class="font-medium dark:text-gray-200" :title="agentNameTooltip(agentsStore.agentRefForSlug(consumer.agent_name))">{{ consumer.agent_name }}</span>
                 </div>
                 <code class="text-xs text-gray-500 dark:text-gray-400">{{ consumer.mount_path }}</code>
               </div>
@@ -151,7 +151,7 @@
                 folder.currently_mounted ? 'bg-status-success-500' : 'bg-state-autonomous-500'
               ]" :title="folder.currently_mounted ? 'Mounted' : 'Pending restart'"></span>
               <div>
-                <div class="font-medium text-gray-900 dark:text-white">{{ folder.source_agent }}</div>
+                <div class="font-medium text-gray-900 dark:text-white" :title="agentNameTooltip(agentsStore.agentRefForSlug(folder.source_agent))">{{ folder.source_agent }}</div>
                 <code class="text-xs text-gray-500 dark:text-gray-400">{{ folder.mount_path }}</code>
               </div>
             </div>
@@ -180,7 +180,7 @@
                 'w-2 h-2 rounded-full',
                 folder.source_status === 'running' ? 'bg-status-success-500' : 'bg-gray-400'
               ]"></span>
-              <span class="dark:text-gray-200">{{ folder.source_agent }}</span>
+              <span class="dark:text-gray-200" :title="agentNameTooltip(agentsStore.agentRefForSlug(folder.source_agent))">{{ folder.source_agent }}</span>
             </div>
           </div>
         </div>
@@ -219,6 +219,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip } from '../utils/agentName'
 
 const props = defineProps({
   agentName: {

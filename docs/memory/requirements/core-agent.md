@@ -24,6 +24,59 @@
 - **Restrictions**: System agents cannot be renamed, only owners/admins can rename
 - **API**: `PUT /api/agents/{name}/rename` with `{new_name: string}`
 
+### 1.3.1 Agent Display Label (ent#181)
+- **Status**: 🚧 In Progress
+- **Implements**: trinity-enterprise#181 (OSS-core — maintainer decision)
+- **Description**: A human-readable label an owner can edit freely, with the
+  agent's slug (`agent_name`) left untouched. Renaming a thing you can see is
+  the common case; re-keying its identity is not.
+- **FR-1 — The slug is the identity, the label is presentation**: everything
+  machine-facing keeps using `agent_name` — routes, Docker container/volume
+  names + labels, MCP keys, A2A cards, Redis keyspaces, every `agent_name`
+  column. The label is rendered, never resolved. This is the whole point: §1.3's
+  slug rename must rewrite ~20 tables, rename the container, clear every
+  per-agent Redis keyspace, and *still* strands the agent's volumes under the
+  old base (Docker can rename neither a volume nor its immutable
+  `trinity.agent-name` label) — the root of #1664/#1665/#1667/#1669/#1671. A
+  label change touches one column and nothing else.
+- **FR-2 — NULL means "use the slug"**: `agent_ownership.display_label TEXT`,
+  nullable, no backfill. Every existing agent renders exactly as it does today
+  until someone sets a label; clearing the label reverts to the slug. Dual-track
+  migration (Invariant #3).
+- **FR-3 — One label everywhere a name renders**: agent detail header, dashboard
+  cards, grid tiles, pickers/lists. A label applied on some surfaces and not
+  others shows one agent under two names with no way to tell which is real —
+  worse than no label. Resolution goes through a single helper, not per-site
+  `||` chains.
+- **FR-4 — The slug stays visible and copyable**: it is what URLs, MCP keys,
+  containers and volumes are keyed on, so the UI shows it as secondary text
+  wherever the label replaces it. A label that *hides* the identity trades one
+  confusion for another.
+- **FR-5 — The slug rename is demoted, not removed**: §1.3 stays available
+  behind a secondary "advanced" affordance with copy that states what it
+  actually does (restart, re-key, volumes stay under the old name). Owners who
+  genuinely need it keep it; it stops being the default gesture for "call it
+  something else".
+- **API**: `GET`/`PUT /api/agents/{name}/label` — owner-only, `{label: string|null}`.
+- **FR-6 — Remaining surfaces resolve the label off the agents store, not new
+  payloads (#1643)**: operator queue, monitoring, executions, the collaboration
+  graph, tab titles and prose/toasts render only a slug in their own payloads.
+  Rather than grow a mutable `display_name` on each of those high-volume
+  endpoints (staleness risk, N duplicated presentation fields), the frontend
+  resolves slug → label off the loaded agents (store getters
+  `displayNameForSlug` / `agentRefForSlug`, live via the `agent_label_changed`
+  WS handler). An unloaded slug falls back to itself, so nothing regresses on a
+  cold surface. Render rule by class: **dense operational tables** (executions,
+  operator/monitoring rows, RACI matrix) keep the **slug primary** and surface
+  the label as a hover tooltip (`agentNameTooltip`); **prose / toasts** use the
+  label alone (`agentDisplayName`); the **collaboration graph** renders the
+  label but keeps `data.label` = slug as the action key (`router.push` /
+  toggles). `AgentAvatar` always receives the slug. Tab titles resolve the
+  label on warm SPA nav and fall back to the slug on a cold direct load (the
+  store isn't fetched yet); the next navigation self-heals. Comma-joined agent
+  lists (e.g. the GitHub-PAT propagation failure list) keep the slug — long
+  labels make them unreadable.
+
 ### 1.4 Agent Deletion
 - **Status**: ✅ Implemented
 - **Description**: Delete agents and cleanup resources
