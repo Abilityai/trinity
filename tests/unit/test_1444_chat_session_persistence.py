@@ -207,7 +207,14 @@ def test_persist_failure_is_loud_safe_and_non_fatal(chat_mod, monkeypatch, caplo
         raise RuntimeError("simulated db write failure")
 
     # create_new_session=True → create_new_chat_session runs first.
-    monkeypatch.setattr(chat_mod.db, "create_new_chat_session", _boom, raising=False)
+    # Patch the object the code under test actually calls: persist_chat_session
+    # lives in chat_persistence_service and binds `db` at its own import (#1483
+    # split). chat_mod.db is a *different* DatabaseManager instance after the
+    # fixture pops `database` from sys.modules, so patching it lands nowhere when
+    # this test runs standalone (it only coincides in a full-sweep import order).
+    monkeypatch.setattr(
+        chat_persistence_service.db, "create_new_chat_session", _boom, raising=False
+    )
 
     req = _make_request(
         chat_mod, user_message=_SENSITIVE_MSG
@@ -265,7 +272,11 @@ def test_dbapi_error_params_not_leaked_by_fail_loud_log(chat_mod, monkeypatch, c
                 {"b": _SENSITIVE_MSG},
             )
 
-    monkeypatch.setattr(chat_mod.db, "add_chat_message", _boom, raising=False)
+    # Patch on chat_persistence_service.db — the instance the function binds and
+    # calls (see the sibling test above for why chat_mod.db is the wrong target).
+    monkeypatch.setattr(
+        chat_persistence_service.db, "add_chat_message", _boom, raising=False
+    )
 
     with caplog.at_level(logging.ERROR, logger="services.chat_persistence_service"):
         sid = asyncio.run(chat_persistence_service.persist_chat_session(
