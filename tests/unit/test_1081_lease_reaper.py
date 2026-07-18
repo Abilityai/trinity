@@ -177,6 +177,22 @@ def _row(eid: str) -> dict:
     }
 
 
+def _poison_item(db, agent_name: str, eid: str) -> dict | None:
+    """Find the poison-park operator-queue item by its request_id (#1631).
+
+    The platform id (``poison-{eid}``) moved to ``request_id``; the row ``id`` is
+    now an opaque uuid, so ``get_operator_queue_item`` (keyed on ``id``) no longer
+    finds it by that string. Look it up through the agent's list, whose rows carry
+    the parsed ``context``/``request_id``.
+    """
+    for it in db.list_operator_queue_items(
+        agent_name=agent_name, include_cleared=True, limit=500
+    ):
+        if it.get("request_id") == f"poison-{eid}":
+            return it
+    return None
+
+
 # ===========================================================================
 # Proof 1 — under the cap → re-queued as the SAME execution_id
 # ===========================================================================
@@ -245,7 +261,7 @@ class TestAtCapPark:
         err = _scalar("SELECT error FROM schedule_executions WHERE id=:i", i=eid)
         assert "poison_lease" in (err or "")
         # An operator_queue park item was created for this execution.
-        park = db.get_operator_queue_item(f"poison-{eid}")
+        park = _poison_item(db, "alpha", eid)
         assert park is not None
         assert park["agent_name"] == "alpha"
         assert park["type"] == "alert"
@@ -513,14 +529,14 @@ class TestAlertBeforePark:
         assert report.parked == 0
         assert _row(eid)["status"] == "running"
         assert eid in [c["id"] for c in db.find_expired_leases()]
-        assert db.get_operator_queue_item(f"poison-{eid}") is None
+        assert _poison_item(db, "alpha", eid) is None
 
         # Alert recovers → the next pass creates the alert AND parks the row.
         monkeypatch.setattr(db, "create_operator_queue_item", original_create)
         report2 = lrs.reap_expired_leases(db, max_redelivery=3)
         assert report2.parked == 1
         assert _row(eid)["status"] == "failed"
-        assert db.get_operator_queue_item(f"poison-{eid}") is not None
+        assert _poison_item(db, "alpha", eid) is not None
 
     def test_alert_is_created_before_the_park_write(self, seed_agent, leased, monkeypatch):
         """Ordering proof: at the instant park is invoked the alert is already
@@ -534,7 +550,7 @@ class TestAlertBeforePark:
         observed: dict = {}
 
         def _spy_park(execution_id, error, now_iso=None):
-            observed["item"] = db.get_operator_queue_item(f"poison-{execution_id}")
+            observed["item"] = _poison_item(db, "alpha", execution_id)
             return original_park(execution_id, error, now_iso=now_iso)
 
         monkeypatch.setattr(db, "park_expired_lease", _spy_park)

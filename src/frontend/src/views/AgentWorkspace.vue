@@ -15,7 +15,10 @@
 
       <AgentAvatar :name="agentName" :avatar-url="agent?.avatar_url" size="sm" class="flex-shrink-0" />
 
-      <span class="font-semibold text-sm text-white truncate">{{ agentName }}</span>
+      <span
+        class="font-semibold text-sm text-white truncate"
+        :title="agentNameTooltip(agent || agentName)"
+      >{{ agentDisplayName(agent) || agentName }}</span>
 
       <span
         v-if="agent"
@@ -288,6 +291,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useVoiceSession } from '../composables/useVoiceSession'
 import { renderMarkdown } from '../utils/markdown'
 import AgentAvatar from '../components/AgentAvatar.vue'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import { VOICES, DEFAULT_VOICE_NAME } from '../constants/voices'
 // Mermaid renders in-parent (not in a sandboxed iframe): the production CSP
 // (script-src 'self') blocks inline scripts in a srcdoc iframe, and CORP blocks

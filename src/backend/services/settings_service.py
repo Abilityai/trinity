@@ -71,6 +71,17 @@ RETENTION_OPS_KEYS = (
     "health_check_retention_days",
     "agent_soft_delete_retention_days",
     "schedule_soft_delete_retention_days",
+    # #1644: these two ARE retention windows and were missing here, so three
+    # readers were silently blind to them:
+    #   - `POST /api/settings/ops/reset` skips only RETENTION_OPS_KEYS, so it
+    #     DELETED these two rows while reporting "retention windows unchanged";
+    #   - `GET /api/settings/retention` never reported them;
+    #   - `log_effective_retention_windows()` never logged them at boot — the
+    #     exact observability gap that made #1638 invisible.
+    # Membership means "is a retention window"; it does NOT mean "gets the
+    # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
+    "agent_reports_retention_days",
+    "operator_queue_retention_days",
 )
 
 

@@ -13,15 +13,15 @@ DDL in ``db/schema.py`` / MetaData in ``db/tables.py``.
 Fresh PG builds already get the column via ``0001_baseline``; ``ADD COLUMN IF NOT
 EXISTS`` keeps this a no-op there.
 
-Revision ID: 0025_users_github_pat
-Revises: 0024_agent_ownership_volume_base_name
+Revision ID: 0027_users_github_pat
+Revises: 0026_operator_queue_request_id
 Create Date: 2026-07-17
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0025_users_github_pat"
-down_revision = "0024_agent_ownership_volume_base_name"
+revision = "0027_users_github_pat"
+down_revision = "0026_operator_queue_request_id"
 branch_labels = None
 depends_on = None
 

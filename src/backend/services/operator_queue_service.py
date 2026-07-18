@@ -38,6 +38,22 @@ MAX_CREATE_ATTEMPTS = 3
 # agent streams unique failing ids; cleared wholesale past this size.
 _MAX_QUARANTINE_ENTRIES = 5000
 
+# #1631: the platform mints its OWN operator-queue items with these id prefixes
+# (poison-park in lease_reaper_service, sync-failing / git-bloat in
+# sync_health_service, cb-dormant in agent_client, skill-not-found in
+# task_execution_service). An agent could pre-claim one of these ids in its own
+# ~/.trinity/operator-queue.json to hijack or suppress the platform's alert for
+# itself, so an agent-AUTHORED request id starting with a reserved prefix is
+# rejected here (the platform creates its own items directly, never through this
+# sync loop, so this never blocks a legitimate platform alert).
+_RESERVED_ID_PREFIXES = (
+    "poison-",
+    "sync-failing-",
+    "git-bloat-",
+    "cb-dormant-",
+    "skill-not-found-",
+)
+
 
 def set_websocket_manager(manager):
     """Set the WebSocket manager for broadcasting events."""
@@ -52,10 +68,18 @@ class OperatorQueueSyncService:
         self.poll_interval = poll_interval
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        # #1525: req_id → consecutive create-failure count. Bounds the retry loop
-        # for a request whose DB create keeps raising (malformed input, a DB
-        # error, …) so it can't hot-loop forever. Entry is dropped on success.
-        self._create_failures: dict[str, int] = {}
+        # #1525: (agent_name, req_id) → consecutive create-failure count. Bounds
+        # the retry loop for a request whose DB create keeps raising (malformed
+        # input, a DB error, …) so it can't hot-loop forever. Entry is dropped on
+        # success. #1631: keyed by the (agent, id) TUPLE — two agents can now
+        # share a req_id, so a bare-id key would let agent A's failing id
+        # quarantine agent B's distinct, healthy request.
+        self._create_failures: dict[tuple[str, str], int] = {}
+        # #1631: (agent, req_id) already warned about for a reserved-prefix
+        # hijack attempt — logged once, not every ~5s cycle. Bounded like the
+        # quarantine map so a crafted stream of unique reserved ids can't grow it
+        # without bound.
+        self._rejected_reserved: set[tuple[str, str]] = set()
 
     def start(self):
         """Start the background polling loop."""
@@ -149,41 +173,67 @@ class OperatorQueueSyncService:
             if not req_id:
                 continue
 
+            # #1631: reject an agent-authored id that impersonates a platform id
+            # prefix (hijack/suppress guard). Log once per (agent, id) so it
+            # can't hot-loop the ~5s sync at WARNING. Normalize before the check
+            # (case/whitespace-fold) so a lookalike like ` Poison-x` can't slip a
+            # platform-styled alert past the filter — the platform mints these
+            # prefixes lowercase and unpadded, so a normalized id that matches can
+            # only be an impersonation attempt.
+            if req_id.strip().lower().startswith(_RESERVED_ID_PREFIXES):
+                key = (agent_name, req_id)
+                if key not in self._rejected_reserved:
+                    if len(self._rejected_reserved) >= _MAX_QUARANTINE_ENTRIES:
+                        self._rejected_reserved.clear()  # safety valve
+                    self._rejected_reserved.add(key)
+                    logger.warning(
+                        f"Rejecting operator-queue request '{req_id}' from "
+                        f"'{agent_name}': ids with a reserved platform prefix are "
+                        f"minted only by the platform (#1631)"
+                    )
+                continue
+
+            fail_key = (agent_name, req_id)
             req_status = req.get("status", "pending")
 
-            if req_status == "pending" and not db.operator_queue_item_exists(req_id):
+            if req_status == "pending" and not db.operator_queue_item_exists(agent_name, req_id):
                 # #1525: quarantine a request whose create keeps failing so a
                 # single malformed/unpersistable entry can't hot-loop the ~5s
                 # sync (the row never persists → exists() stays False → retry
                 # forever). Skip once it has hit the attempt cap.
-                if self._create_failures.get(req_id, 0) >= MAX_CREATE_ATTEMPTS:
+                if self._create_failures.get(fail_key, 0) >= MAX_CREATE_ATTEMPTS:
                     continue
                 # New item — create in DB
                 try:
                     db.create_operator_queue_item(agent_name, req)
                     new_items.append(req)
-                    self._create_failures.pop(req_id, None)  # recovered — clear count
+                    self._create_failures.pop(fail_key, None)  # recovered — clear count
                 except Exception as e:
-                    attempts = self._create_failures.get(req_id, 0) + 1
+                    attempts = self._create_failures.get(fail_key, 0) + 1
                     if len(self._create_failures) >= _MAX_QUARANTINE_ENTRIES:
                         self._create_failures.clear()  # safety valve — never unbounded
-                    self._create_failures[req_id] = attempts
+                    self._create_failures[fail_key] = attempts
                     if attempts >= MAX_CREATE_ATTEMPTS:
                         logger.error(
-                            f"Quarantining operator-queue request {req_id} after "
-                            f"{attempts} failed create attempts (last error: {e}); it "
-                            f"won't be retried until it changes or the service restarts"
+                            f"Quarantining operator-queue request {req_id} for "
+                            f"'{agent_name}' after {attempts} failed create attempts "
+                            f"(last error: {e}); it won't be retried until it changes "
+                            f"or the service restarts"
                         )
                     else:
                         logger.error(
-                            f"Failed to create queue item {req_id} "
+                            f"Failed to create queue item {req_id} for '{agent_name}' "
                             f"(attempt {attempts}/{MAX_CREATE_ATTEMPTS}): {e}"
                         )
 
             elif req_status == "acknowledged":
-                # Agent acknowledged our response
-                if db.mark_operator_queue_acknowledged(req_id):
-                    acknowledged_items.append(req_id)
+                # Agent acknowledged our response. #1631: broadcast the row's
+                # platform uuid (returned here), not the agent's `req_id` — the
+                # frontend store keys items by uuid `id`, so an ack keyed on
+                # request_id would never match a live item.
+                ack_uuid = db.mark_operator_queue_acknowledged(agent_name, req_id)
+                if ack_uuid:
+                    acknowledged_items.append(ack_uuid)
 
         # 3. Broadcast new items via WebSocket
         if new_items and _websocket_manager:
@@ -245,13 +295,17 @@ class OperatorQueueSyncService:
         updated = False
         terminal_flips = 0
 
-        # Build a lookup of responded items by ID
-        response_map = {item["id"]: item for item in responded_items}
+        # #1631: the DB `id` is now a platform uuid; the agent's file entries are
+        # keyed by the string the agent authored, which is persisted as the row's
+        # `request_id`. So every match against a file entry (`req.get("id")`)
+        # MUST key on `request_id`, not the DB `id` — otherwise write-back
+        # silently stops matching and the agent never sees its answer.
+        response_map = {item["request_id"]: item for item in responded_items}
         # Cancelled/expired items (#1017): flip still-'pending' file entries
         # to their terminal status so the agent stops waiting (and so a
         # stale 'pending' file entry can't resurrect a purged row). Never
         # appended if missing from the file.
-        terminal_map = {item["id"]: item for item in (terminal_items or [])}
+        terminal_map = {item["request_id"]: item for item in (terminal_items or [])}
 
         # Update items already in the agent's requests array
         seen_ids = set()
@@ -272,11 +326,15 @@ class OperatorQueueSyncService:
             if req_id:
                 seen_ids.add(req_id)
 
-        # Reconstruct items missing from the file (e.g. after container restart)
+        # Reconstruct items missing from the file (e.g. after container restart).
+        # #1631: write the agent's own `request_id` back as the file entry's
+        # `id` (never the DB uuid) so the agent recognises the item and the next
+        # sync cycle's exists() check — keyed on request_id — matches instead of
+        # creating a duplicate.
         for resp in responded_items:
-            if resp["id"] not in seen_ids:
+            if resp["request_id"] not in seen_ids:
                 requests.append({
-                    "id": resp["id"],
+                    "id": resp["request_id"],
                     "type": resp.get("type", "question"),
                     "status": "responded",
                     "priority": resp.get("priority", "medium"),

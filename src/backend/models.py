@@ -113,6 +113,16 @@ class AgentConfig(BaseModel):
     ephemeral: Optional[EphemeralConfig] = None
 
 
+class AgentLabelUpdate(BaseModel):
+    """PUT body — set or clear an agent's human-facing label (ent#181).
+
+    `label=None` (or blank) clears it, and the agent renders under its slug
+    again. Presentation only: the slug never moves, which is the entire point —
+    a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+    """
+    label: Optional[str] = Field(default=None, max_length=120)
+
+
 class AgentStatus(BaseModel):
     """Status of an agent container."""
     name: str
@@ -126,6 +136,7 @@ class AgentStatus(BaseModel):
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
+    display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
 
     class Config:
         json_encoders = {
@@ -2317,6 +2328,17 @@ class ApiKeyTest(BaseModel):
 class OpsSettingsUpdate(BaseModel):
     """Request body for updating ops settings."""
     settings: Dict[str, str]
+
+
+class RetentionAcknowledge(BaseModel):
+    """Approve one over-threshold retention prune (#1644).
+
+    `window_days` is not advisory — the endpoint rejects (409) unless it matches
+    the window actually in force, so an ack always names the deletion it authorizes.
+    """
+    key: str = Field(..., min_length=1, max_length=100)
+    window_days: int = Field(..., ge=0, le=3650)
+
 
 
 class SlackSettingsUpdate(BaseModel):

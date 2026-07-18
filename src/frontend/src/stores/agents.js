@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 import { useNetworkStore } from './network'
+import { agentDisplayName } from '../utils/agentName'
 
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
@@ -18,6 +19,21 @@ export const useAgentsStore = defineStore('agents', {
   }),
 
   getters: {
+    // #1643: slug → human display name, resolved off the loaded agents.
+    // Operational payloads (executions, operator queue, monitoring) carry only
+    // the slug; this is the single slug→display resolver so those dense surfaces
+    // never grow a mutable presentation field of their own. It stays live via
+    // the agent_label_changed WS handler that updates the cached agent. Unknown
+    // slug (agent not loaded / already gone) → the slug itself.
+    displayNameForSlug() {
+      return (slug) => agentDisplayName(this.agents.find(a => a.name === slug) || slug)
+    },
+    // #1643: the agent object for a slug, or the bare slug when not loaded — feed
+    // it to agentNameTooltip / hasDistinctLabel where a dense row keeps the slug
+    // primary and shows the label on hover.
+    agentRefForSlug() {
+      return (slug) => this.agents.find(a => a.name === slug) || slug
+    },
     // Filter out system agents for regular lists
     userAgents() {
       return this.agents.filter(agent => !agent.is_system)
@@ -360,6 +376,22 @@ export const useAgentsStore = defineStore('agents', {
       const response = await axios.get(`/api/agents/${name}/token-stats`, {
         headers: authStore.authHeader
       })
+      return response.data
+    },
+
+    // ent#181: set or clear an agent's human-facing label. `label: null` clears
+    // it and the agent renders under its slug again. Goes through the shared
+    // axios client + auth interceptor (Invariant #7) — unlike the legacy slug
+    // rename in AgentDetail.vue, which hand-rolls fetch + Authorization.
+    async setAgentLabel(name, label) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/label`, { label }, {
+        headers: authStore.authHeader
+      })
+      // Keep the cached agent in step so every surface re-renders with the new
+      // label without a refetch.
+      const cached = this.agents.find(a => a.name === name)
+      if (cached) cached.display_label = response.data.label
       return response.data
     },
 

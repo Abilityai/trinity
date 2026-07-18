@@ -189,6 +189,7 @@
                 </span>
                 <router-link
                   :to="`/agents/${notification.agent_name}`"
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(notification.agent_name))"
                   class="font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
                 >
                   {{ notification.agent_name }}
@@ -299,6 +300,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useNotificationsStore } from '../../stores/notifications'
+import { useAgentsStore } from '../../stores/agents'
+import { agentNameTooltip } from '../../utils/agentName'
 import {
   XMarkIcon,
   CheckIcon,
@@ -312,6 +315,7 @@ import {
 } from '@heroicons/vue/24/outline'
 
 const notificationsStore = useNotificationsStore()
+const agentsStore = useAgentsStore()
 
 // State
 const loading = ref(false)

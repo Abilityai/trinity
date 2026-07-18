@@ -299,9 +299,9 @@
                   <router-link
                     :to="`/agents/${agent.name}`"
                     class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
-                    :title="agent.name"
+                    :title="agentNameTooltip(agent)"
                   >
-                    {{ agent.name }}
+                    {{ agentDisplayName(agent) }}
                   </router-link>
                   <span
                     v-if="agent.is_system"
@@ -475,9 +475,9 @@
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
-                  :title="agent.name"
+                  :title="agentNameTooltip(agent)"
                 >
-                  {{ agent.name }}
+                  {{ agentDisplayName(agent) }}
                 </router-link>
                 <span
                   v-if="agent.is_system"
@@ -617,9 +617,9 @@
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400 flex-1 min-w-0"
-                  :title="agent.name"
+                  :title="agentNameTooltip(agent)"
                 >
-                  {{ agent.name }}
+                  {{ agentDisplayName(agent) }}
                 </router-link>
                 <span
                   v-if="agent.is_system"
@@ -709,6 +709,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import { useNetworkStore } from '../stores/network'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
@@ -1095,8 +1096,8 @@ async function handleReadOnlyToggle(agent) {
       agentReadOnlyStates.value[agent.name] = newState
       showNotification(
         newState
-          ? `Read-only mode enabled for ${agent.name}`
-          : `Read-only mode disabled for ${agent.name}`,
+          ? `Read-only mode enabled for ${agentDisplayName(agent)}`
+          : `Read-only mode disabled for ${agentDisplayName(agent)}`,
         'success'
       )
     }
@@ -1116,7 +1117,7 @@ const toggleAgentRunning = async (agent) => {
     const result = await agentsStore.toggleAgentRunning(agent.name)
     if (result.success) {
       const action = result.status === 'running' ? 'started' : 'stopped'
-      showNotification(`Agent ${agent.name} ${action}`, 'success')
+      showNotification(`Agent ${agentDisplayName(agent)} ${action}`, 'success')
     } else {
       showNotification(result.error || 'Failed to toggle agent', 'error')
     }

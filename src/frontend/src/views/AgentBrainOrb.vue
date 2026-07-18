@@ -15,7 +15,10 @@
 
       <AgentAvatar :name="agentName" :avatar-url="agent?.avatar_url" size="sm" class="flex-shrink-0" />
 
-      <span class="font-semibold text-sm text-white truncate">{{ agentName }}</span>
+      <span
+        class="font-semibold text-sm text-white truncate"
+        :title="agentNameTooltip(agent || agentName)"
+      >{{ agentDisplayName(agent) || agentName }}</span>
       <span class="text-xs text-gray-500 truncate hidden sm:inline">· The Self-Rendering Mind</span>
 
       <span
@@ -82,6 +85,7 @@ import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useSessionsStore } from '../stores/sessions'
 import AgentAvatar from '../components/AgentAvatar.vue'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 
 const route = useRoute()
 const authStore = useAuthStore()

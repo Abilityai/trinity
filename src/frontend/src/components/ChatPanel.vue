@@ -358,8 +358,13 @@ const loadSessions = async (autoSelect = true) => {
     // BUT only if:
     // - autoSelect is true
     // - we don't already have messages (unsaved new conversation)
-    // - we're NOT in resume mode (EXEC-023 fix: don't auto-select when continuing from execution)
-    if (autoSelect && sessions.value.length > 0 && !currentSessionId.value && messages.value.length === 0 && !isResumeMode.value) {
+    // - resume is NOT active (EXEC-023: don't auto-select when continuing from an
+    //   execution — selectSession() would null resumeSessionIdLocal and the next
+    //   message would drop --resume). Gate on resumeSessionIdLocal, NOT isResumeMode:
+    //   isResumeMode also goes false when the user merely DISMISSES the banner, which
+    //   deliberately keeps resume active (#1672) — testing it here silently lost the
+    //   execution context on the first auto-select after a dismiss.
+    if (autoSelect && sessions.value.length > 0 && !currentSessionId.value && messages.value.length === 0 && !resumeSessionIdLocal.value) {
       const activeSession = sessions.value.find(s => s.status === 'active')
       if (activeSession) {
         await selectSession(activeSession, false)

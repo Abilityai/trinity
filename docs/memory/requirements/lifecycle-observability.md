@@ -22,8 +22,13 @@
   Purge runs the #816 `purge_agent_ownership` → `cascade_delete`
   primitive so all per-agent child rows are removed in one transaction;
   `KEEP`-policy tables (`schedule_executions`, `nevermined_payment_log`)
-  survive per their own retention discipline. Bounded by the shared
-  5000-row/cycle cap so a backlog drains gradually.
+  survive per their own retention discipline. Each purge additionally
+  removes the agent's Docker data volumes (#1581) and is therefore
+  **unrecoverable** — so the #1644 blast-radius guard floors this sweep
+  at **0**: any purge at all requires an explicit admin acknowledgement
+  before it runs. (`RETENTION_CHUNK_SIZE_PER_CYCLE` bounds each
+  *transaction*, not the call — there is no per-cycle row cap; see #1644.)
+
 - **Name reservation**: `is_agent_name_reserved()` is intentionally
   unfiltered — it sees soft-deleted rows so a soft-deleted name cannot
   be reused (and silently clobbered) before purge.
@@ -42,6 +47,49 @@
   `idx_agent_ownership_deleted_at ON agent_ownership(deleted_at) WHERE
   deleted_at IS NOT NULL`. Migration
   `agent_ownership_soft_delete`.
+
+### RETENTION-GUARD-001: Retention prunes are blast-radius guarded
+- **Implements**: Issue #1644 (follow-up to #1638)
+- **Description**: before any window-driven destructive prune,
+  `services/retention_guard.py` counts the candidate set (bounded, so the
+  cost is O(threshold) not O(candidates)) and **refuses** the prune if it
+  exceeds the threshold, logging at ERROR and raising an `operator_queue`
+  alarm naming the setting, the window, the window's source
+  (`db-row`/`code-default`), and the counts. The prune proceeds only after
+  an admin acknowledges it. Covers all **7** window-driven prunes.
+- **Why**: #1638 fixed one *mechanism* (a retroactive default change).
+  It left every other route to a destructive window open — an unvalidated
+  `PUT /api/settings/ops/config`, a future default regression, a direct DB
+  write. The guard does not care how the bad window arrived.
+- **Acknowledgement**: `POST /api/settings/retention/acknowledge`
+  (admin **and** human-only) is **the gate**; the operator-queue item is an
+  alarm and authorizes nothing. An ack is **bound to the window in force**
+  (409 on mismatch — approving a prune at 30 days does not approve one at
+  1 day) and **single-use** (consumed once the prune runs, so the guard
+  re-arms and one approval can never authorize an unboundedly larger
+  future delete at the same window).
+- **Threshold**: a **fixed constant** (`retention_guard.MAX_ROWS_PER_SWEEP`,
+  1000) — deliberately NOT an operator setting. It was briefly configurable via
+  Settings; that was wrong twice over: nobody can reason about the right value
+  (it depends on per-cycle churn they cannot see — the panel needed a caption
+  explaining that *bigger is worse*, and a control that must explain which way is
+  safe is the wrong control), and a mutable constant read at action time gating a
+  destructive operation is #1638 one level up — raising it would silently disarm
+  the guard fleet-wide. Deleting the knob deleted its clamp, its endpoint, its
+  blocklist entry, and a whole fail-closed branch. Chosen against **steady state,
+  not table size**: only rows crossing the cutoff within one 5-min cycle are
+  candidates, so four digits means something changed. Lowering is always safe;
+  raising is a code change with a reviewer, not a text box. Surfaced read-only at
+  `GET /api/settings/retention` → `guard.max_rows`. Per-sweep floors: rows →
+  the constant, schedules → 100, agents → **0**.
+- **Fail-closed**: any error — the count throws, the ack lookup throws —
+  **refuses** the prune. A guard that fails open is worse than no guard
+  because it manufactures confidence. (There is no 'threshold unreadable'
+  path: the threshold is a constant, so that failure mode does not exist.)
+- **Expected behaviour**: a legitimate first-enable of retention on a
+  mature install *will* trip the guard once, and that is intended — the
+  guard cannot distinguish a large legitimate backlog from a mistyped
+  window, so it asks once and the operator acknowledges once.
 
 ### 33.2 Schedule Soft-Delete (#834 — Phase 1b)
 - **Implements**: Issue #834 Phase 1b (PR #839)

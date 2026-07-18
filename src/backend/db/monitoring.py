@@ -22,6 +22,15 @@ from .tables import agent_health_checks, monitoring_alert_cooldowns
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
+def _health_check_prune_predicate(cutoff: str):
+    """WHERE clause for the #772 health-check retention sweep.
+
+    #1644: shared with `count_health_check_candidates` so the guard's count and
+    the prune's delete can never describe different row sets.
+    """
+    return agent_health_checks.c.checked_at < cutoff
+
+
 class MonitoringOperations:
     """Database operations for agent health monitoring."""
 
@@ -249,6 +258,25 @@ class MonitoringOperations:
         latencies = [h["latency_ms"] for h in history if h.get("latency_ms") is not None]
         return sum(latencies) / len(latencies) if latencies else None
 
+    def count_health_check_candidates(self, days: int, limit: int) -> int:
+        """#1644: how many rows `cleanup_old_records(days)` would DELETE.
+
+        Bounded at `limit` — the guard only asks "more than N?", never "how many?".
+        """
+        if days <= 0 or limit <= 0:
+            return 0
+        cutoff = iso_cutoff(hours=days * 24)
+        inner = (
+            select(agent_health_checks.c.id)
+            .where(_health_check_prune_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
+
     def cleanup_old_records(self, days: int = 7, chunk_size: int = 1000) -> int:
         """
         Delete health check records older than specified days.
@@ -277,7 +305,7 @@ class MonitoringOperations:
                     row["id"]
                     for row in conn.execute(
                         select(agent_health_checks.c.id)
-                        .where(agent_health_checks.c.checked_at < cutoff)
+                        .where(_health_check_prune_predicate(cutoff))
                         .limit(chunk_size)
                     ).mappings()
                 ]

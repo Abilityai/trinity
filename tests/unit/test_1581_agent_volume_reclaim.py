@@ -182,9 +182,13 @@ class TestCleanupOrchestration:
         report = CleanupReport()
 
         db = MagicMock()
+        # #1644: the guard floors this sweep at 0 (every purge destroys volumes),
+        # so it only proceeds with an acknowledgement bound to the window in force.
         db.get_setting_value.side_effect = lambda k, d=None: (
-            "180" if k == "agent_soft_delete_retention_days" else d
+            "180" if k in ("agent_soft_delete_retention_days",
+                           "retention_ack_agent_soft_delete_retention_days") else d
         )
+        db.count_soft_deleted_agents_past_retention.return_value = 2
         db.find_soft_deleted_agents_past_retention.return_value = ["ag1", "ag2"]
         db.purge_agent_ownership.return_value = True
         # #1664: un-renamed agents — volume base == agent name (one call each).
@@ -192,7 +196,9 @@ class TestCleanupOrchestration:
         db.is_volume_base_reserved.return_value = False  # #1664: no other claimant
 
         removed = AsyncMock(return_value=2)  # 2 volumes per agent
+        import services.retention_guard as rg
         with patch.object(cs, "db", db), \
+             patch.object(rg, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
              patch("services.docker_utils.remove_agent_volumes", removed):
             await svc._sweep_soft_deleted_agents(report)
@@ -210,14 +216,18 @@ class TestCleanupOrchestration:
         report = CleanupReport()
         db = MagicMock()
         db.get_setting_value.side_effect = lambda k, d=None: (
-            "180" if k == "agent_soft_delete_retention_days" else d
+            "180" if k in ("agent_soft_delete_retention_days",
+                           "retention_ack_agent_soft_delete_retention_days") else d
         )
+        db.count_soft_deleted_agents_past_retention.return_value = 1
         db.find_soft_deleted_agents_past_retention.return_value = ["ag1"]
         db.purge_agent_ownership.return_value = True
         db.get_volume_base_name.side_effect = lambda n: n
         db.is_volume_base_reserved.return_value = False  # #1664: no other claimant
 
+        import services.retention_guard as rg
         with patch.object(cs, "db", db), \
+             patch.object(rg, "db", db), \
              patch("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock()), \
              patch("services.docker_utils.remove_agent_volumes",
                    AsyncMock(side_effect=RuntimeError("docker down"))):

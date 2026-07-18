@@ -508,7 +508,11 @@ export const useNetworkStore = defineStore('network', () => {
         id: systemAgent.name,
         type: 'system-agent',
         data: {
+          // #1643: `label` stays the SLUG — AgentNode keys router.push /
+          // toggleAutonomy / toggleAgentRunning on it. `display_label` is the
+          // human name the node renders; NULL means render the slug.
           label: systemAgent.name,
+          display_label: systemAgent.display_label || null,
           status: systemAgent.status,
           type: systemAgent.type || 'system',
           owner: systemAgent.owner,
@@ -542,7 +546,10 @@ export const useNetworkStore = defineStore('network', () => {
           id: agent.name,
           type: 'agent',
           data: {
+            // #1643: `label` stays the SLUG (node action key); `display_label`
+            // is the rendered human name (NULL → render the slug).
             label: agent.name,
+            display_label: agent.display_label || null,
             status: agent.status,
             owner: agent.owner,
             runtime: agent.runtime || 'claude-code',
@@ -632,6 +639,12 @@ export const useNetworkStore = defineStore('network', () => {
               agent_name: data.name,
               status: data.type === 'agent_started' ? 'running' : 'stopped'
             })
+          } else if (data.type === 'agent_label_changed') {
+            // ent#181/#1643: fields are nested under data.data (agent_* shape)
+            handleAgentLabelChanged({
+              agent_name: data.data?.name,
+              display_label: data.data?.display_label
+            })
           } else if (data.type === 'agent_deleted') {
             handleAgentDeleted(data)
           } else if (data.type === 'agent_activity') {
@@ -716,6 +729,19 @@ export const useNetworkStore = defineStore('network', () => {
     const agent = agents.value.find(a => a.name === event.agent_name)
     if (agent) {
       agent.status = event.status
+    }
+  }
+
+  function handleAgentLabelChanged(event) {
+    // #1643: a label change is a pure re-render — the slug (node id / data.label)
+    // never moves, so only data.display_label updates.
+    const node = nodes.value.find(n => n.id === event.agent_name)
+    if (node) {
+      node.data.display_label = event.display_label || null
+    }
+    const agent = agents.value.find(a => a.name === event.agent_name)
+    if (agent) {
+      agent.display_label = event.display_label || null
     }
   }
 

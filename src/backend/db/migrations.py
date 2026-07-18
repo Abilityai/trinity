@@ -2575,6 +2575,46 @@ def _migrate_operator_queue_cleared_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_queue_request_id(cursor, conn):
+    """#1631 — split the operator_queue `id`'s two jobs.
+
+    `id` was populated with an AGENT-AUTHORED correlation string from the
+    agent's ~/.trinity/operator-queue.json, but it is ALSO the fleet-wide
+    PRIMARY KEY. Two agents picking the same id → the second agent's item was
+    silently never created (the id-only exists() guard short-circuited it).
+
+    Split the jobs: `id` becomes a platform-minted uuid (global handle), and
+    the agent's string moves to a new `request_id` column scoped UNIQUE per
+    agent. Backfill existing rows with their own id (already unique fleet-wide,
+    so it can't violate the new (agent_name, request_id) index) and keeps old
+    rows addressable by request_id. Additive — no rebuild.
+
+    Idempotent (the runner calls migrations twice from init_database, and a
+    fresh install already has the column + index via db/schema.py) and tolerant
+    of the pre-operator_queue "no such table" case, like the sibling migration.
+    """
+    try:
+        added = _safe_add_column(
+            cursor,
+            "operator_queue",
+            "request_id",
+            "ALTER TABLE operator_queue ADD COLUMN request_id TEXT",
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # table not created yet (migration ordering on a bare DB)
+        raise
+    # Backfill only unbackfilled rows so a re-run is a no-op.
+    cursor.execute(
+        "UPDATE operator_queue SET request_id = id WHERE request_id IS NULL"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request "
+        "ON operator_queue(agent_name, request_id)"
+    )
+    conn.commit()
+
+
 def _migrate_agent_compatibility_results_table(cursor, conn):
     """Create agent_compatibility_results table (#668).
 
@@ -2903,6 +2943,26 @@ def _migrate_agent_ownership_volume_base_name(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_display_label(cursor, conn):
+    """ent#181 — the human-facing agent label.
+
+    Adds ``display_label TEXT`` (nullable) to ``agent_ownership``. NULL means
+    "render the slug", which is exactly today's behaviour, so no backfill and
+    every existing agent looks unchanged until someone sets a label.
+
+    The column is presentation only — the slug (``agent_name``) stays the
+    identity every route, container, volume, MCP key and A2A card keys on.
+    Mirrored by Alembic 0025_agent_ownership_display_label.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "display_label",
+        "ALTER TABLE agent_ownership ADD COLUMN display_label TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_users_github_pat(cursor, conn):
     """ent#162 — per-user GitHub PAT.
 
@@ -2913,7 +2973,7 @@ def _migrate_users_github_pat(cursor, conn):
     AES-256-GCM envelope via ``CredentialEncryptionService`` (Invariant #12), the
     same shape as the per-agent PAT (``agent_git_config.github_pat_encrypted``).
     Backfill is a no-op: NULL means "no personal credential", correct for every
-    existing user. Mirrored by Alembic 0025_users_github_pat.
+    existing user. Mirrored by Alembic 0027_users_github_pat.
     """
     _safe_add_column(
         cursor,
@@ -3075,5 +3135,7 @@ MIGRATIONS = [
     ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
     ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
     ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
+    ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
+    ("operator_queue_request_id", _migrate_operator_queue_request_id),
     ("users_github_pat", _migrate_users_github_pat),
 ]
