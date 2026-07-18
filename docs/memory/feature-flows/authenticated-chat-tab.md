@@ -197,7 +197,7 @@ if request.async_mode:
     return { "status": "accepted", "execution_id": execution_id, ... }
 ```
 
-**Session persistence in background** (`_persist_chat_session`, shared by the async wrapper `_run_async_task_with_persistence` and the sync `/task` branch; guarded on a **SUCCESS** terminal — FAILED/CANCELLED turns write no session):
+**Session persistence in background** (`chat_persistence_service.persist_chat_session` — extracted from `routers/chat.py` by #1483; shared by the async wrapper `chat_execution_service.run_async_task` and the sync `/task` branch; guarded on a **SUCCESS** terminal — FAILED/CANCELLED turns write no session; the fail-loud ERROR log's logger name is now `services.chat_persistence_service`):
 ```python
 if request.save_to_session and user_id and user_email:  # gate
   if result.status == SUCCESS:                            # only persist a completed turn
