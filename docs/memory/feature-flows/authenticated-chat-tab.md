@@ -632,7 +632,9 @@ Tasks | Chat | Dashboard | Schedules | Credentials | Skills | ...
 ### Modified
 - `src/frontend/src/views/AgentDetail.vue` - Added Chat tab
 - `src/frontend/src/views/PublicChat.vue` - Refactored to use shared components
-- `src/backend/routers/chat.py` - `_run_async_task_with_persistence` now supports `save_to_session` + `user_id`/`user_email` args; SSE stream proxy endpoint; both async and sync paths use explicit `chat_session_id` when provided
+- `src/backend/services/chat_execution_service.py` - `run_async_task` (the async `/task` wrapper, extracted from `routers/chat.py` by #1483) supports `save_to_session` + `user_id`/`user_email` args; both async and sync paths use explicit `chat_session_id` when provided
+- `src/backend/services/chat_persistence_service.py` - `persist_chat_session` / `persist_and_broadcast_chat_session` (#1444, extracted by #1483)
+- `src/backend/routers/chat.py` - thin `/chat` + `/task` handlers + the SSE stream proxy endpoint (dispatch logic moved to the chat services)
 - `src/backend/models.py` - `ParallelTaskRequest.async_mode` and `chat_session_id` fields
 - `src/backend/db/chat.py` - `get_chat_messages()` uses subquery for correct ASC ordering
 
