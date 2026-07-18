@@ -11,16 +11,14 @@ import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, activity_state_for_terminal
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
-from services.activity_service import activity_service
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
-    get_capacity_manager,
 )
 from services import dispatch_admission_service
 from services import chat_execution_service
@@ -873,161 +871,19 @@ async def terminate_agent_execution(
     if not task_execution_id:
         task_execution_id = execution_id
 
-    # BACKLOG-001: If the execution is still queued in the backlog, cancel it
-    # directly — no container interaction needed, no slot to release.
+    # The termination orchestration (BACKLOG-001 queued-cancel, agent-proxy,
+    # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
+    # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
+    # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
     try:
-        _exec_row = db.get_execution(task_execution_id)
-    except Exception:
-        _exec_row = None
-    if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
-        cancelled = db.cancel_queued_execution(
-            task_execution_id, reason="Cancelled by user while queued"
+        return await chat_execution_service.terminate_execution(
+            name=name,
+            execution_id=execution_id,
+            task_execution_id=task_execution_id,
+            current_user=current_user,
         )
-        if cancelled:
-            await activity_service.track_activity(
-                agent_name=name,
-                activity_type=ActivityType.EXECUTION_CANCELLED,
-                user_id=current_user.id,
-                triggered_by="user",
-                related_execution_id=task_execution_id,
-                details={
-                    "execution_id": execution_id,
-                    "task_execution_id": task_execution_id,
-                    "status": "cancelled_while_queued",
-                },
-            )
-            return {"status": "cancelled_while_queued", "execution_id": execution_id}
-        # Else it transitioned out of queued between our read and update;
-        # fall through to the normal terminate path.
-
-    container = get_agent_container(name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    if container.status != "running":
-        raise HTTPException(status_code=503, detail="Agent is not running")
-
-    try:
-        # Proxy termination request to agent container
-        async with agent_httpx_client(name, timeout=15.0) as client:
-            response = await client.post(
-                f"http://agent-{name}:8000/api/executions/{execution_id}/terminate"
-            )
-
-        result = response.json()
-
-        # Handle different termination outcomes
-        if response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Execution not found in agent")
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=result.get("detail", "Termination failed")
-            )
-
-        # Clear capacity state if termination succeeded.
-        # CAPACITY-CONSOLIDATE (#428): single force_release covers both the
-        # SlotService N-ary counter and the in-memory overflow queue.
-        if result.get("status") in ["terminated", "already_finished"]:
-            try:
-                capacity = get_capacity_manager()
-                fr = await capacity.force_release(name)
-                logger.info(
-                    f"[Terminate] Force-released capacity for agent '{name}' "
-                    f"(was_running={fr.was_running}, slots_cleared={fr.slots_cleared})"
-                )
-            except Exception as e:
-                logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
-
-            # #679 (Issue 7): write CANCELLED only when we actually terminated a
-            # running turn. On `already_finished` the agent's genuine terminal
-            # already stands — the cancel arrived too late — so we leave the real
-            # terminal in place (deterministic; "agent self-report is
-            # authoritative"). Capacity is still force-released above in both cases.
-            if task_execution_id and result.get("status") == "terminated":
-                cancel_won = db.update_execution_status(
-                    execution_id=task_execution_id,
-                    status=TaskExecutionStatus.CANCELLED,
-                    error="Execution terminated by user"
-                )
-                if cancel_won:
-                    logger.info(f"[Terminate] Updated database execution {task_execution_id} to cancelled")
-                else:
-                    logger.info(
-                        f"[Terminate] CANCELLED write for {task_execution_id} lost the CAS — "
-                        f"row already terminal; leaving it and closing the activity in its real state"
-                    )
-
-                # #1332 (Path B): close the still-open dispatch activity as
-                # CANCELLED immediately. The operator-terminate path writes the
-                # CANCELLED row first and never reaches apply_result (the async
-                # callback short-circuits on the authoritative terminal; a sync
-                # apply_result loses the CAS), so without this the dispatch
-                # activity is left `started` until mark_stale_activities_failed
-                # flips it to FAILED ~30 min later. Best-effort like
-                # _close_stale_slot_activity — a close failure never fails the
-                # terminate request.
-                #
-                # Gate the activity state on whether the CANCELLED row-write won
-                # the CAS: if it LOST (the row went terminal via a concurrent
-                # path between the agent's terminate response and this write),
-                # close the activity in the row's ACTUAL terminal state so the
-                # activity never disagrees with the row (e.g. row=SUCCESS would
-                # else read CANCELLED). Won → CANCELLED.
-                try:
-                    dispatch_activity_id = db.get_open_activity_id_for_execution(task_execution_id)
-                    if dispatch_activity_id:
-                        if cancel_won:
-                            close_state = ActivityState.CANCELLED
-                            close_error = "Execution terminated by user"
-                        else:
-                            reconciled = db.get_execution(task_execution_id)
-                            close_state = activity_state_for_terminal(
-                                reconciled.status if reconciled else TaskExecutionStatus.CANCELLED
-                            )
-                            close_error = (
-                                None if close_state == ActivityState.COMPLETED
-                                else "Execution terminated by user"
-                            )
-                        await activity_service.complete_activity(
-                            activity_id=dispatch_activity_id,
-                            status=close_state,
-                            error=close_error,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"[Terminate] Failed to close dispatch activity for "
-                        f"{task_execution_id} as cancelled: {e}"
-                    )
-
-        # Track termination activity
-        await activity_service.track_activity(
-            agent_name=name,
-            activity_type=ActivityType.EXECUTION_CANCELLED,
-            user_id=current_user.id,
-            triggered_by="user",
-            related_execution_id=task_execution_id,
-            details={
-                "execution_id": execution_id,
-                "task_execution_id": task_execution_id,
-                "status": result.get("status"),
-                "returncode": result.get("returncode")
-            }
-        )
-
-        return result
-
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to connect to agent '{name}'"
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Timeout connecting to agent '{name}'"
-        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 @router.get("/{name}/executions/running")

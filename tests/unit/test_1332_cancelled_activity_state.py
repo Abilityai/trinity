@@ -101,6 +101,9 @@ class _AsyncCM:
 def _run_terminate(*, agent_status="terminated", open_activity_id="act-1",
                    complete_raises=False, cancel_won=True, reconciled_status=None):
     import routers.chat as chat
+    # #1483: terminate orchestration moved to chat_execution_service; the
+    # endpoint (chat.terminate_agent_execution) stays a thin mapper.
+    import services.chat_execution_service as ce
     from models import TaskExecutionStatus
 
     # Running (not queued) row so the backlog short-circuit is skipped.
@@ -136,11 +139,11 @@ def _run_terminate(*, agent_status="terminated", open_activity_id="act-1",
     current_user = MagicMock(id=1)
 
     with (
-        patch.object(chat, "db", mock_db),
-        patch.object(chat, "get_agent_container", return_value=container),
-        patch.object(chat, "agent_httpx_client", lambda *a, **k: _AsyncCM(client)),
-        patch.object(chat, "get_capacity_manager", return_value=mock_capacity),
-        patch.object(chat, "activity_service", mock_activity),
+        patch.object(ce, "db", mock_db),
+        patch.object(ce, "get_agent_container", return_value=container),
+        patch.object(ce, "agent_httpx_client", lambda *a, **k: _AsyncCM(client)),
+        patch.object(ce, "get_capacity_manager", return_value=mock_capacity),
+        patch.object(ce, "activity_service", mock_activity),
     ):
         result = _await(
             chat.terminate_agent_execution(

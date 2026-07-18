@@ -46,6 +46,8 @@ from models import (
 )
 from database import db
 from services.activity_service import activity_service
+from services.agent_auth import agent_httpx_client
+from services.docker_service import get_agent_container
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.task_execution_service import (
@@ -1466,3 +1468,163 @@ async def dispatch_parallel_task(
         triggered_by=derivation.triggered_by, image_data=image_data, idem=idem,
         x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id, x_mcp_key_name=x_mcp_key_name,
     )
+
+
+# ===========================================================================
+# Execution termination (#1483, RD5). Decomposed off the CC-22 router handler.
+# The agent-proxy stays inline (NOT task_execution_service.terminate_execution_on_agent,
+# which returns a bool and swallows connect/timeout — reusing it would drop the
+# router's 502/504/404 surfacing, a behavior change). HTTP-free: raises
+# ChatDispatchError, mapped 1:1 by the thin router handler.
+# ===========================================================================
+
+
+async def _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user):
+    """BACKLOG-001: if the execution is still queued in the backlog, cancel it
+    directly (no container interaction, no slot to release) and return the
+    cancelled-while-queued payload. Returns None if not queued (fall through to
+    the normal terminate path) OR if it transitioned out of queued between the
+    read and the update."""
+    try:
+        _exec_row = db.get_execution(task_execution_id)
+    except Exception:
+        _exec_row = None
+    if _exec_row and _exec_row.status == TaskExecutionStatus.QUEUED:
+        cancelled = db.cancel_queued_execution(
+            task_execution_id, reason="Cancelled by user while queued"
+        )
+        if cancelled:
+            await activity_service.track_activity(
+                agent_name=name,
+                activity_type=ActivityType.EXECUTION_CANCELLED,
+                user_id=current_user.id,
+                triggered_by="user",
+                related_execution_id=task_execution_id,
+                details={
+                    "execution_id": execution_id,
+                    "task_execution_id": task_execution_id,
+                    "status": "cancelled_while_queued",
+                },
+            )
+            return {"status": "cancelled_while_queued", "execution_id": execution_id}
+    return None
+
+
+async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
+    """#1332 (Path B): close the still-open dispatch activity as CANCELLED
+    immediately (operator-terminate writes the CANCELLED row first and never
+    reaches apply_result). Gate on the CAS result so the activity never disagrees
+    with the row. Best-effort — a close failure never fails the terminate."""
+    try:
+        dispatch_activity_id = db.get_open_activity_id_for_execution(task_execution_id)
+        if dispatch_activity_id:
+            if cancel_won:
+                close_state = ActivityState.CANCELLED
+                close_error = "Execution terminated by user"
+            else:
+                reconciled = db.get_execution(task_execution_id)
+                close_state = activity_state_for_terminal(
+                    reconciled.status if reconciled else TaskExecutionStatus.CANCELLED
+                )
+                close_error = (
+                    None if close_state == ActivityState.COMPLETED
+                    else "Execution terminated by user"
+                )
+            await activity_service.complete_activity(
+                activity_id=dispatch_activity_id,
+                status=close_state,
+                error=close_error,
+            )
+    except Exception as e:
+        logger.warning(
+            f"[Terminate] Failed to close dispatch activity for "
+            f"{task_execution_id} as cancelled: {e}"
+        )
+
+
+async def _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user):
+    """Proxy the terminate to the agent container, force-release capacity on a
+    terminal outcome, write the #679 CANCELLED CAS (only when we actually
+    terminated a running turn), close the #1332 dispatch activity, and track the
+    termination activity. Raises ChatDispatchError (404/non-200/502/504)."""
+    try:
+        async with agent_httpx_client(name, timeout=15.0) as client:
+            response = await client.post(
+                f"http://agent-{name}:8000/api/executions/{execution_id}/terminate"
+            )
+
+        result = response.json()
+
+        if response.status_code == 404:
+            raise ChatDispatchError(404, "Execution not found in agent")
+        if response.status_code != 200:
+            raise ChatDispatchError(
+                response.status_code, result.get("detail", "Termination failed")
+            )
+
+        # Clear capacity state if termination succeeded (CAPACITY-CONSOLIDATE #428).
+        if result.get("status") in ["terminated", "already_finished"]:
+            try:
+                capacity = get_capacity_manager()
+                fr = await capacity.force_release(name)
+                logger.info(
+                    f"[Terminate] Force-released capacity for agent '{name}' "
+                    f"(was_running={fr.was_running}, slots_cleared={fr.slots_cleared})"
+                )
+            except Exception as e:
+                logger.warning(f"[Terminate] Failed to force-release capacity for {name}: {e}")
+
+            # #679: write CANCELLED only when we actually terminated a running
+            # turn. On `already_finished` the agent's genuine terminal already
+            # stands — leave it. Capacity is force-released in both cases.
+            if task_execution_id and result.get("status") == "terminated":
+                cancel_won = db.update_execution_status(
+                    execution_id=task_execution_id,
+                    status=TaskExecutionStatus.CANCELLED,
+                    error="Execution terminated by user"
+                )
+                if cancel_won:
+                    logger.info(f"[Terminate] Updated database execution {task_execution_id} to cancelled")
+                else:
+                    logger.info(
+                        f"[Terminate] CANCELLED write for {task_execution_id} lost the CAS — "
+                        f"row already terminal; leaving it and closing the activity in its real state"
+                    )
+                await _close_dispatch_activity_cancelled(task_execution_id, cancel_won)
+
+        await activity_service.track_activity(
+            agent_name=name,
+            activity_type=ActivityType.EXECUTION_CANCELLED,
+            user_id=current_user.id,
+            triggered_by="user",
+            related_execution_id=task_execution_id,
+            details={
+                "execution_id": execution_id,
+                "task_execution_id": task_execution_id,
+                "status": result.get("status"),
+                "returncode": result.get("returncode")
+            }
+        )
+        return result
+
+    except httpx.ConnectError:
+        raise ChatDispatchError(502, f"Failed to connect to agent '{name}'")
+    except httpx.TimeoutException:
+        raise ChatDispatchError(504, f"Timeout connecting to agent '{name}'")
+
+
+async def terminate_execution(*, name, execution_id, task_execution_id, current_user):
+    """Terminate a running execution: cancel-if-queued (BACKLOG-001), else
+    container-gate then proxy-terminate + finalize. Returns the result dict
+    (or the cancelled-while-queued payload); raises ChatDispatchError."""
+    queued = await _cancel_queued_if_queued(name, execution_id, task_execution_id, current_user)
+    if queued is not None:
+        return queued
+
+    container = get_agent_container(name)
+    if not container:
+        raise ChatDispatchError(404, "Agent not found")
+    if container.status != "running":
+        raise ChatDispatchError(503, "Agent is not running")
+
+    return await _proxy_terminate_and_finalize(name, execution_id, task_execution_id, current_user)
