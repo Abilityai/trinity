@@ -435,6 +435,24 @@ class TestExemptionAndFloodAlert:
 
         assert db.create_operator_queue_item.call_count == 1
 
+    def test_first_alert_emits_when_monotonic_below_cooldown(self, monkeypatch):
+        # Regression: on a freshly-booted process `time.monotonic()` can be
+        # smaller than the cooldown window. A `0.0` "never alerted" sentinel made
+        # `now - 0.0 < COOLDOWN` true and suppressed the FIRST-ever alert for the
+        # first COOLDOWN seconds of uptime. The `None` sentinel must always emit
+        # the first alert regardless of monotonic's absolute value.
+        db = MagicMock()
+        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.rate_limiter, "check", MagicMock())
+        # Simulate a fresh runner: monotonic well below COOLDOWN (300s).
+        monkeypatch.setattr(oqs.time, "monotonic", lambda: 5.0)
+        svc = OperatorQueueSyncService()
+
+        asyncio.run(svc._maybe_emit_flood_alert("a", held=1))
+        assert db.create_operator_queue_item.call_count == 1   # emits despite low monotonic
+        asyncio.run(svc._maybe_emit_flood_alert("a", held=1))  # still within cooldown
+        assert db.create_operator_queue_item.call_count == 1   # cooldown still holds
+
     def test_flood_alert_create_failure_does_not_kill_sync(self, monkeypatch):
         # A create raise inside the alert path must be swallowed.
         db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT,
@@ -636,6 +654,22 @@ def _ops():
     return OperatorQueueOperations.__new__(OperatorQueueOperations)
 
 
+def _patch_engine(monkeypatch, engine):
+    """Patch get_engine/make_insert where OperatorQueueOperations methods actually
+    resolve them — the method's __globals__ (the db.operator_queue module dict) —
+    NOT the string path "db.operator_queue.get_engine".
+
+    A prior test in the full-suite run may have left a stand-in in
+    sys.modules["db.operator_queue"] that still re-exports the *real* class, so a
+    string-path monkeypatch lands on the stand-in while the real method keeps
+    reading the original module dict (the module-identity gotcha) → the real
+    engine runs and the stub is ignored. Patching __globals__ targets exactly the
+    dict the running method looks names up in, so it is immune to that swap."""
+    g = _ops().create_item.__globals__
+    monkeypatch.setitem(g, "get_engine", lambda: engine)
+    monkeypatch.setitem(g, "make_insert", lambda t: MagicMock())
+
+
 class TestDbBelt:
     def test_belt_rejects_oversize_question(self):
         ops = _ops()
@@ -659,8 +693,7 @@ class TestDbBelt:
 
     def test_belt_passes_a_small_platform_item(self, monkeypatch):
         # A validation_service-style ~200-char item must pass the belt.
-        monkeypatch.setattr("db.operator_queue.get_engine", lambda: _FakeEngine())
-        monkeypatch.setattr("db.operator_queue.make_insert", lambda t: MagicMock())
+        _patch_engine(monkeypatch, _FakeEngine())
         ops = _ops()
         rid = ops.create_item("agent", {
             "id": "val_exec_20260717",
@@ -679,19 +712,18 @@ class TestDbBelt:
 
     def test_non_dict_context_does_not_crash_create(self, monkeypatch):
         # The pre-existing execution_id `.get` crash on a non-dict context.
-        monkeypatch.setattr("db.operator_queue.get_engine", lambda: _FakeEngine())
-        monkeypatch.setattr("db.operator_queue.make_insert", lambda t: MagicMock())
+        _patch_engine(monkeypatch, _FakeEngine())
         ops = _ops()
         rid = ops.create_item("agent", {"id": "x", "context": "not-a-dict"})
         # No AttributeError on the non-dict context; #1631 returns the row uuid.
         assert rid == _STUB_ROW_ID
 
     def test_count_pending_returns_int(self, monkeypatch):
-        monkeypatch.setattr("db.operator_queue.get_engine", lambda: _FakeEngine(scalar=7))
+        _patch_engine(monkeypatch, _FakeEngine(scalar=7))
         ops = _ops()
         assert ops.count_pending_for_agent("agent") == 7
 
     def test_count_pending_none_scalar_is_zero(self, monkeypatch):
-        monkeypatch.setattr("db.operator_queue.get_engine", lambda: _FakeEngine(scalar=None))
+        _patch_engine(monkeypatch, _FakeEngine(scalar=None))
         ops = _ops()
         assert ops.count_pending_for_agent("agent") == 0

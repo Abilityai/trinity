@@ -697,8 +697,12 @@ class OperatorQueueSyncService:
         (in-memory cooldown resets) — harmless.
         """
         now = time.monotonic()
-        last = self._flood_alert_cooldown.get(agent_name, 0.0)
-        if now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
+        # `None` = never alerted for this agent. A `0.0` default would be wrong:
+        # `time.monotonic()` is seconds from an arbitrary reference and can be
+        # < COOLDOWN on a freshly-booted process, so `now - 0.0 < COOLDOWN` would
+        # suppress the FIRST-ever alert for the first COOLDOWN seconds of uptime.
+        last = self._flood_alert_cooldown.get(agent_name)
+        if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
             return  # already alerted this episode
         self._flood_alert_cooldown[agent_name] = now
 
