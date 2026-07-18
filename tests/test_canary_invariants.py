@@ -354,10 +354,17 @@ _CANARY_SCHEMA_SQL = """
             agent_name TEXT NOT NULL,
             skill_name TEXT NOT NULL
         );
+        -- #1540: production agent_tags is composite-PK (agent_name, tag) with
+        -- NO `id` column (db/tables.py). The canary derives the orphan-scan PK
+        -- from the STATIC Table, so a composite PK yields a synthetic
+        -- `agent_tags-row` row_id. Matching the real DDL here exercises that
+        -- composite branch on the SQLite rail (guards the KeyError('id') a naive
+        -- reflected-PK port would have shipped).
         CREATE TABLE agent_tags (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL,
-            tag TEXT NOT NULL
+            tag TEXT NOT NULL,
+            created_at TEXT,
+            PRIMARY KEY (agent_name, tag)
         );
         CREATE TABLE agent_shared_files (
             id TEXT PRIMARY KEY,
@@ -1806,35 +1813,45 @@ class TestInvariantB01EndToEnd:
     def test_b01_backend_consistency_on_diverged_backend(
         self, canary_db_split, reload_canary_split
     ):
-        """#1450 gap (b): a Postgres-style diverged backend WITHOUT a live PG.
+        """#1450 + #1540: a Postgres-style diverged backend WITHOUT a live PG.
 
-        `canary_db_split` points the raw-sqlite reader at an EMPTY (of queued
-        rows) file and the `get_engine()`/DATABASE_URL seam at a DIFFERENT file
-        holding N queued rows. Before the fix, B-01 Side B read the raw file → 0
-        while Side A (accessor, engine) read N → spurious `critical`. After the
-        fix both sides read the engine → N == N → green.
+        `canary_db_split` decouples the raw-sqlite file (`db.connection`) from the
+        `get_engine()`/DATABASE_URL ENGINE file. Since #1540 the WHOLE collector
+        reads the ENGINE file, so the agent + queued rows live there and BOTH
+        B-01 sides (accessor Side A, `_collect_queued_ids_via_engine` Side B) —
+        and now `queued_exec_ids` from `_collect_executions` too — read the same
+        engine backend. B-01 stays green (N == N); the RAW file is ignored.
         """
         raw_path, engine_path = canary_db_split
-        # Agent lives in the RAW file (that's what _collect_known_agents reads).
-        _add_agent(raw_path, "a1")
-        # N queued rows live ONLY in the ENGINE file (the accessor + Side B read
-        # this backend). The raw file has zero queued rows for a1.
+        # The agent + its queued rows live in the ENGINE file — that is what
+        # _collect_known_agents and every SQL collector reads since #1540.
+        _add_agent(engine_path, "a1")
         for i in range(3):
             _add_execution(engine_path, f"q{i}", "a1", "queued")
+        # Decoy state written ONLY to the RAW file: a ghost agent + a queued row.
+        # Post-#1540 these MUST NOT leak into any collector (proof the reads moved
+        # off db.connection onto the engine seam).
+        _add_agent(raw_path, "raw-only-ghost")
+        _add_execution(raw_path, "raw-q", "a1", "queued")
 
         snap = reload_canary_split["canary"].collect_snapshot()
+
+        # _collect_known_agents reads the ENGINE file → the RAW-only ghost is
+        # invisible; the engine agent is present.
+        assert snap.known_agents == {"a1"}
         agent = next(a for a in snap.agents if a.name == "a1")
 
-        # Side B now reads the engine file → sees all 3; the raw set is empty,
-        # proving the two sides genuinely read different backends.
+        # Both B-01 sides AND queued_exec_ids read the engine → all see the 3
+        # engine rows; the raw "raw-q" row is ignored.
         assert agent.queued_ids_via_engine == {"q0", "q1", "q2"}
-        assert agent.queued_exec_ids == set()
+        assert agent.queued_exec_ids == {"q0", "q1", "q2"}
         assert agent.queued_count_via_service == 3
 
         results = reload_canary_split["canary"].run_invariants(snap)
         assert results["B-01"] == [], (
             "B-01 must not false-fire when the raw-sqlite reader and the engine "
-            "backend diverge — both sides now go through get_engine() (#1450)"
+            "backend diverge — the whole collector now reads get_engine() "
+            "(#1450 / #1540)"
         )
 
     def test_b01_tolerates_transient_race(
@@ -2890,6 +2907,12 @@ class TestTerminalRowCollector:
         # An ABSENT completed_at/duration_ms column (minimal/older DDL) must
         # skip the source (recorded in `unavailable`) rather than default the
         # column to None and false-fire E-03 on every row.
+        #
+        # #1540: `_collect_terminal_rows` reads through the get_engine()/
+        # DATABASE_URL seam and reflects the LIVE columns via
+        # sqlalchemy.inspect(), so this drives the minimal DDL through the ENGINE
+        # (point DATABASE_URL at the file), proving the inspect() column guard is
+        # fail-open identically to the old raw PRAGMA guard.
         import tempfile as _tf
 
         db_file = _tf.NamedTemporaryFile(suffix="_ta.db", delete=False)
@@ -2914,18 +2937,9 @@ class TestTerminalRowCollector:
         c.commit()
         c.close()
 
-        class _Ctx:
-            def __enter__(self_):
-                self_._c = sqlite3.connect(db_file.name)
-                self_._c.row_factory = sqlite3.Row
-                return self_._c
-
-            def __exit__(self_, *a):
-                self_._c.close()
-
-        fake = types.ModuleType("db.connection")
-        fake.get_db_connection = lambda: _Ctx()
-        monkeypatch.setitem(sys.modules, "db.connection", fake)
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file.name}")
+        import db.engine as engine_mod
+        engine_mod.dispose_engines()
 
         from canary.snapshot import _collect_terminal_rows
 
@@ -2935,6 +2949,7 @@ class TestTerminalRowCollector:
             "completed_at" in res["unavailable"]
             or "duration_ms" in res["unavailable"]
         )
+        engine_mod.dispose_engines()
         os.unlink(db_file.name)
 
     def test_cap_and_sampled_flag(self, canary_db, reload_canary, monkeypatch):
