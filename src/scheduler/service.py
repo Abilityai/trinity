@@ -44,6 +44,25 @@ def _describe_exception(e: BaseException) -> str:
     return str(e).strip() or f"{type(e).__name__} (no detail)"
 
 
+def _reminder_outcome_unknown(exc: BaseException) -> bool:
+    """True when a reminder-dispatch exception means the outcome is UNKNOWN
+    (a dispatch TimeoutException — the backend may already be running the task),
+    vs a CLEAN pre-start failure (non-200 like a 503 warmup, or a raw connection
+    error — the task never started) (#1296, Codex C2).
+
+    ``_call_backend_execute_task`` wraps an ``httpx.TimeoutException`` in a plain
+    ``Exception("… outcome unknown") from e``, so we check both the wrapped cause
+    and the message; a bare timeout (direct) is caught too. Everything else — a
+    non-200 ``Exception`` or an ``httpx.ConnectError`` propagated raw — is a clean
+    pre-start failure that SHOULD retry.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(getattr(exc, "__cause__", None), httpx.TimeoutException):
+        return True
+    return "outcome unknown" in str(exc).lower()
+
+
 # #913: Polling-deadline fallback when the schedule's timeout_seconds is
 # NULL (= "inherit per-agent value"). The scheduler does not have the
 # per-agent value in this process; the backend enforces the real timeout.
@@ -175,6 +194,14 @@ class SchedulerService:
 
         # RETRY-001: Recover any pending retries from before restart
         self._recover_pending_retries()
+
+        # #1296: recover/arm reminder jobs after restart (own try — a reminder
+        # error, or a not-yet-migrated agent_reminders table, must never crash
+        # boot). _reconcile_reminders is itself fail-open; this is belt-and-braces.
+        try:
+            self._reconcile_reminders()
+        except Exception as e:
+            logger.error(f"Reminder boot recovery failed (continuing): {e}")
 
     def _get_missed_schedules(self, schedules: List[Schedule]) -> List[Schedule]:
         """
@@ -512,6 +539,15 @@ class SchedulerService:
             await self._sync_process_schedules()
         except Exception as e:
             logger.error(f"Schedule sync failed: {e}")
+
+        # #1296: reminder reconcile in its OWN try/except, NOT under the cron/
+        # process try above (Codex C5) — a cron-sync error must not starve
+        # reminder pickup. Latency ≤ one schedule_reload_interval, same as a
+        # brand-new cron schedule.
+        try:
+            self._reconcile_reminders()
+        except Exception as e:
+            logger.error(f"Reminder reconcile failed: {e}")
 
     async def _sync_agent_schedules(self):
         """Sync agent schedules with database."""
@@ -1581,6 +1617,214 @@ class SchedulerService:
             )
 
     # =========================================================================
+    # Agent Self-Reminders (#1296)
+    #
+    # A near-clone of the RETRY-001 one-shot machinery: a durable DB row is the
+    # source of truth, an APScheduler DateTrigger is armed per pending reminder,
+    # and the reconcile (boot + 60s sync-loop + reload) re-arms/reclaims from the
+    # DB. On fire the scheduler CREATES the execution row itself (real id) and
+    # dispatches a normal execution of the same agent through the standard
+    # capacity/slot path (triggered_by="reminder") — no bespoke dispatch.
+    # =========================================================================
+
+    def _schedule_reminder_job(self, reminder, run_at: datetime):
+        """Arm a one-shot DateTrigger for a reminder (mirrors _schedule_retry_job).
+
+        Deterministic job id + replace_existing ⇒ re-arming is idempotent at the
+        APScheduler level, so the reconcile can safely re-arm without dup jobs.
+        """
+        from apscheduler.triggers.date import DateTrigger
+
+        self.scheduler.add_job(
+            self._execute_reminder,
+            trigger=DateTrigger(run_date=run_at),
+            id=f"reminder_{reminder.id}",
+            kwargs={
+                "reminder_id": reminder.id,
+                "agent_name": reminder.agent_name,
+                "message": reminder.message,
+                "model": reminder.model,
+                "timeout_seconds": reminder.timeout_seconds,
+                "allowed_tools": reminder.allowed_tools,
+            },
+            replace_existing=True,
+        )
+
+    def _reminder_after_failed_attempt(self, reminder_id: str, attempts: int, error: str):
+        """A clean pre-start failure or a stale-firing reclaim: retry (bounded)
+        by releasing firing→pending for the reconcile to re-arm, or — once
+        fire_attempts hits the cap — mark the reminder terminal `failed`."""
+        if attempts >= config.max_reminder_fire_attempts:
+            self.db.mark_reminder_failed(reminder_id, (error or "")[:2000])
+            logger.error(
+                f"Reminder {reminder_id} failed permanently after {attempts} "
+                f"attempts: {error}"
+            )
+        else:
+            self.db.release_reminder_to_pending(reminder_id, (error or "")[:2000])
+            logger.warning(
+                f"Reminder {reminder_id} attempt {attempts} failed "
+                f"({error}) — released to pending for retry"
+            )
+
+    async def _execute_reminder(
+        self,
+        reminder_id: str,
+        agent_name: str,
+        message: str,
+        model: Optional[str],
+        timeout_seconds: Optional[int],
+        allowed_tools: Optional[list],
+    ):
+        """Fire handler for a reminder (at-least-once, bounded, observable, #1296).
+
+        Called by APScheduler when the DateTrigger fires.
+        """
+        # 1. Single-fire claim (CAS pending→firing, committed, increments
+        #    fire_attempts). False ⇒ another fire won / cancelled / already
+        #    firing → skip. Also cancel-safe (a cancelled reminder is no longer
+        #    pending).
+        if not self.db.claim_reminder_firing(reminder_id):
+            logger.info(
+                f"Reminder {reminder_id} not claimable (cancelled/fired/already "
+                "firing) — skipping"
+            )
+            return
+
+        # Re-read for the current fire_attempts (drives the bounded-retry cap).
+        reminder = self.db.get_reminder_by_id(reminder_id)
+        attempts = reminder.fire_attempts if reminder else 1
+
+        execution_id = None
+        try:
+            # 2. Create the execution row up-front (REAL id, __manual__ marker —
+            #    PG-safe, no FK; triggered_by="reminder"; status RUNNING). The
+            #    real id auto-stamps Idempotency-Key: sched:{id} and lets
+            #    _poll_and_finalize own the execution's terminal.
+            execution = self.db.create_execution(
+                schedule_id="__manual__",
+                agent_name=agent_name,
+                message=message,
+                triggered_by="reminder",
+                model_used=model,
+            )
+            if not execution:
+                raise Exception("failed to create reminder execution row")
+            execution_id = execution.id
+            self.db.set_reminder_execution(reminder_id, execution_id)
+
+            # 3. Dispatch through the standard backend path (capacity/slot admit).
+            await self._call_backend_execute_task(
+                agent_name=agent_name,
+                message=message,
+                triggered_by="reminder",
+                timeout_seconds=timeout_seconds,
+                model=model,
+                allowed_tools=allowed_tools,
+                execution_id=execution_id,
+            )
+        except Exception as e:
+            error_msg = _describe_exception(e)
+            if execution_id is not None and _reminder_outcome_unknown(e):
+                # Dispatch outcome UNKNOWN (timeout) — the backend may already be
+                # running the task. Assume dispatched: mark fired and let
+                # _poll_and_finalize finalize the execution row. Do NOT force it
+                # FAILED (would clobber a running task) and do NOT retry (a fresh
+                # execution_id ⇒ fresh key ⇒ not deduped ⇒ double-execute).
+                logger.warning(
+                    f"Reminder {reminder_id} dispatch outcome unknown "
+                    f"({error_msg}) — assuming dispatched (firing→fired)"
+                )
+                self.db.mark_reminder_fired(reminder_id)
+                return
+            # Clean pre-start failure (non-200 503-warmup/5xx, connection error)
+            # OR a row-creation failure — the task never started. Mark the
+            # attempt's execution row FAILED (status-guarded, mirrors
+            # service.py:989) then bounded-retry (this is what makes AC #3 hold —
+            # a reminder due during a backend restart retries instead of being
+            # permanently consumed).
+            logger.error(
+                f"Reminder {reminder_id} dispatch failed cleanly ({error_msg})"
+            )
+            if execution_id is not None:
+                current = self.db.get_execution(execution_id)
+                if current and current.status == ExecutionStatus.RUNNING:
+                    self.db.update_execution_status(
+                        execution_id=execution_id,
+                        status=ExecutionStatus.FAILED,
+                        error=error_msg[:2000],
+                    )
+            self._reminder_after_failed_attempt(reminder_id, attempts, error_msg)
+            return
+
+        # 4. Dispatch accepted (200/dispatched) → delivered.
+        self.db.mark_reminder_fired(reminder_id)
+        logger.info(
+            f"Reminder {reminder_id} fired for agent {agent_name} "
+            f"(execution_id={execution_id})"
+        )
+
+    def _reconcile_reminders(self):
+        """Steady-state pickup + boot recovery + stale-`firing` reclaim (#1296).
+
+        FAIL-OPEN (eng D + Codex C5): the WHOLE body is wrapped so a not-yet-
+        migrated ``agent_reminders`` table (a new scheduler image before the
+        backend applies 0028) or any error is a logged no-op, never a boot
+        crash-loop nor a starve of the other syncs. Sync (no dispatch happens
+        here — only arming + reclaim), so boot (sync ``initialize``) can call it
+        directly. Idempotent: it only arms MISSING ``reminder_`` jobs and never
+        blanket-removes them.
+        """
+        try:
+            reminders = self.db.get_active_reminders()
+        except Exception as e:
+            logger.warning(
+                f"Reminder reconcile skipped (table absent or read error): {e}"
+            )
+            return
+
+        now = datetime.utcnow()
+        # A firing row older than this (with no live job) is a crash-mid-fire
+        # orphan: the dispatch window + poll buffer + a margin.
+        stale_after = timedelta(
+            seconds=config.dispatch_timeout + config.poll_deadline_buffer + 60
+        )
+
+        for reminder in reminders:
+            try:
+                if reminder.status == "pending":
+                    if self.scheduler.get_job(f"reminder_{reminder.id}") is None:
+                        run_at = reminder.fire_at
+                        if run_at < now:
+                            # Past-due (created while the scheduler was down, or
+                            # autonomy was just re-enabled) — fire shortly
+                            # (mirror _recover_pending_retries).
+                            run_at = now + timedelta(seconds=5)
+                        self._schedule_reminder_job(reminder, run_at)
+                elif reminder.status == "firing":
+                    # Reclaim a stale firing row (crash mid-fire, no live job).
+                    if reminder.firing_at is not None and (now - reminder.firing_at) < stale_after:
+                        continue
+                    if self.scheduler.get_job(f"reminder_{reminder.id}") is not None:
+                        continue
+                    # FAIL any orphan RUNNING execution row (status-guarded).
+                    if reminder.execution_id:
+                        current = self.db.get_execution(reminder.execution_id)
+                        if current and current.status == ExecutionStatus.RUNNING:
+                            self.db.update_execution_status(
+                                execution_id=reminder.execution_id,
+                                status=ExecutionStatus.FAILED,
+                                error="reminder fire reclaimed (stale firing / crash mid-fire)",
+                            )
+                    self._reminder_after_failed_attempt(
+                        reminder.id, reminder.fire_attempts, "stale firing reclaimed"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Reminder reconcile: failed to process reminder {reminder.id}: {e}"
+                )
+
+    # =========================================================================
     # Validation Management (VALIDATE-001)
     # =========================================================================
 
@@ -1747,6 +1991,15 @@ class SchedulerService:
         process_schedules = self.db.list_all_enabled_process_schedules()
         for process_schedule in process_schedules:
             self._add_process_job(process_schedule)
+
+        # #1296: the full-reload path removes only schedule_/process_schedule_
+        # jobs (Codex C6), so rebuild/reclaim reminder jobs too. The reconcile is
+        # idempotent — it only arms MISSING reminder_ jobs and never blanket-
+        # removes them, so this doesn't disturb already-armed reminders.
+        try:
+            self._reconcile_reminders()
+        except Exception as e:
+            logger.error(f"Reminder reconcile during reload failed: {e}")
 
         logger.info(f"Reloaded {len(schedules)} agent schedules, {len(process_schedules)} process schedules")
 

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from .config import config
-from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution
+from .models import Schedule, ScheduleExecution, ExecutionStatus, ProcessSchedule, ProcessScheduleExecution, Reminder
 from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 logger = logging.getLogger(__name__)
@@ -647,6 +647,139 @@ class SchedulerDatabase:
                 current_id = row["retry_of_execution_id"]
 
             return current_id
+
+    # =========================================================================
+    # Reminder Operations (#1296)
+    #
+    # ALL mutating methods commit (eng C): mirror schedule_retry (committed),
+    # NOT get_pending_retries (a no-commit SELECT). Without commit, sqlite3's
+    # implicit txn + psycopg2 both roll back on conn.close(), leaving the row
+    # unchanged while rowcount was 1 pre-close → a double-fire latent for 24h.
+    # =========================================================================
+
+    @staticmethod
+    def _row_to_reminder(row) -> Reminder:
+        """Hydrate a Reminder from a row; parse timestamps to NAIVE UTC via
+        parse_scheduler_ts (#1472/#1474 — a Z-suffixed fire_at compared against
+        datetime.utcnow() must not raise)."""
+        allowed = row["allowed_tools"]
+        try:
+            allowed_tools = json.loads(allowed) if allowed else None
+        except (TypeError, ValueError):
+            allowed_tools = None
+        firing_at = row["firing_at"]
+        return Reminder(
+            id=row["id"],
+            agent_name=row["agent_name"],
+            message=row["message"],
+            fire_at=parse_scheduler_ts(row["fire_at"]),
+            status=row["status"],
+            fire_attempts=row["fire_attempts"] or 0,
+            firing_at=parse_scheduler_ts(firing_at) if firing_at else None,
+            model=row["model"],
+            timeout_seconds=row["timeout_seconds"],
+            allowed_tools=allowed_tools,
+            execution_id=row["execution_id"],
+            error=row["error"],
+        )
+
+    def get_active_reminders(self) -> List[Reminder]:
+        """Reminders eligible for arming/reclaim: ``pending`` ∪ ``firing``, for a
+        LIVE, autonomy-ENABLED agent.
+
+        Reads BOTH states so the reconcile can arm pending reminders AND reclaim
+        stale ``firing`` ones. Excludes soft-deleted agents (``deleted_at`` —
+        mirrors ``list_all_enabled_schedules``, else a reminder fires into a
+        nonexistent container) and autonomy-disabled agents (their pending
+        reminders are held and resume, past-due-fire, when autonomy is
+        re-enabled). Order-by is lexicographic on the ISO-Z TEXT column
+        (ordering-only; correctness rides the consistent ``to_utc_iso`` write
+        format, so Invariant #16 doesn't bite).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT r.* FROM agent_reminders r
+                JOIN agent_ownership ao ON ao.agent_name = r.agent_name
+                WHERE r.status IN ('pending', 'firing')
+                  AND ao.deleted_at IS NULL
+                  AND ao.autonomy_enabled = 1
+                ORDER BY r.fire_at ASC
+            """)
+            return [self._row_to_reminder(row) for row in cursor.fetchall()]
+
+    def get_reminder_by_id(self, reminder_id: str) -> Optional[Reminder]:
+        """Fetch a single reminder by id (to re-read fire_attempts after a CAS)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM agent_reminders WHERE id = ?", (reminder_id,)
+            )
+            row = cursor.fetchone()
+            return self._row_to_reminder(row) if row else None
+
+    def claim_reminder_firing(self, reminder_id: str) -> bool:
+        """The single-fire CAS: ``pending → firing`` + increment fire_attempts.
+
+        Commit; return ``rowcount > 0``. The mutated predicate ``status='pending'``
+        is in the outer WHERE, so a losing concurrent updater's CAS is a no-op
+        (learnings #1081 #70) — exactly one claimer wins.
+        """
+        now = utc_now_iso()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_reminders
+                SET status = 'firing', firing_at = ?, fire_attempts = fire_attempts + 1
+                WHERE id = ? AND status = 'pending'
+            """, (now, reminder_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_reminder_fired(self, reminder_id: str) -> bool:
+        """``firing → fired`` (terminal delivered). Commit."""
+        now = utc_now_iso()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_reminders SET status = 'fired', fired_at = ?
+                WHERE id = ? AND status = 'firing'
+            """, (now, reminder_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def release_reminder_to_pending(self, reminder_id: str, error: str = None) -> bool:
+        """``firing → pending`` (transient-failure release; the reconcile re-arms). Commit."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_reminders SET status = 'pending', firing_at = NULL, error = ?
+                WHERE id = ? AND status = 'firing'
+            """, (error, reminder_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_reminder_failed(self, reminder_id: str, error: str = None) -> bool:
+        """``firing → failed`` (bounded-attempts terminal). Commit."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE agent_reminders SET status = 'failed', firing_at = NULL, error = ?
+                WHERE id = ? AND status = 'firing'
+            """, (error, reminder_id))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def set_reminder_execution(self, reminder_id: str, execution_id: str) -> bool:
+        """Link the latest fire attempt's execution row onto the reminder. Commit."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE agent_reminders SET execution_id = ? WHERE id = ?",
+                (execution_id, reminder_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     # =========================================================================
     # Process Schedule Operations
