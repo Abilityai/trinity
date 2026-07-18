@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from routers.chat import execute_parallel_task as ENDPOINT
+from services import chat_persistence_service
 from models import ParallelTaskRequest, TaskExecutionStatus
 
 _MOD = sys.modules[ENDPOINT.__module__]  # routers.chat (endpoint stays here)
@@ -120,7 +121,7 @@ def _env(
          patch.object(_MOD, "get_task_execution_service", return_value=task_service), \
          patch.object(_MOD, "activity_service", activity), \
          patch.object(_MOD, "platform_audit_service", MagicMock(log=AsyncMock())), \
-         patch.object(_MOD, "_persist_chat_session", persist), \
+         patch.object(chat_persistence_service, "persist_chat_session", persist), \
          patch.object(_MOD, "_run_async_task_with_persistence", async_bg), \
          patch.object(_MOD, "wait_for_sync_terminal", waiter):
         yield {

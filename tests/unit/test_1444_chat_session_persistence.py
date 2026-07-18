@@ -1,14 +1,14 @@
 """#1444 — async `/task` with save_to_session must persist a chat session.
 
 Fast unit/regression guards for the in-process `/task` persistence path
-(`routers/chat.py::_persist_chat_session` +
+(`services/chat_persistence_service.py::persist_chat_session` +
 `_run_async_task_with_persistence`). These are the CI guard the slow,
 `requires_agent` integration tests in
 `tests/test_dynamic_thinking_status.py::TestAsyncModeSessionPersistence` never
 provided — *that* is why #1444 shipped: the persistence contract was only
 covered by live-stack tests that never gate CI.
 
-Root cause (triaged three ways: direct `_persist_chat_session`, the full wrapper
+Root cause (triaged three ways: direct `persist_chat_session`, the full wrapper
 with a stubbed `execute_task`, and the full wrapper with the REAL `execute_task`
 + real terminal-CAS row write): on stock config the in-process persistence path
 is **correct** — it creates a `chat_sessions` row + user & assistant
@@ -161,9 +161,9 @@ def test_async_wrapper_persists_session_on_success(chat_mod, monkeypatch):
 
 
 def test_persist_returns_session_id_on_success(chat_mod):
-    """Direct `_persist_chat_session` on a SUCCESS result returns the new
+    """Direct `persist_chat_session` on a SUCCESS result returns the new
     session id and writes both messages (the primitive Fold 2 builds on)."""
-    sid = asyncio.run(chat_mod._persist_chat_session(
+    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=_make_request(chat_mod),
         result=_SuccessResult(),
@@ -178,7 +178,7 @@ def test_persist_returns_session_id_on_success(chat_mod):
 def test_no_persist_on_non_success(chat_mod):
     """A non-SUCCESS terminal (FAILED/CANCELLED) must NOT write an empty
     assistant message — persistence is guarded on SUCCESS."""
-    sid = asyncio.run(chat_mod._persist_chat_session(
+    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=_make_request(chat_mod),
         result=_FailedResult(),
@@ -209,8 +209,8 @@ def test_persist_failure_is_loud_safe_and_non_fatal(chat_mod, monkeypatch, caplo
         chat_mod, user_message=_SENSITIVE_MSG
     )
 
-    with caplog.at_level(logging.ERROR, logger="routers.chat"):
-        sid = asyncio.run(chat_mod._persist_chat_session(
+    with caplog.at_level(logging.ERROR, logger="services.chat_persistence_service"):
+        sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
             agent_name="agent-a",
             request=req,
             result=_SuccessResult(response=_SENSITIVE_RESP),
@@ -263,8 +263,8 @@ def test_dbapi_error_params_not_leaked_by_fail_loud_log(chat_mod, monkeypatch, c
 
     monkeypatch.setattr(chat_mod.db, "add_chat_message", _boom, raising=False)
 
-    with caplog.at_level(logging.ERROR, logger="routers.chat"):
-        sid = asyncio.run(chat_mod._persist_chat_session(
+    with caplog.at_level(logging.ERROR, logger="services.chat_persistence_service"):
+        sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
             agent_name="agent-a",
             request=_make_request(chat_mod, user_message=_SENSITIVE_MSG),
             result=_SuccessResult(response=_SENSITIVE_RESP),
@@ -308,7 +308,7 @@ def test_foreign_chat_session_id_falls_through_to_own_session(chat_mod):
         create_new_session=False,
         chat_session_id=session_a.id,
     )
-    sid = asyncio.run(chat_mod._persist_chat_session(
+    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=req,
         result=_SuccessResult(),
