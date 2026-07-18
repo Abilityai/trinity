@@ -56,6 +56,7 @@ from routers.sharing import router as sharing_router, set_websocket_manager as s
 from routers.mcp_keys import router as mcp_keys_router
 from routers.chat import router as chat_router, set_websocket_manager as set_chat_ws_manager
 from services.chat_persistence_service import set_websocket_manager as set_chat_persistence_ws_manager
+from services.chat_execution_service import set_websocket_manager as set_chat_execution_ws_manager
 from routers.sessions import router as sessions_router  # SESSION_TAB_2026-04 Phase 2
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
@@ -245,6 +246,7 @@ set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
 set_chat_ws_manager(manager)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
+set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration broadcast
 set_public_links_ws_manager(manager)
 set_notifications_ws_manager(manager)
 set_notifications_filtered_ws_manager(filtered_manager)

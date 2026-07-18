@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from routers.chat import _run_chat_and_finalize as FN  # repoint on move
+from services.chat_execution_service import run_chat_turn as FN  # moved from routers.chat (#1483)
 from models import ChatMessageRequest, ActivityState, TaskExecutionStatus
 
 _MOD = sys.modules[FN.__module__]

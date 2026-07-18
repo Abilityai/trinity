@@ -15,9 +15,7 @@ from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource, activity_state_for_terminal
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
-from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.agent_auth import agent_httpx_client
-from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
 from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
@@ -31,26 +29,18 @@ from services.capacity_manager import (
 from services import idempotency_service
 from services import chat_persistence_service
 from services import dispatch_admission_service
-from services.chat_signals import ChatExecutionContext, ChatAdmissionReplay
+from services import chat_execution_service
+from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
 from services.event_dispatch_service import (
     RESERVED_EVENT_TRIGGER,
     RESERVED_EVENT_TRIGGER_HEADER_VALUE,
     verify_internal_dispatch_secret,
 )
 from services.task_execution_service import (
-    _compute_context_used,
     dispatch_breaker_active,
     get_task_execution_service,
-    agent_post_with_retry,
 )
 from database import db
-from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response
-from services.platform_prompt_service import (
-    ExecutionContext,
-    compose_system_prompt,
-    get_platform_system_prompt,
-    is_execution_context_enabled,
-)
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -154,160 +144,6 @@ def set_websocket_manager(manager):
     _websocket_manager = manager
 
 
-async def broadcast_collaboration_event(source_agent: str, target_agent: str, action: str = "chat"):
-    """Broadcast agent collaboration event to all WebSocket clients."""
-    if _websocket_manager:
-        event = {
-            "type": "agent_collaboration",
-            "source_agent": source_agent,
-            "target_agent": target_agent,
-            "action": action,
-            "timestamp": utc_now_iso()
-        }
-        await _websocket_manager.broadcast(json.dumps(event))
-    else:
-        print(f"[Warning] WebSocket manager not set, skipping collaboration broadcast")
-
-
-async def _prepare_chat_execution(
-    *,
-    name: str,
-    request: ChatMessageRequest,
-    current_user: User,
-    x_source_agent: Optional[str],
-    x_via_mcp: Optional[str],
-    x_mcp_key_id: Optional[str],
-    x_mcp_key_name: Optional[str],
-    idem: object,
-    chat_execution_id: str,
-    capacity_result: object,
-    queue_result: str,
-) -> ChatExecutionContext:
-    """Execution setup for chat_with_agent (#1026 slice 2).
-
-    Creates the task-execution record (#96), looks up the agent subscription
-    (SUB-004), broadcasts the agent-to-agent collaboration event + activity,
-    gets/creates the chat session, tracks the chat-start activity, and logs the
-    inbound user message. Returns a ChatExecutionContext carrying the ids/records
-    the downstream execute+finalize body consumes.
-    """
-    is_queued = capacity_result.state == "queued_in_memory"
-    # Backwards-compat names: existing code below references `execution.id`.
-    # Map the new chat_execution_id onto the old shape so the rest of the
-    # function stays diff-minimal.
-    class _ExecutionLite:
-        def __init__(self, eid: str):
-            self.id = eid
-    execution = _ExecutionLite(chat_execution_id)
-
-    # Create execution record for ALL chat calls (user, MCP, and agent-to-agent)
-    # This ensures every execution appears in the Tasks tab for unified tracking (#96)
-    task_execution_id = None
-    # Determine triggered_by: "agent" for agent-to-agent, "mcp" for user MCP calls, "chat" for UI chat
-    if x_source_agent:
-        triggered_by = "agent"
-    elif x_via_mcp:
-        triggered_by = "mcp"
-    else:
-        triggered_by = "chat"
-    # Look up subscription for this agent (best-effort, for usage tracking SUB-004)
-    # We fetch this early so it can be passed to the execution record too
-    try:
-        _exec_subscription_id = db.get_agent_subscription_id(name)
-    except Exception:
-        _exec_subscription_id = None
-
-    task_execution = db.create_task_execution(
-        agent_name=name,
-        message=request.message,
-        triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
-        source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
-        subscription_id=_exec_subscription_id,
-    )
-    task_execution_id = task_execution.id if task_execution else None
-    idempotency_service.attach_execution(idem, task_execution_id)
-    logger.info(f"[Chat] Created task execution {task_execution_id} for {triggered_by} call on agent '{name}'")
-
-    # Broadcast collaboration event if this is agent-to-agent communication
-    collaboration_activity_id = None
-    if x_source_agent:
-        await broadcast_collaboration_event(
-            source_agent=x_source_agent,
-            target_agent=name,
-            action="chat"
-        )
-
-        # Track agent collaboration activity
-        collaboration_activity_id = await activity_service.track_activity(
-            agent_name=x_source_agent,  # Activity belongs to source agent
-            activity_type=ActivityType.AGENT_COLLABORATION,
-            user_id=current_user.id,
-            triggered_by="agent",
-            related_execution_id=task_execution_id,  # Database execution ID for structured queries
-            details={
-                "source_agent": x_source_agent,
-                "target_agent": name,
-                "action": "chat",
-                "message_preview": request.message[:100],
-                "execution_id": task_execution_id,  # Also in details for WebSocket events
-                "queue_status": queue_result
-            }
-        )
-
-    # Get or create chat session for this user+agent
-    # Reuse _exec_subscription_id already fetched above (SUB-004)
-    _chat_subscription_id = _exec_subscription_id
-    session = db.get_or_create_chat_session(
-        agent_name=name,
-        user_id=current_user.id,
-        user_email=current_user.email or current_user.username,
-        subscription_id=_chat_subscription_id,
-    )
-
-    # Track chat start activity
-    # triggered_by: "agent" for agent-to-agent, "mcp" for user MCP calls, "user" for UI chat
-    activity_triggered_by = "agent" if x_source_agent else ("mcp" if x_via_mcp else "user")
-    chat_activity_id = await activity_service.track_activity(
-        agent_name=name,
-        activity_type=ActivityType.CHAT_START,
-        user_id=current_user.id,
-        triggered_by=activity_triggered_by,
-        parent_activity_id=collaboration_activity_id,  # Link to collaboration if agent-initiated
-        related_execution_id=task_execution_id,  # Database execution ID for structured queries
-        details={
-            "message_preview": request.message[:100],
-            "source_agent": x_source_agent,
-            "execution_id": task_execution_id,  # Also in details for WebSocket events
-            "queue_status": queue_result
-        }
-    )
-
-    # Log user message to database
-    db.add_chat_message(
-        session_id=session.id,
-        agent_name=name,
-        user_id=current_user.id,
-        user_email=current_user.email or current_user.username,
-        role="user",
-        content=request.message
-    )
-
-    return ChatExecutionContext(
-        execution=execution,
-        task_execution_id=task_execution_id,
-        triggered_by=triggered_by,
-        subscription_id=_chat_subscription_id,
-        collaboration_activity_id=collaboration_activity_id,
-        chat_activity_id=chat_activity_id,
-        session=session,
-        is_queued=is_queued,
-    )
-
-
 @router.post("/{name}/chat")
 async def chat_with_agent(
     request: ChatMessageRequest,
@@ -402,7 +238,7 @@ async def chat_with_agent(
     # user-message log. Returns the ids/records the execute+finalize body below
     # consumes; every field is unpacked (slice-1 lesson: a stranded local
     # NameErrors the admitted path).
-    ctx = await _prepare_chat_execution(
+    ctx = await chat_execution_service.prepare_chat_execution(
         name=name,
         request=request,
         current_user=current_user,
@@ -427,434 +263,31 @@ async def chat_with_agent(
     # Execute + finalize (#1026 slice 3): dispatch to the agent, persist the
     # assistant message + observability, complete activities, write the terminal
     # execution row, store the idempotency snapshot, and (on error) run SUB-003
-    # auto-switch + map the HTTPException. Always releases the slot + idem claim.
-    return await _run_chat_and_finalize(
-        name=name,
-        request=request,
-        current_user=current_user,
-        x_source_agent=x_source_agent,
-        x_mcp_key_name=x_mcp_key_name,
-        triggered_by=triggered_by,
-        task_execution_id=task_execution_id,
-        _chat_subscription_id=_chat_subscription_id,
-        chat_activity_id=chat_activity_id,
-        collaboration_activity_id=collaboration_activity_id,
-        session=session,
-        execution=execution,
-        queue_result=queue_result,
-        is_queued=is_queued,
-        chat_timeout=chat_timeout,
-        idem=idem,
-        capacity=capacity,
-    )
-
-
-async def _run_chat_and_finalize(
-    *,
-    name: str,
-    request: ChatMessageRequest,
-    current_user: User,
-    x_source_agent: Optional[str],
-    x_mcp_key_name: Optional[str],
-    triggered_by: str,
-    task_execution_id: object,
-    _chat_subscription_id: object,
-    chat_activity_id: object,
-    collaboration_activity_id: object,
-    session: object,
-    execution: object,
-    queue_result: str,
-    is_queued: bool,
-    chat_timeout: int,
-    idem: object,
-    capacity: object,
-):
-    """Execute the chat against the agent and finalize (#1026 slice 3).
-
-    Dispatches the request to the agent server, persists the assistant message +
-    observability, completes the chat/collaboration activities, writes the
-    terminal execution-status row, and stores the idempotency snapshot. On the
-    agent-call error paths it records the failure, runs SUB-003 auto-switch
-    (429/auth), and raises the mapped HTTPException. The ``finally`` always
-    releases the capacity slot and any still-in-flight idempotency claim.
-    Returns the agent response dict (the endpoint's response body).
-    """
-    idem_done = False
-    execution_success = False
+    # auto-switch. The service is HTTP-free — its failure paths raise
+    # ChatDispatchError, which this thin handler maps 1:1 to an HTTPException.
+    # The finally in run_chat_turn releases the slot + idem claim.
     try:
-        # chat_timeout already fetched above for slot acquisition (Issue #98)
-
-        payload = {"message": request.message, "stream": False}
-        if request.model:
-            payload["model"] = request.model
-        # Inject platform instructions + execution context (#171) into every chat request.
-        # Resolve the agent runtime (best-effort, never raises) so the MCP-tool
-        # naming in the platform prompt matches the harness (#1187 F-MCP). Lazy +
-        # guarded import so a re-import under a stubbed services.docker_service
-        # (unit tests) can't break dispatch; Claude default on any failure.
-        try:
-            from services.docker_service import get_agent_runtime
-            agent_runtime = get_agent_runtime(name)
-        except Exception:
-            agent_runtime = "claude-code"
-        try:
-            exec_ctx = ExecutionContext(
-                agent_name=name,
-                mode="chat",
-                triggered_by=triggered_by,
-                source_user_email=current_user.email or current_user.username,
-                source_agent_name=x_source_agent,
-                source_mcp_key_name=x_mcp_key_name,
-                model=request.model,
-            )
-            payload["system_prompt"] = compose_system_prompt(
-                execution_context=exec_ctx,
-                include_execution_context=is_execution_context_enabled(),
-                runtime=agent_runtime,
-            )
-        except Exception as e:
-            logger.warning(f"[Chat] execution context build failed, falling back: {e}")
-            payload["system_prompt"] = get_platform_system_prompt(runtime=agent_runtime)
-        # Pass execution ID so agent registers process under the same ID (enables termination)
-        if task_execution_id:
-            payload["execution_id"] = task_execution_id
-
-        # Mark execution dispatched BEFORE calling agent so the cleanup-service
-        # no-session sweep doesn't falsely fail long-running executions
-        # (mirrors services/task_execution_service.py:401-410, fixes #686 —
-        # parallel codepath of #279).
-        if task_execution_id:
-            try:
-                db.mark_execution_dispatched(task_execution_id)
-            except Exception as e:
-                logger.warning(f"[Chat] Failed to mark execution dispatched: {e}")
-
-        start_time = datetime.utcnow()
-
-        # Use retry helper to handle agent server startup delays
-        response = await agent_post_with_retry(
-            name,
-            "/api/chat",
-            payload,
-            max_retries=3,
-            retry_delay=1.0,
-            timeout=chat_timeout + 10  # Add buffer for HTTP overhead
+        return await chat_execution_service.run_chat_turn(
+            name=name,
+            request=request,
+            current_user=current_user,
+            x_source_agent=x_source_agent,
+            x_mcp_key_name=x_mcp_key_name,
+            triggered_by=triggered_by,
+            task_execution_id=task_execution_id,
+            _chat_subscription_id=_chat_subscription_id,
+            chat_activity_id=chat_activity_id,
+            collaboration_activity_id=collaboration_activity_id,
+            session=session,
+            execution=execution,
+            queue_result=queue_result,
+            is_queued=is_queued,
+            chat_timeout=chat_timeout,
+            idem=idem,
+            capacity=capacity,
         )
-        response.raise_for_status()
-
-        response_data = response.json()
-
-        # Extract metadata for persistence
-        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
-        metadata = response_data.get("metadata", {})
-        session_data = response_data.get("session", {})
-
-        # Serialize tool calls if present
-        # Note: Check is not None, not truthiness - empty list [] is valid log
-        # execution_log is now raw Claude Code format for UI
-        # execution_log_simplified is the old format for activity tracking
-        execution_log = response_data.get("execution_log", [])
-        execution_log_simplified = response_data.get("execution_log_simplified", execution_log)
-        execution_log_json = json.dumps(execution_log) if execution_log is not None else None
-        tool_calls_json = json.dumps(execution_log_simplified) if execution_log_simplified is not None else None
-
-        # SECURITY: Sanitize credentials from execution logs and response before persistence
-        execution_log_json = sanitize_execution_log(execution_log_json)
-        tool_calls_json = sanitize_execution_log(tool_calls_json)
-        sanitized_response = sanitize_response(response_data.get("response", ""))
-
-        # Log assistant response to database with observability data
-        # SECURITY: Use sanitized response
-        assistant_message = db.add_chat_message(
-            session_id=session.id,
-            agent_name=name,
-            user_id=current_user.id,
-            user_email=current_user.email or current_user.username,
-            role="assistant",
-            content=sanitized_response,
-            cost=metadata.get("cost_usd"),
-            context_used=session_data.get("context_tokens"),
-            context_max=session_data.get("context_window"),
-            tool_calls=tool_calls_json,
-            execution_time_ms=execution_time_ms,
-            subscription_id=_chat_subscription_id,
-            output_tokens=metadata.get("output_tokens"),
-        )
-
-        # Note: Tool calls are stored in chat_messages.tool_calls JSON column
-        # Individual tool_call activities were removed (Issue #45) - they were
-        # duplicate data that accumulated as orphans (never completed)
-
-        # Track chat completion
-        await activity_service.complete_activity(
-            activity_id=chat_activity_id,
-            status=ActivityState.COMPLETED,
-            details={
-                "related_chat_message_id": assistant_message.id,
-                "context_used": session_data.get("context_tokens"),
-                "context_max": session_data.get("context_window"),
-                "cost_usd": metadata.get("cost_usd"),
-                "execution_time_ms": execution_time_ms,
-                "tool_count": len(execution_log_simplified),
-                "execution_id": task_execution_id  # Use database execution ID, not queue ID
-            }
-        )
-
-        # Complete collaboration activity if this was agent-to-agent
-        if collaboration_activity_id:
-            await activity_service.complete_activity(
-                activity_id=collaboration_activity_id,
-                status=ActivityState.COMPLETED,
-                details={
-                    "related_chat_message_id": assistant_message.id,
-                    "response_length": len(response_data.get("response", "")),
-                    "execution_time_ms": execution_time_ms,
-                    "execution_id": task_execution_id  # Use database execution ID, not queue ID
-                }
-            )
-
-        # Update task execution record with results (#96: all chat types now have execution records)
-        # SECURITY: Use sanitized response and execution logs
-        if task_execution_id:
-            context_used = session_data.get("context_tokens", 0)
-            # Persist the real Claude session UUID instead of the 'dispatched'
-            # sentinel set by mark_execution_dispatched (#686 UC1 — closes
-            # observability gap; falls back to existing sentinel if absent).
-            # Defense-in-depth: agent-server emits session IDs as uuid4 strings
-            # (docker/base-image/agent_server/services/headless_executor.py:167).
-            # Reject malformed values so a buggy/compromised agent can't poison
-            # the claude_session_id column — on rejection leave the 'dispatched'
-            # sentinel (cleanup sweep stays correct, observability lost for row).
-            real_session_id = (
-                response_data.get("session_id")
-                or session_data.get("session_id")
-                or metadata.get("session_id")
-            )
-            if real_session_id is not None:
-                try:
-                    uuid.UUID(str(real_session_id))
-                except (ValueError, TypeError, AttributeError):
-                    logger.warning(
-                        f"[Chat] Discarding malformed claude_session_id from agent response "
-                        f"(execution_id={task_execution_id})"
-                    )
-                    real_session_id = None
-            db.update_execution_status(
-                execution_id=task_execution_id,
-                status=TaskExecutionStatus.SUCCESS,
-                response=sanitized_response,
-                context_used=context_used if context_used > 0 else None,
-                context_max=session_data.get("context_window") or DEFAULT_CONTEXT_WINDOW,
-                cost=metadata.get("cost_usd"),
-                tool_calls=tool_calls_json,  # Simplified format for activity tracking
-                execution_log=execution_log_json,  # Raw Claude Code format for UI
-                claude_session_id=real_session_id,
-            )
-
-        execution_success = True
-
-        # Add execution metadata to response
-        # Include both IDs for clarity:
-        # - id: Queue execution ID (transient, for queue status tracking)
-        # - task_execution_id: Database execution ID (permanent, for API queries and navigation)
-        response_data["execution"] = {
-            "id": execution.id,  # Queue ID (transient)
-            "task_execution_id": task_execution_id,  # Database ID (permanent) - use this for navigation
-            "queue_status": queue_result,
-            "was_queued": is_queued
-        }
-
-        # RELIABILITY-006 (#525): store the result so a duplicate Idempotency-Key
-        # replays this exact response instead of dispatching a second execution.
-        idempotency_service.complete(idem, task_execution_id, response_data)
-        idem_done = True
-
-        return response_data
-    except BackendAgentCallBudgetExhausted as _budget_e:
-        # #904 RC-1: backend agent-call budget exhausted. Translate to a
-        # 503 without firing SUB-003 (no Claude work started; the
-        # subscription is unrelated to the rejection). Close out the
-        # in-flight chat activity + execution row in the FAILED state
-        # so the timeline reflects the rejection accurately.
-        budget_msg = str(_budget_e)
-        # #1332: read the row's current state BEFORE closing activities. If it
-        # already went terminal (e.g. CANCELLED via an operator terminate that
-        # raced this rejection), mirror that real state onto the chat/collab
-        # activities instead of stamping FAILED over a cancel. A still-RUNNING
-        # or missing row maps to FAILED — the genuine-rejection case.
-        existing = db.get_execution(task_execution_id) if task_execution_id else None
-        budget_close_state = (
-            activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
-        )
-        budget_close_error = budget_msg if budget_close_state == ActivityState.FAILED else None
-        await activity_service.complete_activity(
-            activity_id=chat_activity_id,
-            status=budget_close_state,
-            error=budget_close_error,
-        )
-        if task_execution_id and (not existing or existing.status != TaskExecutionStatus.CANCELLED):
-            db.update_execution_status(
-                execution_id=task_execution_id,
-                status=TaskExecutionStatus.FAILED,
-                error=budget_msg,
-            )
-        if collaboration_activity_id:
-            await activity_service.complete_activity(
-                activity_id=collaboration_activity_id,
-                status=budget_close_state,
-                error=budget_close_error,
-            )
-        raise HTTPException(status_code=503, detail=budget_msg)
-
-    except httpx.HTTPError as e:
-        import logging
-        # Extract detailed error message from agent response if available
-        error_msg = f"HTTP error: {type(e).__name__}"
-        agent_status_code = None
-        # #678: salvage partial metadata when the agent returned the
-        # structured dict body from _classify_empty_result.
-        partial_metadata: dict = {}
-        if hasattr(e, 'response') and e.response is not None:
-            agent_status_code = e.response.status_code
-            try:
-                error_data = e.response.json()
-                detail = error_data.get("detail")
-                if isinstance(detail, dict):
-                    error_msg = detail.get("message") or str(detail)
-                    if isinstance(detail.get("metadata"), dict):
-                        partial_metadata = sanitize_dict(detail["metadata"])
-                elif "detail" in error_data:
-                    error_msg = error_data["detail"]
-            except Exception:
-                # Try raw text if JSON parsing fails
-                if e.response.text:
-                    error_msg = e.response.text[:500]
-        logging.getLogger("trinity.errors").error(f"Failed to communicate with agent {name}: {error_msg}")
-
-        # #1332: read the row state BEFORE closing activities so a row already
-        # CANCELLED (operator terminate raced this HTTP error) closes the
-        # chat/collab activities as CANCELLED, not FAILED. RUNNING/missing → FAILED.
-        existing = db.get_execution(task_execution_id) if task_execution_id else None
-        http_close_state = (
-            activity_state_for_terminal(existing.status) if existing else ActivityState.FAILED
-        )
-        http_close_error = error_msg if http_close_state == ActivityState.FAILED else None
-
-        # Track chat failure
-        await activity_service.complete_activity(
-            activity_id=chat_activity_id,
-            status=http_close_state,
-            error=http_close_error,
-        )
-
-        # Update task execution record on failure (#96: all chat types now have execution records)
-        # #678: salvage cost/context from partial_metadata when the agent
-        # captured them before the reader-thread race wedged its stream.
-        # Mirror the cancellation-race guard from task_execution_service.py:
-        # the SQL WHERE clause in update_execution_status already blocks a
-        # FAILED write over a CANCELLED row, but the explicit pre-check
-        # keeps the two callers consistent and avoids a wasted UPDATE.
-        if task_execution_id and (not existing or existing.status != TaskExecutionStatus.CANCELLED):
-            salvage_cost = partial_metadata.get("cost_usd") if partial_metadata else None
-            salvage_context = _compute_context_used(partial_metadata) if partial_metadata else None
-            salvage_context_max = (
-                (partial_metadata.get("context_window") or DEFAULT_CONTEXT_WINDOW)
-                if partial_metadata
-                else None
-            )
-            db.update_execution_status(
-                execution_id=task_execution_id,
-                status=TaskExecutionStatus.FAILED,
-                error=error_msg,
-                cost=salvage_cost,
-                context_used=salvage_context,
-                context_max=salvage_context_max,
-            )
-
-        # Complete collaboration activity on failure (was missing - caused activities to stay in "started" state)
-        if collaboration_activity_id:
-            await activity_service.complete_activity(
-                activity_id=collaboration_activity_id,
-                status=http_close_state,
-                error=http_close_error,
-            )
-
-        # SUB-003 (#441): Auto-switch on rate-limit (429) OR auth-class
-        # failures (503 from agent server, or auth indicators in the error).
-        from services.subscription_auto_switch import (
-            handle_subscription_failure,
-            is_auth_failure,
-        )
-
-        if agent_status_code == 429:
-            try:
-                switch_result = await handle_subscription_failure(
-                    agent_name=name,
-                    error_message=error_msg,
-                    failure_kind="rate_limit",
-                )
-                if switch_result:
-                    # Auto-switch happened — inform the caller
-                    raise HTTPException(
-                        status_code=429,
-                        detail={
-                            "error": error_msg,
-                            "auto_switch": switch_result,
-                            "message": (
-                                f"Rate limit hit. Subscription auto-switched to "
-                                f"'{switch_result['new_subscription']}'. Please retry."
-                            ),
-                            "retry_after": 15,
-                        }
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"[SUB-003] Auto-switch check failed for '{name}': {e}")
-
-            # Preserve 429 from agent so frontend can show clear message
-            raise HTTPException(status_code=429, detail=error_msg)
-
-        if agent_status_code == 503 or is_auth_failure(error_msg):
-            try:
-                switch_result = await handle_subscription_failure(
-                    agent_name=name,
-                    error_message=error_msg,
-                    failure_kind="auth",
-                )
-                if switch_result:
-                    # Auto-switch happened — surface as 503 + retry hint so the
-                    # frontend gets the same retry UX as the 429 path.
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "error": error_msg,
-                            "auto_switch": switch_result,
-                            "message": (
-                                f"Authentication failure on subscription. Auto-switched to "
-                                f"'{switch_result['new_subscription']}'. Please retry."
-                            ),
-                            "retry_after": 15,
-                        }
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"[SUB-003] Auto-switch check failed for '{name}': {e}")
-
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to communicate with agent: {error_msg}"
-        )
-    finally:
-        # CAPACITY-CONSOLIDATE (#428): single release covers both the
-        # SlotService N-ary counter and the in-memory overflow bookkeeping.
-        await capacity.release(name, execution.id)
-        # RELIABILITY-006 (#525): on any non-success exit, release the in-flight
-        # idempotency claim so the caller can legitimately retry (no-op on the
-        # success path, where complete() already finalized it).
-        if not idem_done:
-            idempotency_service.fail(idem)
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 async def _run_async_task_with_persistence(
@@ -1335,7 +768,7 @@ async def execute_parallel_task(
                 }))
         else:
             # Regular agent-to-agent collaboration
-            await broadcast_collaboration_event(
+            await chat_execution_service.broadcast_collaboration_event(
                 source_agent=x_source_agent,
                 target_agent=name,
                 action="parallel_task"
