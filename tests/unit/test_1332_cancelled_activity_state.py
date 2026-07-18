@@ -241,30 +241,32 @@ class TestCollaborationAndSelfTaskCloses:
     pytestmark = pytest.mark.unit
 
     def test_collaboration_close_cancelled(self):
-        import routers.chat as chat
+        # #1483: the /task post-processing helpers moved to chat_execution_service
+        # (renamed off the leading underscore).
+        import services.chat_execution_service as ce
         from models import ActivityState
 
         mock_activity = MagicMock(complete_activity=AsyncMock())
-        with patch.object(chat, "activity_service", mock_activity):
+        with patch.object(ce, "activity_service", mock_activity):
             _await(
-                chat._complete_collaboration_activity(
+                ce.complete_collaboration_activity(
                     "collab-act", _cancelled_result(), "exec-1332", 1234,
                 )
             )
         assert mock_activity.complete_activity.await_args.kwargs["status"] == ActivityState.CANCELLED
 
     def test_self_task_close_cancelled(self):
-        import routers.chat as chat
+        import services.chat_execution_service as ce
         from models import ActivityState
 
         request = MagicMock(inject_result=False, chat_session_id=None)
         mock_activity = MagicMock(complete_activity=AsyncMock())
         with (
-            patch.object(chat, "activity_service", mock_activity),
-            patch.object(chat, "_websocket_manager", None),
+            patch.object(ce, "activity_service", mock_activity),
+            patch.object(ce, "_websocket_manager", None),
         ):
             _await(
-                chat._finalize_self_task(
+                ce.finalize_self_task(
                     is_self_task=True,
                     self_task_activity_id="self-act",
                     agent_name="test-agent",

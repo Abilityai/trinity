@@ -43,6 +43,7 @@ while _BACKEND_STR in sys.path:
 sys.path.insert(0, _BACKEND_STR)
 
 from db_harness import db_backend  # noqa: E402,F401  (db_backend is a pytest fixture)
+from services import chat_persistence_service  # noqa: E402  (#1483: no longer a routers.chat attr)
 
 pytestmark = pytest.mark.unit
 
@@ -122,20 +123,23 @@ def _count(table: str) -> int:
 # ---------------------------------------------------------------------------
 
 def test_async_wrapper_persists_session_on_success(chat_mod, monkeypatch):
-    """`_run_async_task_with_persistence` with a SUCCESS `execute_task` creates
-    one chat_sessions row + a user AND an assistant chat_messages row.
+    """`run_async_task` with a SUCCESS `execute_task` creates one chat_sessions
+    row + a user AND an assistant chat_messages row.
 
     This is the exact contract the failing integration test asserts, driven at
     unit speed with a stubbed execute_task — the guard that would have caught
-    #1444 in CI."""
+    #1444 in CI. (#1483: the wrapper moved to chat_execution_service, reached via
+    the router's `chat_execution_service` module attribute.)"""
 
     class _Svc:
         async def execute_task(self, **kwargs):
             return _SuccessResult(execution_id=kwargs.get("execution_id") or "exec-1")
 
-    monkeypatch.setattr(chat_mod, "get_task_execution_service", lambda: _Svc())
+    monkeypatch.setattr(
+        chat_mod.chat_execution_service, "get_task_execution_service", lambda: _Svc()
+    )
 
-    asyncio.run(chat_mod._run_async_task_with_persistence(
+    asyncio.run(chat_mod.chat_execution_service.run_async_task(
         agent_name="agent-a",
         request=_make_request(chat_mod),
         execution_id="exec-1",
@@ -163,7 +167,7 @@ def test_async_wrapper_persists_session_on_success(chat_mod, monkeypatch):
 def test_persist_returns_session_id_on_success(chat_mod):
     """Direct `persist_chat_session` on a SUCCESS result returns the new
     session id and writes both messages (the primitive Fold 2 builds on)."""
-    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
+    sid = asyncio.run(chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=_make_request(chat_mod),
         result=_SuccessResult(),
@@ -178,7 +182,7 @@ def test_persist_returns_session_id_on_success(chat_mod):
 def test_no_persist_on_non_success(chat_mod):
     """A non-SUCCESS terminal (FAILED/CANCELLED) must NOT write an empty
     assistant message — persistence is guarded on SUCCESS."""
-    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
+    sid = asyncio.run(chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=_make_request(chat_mod),
         result=_FailedResult(),
@@ -210,7 +214,7 @@ def test_persist_failure_is_loud_safe_and_non_fatal(chat_mod, monkeypatch, caplo
     )
 
     with caplog.at_level(logging.ERROR, logger="services.chat_persistence_service"):
-        sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
+        sid = asyncio.run(chat_persistence_service.persist_chat_session(
             agent_name="agent-a",
             request=req,
             result=_SuccessResult(response=_SENSITIVE_RESP),
@@ -264,7 +268,7 @@ def test_dbapi_error_params_not_leaked_by_fail_loud_log(chat_mod, monkeypatch, c
     monkeypatch.setattr(chat_mod.db, "add_chat_message", _boom, raising=False)
 
     with caplog.at_level(logging.ERROR, logger="services.chat_persistence_service"):
-        sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
+        sid = asyncio.run(chat_persistence_service.persist_chat_session(
             agent_name="agent-a",
             request=_make_request(chat_mod, user_message=_SENSITIVE_MSG),
             result=_SuccessResult(response=_SENSITIVE_RESP),
@@ -308,7 +312,7 @@ def test_foreign_chat_session_id_falls_through_to_own_session(chat_mod):
         create_new_session=False,
         chat_session_id=session_a.id,
     )
-    sid = asyncio.run(chat_mod.chat_persistence_service.persist_chat_session(
+    sid = asyncio.run(chat_persistence_service.persist_chat_session(
         agent_name="agent-a",
         request=req,
         result=_SuccessResult(),

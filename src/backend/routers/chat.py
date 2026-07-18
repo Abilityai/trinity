@@ -8,38 +8,23 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import json
 import logging
-import asyncio
-import uuid
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource, activity_state_for_terminal
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, activity_state_for_terminal
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.activity_service import activity_service
-from services.upload_service import process_file_uploads, decode_web_file, WEB_MAX_FILES, WEB_MAX_FILE_SIZE, WEB_MAX_IMAGE_SIZE, WEB_MAX_TOTAL_IMAGE_SIZE
 from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
-    PersistentTaskPayload,
     get_capacity_manager,
 )
-from services import idempotency_service
-from services import chat_persistence_service
 from services import dispatch_admission_service
 from services import chat_execution_service
 from services.chat_signals import ChatAdmissionReplay, ChatDispatchError
-from services.event_dispatch_service import (
-    RESERVED_EVENT_TRIGGER,
-    RESERVED_EVENT_TRIGGER_HEADER_VALUE,
-    verify_internal_dispatch_secret,
-)
-from services.task_execution_service import (
-    dispatch_breaker_active,
-    get_task_execution_service,
-)
 from database import db
 from utils.helpers import utc_now_iso
 
@@ -48,14 +33,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["chat"])
 
-# WebSocket manager (injected from main.py)
-_websocket_manager = None
+# NOTE (#1483): the chat router no longer holds a WebSocket manager — every
+# broadcast (agent_collaboration, self_task, chat_response_ready) moved into
+# chat_execution_service / chat_persistence_service, each with its own
+# set_websocket_manager wired in main.py (§7: minimize WS globals).
 
-
-# Sync HTTP long-poll primitives live in services/sync_waiter.py so they're
-# importable from tests without pulling in the full router/auth chain.
-# (Issue #498)
-from services.sync_waiter import signal_sync_waiter, wait_for_sync_terminal
+# The #1068 deprecated-timeout usage counter sources its redis client from the
+# auth router (RD10: kept at the router boundary so a service never imports a
+# router — the exact Invariant #1 smell the split enforces against).
 from routers.auth import get_redis_client
 
 
@@ -136,12 +121,6 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
         detail={"error": "circuit_open", "retry_after_seconds": retry_after},
         headers={"X-Circuit-Open": "true", "Retry-After": str(retry_after)},
     )
-
-
-def set_websocket_manager(manager):
-    """Set WebSocket manager for broadcasting collaboration events."""
-    global _websocket_manager
-    _websocket_manager = manager
 
 
 @router.post("/{name}/chat")
@@ -290,104 +269,6 @@ async def chat_with_agent(
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
-async def _run_async_task_with_persistence(
-    agent_name: str,
-    request: ParallelTaskRequest,
-    execution_id: str,
-    collaboration_activity_id: Optional[str],
-    x_source_agent: Optional[str],
-    user_id: Optional[int] = None,
-    user_email: Optional[str] = None,
-    subscription_id: Optional[str] = None,
-    is_self_task: bool = False,
-    self_task_activity_id: Optional[str] = None,
-    images: Optional[list] = None,
-    dispatch_gate_checked: bool = False,
-    triggered_by_override: Optional[str] = None,
-):
-    """
-    Async /task background wrapper (issue #95).
-
-    Delegates the full execution lifecycle to TaskExecutionService (single path
-    for slot / activity / sanitization / retry / release) and layers on the
-    chat-endpoint-specific post-task side effects:
-      - authenticated chat_session persistence (THINK-001)
-      - chat_response_ready WebSocket broadcast
-      - collaboration activity completion (agent-to-agent call)
-
-    Caller (execute_parallel_task async branch) has already pre-acquired the
-    capacity slot so that 429-at-capacity is returned synchronously. The
-    service will release the slot in its finally block.
-    """
-    start_time = datetime.utcnow()
-    task_service = get_task_execution_service()
-    # #1578: a reserved agent.task.* dispatch persists triggered_by="event" (the
-    # recursion-break sentinel); every other async task keeps the derived value.
-    triggered_by = triggered_by_override or ("agent" if x_source_agent else "manual")
-
-    # Outer try/finally so a sync long-poll waiter (issue #498) is always
-    # signaled even if the post-task side effects below raise.
-    result = None
-    chat_session_id = None
-    try:
-        # Service tracks CHAT_START with parent_activity_id=collaboration_activity_id
-        # and merges extra_activity_details (parallel_mode/async_mode) so the Network
-        # view filter at src/frontend/src/stores/network.js:255 still includes this
-        # execution.
-        result = await task_service.execute_task(
-            agent_name=agent_name,
-            message=request.message,
-            triggered_by=triggered_by,
-            source_user_id=user_id,
-            source_user_email=user_email,
-            source_agent_name=x_source_agent,
-            model=request.model,
-            timeout_seconds=request.timeout_seconds,
-            resume_session_id=request.resume_session_id,
-            allowed_tools=request.allowed_tools,
-            system_prompt=request.system_prompt,
-            execution_id=execution_id,
-            subscription_id=subscription_id,
-            parent_activity_id=collaboration_activity_id,
-            extra_activity_details={
-                "parallel_mode": True,
-                "async_mode": True,
-                "model": request.model,
-                "timeout_seconds": request.timeout_seconds,
-            },
-            slot_already_held=True,  # Router pre-acquired to preserve 429-upfront contract
-            images=images or [],
-            dispatch_gate_checked=dispatch_gate_checked,  # #526: True when router gated at acquire()
-        )
-
-        execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
-
-        # Post-task side effects (each guarded + self-isolating; see helpers).
-        chat_session_id = await chat_persistence_service.persist_and_broadcast_chat_session(
-            agent_name=agent_name, request=request, result=result,
-            execution_id=execution_id, user_id=user_id, user_email=user_email,
-            subscription_id=subscription_id, execution_time_ms=execution_time_ms,
-        )
-        await _complete_collaboration_activity(
-            collaboration_activity_id, result, execution_id, execution_time_ms,
-        )
-        await _finalize_self_task(
-            is_self_task=is_self_task, self_task_activity_id=self_task_activity_id,
-            agent_name=agent_name, request=request, result=result,
-            execution_id=execution_id, user_id=user_id, user_email=user_email,
-            execution_time_ms=execution_time_ms,
-        )
-
-        logger.info(
-            f"[Task Async] Completed background task for agent '{agent_name}', "
-            f"execution_id={execution_id}, status={result.status}"
-        )
-    finally:
-        # Issue #498: signal any sync HTTP caller waiting on this execution.
-        # No-op when no waiter is registered (the common async path).
-        signal_sync_waiter(execution_id, result, chat_session_id)
-
-
 def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
     """#1068 (demotion PR 1): deprecated per-task timeout override — honor but clamp
     to the agent cap (closing the pre-#1068 unclamped escape around the #929 invariant
@@ -397,110 +278,6 @@ def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -
     if requested > agent_cap:
         return agent_cap, f"timeout_seconds={requested}s exceeds agent cap {agent_cap}s; clamping (field deprecated, will be removed)."
     return requested, f"timeout_seconds={requested}s deprecated; agent cap ({agent_cap}s) is authoritative."
-
-
-async def _complete_collaboration_activity(
-    collaboration_activity_id, result, execution_id, execution_time_ms,
-):
-    """Post-task block 2: complete the agent-to-agent collaboration activity.
-    No-op when there is no collaboration activity; self-isolating on error."""
-    if not collaboration_activity_id:
-        return
-    try:
-        await activity_service.complete_activity(
-            activity_id=collaboration_activity_id,
-            # #1332: a cancelled collaboration turn reads as CANCELLED, not FAILED.
-            status=activity_state_for_terminal(result.status),
-            details={
-                "response_length": len(result.response or ""),
-                "execution_time_ms": execution_time_ms,
-                "execution_id": execution_id,
-            },
-            error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
-        )
-    except Exception as e:
-        logger.warning(f"[Task Async] collaboration activity completion failed: {e}")
-
-
-async def _finalize_self_task(
-    *, is_self_task, self_task_activity_id, agent_name, request, result,
-    execution_id, user_id, user_email, execution_time_ms,
-):
-    """Post-task block 3 (SELF-EXEC-001): complete the self-task activity,
-    inject the result into the originating chat session when requested, and
-    broadcast the completion event. No-op unless this is a self-task."""
-    if not (is_self_task and self_task_activity_id):
-        return
-
-    # #1332: a cancelled self-task turn reads as CANCELLED, not FAILED.
-    activity_status = activity_state_for_terminal(result.status)
-
-    # Complete the self-task activity
-    try:
-        await activity_service.complete_activity(
-            activity_id=self_task_activity_id,
-            status=activity_status,
-            details={
-                "response_length": len(result.response or ""),
-                "execution_time_ms": execution_time_ms,
-                "execution_id": execution_id,
-                "inject_result": request.inject_result,
-            },
-            error=(result.error if result.status == TaskExecutionStatus.FAILED else None),
-        )
-    except Exception as e:
-        logger.warning(f"[Task Async] self-task activity completion failed: {e}")
-
-    # Inject result into chat session if requested
-    if request.inject_result and request.chat_session_id and result.status == TaskExecutionStatus.SUCCESS:
-        try:
-            # Validate session exists and belongs to user
-            session = db.get_chat_session(request.chat_session_id)
-            if session and session.user_id == user_id:
-                # Add self-task result as a chat message
-                db.add_chat_message(
-                    session_id=request.chat_session_id,
-                    agent_name=agent_name,
-                    user_id=user_id,
-                    user_email=user_email or "",
-                    role="assistant",
-                    content=result.response or "",
-                    cost=result.cost,
-                    context_used=result.context_used,
-                    context_max=result.context_max,
-                    execution_time_ms=execution_time_ms,
-                    source="self_task",  # Mark as self-task result
-                )
-                logger.info(f"[Self-Task] Injected result into chat session {request.chat_session_id}")
-            else:
-                logger.warning(f"[Self-Task] Cannot inject result: session {request.chat_session_id} not found or not owned by user")
-        except Exception as e:
-            logger.warning(f"[Self-Task] Failed to inject result into chat session: {e}")
-
-    # Broadcast self-task completion event
-    if _websocket_manager:
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "agent_activity",
-                "agent_name": agent_name,
-                "activity_type": "self_task",
-                # #1332: mirror the activity DB state (cancelled stays cancelled)
-                # so the WS event and the persisted row never disagree.
-                "activity_state": activity_status.value,
-                "action": f"Background task completed",
-                "timestamp": utc_now_iso(),
-                "details": {
-                    "execution_id": execution_id,
-                    "chat_session_id": request.chat_session_id,
-                    "cost_usd": result.cost,
-                    "execution_time_ms": execution_time_ms,
-                    "response_preview": (result.response or "")[:200],
-                    "inject_result": request.inject_result,
-                    "result_injected": request.inject_result and request.chat_session_id is not None,
-                }
-            }))
-        except Exception as e:
-            logger.warning(f"[Self-Task] WebSocket broadcast failed: {e}")
 
 
 @router.post("/{name}/task")
@@ -592,578 +369,42 @@ async def execute_parallel_task(
             _record_deprecated_task_timeout_use()  # durable signal for the soak gate
         request.timeout_seconds = _resolved_timeout
 
-    # SELF-EXEC-001: Security validation - verify X-Source-Agent matches MCP key's agent scope
-    # This prevents header spoofing where a caller claims to be a different agent
-    if x_source_agent and current_user.agent_name:
-        if x_source_agent != current_user.agent_name:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Source agent header '{x_source_agent}' doesn't match API key scope '{current_user.agent_name}'"
-            )
-
-    # SELF-EXEC-001: Detect self-task (agent calling itself)
-    is_self_task = (x_source_agent is not None and x_source_agent == name)
-
-    # Determine execution source for logging
-    if x_source_agent:
-        source = ExecutionSource.AGENT
-        triggered_by = "self_task" if is_self_task else "agent"
-    elif x_via_mcp:
-        source = ExecutionSource.USER
-        triggered_by = "mcp"
-    else:
-        source = ExecutionSource.USER
-        triggered_by = "manual"
-
-    # #1578 recursion-break: a task the backend dispatched for a reserved
-    # `agent.task.*` completion event carries X-Event-Trigger. Persist it as
-    # `triggered_by="event"` so the emit helper suppresses this task's OWN
-    # terminal event — breaking self / A↔B / A→B→C→A auto-emit cycles at the
-    # root. The tag is honored ONLY when accompanied by a valid backend-internal
-    # `X-Internal-Secret` (C-003) — trigger_subscription stamps both, so an
-    # external `/task` caller spoofing X-Event-Trigger alone cannot suppress a
-    # real agent's completion event.
-    reserved_event_dispatch = (
-        x_event_trigger == RESERVED_EVENT_TRIGGER_HEADER_VALUE
-        and verify_internal_dispatch_secret(x_internal_secret)
-    )
-    if reserved_event_dispatch:
-        triggered_by = RESERVED_EVENT_TRIGGER
-
-    # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicates before
-    # any file upload / execution-record creation. Optional header — absent →
-    # dedup off, request proceeds normally. Post-dispatch failures intentionally
-    # leave the claim in place (a duplicate within the 24h TTL gets a 409 with
-    # the original execution_id to poll); only upfront at-capacity rejections
-    # release the claim so the caller can retry once capacity frees. The begin +
-    # replay-signal lives in dispatch_admission_service (shared with /chat, RD2);
-    # the replay audit + 409/200 mapping stay here (router HTTP boundary).
-    idem, replay = dispatch_admission_service.begin_task_idempotency(
-        name=name, idempotency_key=idempotency_key,
-    )
-    if replay is not None:
-        await dispatch_admission_service.audit_idempotent_replay(
-            name=name, endpoint=f"/api/agents/{name}/task", x_via_mcp=x_via_mcp,
-            x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
-            x_mcp_key_name=x_mcp_key_name, current_user=current_user,
-            idempotency_key=idempotency_key, idem=idem,
+    # Derive → idempotency → file upload → create-row → async/sync dispatch all
+    # live in chat_execution_service now (Invariant #1). It is HTTP-free: it
+    # raises ChatDispatchError (mapped 1:1 here) and returns a response dict OR a
+    # ChatAdmissionReplay (idempotent replay → 409 in-flight / 200 JSONResponse).
+    try:
+        result = await chat_execution_service.dispatch_parallel_task(
+            request=request,
+            name=name,
+            current_user=current_user,
+            container=container,
+            x_source_agent=x_source_agent,
+            x_via_mcp=x_via_mcp,
+            x_mcp_key_id=x_mcp_key_id,
+            x_mcp_key_name=x_mcp_key_name,
+            idempotency_key=idempotency_key,
+            x_event_trigger=x_event_trigger,
+            x_internal_secret=x_internal_secret,
         )
-        if replay.in_flight:
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+    if isinstance(result, ChatAdmissionReplay):
+        if result.in_flight:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "request_in_progress",
                     "message": "A request with this Idempotency-Key is still being processed.",
-                    "execution_id": replay.execution_id,
+                    "execution_id": result.execution_id,
                 },
             )
         return JSONResponse(
-            content=replay.snapshot
-            or {"task_execution_id": replay.execution_id, "async_mode": bool(request.async_mode)},
+            content=result.snapshot
+            or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
             headers={"X-Idempotent-Replay": "true"},
         )
-
-    # (#364) File upload processing — done synchronously before the async/sync
-    # fork so bytes are decoded and written to the container before we return
-    # execution_id (async) or before execute_task runs (sync).
-    _upload_dir = None
-    _image_data: list = []
-    if request.files:
-        uploader = current_user.email or current_user.username
-        raw_files = [
-            {
-                "name": f.name,
-                "mimetype": f.mimetype,
-                "size": f.size,
-                "data": decode_web_file(f.dict()),
-                "id": f"f{i}",
-            }
-            for i, f in enumerate(request.files)
-        ]
-        file_descs, _upload_dir, all_writes_failed, _image_data = await process_file_uploads(
-            raw_files=raw_files,
-            agent_name=name,
-            container=container,
-            session_id=str(current_user.id),
-            uploader=uploader,
-            source="web",
-            max_files=WEB_MAX_FILES,
-            max_file_size=WEB_MAX_FILE_SIZE,
-            max_image_size=WEB_MAX_IMAGE_SIZE,
-            max_total_image_size=WEB_MAX_TOTAL_IMAGE_SIZE,
-        )
-        if all_writes_failed:
-            raise HTTPException(
-                status_code=502,
-                detail="File upload failed: could not write to agent workspace."
-            )
-        if file_descs:
-            file_block = "\n".join(file_descs)
-            request.message = f"{request.message}\n\n{file_block}"
-
-    # SUB-004: Look up subscription for usage tracking (best-effort)
-    try:
-        _task_subscription_id = db.get_agent_subscription_id(name)
-    except Exception:
-        _task_subscription_id = None
-
-    # Create execution record in database (persisted task history).
-    # Issue #95 (E3): pass subscription_id so the pre-created execution record
-    # snapshots the subscription at creation time (service only snapshots when
-    # it creates the record itself).
-    execution = db.create_task_execution(
-        agent_name=name,
-        message=request.message,
-        triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
-        source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
-        model_used=request.model,
-        subscription_id=_task_subscription_id,
-    )
-    execution_id = execution.id if execution else None
-    idempotency_service.attach_execution(idem, execution_id)
-
-    # Broadcast collaboration event if this is agent-to-agent communication
-    # Track collaboration activity FIRST (belongs to source agent) - mirrors /api/chat pattern
-    collaboration_activity_id = None
-    self_task_activity_id = None
-
-    if x_source_agent:
-        if is_self_task:
-            # SELF-EXEC-001: Self-task - track as SELF_TASK activity (belongs to the agent itself)
-            self_task_activity_id = await activity_service.track_activity(
-                agent_name=name,  # Activity belongs to the agent running the self-task
-                activity_type=ActivityType.SELF_TASK,
-                user_id=current_user.id,
-                triggered_by="self_task",
-                related_execution_id=execution_id,
-                details={
-                    "agent_name": name,
-                    "action": "self_task",
-                    "message_preview": request.message[:100],
-                    "execution_id": execution_id,
-                    "parallel_mode": True,
-                    "inject_result": request.inject_result,
-                    "chat_session_id": request.chat_session_id,
-                }
-            )
-            # Broadcast self-task event (distinct from collaboration)
-            if _websocket_manager:
-                await _websocket_manager.broadcast(json.dumps({
-                    "type": "agent_activity",
-                    "agent_name": name,
-                    "activity_type": "self_task",
-                    "activity_state": "started",
-                    "action": f"Background task: {request.message[:50]}...",
-                    "timestamp": utc_now_iso(),
-                    "details": {
-                        "execution_id": execution_id,
-                        "chat_session_id": request.chat_session_id,
-                        "message_preview": request.message[:100],
-                        "inject_result": request.inject_result,
-                    }
-                }))
-        else:
-            # Regular agent-to-agent collaboration
-            await chat_execution_service.broadcast_collaboration_event(
-                source_agent=x_source_agent,
-                target_agent=name,
-                action="parallel_task"
-            )
-
-            # Track agent collaboration activity (belongs to source agent for Dashboard arrows)
-            collaboration_activity_id = await activity_service.track_activity(
-                agent_name=x_source_agent,  # Activity belongs to source agent (the caller)
-                activity_type=ActivityType.AGENT_COLLABORATION,
-                user_id=current_user.id,
-                triggered_by="agent",
-                related_execution_id=execution_id,  # Database execution ID for structured queries
-                details={
-                    "source_agent": x_source_agent,
-                    "target_agent": name,
-                    "action": "parallel_task",
-                    "message_preview": request.message[:100],
-                    "execution_id": execution_id,  # Also in details for WebSocket events
-                    "parallel_mode": True
-                }
-            )
-
-    # Async mode: pre-acquire capacity synchronously so at-capacity returns 429
-    # upfront (preserves existing client contract), then delegate the lifecycle
-    # to TaskExecutionService via _run_async_task_with_persistence (#95).
-    # CAPACITY-CONSOLIDATE (#428): one CapacityManager.acquire call replaces
-    # the prior slot_service.acquire_slot + backlog.enqueue dance.
-    if request.async_mode:
-        capacity = get_capacity_manager()
-        max_parallel_tasks = db.get_max_parallel_tasks(name)
-        cb_enabled = dispatch_breaker_active(name)  # #526: combined global + per-agent gate
-        effective_timeout = request.timeout_seconds
-        if effective_timeout is None:
-            effective_timeout = db.get_execution_timeout(name)
-
-        try:
-            cap_result = await capacity.acquire(
-                agent_name=name,
-                execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-                max_concurrent=max_parallel_tasks,
-                message_preview=request.message[:100] if request.message else "",
-                timeout_seconds=effective_timeout,
-                overflow_policy="queue_persistent",
-                breaker_enabled=cb_enabled,
-                overflow_payload=PersistentTaskPayload(
-                    request=request,
-                    effective_timeout=effective_timeout,
-                    user_id=current_user.id,
-                    user_email=current_user.email or current_user.username,
-                    subscription_id=_task_subscription_id,
-                    x_source_agent=x_source_agent,
-                    x_mcp_key_id=x_mcp_key_id,
-                    x_mcp_key_name=x_mcp_key_name,
-                    triggered_by=triggered_by,
-                    collaboration_activity_id=collaboration_activity_id,
-                    # #496: thread self-task fields so SELF-EXEC-001 (#264)
-                    # inject_result still works when a self-task overflows.
-                    is_self_task=is_self_task,
-                    self_task_activity_id=self_task_activity_id,
-                ),
-            )
-        except CapacityFull as e:
-            # Both capacity AND backlog are full — surface 429 with prior shape.
-            if execution_id:
-                db.update_execution_status(
-                    execution_id=execution_id,
-                    status=TaskExecutionStatus.FAILED,
-                    error=(
-                        f"Agent at capacity ({max_parallel_tasks}/{max_parallel_tasks} parallel tasks running) "
-                        f"and backlog is full"
-                    ),
-                )
-            idempotency_service.fail(idem)
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    f"Agent '{name}' is at capacity ({max_parallel_tasks} parallel tasks) "
-                    f"and its backlog is full. Try again later."
-                ),
-            ) from e
-        except CircuitOpen as e:
-            # #526: dispatch breaker open — raised before the queue_persistent
-            # enqueue, so nothing was backlogged. Close the pre-created row
-            # FAILED(circuit_open) and return 503.
-            logger.warning(f"[Task Async] Agent '{name}' dispatch circuit open, rejecting")
-            # #946: nothing dispatched — release the idempotency claim so the
-            # caller can retry with the same key once the breaker recovers,
-            # mirroring /chat (line 242) and the CapacityFull branch above.
-            # Without this the in_flight row blocks same-key retries for 24h.
-            idempotency_service.fail(idem)
-            _raise_circuit_open_503(name, execution_id, e)
-        except EphemeralBudgetExhausted as e:
-            # trinity-enterprise#69: ghost budget spent — 410, no enqueue.
-            idempotency_service.fail(idem)
-            _raise_ephemeral_exhausted_410(name, execution_id, e)
-
-        if cap_result.state == "queued_persistent":
-            logger.info(
-                f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
-            )
-            _queued_payload = {
-                "status": "queued",
-                "execution_id": execution_id,
-                "agent_name": name,
-                "message": (
-                    f"Agent at capacity; task queued. Poll GET "
-                    f"/api/agents/{name}/executions/{execution_id} for results."
-                ),
-                "async_mode": True,
-            }
-            idempotency_service.complete(idem, execution_id, _queued_payload)
-            return _queued_payload
-        slot_acquired = True  # admitted — preserved for downstream finally semantics
-
-        # Issue #279: done callback surfaces unhandled BG task exceptions.
-        def _on_task_done(task: asyncio.Task):
-            if task.cancelled():
-                logger.warning(f"[Task Async] Background task cancelled for agent '{name}', execution_id={execution_id}")
-            elif exc := task.exception():
-                logger.error(f"[Task Async] Unhandled exception in background task for agent '{name}', execution_id={execution_id}: {exc}")
-
-        bg_task = asyncio.create_task(
-            _run_async_task_with_persistence(
-                agent_name=name,
-                request=request,
-                execution_id=execution_id,
-                collaboration_activity_id=collaboration_activity_id,
-                x_source_agent=x_source_agent,
-                user_id=current_user.id,
-                user_email=current_user.email or current_user.username,
-                subscription_id=_task_subscription_id,
-                is_self_task=is_self_task,
-                self_task_activity_id=self_task_activity_id,
-                images=_image_data,
-                dispatch_gate_checked=True,  # #526: router already gated at acquire()
-                triggered_by_override=(
-                    RESERVED_EVENT_TRIGGER if reserved_event_dispatch else None
-                ),  # #1578 recursion-break
-            )
-        )
-        bg_task.add_done_callback(_on_task_done)
-
-        logger.info(f"[Task Async] Started background task for agent '{name}', execution_id={execution_id}")
-        _accepted_payload = {
-            "status": "accepted",
-            "execution_id": execution_id,
-            "agent_name": name,
-            "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
-            "async_mode": True,
-        }
-        idempotency_service.complete(idem, execution_id, _accepted_payload)
-        return _accepted_payload
-
-    # ---- Sync mode: pre-acquire capacity to mirror async branch (issue #498).
-    # On success, delegate to TaskExecutionService with slot_already_held=True
-    # so service finally still releases. On at-capacity, spill to the same
-    # backlog the async path uses and long-poll on this connection until the
-    # execution reaches a terminal status.
-    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.acquire call.
-    capacity = get_capacity_manager()
-    sync_max_parallel_tasks = db.get_max_parallel_tasks(name)
-    sync_cb_enabled = dispatch_breaker_active(name)  # #526: combined global + per-agent gate
-    sync_effective_timeout = request.timeout_seconds
-    if sync_effective_timeout is None:
-        sync_effective_timeout = db.get_execution_timeout(name)
-
-    try:
-        sync_cap_result = await capacity.acquire(
-            agent_name=name,
-            execution_id=execution_id or f"temp-{datetime.utcnow().timestamp()}",
-            max_concurrent=sync_max_parallel_tasks,
-            message_preview=request.message[:100] if request.message else "",
-            timeout_seconds=sync_effective_timeout,
-            overflow_policy="queue_persistent",
-            breaker_enabled=sync_cb_enabled,
-            overflow_payload=PersistentTaskPayload(
-                request=request,
-                effective_timeout=sync_effective_timeout,
-                user_id=current_user.id,
-                user_email=current_user.email or current_user.username,
-                subscription_id=_task_subscription_id,
-                x_source_agent=x_source_agent,
-                x_mcp_key_id=x_mcp_key_id,
-                x_mcp_key_name=x_mcp_key_name,
-                triggered_by=triggered_by,
-                collaboration_activity_id=collaboration_activity_id,
-                is_self_task=is_self_task,
-                self_task_activity_id=self_task_activity_id,
-            ),
-        )
-    except CapacityFull as e:
-        # Both capacity AND backlog are full → preserve terminal-failure semantics.
-        if execution_id:
-            db.update_execution_status(
-                execution_id=execution_id,
-                status=TaskExecutionStatus.FAILED,
-                error=(
-                    f"Agent at capacity ({sync_max_parallel_tasks}/{sync_max_parallel_tasks} parallel tasks running) "
-                    f"and backlog is full"
-                ),
-            )
-        idempotency_service.fail(idem)
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                f"Agent '{name}' is at capacity ({sync_max_parallel_tasks} parallel tasks) "
-                f"and its backlog is full. Try again later."
-            ),
-        ) from e
-    except CircuitOpen as e:
-        # #526: dispatch breaker open — raised before the queue_persistent
-        # enqueue. Close the pre-created row FAILED(circuit_open) and 503.
-        logger.warning(f"[Task Sync] Agent '{name}' dispatch circuit open, rejecting")
-        # #946: release the idempotency claim so the same-key retry isn't
-        # blocked for 24h, mirroring /chat (line 242) and CapacityFull above.
-        idempotency_service.fail(idem)
-        _raise_circuit_open_503(name, execution_id, e)
-    except EphemeralBudgetExhausted as e:
-        # trinity-enterprise#69: ghost budget spent — 410, no enqueue.
-        idempotency_service.fail(idem)
-        _raise_ephemeral_exhausted_410(name, execution_id, e)
-
-    sync_slot_acquired = sync_cap_result.state == "admitted"
-
-    if not sync_slot_acquired:
-        # Spilled to backlog — long-poll on the open HTTP connection. The drain
-        # callback fires _run_async_task_with_persistence; that helper signals
-        # _sync_waiters from its finally so we wake immediately on terminal.
-
-        # Long-poll cap: queue wait + execution time, both bounded individually
-        # by effective_timeout via slot TTL and TaskExecutionService internals.
-        # Total connection hold ≤ 2 * effective_timeout (Policy B).
-        sync_wait_cap = 2 * sync_effective_timeout
-        logger.info(
-            f"[Task Sync] Agent '{name}' at capacity — execution {execution_id} "
-            f"queued to backlog; long-polling up to {sync_wait_cap}s"
-        )
-        try:
-            wait_payload = await wait_for_sync_terminal(
-                execution_id, timeout=sync_wait_cap
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    f"Sync task on agent '{name}' did not complete within "
-                    f"{sync_wait_cap}s. Execution {execution_id} may still be "
-                    f"running; poll GET /api/agents/{name}/executions/{execution_id}."
-                ),
-            )
-
-        if wait_payload is not None and wait_payload.get("result") is not None:
-            # Drain happy path — full TaskExecutionResult is available.
-            result = wait_payload["result"]
-            sync_chat_session_id = wait_payload.get("chat_session_id")
-        else:
-            # Polling fallback caught a non-drain terminal flip (corrupt
-            # metadata, expire_stale, cleanup recovery). Reconstruct a
-            # minimal result from the row so the failure-translation block
-            # below still works.
-            row = db.get_execution(execution_id)
-            if row is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Execution {execution_id} disappeared while waiting",
-                )
-            from services.task_execution_service import TaskExecutionResult
-            result = TaskExecutionResult(
-                execution_id=execution_id,
-                status=row.status,
-                response=row.response or "",
-                cost=row.cost,
-                context_used=row.context_used,
-                context_max=row.context_max,
-                session_id=row.claude_session_id,
-                error=row.error,
-                raw_response={
-                    "response": row.response or "",
-                    "cost": row.cost,
-                    "execution_id": execution_id,
-                    "claude_session_id": row.claude_session_id,
-                },
-            )
-            sync_chat_session_id = None
-
-        # Side effects (collaboration activity, chat session persist) were
-        # handled by _run_async_task_with_persistence inside the drain — do
-        # NOT repeat them. Just translate failure and build the response.
-        # #679: CANCELLED is non-success — surface it cleanly (503 with the
-        # cancel notice) rather than returning an empty success-shaped body.
-        if result.status in ("failed", "cancelled"):
-            if "at capacity" in (result.error or ""):
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Agent '{name}' is at capacity. Try again later.",
-                )
-            elif "timed out" in (result.error or ""):
-                raise HTTPException(status_code=504, detail=result.error)
-            else:
-                raise HTTPException(
-                    status_code=503,
-                    detail=result.error or "Failed to execute task. The agent may be unavailable.",
-                )
-
-        sync_response_data = result.raw_response or {}
-        if sync_chat_session_id:
-            sync_response_data["chat_session_id"] = sync_chat_session_id
-        sync_response_data["task_execution_id"] = execution_id
-        idempotency_service.complete(idem, execution_id, sync_response_data)
-        return sync_response_data
-
-    # ---- Slot acquired immediately — existing sync path (EXEC-024) ----
-    task_execution_service = get_task_execution_service()
-    result = await task_execution_service.execute_task(
-        agent_name=name,
-        message=request.message,
-        triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
-        source_agent_name=x_source_agent,
-        source_mcp_key_id=x_mcp_key_id,
-        source_mcp_key_name=x_mcp_key_name,
-        model=request.model,
-        timeout_seconds=request.timeout_seconds,  # TIMEOUT-001: None = use agent's config
-        resume_session_id=request.resume_session_id,
-        allowed_tools=request.allowed_tools,
-        system_prompt=request.system_prompt,
-        execution_id=execution_id,
-        slot_already_held=True,  # Issue #498: router pre-acquired
-        images=_image_data,
-        dispatch_gate_checked=True,  # #526: router already gated at acquire()
-    )
-
-    # Complete collaboration activity based on result
-    if collaboration_activity_id:
-        await activity_service.complete_activity(
-            activity_id=collaboration_activity_id,
-            # #1332: a cancelled collaboration turn reads as CANCELLED, not FAILED.
-            status=activity_state_for_terminal(result.status),
-            details={
-                "response_length": len(result.response),
-                "execution_id": execution_id,
-            },
-            error=result.error if result.status == TaskExecutionStatus.FAILED else None,
-        )
-
-    # Handle failure — translate to HTTP errors
-    # #679: CANCELLED is non-success — surface it cleanly rather than returning
-    # an empty success-shaped body (result.error is "Execution cancelled by user").
-    if result.status in ("failed", "cancelled"):
-        if "at capacity" in (result.error or ""):
-            raise HTTPException(
-                status_code=429,
-                detail=f"Agent '{name}' is at capacity. Try again later."
-            )
-        elif "timed out" in (result.error or ""):
-            raise HTTPException(
-                status_code=504,
-                detail=result.error
-            )
-        else:
-            raise HTTPException(
-                status_code=503,
-                detail=result.error or "Failed to execute task. The agent may be unavailable."
-            )
-
-    # Build response from service result
-    response_data = result.raw_response
-
-    # Persist to chat session if requested (for authenticated Chat tab).
-    # Shared helper with the async branch (issue #95): guards on SUCCESS so
-    # FAILED/CANCELLED executions don't write empty assistant messages.
-    if request.save_to_session:
-        chat_session_id = await chat_persistence_service.persist_chat_session(
-            agent_name=name,
-            request=request,
-            result=result,
-            user_id=current_user.id,
-            user_email=current_user.email or current_user.username,
-            subscription_id=_task_subscription_id,
-        )
-        if chat_session_id:
-            response_data["chat_session_id"] = chat_session_id
-        elif result.status == TaskExecutionStatus.SUCCESS:
-            # Fail-loud (#1444): the turn succeeded so persistence was expected,
-            # but it returned no session id — surface a marker so the caller sees
-            # the Chat-tab history write was dropped (the ERROR log names the
-            # raise). Never 500 a completed, billed turn.
-            response_data["chat_persist_failed"] = True
-
-    # Add database execution ID to response for frontend tracking
-    response_data["task_execution_id"] = execution_id
-
-    idempotency_service.complete(idem, execution_id, response_data)
-    return response_data
+    return result
 
 
 @router.get("/{name}/chat/history")

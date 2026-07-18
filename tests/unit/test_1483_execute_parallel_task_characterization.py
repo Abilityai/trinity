@@ -30,6 +30,7 @@ import pytest
 from routers.chat import execute_parallel_task as ENDPOINT
 from services import chat_persistence_service
 import services.dispatch_admission_service as _DISPATCH
+import services.chat_execution_service as _CE
 from models import ParallelTaskRequest, TaskExecutionStatus
 
 _MOD = sys.modules[ENDPOINT.__module__]  # routers.chat (endpoint stays here)
@@ -116,16 +117,17 @@ def _env(
 
     with patch.object(_MOD, "get_agent_container", return_value=container), \
          patch.object(_MOD, "db", db), \
-         patch.object(_MOD, "idempotency_service", isvc), \
+         patch.object(_CE, "db", db), \
+         patch.object(_CE, "idempotency_service", isvc), \
          patch.object(_DISPATCH, "idempotency_service", isvc), \
          patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=AsyncMock())), \
-         patch.object(_MOD, "get_capacity_manager", return_value=cap), \
-         patch.object(_MOD, "dispatch_breaker_active", return_value=False), \
-         patch.object(_MOD, "get_task_execution_service", return_value=task_service), \
-         patch.object(_MOD, "activity_service", activity), \
+         patch.object(_CE, "get_capacity_manager", return_value=cap), \
+         patch.object(_CE, "dispatch_breaker_active", return_value=False), \
+         patch.object(_CE, "get_task_execution_service", return_value=task_service), \
+         patch.object(_CE, "activity_service", activity), \
          patch.object(chat_persistence_service, "persist_chat_session", persist), \
-         patch.object(_MOD, "_run_async_task_with_persistence", async_bg), \
-         patch.object(_MOD, "wait_for_sync_terminal", waiter):
+         patch.object(_CE, "run_async_task", async_bg), \
+         patch.object(_CE, "wait_for_sync_terminal", waiter):
         yield {
             "db": db, "isvc": isvc, "cap": cap, "task_service": task_service,
             "activity": activity, "persist": persist, "async_bg": async_bg,
@@ -286,8 +288,8 @@ def test_upload_502_does_not_fail_idempotency_claim():
     file_obj = WebFileUpload(name="f.txt", mimetype="text/plain", size=3, data_base64="YWJj")
     req = ParallelTaskRequest(message="hi", files=[file_obj])
     with _env() as m, \
-         patch.object(_MOD, "decode_web_file", return_value=b"abc"), \
-         patch.object(_MOD, "process_file_uploads",
+         patch.object(_CE, "decode_web_file", return_value=b"abc"), \
+         patch.object(_CE, "process_file_uploads",
                       AsyncMock(return_value=([], "/tmp/up", True, []))):
         with pytest.raises(Exception) as exc:
             _call(req)
@@ -315,9 +317,9 @@ def _sink_env(**kw):
 def test_1578_reserved_event_sync_sink():
     """Valid X-Event-Trigger + internal secret → triggered_by='event' at
     create_task_execution AND the sync execute_task sink."""
-    with patch.object(_MOD, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
-         patch.object(_MOD, "RESERVED_EVENT_TRIGGER", "event"), \
-         patch.object(_MOD, "verify_internal_dispatch_secret", return_value=True), \
+    with patch.object(_CE, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
+         patch.object(_CE, "RESERVED_EVENT_TRIGGER", "event"), \
+         patch.object(_CE, "verify_internal_dispatch_secret", return_value=True), \
          _env() as m:
         _call(ParallelTaskRequest(message="hi"),
               x_event_trigger="agent.task", x_internal_secret="secret")
@@ -328,9 +330,9 @@ def test_1578_reserved_event_sync_sink():
 def test_1578_reserved_event_async_override_and_backlog_sink():
     """Async path: the reserved tag flows to create_task_execution, the
     PersistentTaskPayload backlog payload, AND the async triggered_by_override."""
-    with patch.object(_MOD, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
-         patch.object(_MOD, "RESERVED_EVENT_TRIGGER", "event"), \
-         patch.object(_MOD, "verify_internal_dispatch_secret", return_value=True), \
+    with patch.object(_CE, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
+         patch.object(_CE, "RESERVED_EVENT_TRIGGER", "event"), \
+         patch.object(_CE, "verify_internal_dispatch_secret", return_value=True), \
          _env(cap_state="admitted") as m:
         _call(ParallelTaskRequest(message="hi", async_mode=True),
               x_event_trigger="agent.task", x_internal_secret="secret")
@@ -346,9 +348,9 @@ def test_1578_reserved_event_async_override_and_backlog_sink():
 def test_1578_spoofed_event_trigger_without_secret_ignored():
     """X-Event-Trigger without a valid internal secret is NOT honored — the
     task keeps its derived triggered_by (C-003 gate)."""
-    with patch.object(_MOD, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
-         patch.object(_MOD, "RESERVED_EVENT_TRIGGER", "event"), \
-         patch.object(_MOD, "verify_internal_dispatch_secret", return_value=False), \
+    with patch.object(_CE, "RESERVED_EVENT_TRIGGER_HEADER_VALUE", "agent.task"), \
+         patch.object(_CE, "RESERVED_EVENT_TRIGGER", "event"), \
+         patch.object(_CE, "verify_internal_dispatch_secret", return_value=False), \
          _env() as m:
         _call(ParallelTaskRequest(message="hi"),
               x_event_trigger="agent.task", x_internal_secret="wrong")
