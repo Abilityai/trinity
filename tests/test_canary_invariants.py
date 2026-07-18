@@ -3365,3 +3365,362 @@ class TestInvariantG04:
         # SECURITY end-to-end: the persisted violation carries no secret bytes.
         blob = json.dumps(v[0].observed_state) + (v[0].signal_query or "")
         assert secret not in blob
+
+
+# ---------------------------------------------------------------------------
+# Issue #1540 — SQL-tier collector reads route through the get_engine()/
+# DATABASE_URL seam (un-blinding on PostgreSQL).
+#
+# The `canary_db_split` fixture is the raw≠engine proof harness: writing to the
+# ENGINE file only proves the collectors read the engine seam; writing to the
+# RAW file only proves `db.connection` is no longer read. These are SQLite-on-
+# both-sides (a different *file*, not psycopg2), so `test_pg_*` (env-gated on
+# TRINITY_TEST_PG_URL) is the required real-Postgres gate for the dialect path.
+# ---------------------------------------------------------------------------
+
+
+class TestIssue1540EngineSeam:
+    # -- §6a: the un-blinding gate (the core proof) -----------------------
+
+    def test_engine_only_agents_populate_snapshot(
+        self, canary_db_split, reload_canary_split
+    ):
+        """THE un-blinding proof: agents written to the ENGINE file only must
+        populate snap.known_agents/snap.agents. Pre-#1540 `_collect_known_agents`
+        read the RAW file → empty → the whole per-agent loop
+        (S-01/E-05/B-02/E-04/G-04 and B-01) went vacuously green on Postgres.
+        """
+        _raw_path, engine_path = canary_db_split
+        _add_agent(engine_path, "a1")
+        _add_execution(engine_path, "e1", "a1", "running")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        assert snap.known_agents == {"a1"}
+        assert [a.name for a in snap.agents] == ["a1"]
+        assert snap.agents[0].running_exec_ids == {"e1"}
+
+    def test_raw_only_rows_ignored(self, canary_db_split, reload_canary_split):
+        """Negative proof: rows written to the RAW file only are IGNORED — the
+        collectors read the engine, not `db.connection`. If a collector still
+        read raw, the ghost agent + orphan row would leak into the snapshot.
+        """
+        raw_path, _engine_path = canary_db_split
+        _add_agent(raw_path, "raw-ghost")
+        _add_orphan_sharing(raw_path, "orphan-in-raw")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        assert snap.known_agents == set()
+        assert snap.agents == []
+        assert snap.orphan_refs == []
+
+    def test_s01_fires_on_engine_only_mismatch(
+        self, canary_db_split, reload_canary_split
+    ):
+        """AC: a synthetic slot–row mismatch on the engine backend fires S-01.
+        Engine running row + NO matching Redis slot → `in_sql_only`.
+        """
+        _raw_path, engine_path = canary_db_split
+        _add_agent(engine_path, "a1")
+        # Default started_at is old (past the S-01 grace) and there is no Redis
+        # slot for e1 → in_sql_only.
+        _add_execution(engine_path, "e1", "a1", "running")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+        violations = s01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["in_sql_only"] == ["e1"]
+
+    def test_s01_clean_engine_state_does_not_fire(
+        self, canary_db_split, reload_canary_split
+    ):
+        """AC: a clean slot⇄row bijection on the engine backend does NOT fire."""
+        _raw_path, engine_path = canary_db_split
+        _add_agent(engine_path, "a1")
+        _add_execution(engine_path, "e1", "a1", "running")
+        reload_canary_split["redis"].zadd("agent:slots:a1", {"e1": 1.0})
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+        assert s01.check(snap) == []
+
+    def test_l03_fires_on_engine_only_orphan(
+        self, canary_db_split, reload_canary_split
+    ):
+        """Fleet-wide read un-blinds: an orphan agent_sharing row in the ENGINE
+        file (agent absent from ENGINE agent_ownership) fires L-03.
+        """
+        _raw_path, engine_path = canary_db_split
+        _add_agent(engine_path, "a1")
+        _add_orphan_sharing(engine_path, "ghost")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        assert {r.referenced_agent_name for r in snap.orphan_refs} == {"ghost"}
+        from canary.invariants import l03_delete_cascades as l03
+        assert len(l03.check(snap)) >= 1
+
+    def test_e05_fires_on_engine_only_dispatched_row(
+        self, canary_db_split, reload_canary_split
+    ):
+        """Fleet-wide read un-blinds: an old ENGINE running row with no session
+        id fires E-05.
+        """
+        _raw_path, engine_path = canary_db_split
+        _add_agent(engine_path, "a1")
+        _add_execution(engine_path, "e-old", "a1", "running")
+
+        snap = reload_canary_split["canary"].collect_snapshot()
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        violations = e05.check(snap)
+        assert [x.observed_state["execution_id"] for x in violations] == ["e-old"]
+
+    # -- §6f: composite-PK agent_tags orphan scan (the HIGH regression) ----
+
+    def test_orphan_scan_agent_tags_composite_pk(self, canary_db, reload_canary):
+        """L-03 orphan scan over the composite-PK `agent_tags` table (no `id`
+        column) yields a synthetic `agent_tags-row` row_id. Direct regression for
+        the `KeyError('id')` a reflected-PK port would have crashed on — the PK is
+        derived from the STATIC db/tables.py Table, not reflection.
+        """
+        _add_agent(canary_db, "real")
+        c = _conn(canary_db)
+        c.execute(
+            "INSERT INTO agent_tags (agent_name, tag) VALUES (?, ?)",
+            ("ghost-tagged", "priority"),
+        )
+        c.commit()
+        c.close()
+
+        snap = reload_canary["canary"].collect_snapshot()
+        tag_refs = [r for r in snap.orphan_refs if r.table == "agent_tags"]
+        assert len(tag_refs) == 1
+        assert tag_refs[0].referenced_agent_name == "ghost-tagged"
+        assert tag_refs[0].row_id == "agent_tags-row"
+
+    # -- §6c: minimal-DDL fail-open on the engine (inspect() column guard) --
+
+    def test_executions_minimal_ddl_fail_open(self, monkeypatch):
+        """`_collect_executions` reflects LIVE columns via `inspect()`: a minimal
+        DDL lacking claude_session_id / lease_expires_at / queued_at /
+        backlog_metadata still collects (fail-open) — session=None, no leased
+        flag, empty queued_meta — instead of erroring on an absent column. This
+        is the older-image path, now on the engine seam.
+        """
+        import tempfile as _tf
+
+        db_file = _tf.NamedTemporaryFile(suffix="_min.db", delete=False)
+        db_file.close()
+        c = sqlite3.connect(db_file.name)
+        c.executescript(
+            """
+            CREATE TABLE schedule_executions (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT
+            );
+            """
+        )
+        c.execute(
+            "INSERT INTO schedule_executions (id, agent_name, status, started_at) "
+            "VALUES ('r1', 'a1', 'running', '2026-04-30T00:00:00Z'), "
+            "('q1', 'a1', 'queued', '2026-04-30T00:00:00Z')"
+        )
+        c.commit()
+        c.close()
+
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file.name}")
+        import db.engine as engine_mod
+        engine_mod.dispose_engines()
+
+        from canary.snapshot import _collect_executions
+        out = _collect_executions("a1")
+        assert out["running"] == {"r1"}
+        assert out["queued"] == {"q1"}
+        # Absent claude_session_id → None (E-05 grace path), not a KeyError.
+        assert out["claude_session_ids"] == {"r1": None}
+        assert out["lease_expires_at"] == {"r1": None}
+        # Absent queued_at/backlog_metadata → empty (E-04/G-04 older-image skip).
+        assert out["queued_meta"] == {}
+
+        engine_mod.dispose_engines()
+        os.unlink(db_file.name)
+
+    # -- §6g: engine-down preserves the sqlite.* label skip contract --------
+
+    def test_engine_down_preserves_labels_and_l03_e02_skip(
+        self, canary_db, reload_canary, monkeypatch
+    ):
+        """If the orphan/terminal SQL reads fail (engine unreachable mid-cycle),
+        the `sources_unavailable` entries keep their historical `sqlite.*`
+        prefixes VERBATIM and L-03 / E-02 SKIP (fail-open) on that prefix — never
+        false-fire against empty data. Pins the label→skip contract (#1540 §4g):
+        a cosmetic `sqlite.*`→`engine.*` rename would silently disable the skip.
+        """
+        _add_agent(canary_db, "a1")
+        from canary import snapshot as snap_mod
+
+        def _boom(*a, **kw):
+            raise RuntimeError("engine unreachable")
+
+        monkeypatch.setattr(snap_mod, "_collect_orphan_refs", _boom)
+        monkeypatch.setattr(snap_mod, "_collect_terminal_executions", _boom)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        assert any(
+            s.startswith("sqlite.orphan_refs") for s in snap.sources_unavailable
+        )
+        assert any(
+            s.startswith("sqlite.terminal_executions")
+            for s in snap.sources_unavailable
+        )
+        results = reload_canary["canary"].run_invariants(snap)
+        assert results["L-03"] == []
+        assert results["E-02"] == []
+
+    # -- §6h: static import-guard (silent re-blinding tripwire) -------------
+
+    def test_snapshot_does_not_import_db_connection(self):
+        """After #1540 the collector reads ONLY through the engine seam — it must
+        not import `db.connection`. Pins the migration so a future edit can't
+        quietly re-introduce a raw-sqlite read that would re-blind Postgres.
+        Matches on import STATEMENTS (not docstring mentions).
+        """
+        import pathlib
+        import re
+
+        import canary.snapshot as snap_mod
+
+        src = pathlib.Path(snap_mod.__file__).read_text()
+        offending = [
+            line
+            for line in src.splitlines()
+            if re.match(
+                r"\s*(from\s+db\.connection\s+import|import\s+db\.connection)", line
+            )
+        ]
+        assert offending == [], (
+            f"canary/snapshot.py must not import db.connection (#1540): {offending}"
+        )
+
+    # -- §6d: real-PostgreSQL un-blinding (env-gated required pre-merge gate) --
+
+    @pytest.mark.skipif(
+        not os.getenv("TRINITY_TEST_PG_URL"),
+        reason="requires a real PostgreSQL (set TRINITY_TEST_PG_URL)",
+    )
+    def test_pg_unblinding_and_sources_clean(
+        self, fake_redis, fake_docker, monkeypatch
+    ):
+        """AC 'on PG': drive `collect_snapshot()` against a REAL PostgreSQL and
+        assert (1) no collector silently errored (`sources_unavailable == []`) —
+        proving the psycopg2 dialect renders every ported statement, including
+        `inspect()` information_schema reflection, `.notin_()` expansion, and the
+        `text()` orphan filters — and (2) the un-blinding holds: agents populate,
+        a synthetic slot–row mismatch fires S-01, an orphan row fires L-03.
+
+        `canary_db_split` is SQLite-on-both-sides (a different *file*, not
+        psycopg2), so it proves the read-*routing* moved off `db.connection` but
+        never exercises PG's dialect — this test does. Run before PR-ready:
+          docker run -d -e POSTGRES_PASSWORD=x -p 5433:5432 postgres:16-alpine
+          TRINITY_TEST_PG_URL=postgresql+psycopg2://postgres:x@localhost:5433/postgres \\
+            .venv-test/bin/python -m pytest tests/test_canary_invariants.py -k pg
+        """
+        pg_url = os.environ["TRINITY_TEST_PG_URL"]
+        monkeypatch.setenv("DATABASE_URL", pg_url)
+        import db.engine as engine_mod
+        engine_mod.dispose_engines()
+
+        from db.tables import (
+            access_requests,
+            agent_ownership,
+            agent_public_links,
+            agent_reports,
+            agent_schedules,
+            agent_shared_files,
+            agent_sharing,
+            agent_skills,
+            agent_tags,
+            chat_sessions,
+            mcp_api_keys,
+            operator_queue,
+            schedule_executions,
+        )
+
+        canary_tables = [
+            agent_ownership,
+            schedule_executions,
+            agent_schedules,
+            agent_sharing,
+            chat_sessions,
+            agent_skills,
+            agent_tags,
+            agent_shared_files,
+            agent_public_links,
+            operator_queue,
+            access_requests,
+            agent_reports,
+            mcp_api_keys,
+        ]
+        engine = engine_mod.get_engine()
+        # Clean slate: (re)create just the canary tables on PG (no ForeignKeys in
+        # db/tables.py → the subset is self-contained).
+        for tbl in reversed(canary_tables):
+            tbl.drop(engine, checkfirst=True)
+        for tbl in canary_tables:
+            tbl.create(engine, checkfirst=True)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    agent_ownership.insert().values(
+                        agent_name="a1",
+                        owner_id=1,
+                        is_system=0,
+                        max_parallel_tasks=3,
+                        execution_timeout_seconds=900,
+                    )
+                )
+                # running row, no matching Redis slot, old started_at → S-01 fires.
+                conn.execute(
+                    schedule_executions.insert().values(
+                        id="e1",
+                        agent_name="a1",
+                        status="running",
+                        started_at="2026-04-30T00:00:00Z",
+                        message="",
+                        triggered_by="test",
+                    )
+                )
+                # orphan sharing row referencing a non-existent agent → L-03 fires.
+                conn.execute(
+                    agent_sharing.insert().values(
+                        agent_name="ghost",
+                        shared_with_email="g@example.com",
+                        shared_by_id=1,
+                        created_at="2026-04-30T00:00:00Z",
+                    )
+                )
+
+            bundle = _reload_canary_with_temp_db(fake_redis, monkeypatch)
+            snap = bundle["canary"].collect_snapshot()
+
+            assert snap.sources_unavailable == [], (
+                f"a collector silently errored on PostgreSQL: "
+                f"{snap.sources_unavailable}"
+            )
+            assert snap.known_agents == {"a1"}
+
+            from canary.invariants import l03_delete_cascades as l03
+            from canary.invariants import s01_slot_row_bijection as s01
+
+            assert [v.observed_state["in_sql_only"] for v in s01.check(snap)] == [
+                ["e1"]
+            ]
+            assert any(
+                r.referenced_agent_name == "ghost" for r in snap.orphan_refs
+            )
+            assert len(l03.check(snap)) >= 1
+        finally:
+            for tbl in reversed(canary_tables):
+                tbl.drop(engine, checkfirst=True)
+            engine_mod.dispose_engines()
