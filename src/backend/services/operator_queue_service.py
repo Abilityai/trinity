@@ -175,8 +175,12 @@ class OperatorQueueSyncService:
 
             # #1631: reject an agent-authored id that impersonates a platform id
             # prefix (hijack/suppress guard). Log once per (agent, id) so it
-            # can't hot-loop the ~5s sync at WARNING.
-            if req_id.startswith(_RESERVED_ID_PREFIXES):
+            # can't hot-loop the ~5s sync at WARNING. Normalize before the check
+            # (case/whitespace-fold) so a lookalike like ` Poison-x` can't slip a
+            # platform-styled alert past the filter — the platform mints these
+            # prefixes lowercase and unpadded, so a normalized id that matches can
+            # only be an impersonation attempt.
+            if req_id.strip().lower().startswith(_RESERVED_ID_PREFIXES):
                 key = (agent_name, req_id)
                 if key not in self._rejected_reserved:
                     if len(self._rejected_reserved) >= _MAX_QUARANTINE_ENTRIES:
