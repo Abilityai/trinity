@@ -11,7 +11,7 @@ import logging
 import asyncio
 import uuid
 from datetime import datetime
-from typing import NamedTuple, NoReturn, Optional
+from typing import NoReturn, Optional
 
 from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ActivityType, ActivityState, TaskExecutionStatus, ExecutionSource, activity_state_for_terminal
 from dependencies import get_current_user, get_authorized_agent, get_owned_agent
@@ -30,6 +30,8 @@ from services.capacity_manager import (
 )
 from services import idempotency_service
 from services import chat_persistence_service
+from services import dispatch_admission_service
+from services.chat_signals import ChatExecutionContext, ChatAdmissionReplay
 from services.event_dispatch_service import (
     RESERVED_EVENT_TRIGGER,
     RESERVED_EVENT_TRIGGER_HEADER_VALUE,
@@ -50,7 +52,6 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from utils.helpers import utc_now_iso
-from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -166,202 +167,6 @@ async def broadcast_collaboration_event(source_agent: str, target_agent: str, ac
         await _websocket_manager.broadcast(json.dumps(event))
     else:
         print(f"[Warning] WebSocket manager not set, skipping collaboration broadcast")
-
-
-class ChatAdmission(NamedTuple):
-    """Result of the chat admission gate (#1026 slice 1) when a request is
-    cleared to proceed. Carries the values the rest of the endpoint needs."""
-    idem: object
-    execution_id: str
-    capacity_result: object
-    capacity: object
-    queue_result: str
-    chat_timeout: int
-
-
-async def _admit_chat_request(
-    *,
-    name: str,
-    request: ChatMessageRequest,
-    current_user: User,
-    x_source_agent: Optional[str],
-    x_via_mcp: Optional[str],
-    x_mcp_key_id: Optional[str],
-    x_mcp_key_name: Optional[str],
-    idempotency_key: Optional[str],
-):
-    """Admission gate for chat_with_agent (#1026 slice 1).
-
-    Runs the idempotency gate (#525), the dispatch-breaker fast-fail (#526), and
-    the CapacityManager.acquire (#428). Returns either:
-      - a ``JSONResponse`` — the caller must return it directly (idempotent
-        replay snapshot); or
-      - a ``ChatAdmission`` — the request is cleared and carries the
-        ``idem`` / ``execution_id`` / ``capacity_result`` / ``capacity`` the
-        rest of the endpoint consumes.
-
-    Raises ``HTTPException`` directly on the deny paths (409 in-flight replay,
-    503 breaker-open, 429 capacity-full — which also releases the idempotency
-    claim so the caller can retry).
-    """
-    # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
-    # requests before consuming a capacity slot. The header is optional — when
-    # absent, dedup is off and the request proceeds normally (back-compat).
-    idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
-    )
-    if idem.replay:
-        await platform_audit_service.log(
-            event_type=AuditEventType.EXECUTION,
-            event_action="idempotent_replay",
-            source="mcp" if x_via_mcp else "api",
-            actor_user=current_user if not x_source_agent else None,
-            actor_agent_name=x_source_agent,
-            mcp_key_id=x_mcp_key_id,
-            mcp_key_name=x_mcp_key_name,
-            target_type="agent",
-            target_id=name,
-            endpoint=f"/api/agents/{name}/chat",
-            details={
-                "idempotency_key": idempotency_key,
-                "execution_id": idem.execution_id,
-                "in_flight": idem.in_flight,
-            },
-        )
-        if idem.in_flight:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "request_in_progress",
-                    "message": "A request with this Idempotency-Key is still being processed.",
-                    "execution_id": idem.execution_id,
-                },
-            )
-        return JSONResponse(
-            content=idem.snapshot
-            or {"execution": {"task_execution_id": idem.execution_id}},
-            headers={"X-Idempotent-Replay": "true"},
-        )
-
-    # Determine execution source
-    if x_source_agent:
-        source = ExecutionSource.AGENT
-    else:
-        source = ExecutionSource.USER
-
-    # CAPACITY-CONSOLIDATE (#428): single CapacityManager.acquire call replaces
-    # the prior ExecutionQueue.submit + SlotService.acquire_slot pair. /chat
-    # shares the agent's parallel pool with /task (same `max_parallel_tasks`)
-    # and spills to an in-memory queue (depth 3, preserved from the original
-    # ExecutionQueue MAX_QUEUE_SIZE) when the pool is full. The agent's Claude
-    # subprocess is the actual serial bottleneck downstream.
-    import uuid as _uuid
-    capacity = get_capacity_manager()
-    chat_execution_id = str(_uuid.uuid4())
-    chat_timeout = db.get_execution_timeout(name)
-    max_parallel_tasks = db.get_max_parallel_tasks(name)
-    # #526 F1: /chat does NOT record dispatch outcomes (only
-    # task_execution_service does), so it must NOT consume a half-open probe
-    # permit — doing so stalls the breaker's backoff and leaks chat requests to
-    # an auth-dead agent. Gate /chat with a PURE STATE READ instead: fast-fail
-    # 503 whenever the breaker is open (incl. the half-open window) and let the
-    # /task path drive recovery. acquire() below runs WITHOUT breaker_enabled so
-    # /chat never touches the probe machinery.
-    if dispatch_breaker_active(name):
-        from services.dispatch_breaker import DispatchBreaker
-        _disp = DispatchBreaker(name).to_dict()
-        if _disp.get("state") == "open":
-            logger.warning(f"[Chat] Agent '{name}' dispatch circuit open, rejecting request")
-            # Nothing dispatched — release the idempotency claim so the caller
-            # can retry with the same key once the breaker recovers (#525),
-            # mirroring the CapacityFull branch below.
-            idempotency_service.fail(idem)
-            _raise_circuit_open_503(
-                name, None, CircuitOpen(name, int(_disp.get("retry_after_seconds") or 0))
-            )
-    try:
-        capacity_result = await capacity.acquire(
-            agent_name=name,
-            execution_id=chat_execution_id,
-            max_concurrent=max_parallel_tasks,
-            message_preview=request.message[:100] if request.message else "",
-            timeout_seconds=chat_timeout,
-            overflow_policy="queue_in_memory",
-            source=source,
-            source_agent=x_source_agent,
-            source_user_id=str(current_user.id),
-            source_user_email=current_user.email or current_user.username,
-            message=request.message,
-        )
-        queue_result = (
-            "running"
-            if capacity_result.state == "admitted"
-            else f"queued:{capacity_result.queue_position}"
-        )
-        logger.info(f"[Chat] Agent '{name}' execution {chat_execution_id}: {queue_result}")
-        await platform_audit_service.log(
-            event_type=AuditEventType.EXECUTION,
-            event_action="chat_started",
-            source="mcp" if x_via_mcp else "api",
-            actor_user=current_user if not x_source_agent else None,
-            actor_agent_name=x_source_agent,
-            mcp_key_id=x_mcp_key_id,
-            mcp_key_name=x_mcp_key_name,
-            mcp_scope="agent" if x_source_agent else ("user" if x_via_mcp else None),
-            target_type="agent",
-            target_id=name,
-            endpoint=f"/api/agents/{name}/chat",
-            request_id=None,
-            details={
-                "execution_id": chat_execution_id,
-                "queue_result": queue_result,
-                "source": source.value if hasattr(source, "value") else str(source),
-                "message_length": len(request.message) if request.message else 0,
-            },
-        )
-    except EphemeralBudgetExhausted as e:
-        # trinity-enterprise#69: ghost budget spent — nothing admitted/enqueued.
-        idempotency_service.fail(idem)
-        _raise_ephemeral_exhausted_410(name, chat_execution_id, e)
-    except CapacityFull as e:
-        logger.warning(f"[Chat] Agent '{name}' at capacity, rejecting request (reason={e.reason})")
-        # Nothing dispatched — release the idempotency claim so the caller can
-        # retry with the same key once capacity frees up (#525).
-        idempotency_service.fail(idem)
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "error": "Agent queue is full",
-                "agent": name,
-                "queue_length": e.depth or 0,
-                "retry_after": 30,
-                "message": f"Agent '{name}' is busy. Please try again later."
-            }
-        )
-
-    return ChatAdmission(
-        idem=idem,
-        execution_id=chat_execution_id,
-        capacity_result=capacity_result,
-        capacity=capacity,
-        queue_result=queue_result,
-        chat_timeout=chat_timeout,
-    )
-
-
-class ChatExecutionContext(NamedTuple):
-    """Execution-setup handoff for chat_with_agent (#1026 slice 2). Carries the
-    records/ids the downstream execute+finalize body consumes. As with
-    ChatAdmission (slice 1), every field here is referenced downstream — leaving
-    one out strands a local and NameErrors the admitted path."""
-    execution: object
-    task_execution_id: object
-    triggered_by: str
-    subscription_id: object
-    collaboration_activity_id: object
-    chat_activity_id: object
-    session: object
-    is_queued: bool
 
 
 async def _prepare_chat_execution(
@@ -538,20 +343,53 @@ async def chat_with_agent(
         raise HTTPException(status_code=503, detail="Agent is not running")
 
     # Admission gate (#1026 slice 1): idempotency (#525) + dispatch breaker
-    # (#526) + capacity acquire (#428). Returns a JSONResponse on idempotent
-    # replay, or a ChatAdmission to proceed; raises 409/503/429 on deny.
-    admission = await _admit_chat_request(
-        name=name,
-        request=request,
-        current_user=current_user,
-        x_source_agent=x_source_agent,
-        x_via_mcp=x_via_mcp,
-        x_mcp_key_id=x_mcp_key_id,
-        x_mcp_key_name=x_mcp_key_name,
-        idempotency_key=idempotency_key,
-    )
-    if isinstance(admission, JSONResponse):
-        return admission
+    # (#526) + capacity acquire (#428) live in dispatch_admission_service now
+    # (Invariant #1). The service is HTTP-free: it returns a ChatAdmissionReplay
+    # (idempotent replay) or a ChatAdmission, and raises the already-domain
+    # CircuitOpen / CapacityFull / EphemeralBudgetExhausted — which this thin
+    # handler maps to 503 / 429 / 410 (the FAILED-row-write + raise stay here,
+    # RD-E12; /chat holds no pre-created row so execution_id is None).
+    try:
+        admission = await dispatch_admission_service.admit_chat_request(
+            name=name,
+            request=request,
+            current_user=current_user,
+            x_source_agent=x_source_agent,
+            x_via_mcp=x_via_mcp,
+            x_mcp_key_id=x_mcp_key_id,
+            x_mcp_key_name=x_mcp_key_name,
+            idempotency_key=idempotency_key,
+        )
+    except CircuitOpen as e:
+        _raise_circuit_open_503(name, None, e)
+    except EphemeralBudgetExhausted as e:
+        _raise_ephemeral_exhausted_410(name, None, e)
+    except CapacityFull as e:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Agent queue is full",
+                "agent": name,
+                "queue_length": e.depth or 0,
+                "retry_after": 30,
+                "message": f"Agent '{name}' is busy. Please try again later."
+            }
+        )
+    if isinstance(admission, ChatAdmissionReplay):
+        if admission.in_flight:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "request_in_progress",
+                    "message": "A request with this Idempotency-Key is still being processed.",
+                    "execution_id": admission.execution_id,
+                },
+            )
+        return JSONResponse(
+            content=admission.snapshot
+            or {"execution": {"task_execution_id": admission.execution_id}},
+            headers={"X-Idempotent-Replay": "true"},
+        )
     idem = admission.idem
     chat_execution_id = admission.execution_id
     capacity_result = admission.capacity_result
@@ -1364,40 +1202,31 @@ async def execute_parallel_task(
     # dedup off, request proceeds normally. Post-dispatch failures intentionally
     # leave the claim in place (a duplicate within the 24h TTL gets a 409 with
     # the original execution_id to poll); only upfront at-capacity rejections
-    # release the claim so the caller can retry once capacity frees.
-    idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+    # release the claim so the caller can retry once capacity frees. The begin +
+    # replay-signal lives in dispatch_admission_service (shared with /chat, RD2);
+    # the replay audit + 409/200 mapping stay here (router HTTP boundary).
+    idem, replay = dispatch_admission_service.begin_task_idempotency(
+        name=name, idempotency_key=idempotency_key,
     )
-    if idem.replay:
-        await platform_audit_service.log(
-            event_type=AuditEventType.EXECUTION,
-            event_action="idempotent_replay",
-            source="mcp" if x_via_mcp else "api",
-            actor_user=current_user if not x_source_agent else None,
-            actor_agent_name=x_source_agent,
-            mcp_key_id=x_mcp_key_id,
-            mcp_key_name=x_mcp_key_name,
-            target_type="agent",
-            target_id=name,
-            endpoint=f"/api/agents/{name}/task",
-            details={
-                "idempotency_key": idempotency_key,
-                "execution_id": idem.execution_id,
-                "in_flight": idem.in_flight,
-            },
+    if replay is not None:
+        await dispatch_admission_service.audit_idempotent_replay(
+            name=name, endpoint=f"/api/agents/{name}/task", x_via_mcp=x_via_mcp,
+            x_source_agent=x_source_agent, x_mcp_key_id=x_mcp_key_id,
+            x_mcp_key_name=x_mcp_key_name, current_user=current_user,
+            idempotency_key=idempotency_key, idem=idem,
         )
-        if idem.in_flight:
+        if replay.in_flight:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "error": "request_in_progress",
                     "message": "A request with this Idempotency-Key is still being processed.",
-                    "execution_id": idem.execution_id,
+                    "execution_id": replay.execution_id,
                 },
             )
         return JSONResponse(
-            content=idem.snapshot
-            or {"task_execution_id": idem.execution_id, "async_mode": bool(request.async_mode)},
+            content=replay.snapshot
+            or {"task_execution_id": replay.execution_id, "async_mode": bool(request.async_mode)},
             headers={"X-Idempotent-Replay": "true"},
         )
 

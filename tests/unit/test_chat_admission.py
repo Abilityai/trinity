@@ -27,9 +27,15 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from routers.chat import chat_with_agent
+import services.dispatch_admission_service as _DISPATCH
 from models import ChatMessageRequest
 from services.capacity_manager import CapacityFull
 
+# The /chat admission gate (idempotency + breaker + capacity acquire) moved to
+# dispatch_admission_service (#1483). The endpoint (chat_with_agent) stays in
+# routers.chat and maps the service's domain signals to HTTP, so admission
+# collaborators are patched at _DISPATCH; prepare/finalize collaborators (still
+# in routers.chat until the chat_execution_service move) stay at _CHAT.
 _CHAT = sys.modules[chat_with_agent.__module__]
 
 
@@ -73,10 +79,12 @@ def _env(idem, breaker_state=None, acquire_exc=None):
     breaker.to_dict.return_value = {"state": breaker_state or "closed", "retry_after_seconds": 5}
 
     with patch.object(_CHAT, "get_agent_container", return_value=container), \
+         patch.object(_DISPATCH, "idempotency_service", isvc), \
          patch.object(_CHAT, "idempotency_service", isvc), \
-         patch.object(_CHAT, "dispatch_breaker_active", return_value=bool(breaker_state)), \
-         patch.object(_CHAT, "get_capacity_manager", return_value=cap), \
-         patch.object(_CHAT, "platform_audit_service", MagicMock(log=AsyncMock())), \
+         patch.object(_DISPATCH, "dispatch_breaker_active", return_value=bool(breaker_state)), \
+         patch.object(_DISPATCH, "get_capacity_manager", return_value=cap), \
+         patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=AsyncMock())), \
+         patch.object(_DISPATCH, "db", db), \
          patch.object(_CHAT, "db", db), \
          patch("services.dispatch_breaker.DispatchBreaker", return_value=breaker):
         yield {"isvc": isvc, "cap": cap, "db": db}
@@ -134,11 +142,12 @@ def test_capacity_full_raises_429_and_releases_idem():
 def test_admitted_returns_chat_admission():
     """Happy path: the extracted helper returns a ChatAdmission carrying the
     handoff values the endpoint consumes downstream."""
-    from routers.chat import _admit_chat_request, ChatAdmission
+    from services.dispatch_admission_service import admit_chat_request
+    from services.chat_signals import ChatAdmission
     cap_result = MagicMock(state="admitted", queue_position=0)
     with _env(_idem(replay=False)) as m:
         m["cap"].acquire = AsyncMock(return_value=cap_result)
-        admission = asyncio.run(_admit_chat_request(
+        admission = asyncio.run(admit_chat_request(
             name="agent1", request=ChatMessageRequest(message="hi"),
             current_user=_user(), x_source_agent=None, x_via_mcp=None,
             x_mcp_key_id=None, x_mcp_key_name=None, idempotency_key="k1",

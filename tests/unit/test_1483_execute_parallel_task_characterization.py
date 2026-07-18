@@ -29,6 +29,7 @@ import pytest
 
 from routers.chat import execute_parallel_task as ENDPOINT
 from services import chat_persistence_service
+import services.dispatch_admission_service as _DISPATCH
 from models import ParallelTaskRequest, TaskExecutionStatus
 
 _MOD = sys.modules[ENDPOINT.__module__]  # routers.chat (endpoint stays here)
@@ -116,11 +117,12 @@ def _env(
     with patch.object(_MOD, "get_agent_container", return_value=container), \
          patch.object(_MOD, "db", db), \
          patch.object(_MOD, "idempotency_service", isvc), \
+         patch.object(_DISPATCH, "idempotency_service", isvc), \
+         patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=AsyncMock())), \
          patch.object(_MOD, "get_capacity_manager", return_value=cap), \
          patch.object(_MOD, "dispatch_breaker_active", return_value=False), \
          patch.object(_MOD, "get_task_execution_service", return_value=task_service), \
          patch.object(_MOD, "activity_service", activity), \
-         patch.object(_MOD, "platform_audit_service", MagicMock(log=AsyncMock())), \
          patch.object(chat_persistence_service, "persist_chat_session", persist), \
          patch.object(_MOD, "_run_async_task_with_persistence", async_bg), \
          patch.object(_MOD, "wait_for_sync_terminal", waiter):
