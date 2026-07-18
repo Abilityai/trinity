@@ -2500,6 +2500,50 @@ def _migrate_agent_loops_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_reminders_table(cursor, conn):
+    """Create the agent_reminders table + indexes (#1296).
+
+    Durable one-shot deferred self-trigger: an agent schedules a future
+    re-invocation of itself. The standalone scheduler arms a DateTrigger per
+    pending row and, on fire, dispatches a normal execution of the same agent
+    (``triggered_by="reminder"``). Mirrored by Alembic 0028_agent_reminders and
+    the DDL in ``db/schema.py`` / MetaData in ``db/tables.py``. Kept
+    byte-consistent across all four.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_reminders (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            fire_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            model TEXT,
+            timeout_seconds INTEGER,
+            allowed_tools TEXT,
+            owner_id INTEGER,
+            created_by_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            execution_id TEXT,
+            fire_attempts INTEGER NOT NULL DEFAULT 0,
+            firing_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            fired_at TEXT,
+            cancelled_at TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reminders_agent "
+        "ON agent_reminders(agent_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
+        "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')"
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_failure_policy(cursor, conn):
     """Add per-loop failure-policy columns to agent_loops (#1167).
 
@@ -3138,4 +3182,5 @@ MIGRATIONS = [
     ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
     ("operator_queue_request_id", _migrate_operator_queue_request_id),
     ("users_github_pat", _migrate_users_github_pat),
+    ("agent_reminders_table", _migrate_agent_reminders_table),
 ]
