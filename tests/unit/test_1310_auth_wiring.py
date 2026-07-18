@@ -37,10 +37,16 @@ _ROUTERS = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
 # their own inline check (enumeration-safe by construction; INV-8 §2.7 / #186):
 #   * reports.get_report            — 404-not-403 to avoid a report-id oracle
 #   * nevermined._require_*_access  — the payment-config uniform-404 helpers
+#   * chat.execute_parallel_task    — the resume-session owner check is a compound
+#     `role != "admin" AND NOT db.resume_session_belongs_to_user(...)` raising an
+#     intentional 404 (session-id enumeration safety, Invariant #8 session
+#     pattern). No shared helper fits: `assert_owns_or_admin` takes an owner_id
+#     and raises 403, which would leak session existence. Stays inline (#1083).
 _ALLOWLIST: set[tuple[str, str]] = {
     ("reports.py", "get_report"),
     ("nevermined.py", "_require_read_access"),
     ("nevermined.py", "_require_write_access"),
+    ("chat.py", "execute_parallel_task"),
 }
 
 _CAN_USER = {"can_user_access_agent", "can_user_share_agent"}

@@ -89,6 +89,22 @@ _REAL_SERVICES_PKG = sys.modules["services"]
 _REAL_AGENT_SERVICE = sys.modules["services.agent_service"]
 _REAL_DOCKER_SERVICE = sys.modules["services.docker_service"]
 
+# The service-package names this file re-pins to their genuine modules per test.
+# Declaring this list + the ``_restore_sys_modules`` autouse fixture below is the
+# linter-recognized escape hatch (`tests/lint_sys_modules.py`) for the import-time
+# eviction above — a module-level ``sys.modules.pop`` that no monkeypatch fixture
+# can reach (precedent: tests/unit/test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = [
+    "services",
+    "services.agent_service",
+    "services.docker_service",
+]
+_REAL_MODULES = {
+    "services": _REAL_SERVICES_PKG,
+    "services.agent_service": _REAL_AGENT_SERVICE,
+    "services.docker_service": _REAL_DOCKER_SERVICE,
+}
+
 # Routers that import cleanly in the bare unit env (framework python). schedules
 # needs apscheduler and is imported lazily inside its own test (skip if absent).
 import routers.agent_config as agent_config  # noqa: E402
@@ -126,16 +142,17 @@ _MISSING = "does-not-exist-xyz"
 
 
 @pytest.fixture(autouse=True)
-def _pin_real_service_modules(monkeypatch):
+def _restore_sys_modules(monkeypatch):
     """Re-pin the genuine service modules for the duration of every test so a
     sibling unit file's persistent sys.modules stub (notably the fake
     ``services.agent_service`` package ``test_inject_assigned_credentials``
     installs at import) can't leak into the handler bodies this suite drives.
     ``monkeypatch.setitem`` auto-restores the sibling's stub afterward, so this
-    file stays a well-behaved sys.modules citizen."""
-    monkeypatch.setitem(sys.modules, "services", _REAL_SERVICES_PKG)
-    monkeypatch.setitem(sys.modules, "services.agent_service", _REAL_AGENT_SERVICE)
-    monkeypatch.setitem(sys.modules, "services.docker_service", _REAL_DOCKER_SERVICE)
+    file stays a well-behaved sys.modules citizen. Named ``_restore_sys_modules``
+    (paired with ``_STUBBED_MODULE_NAMES`` above) so the sys.modules lint
+    recognizes the snapshot/restore helper (`tests/lint_sys_modules.py`)."""
+    for _name in _STUBBED_MODULE_NAMES:
+        monkeypatch.setitem(sys.modules, _name, _REAL_MODULES[_name])
 
 
 @pytest.fixture
