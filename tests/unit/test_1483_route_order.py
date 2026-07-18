@@ -122,15 +122,25 @@ def test_executions_stream_resolves_to_chat_stream(flat_routes):
 
 def test_chat_router_precedes_schedules_router_in_include_order():
     """Cross-router guard: the chat router's include index is strictly before the
-    schedules router's — the precondition that makes `/executions/running` win."""
+    schedules router's — the precondition that makes `/executions/running` win.
+
+    Robust to both route-table shapes: current FastAPI (0.115.x/0.124.x) flattens
+    ``include_router`` into plain ``APIRoute`` entries in ``app.routes`` (include
+    order = positional order), while older/future versions wrap each include in an
+    ``_IncludedRouter``. Either way the chat handler's first occurrence must
+    precede the schedules handler's.
+    """
     def _include_index(endpoint_name: str) -> int:
         for idx, entry in enumerate(main.app.routes):
-            if type(entry).__name__ != "_IncludedRouter":
-                continue
-            for r in entry.original_router.routes:
-                if isinstance(r, APIRoute) and r.endpoint.__name__ == endpoint_name:
-                    return idx
-        raise AssertionError(f"endpoint {endpoint_name} not found in any included router")
+            # Flattened shape: the APIRoute lives directly in app.routes.
+            if isinstance(entry, APIRoute) and entry.endpoint.__name__ == endpoint_name:
+                return idx
+            # Legacy wrapped shape: an _IncludedRouter carrying original_router.
+            if type(entry).__name__ == "_IncludedRouter":
+                for r in entry.original_router.routes:
+                    if isinstance(r, APIRoute) and r.endpoint.__name__ == endpoint_name:
+                        return idx
+        raise AssertionError(f"endpoint {endpoint_name} not found in the app route table")
 
     chat_idx = _include_index("get_agent_running_executions")
     sched_idx = _include_index("get_execution")
