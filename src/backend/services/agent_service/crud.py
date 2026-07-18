@@ -1021,6 +1021,608 @@ def _build_env_vars(
     return env_vars, auto_assigned_subscription_id
 
 
+async def _workspace_volume_mount(config: AgentConfig, volumes: dict) -> None:
+    """Get-or-create the durable per-agent workspace volume and mount it at
+    /home/developer. A pre-existing volume is a DECLARED adopt (#1667 — the
+    refusal gate already ran before the try-block)."""
+    agent_volume_name = f"agent-{config.name}-workspace"
+    # #1667: adopting a pre-existing volume is a DECISION, not a
+    # fallthrough. This used to be get-then-create with no branch —
+    # an existing volume was silently mounted as the new agent's
+    # `/home/developer`, so whatever the previous holder of this
+    # name left behind (its `.env`, its `.credentials.enc`, its
+    # workspace) resurfaced inside a different agent, possibly a
+    # different owner's. #1664's gate covers the case where a row
+    # still claims the base (rename); this covers the case where
+    # NOTHING claims it — a purge whose removal hit an in-use 409,
+    # a crash between `volume_create` and the ownership INSERT
+    # (creation writes the volume first — the reason the orphan
+    # sweep carries a 1h creation grace), or a restored backup.
+    #
+    # Emptiness cannot be the discriminator: the one legitimate
+    # adopter — deploy-local (#950) — PRE-POPULATES this volume with
+    # the template before calling create, so a valid adopt is
+    # non-empty. (And Docker auto-populates a named volume from the
+    # image on first mount, so "empty" wouldn't even identify a
+    # crashed create.) So the adopter declares itself, and everyone
+    # else is refused.
+    try:
+        await volume_get(agent_volume_name)
+        # Reaching here means the volume pre-exists. The refusal
+        # gate above already ran, so this is a declared adopt —
+        # deploy-local's pre-populated workspace (#950). Logged:
+        # an adopt is never silent again (#1667).
+        logger.info(
+            "[#1667] adopting pre-existing workspace volume %s for %s",
+            agent_volume_name,
+            config.name,
+        )
+    except docker.errors.NotFound:
+        await volume_create(
+            name=agent_volume_name,
+            labels={
+                'trinity.platform': 'agent-workspace',
+                'trinity.agent-name': config.name
+            }
+        )
+    volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
+
+
+async def _shared_folder_mounts(
+    config: AgentConfig, volumes: dict, template_shared_folders: Optional[dict]
+) -> None:
+    """Phase 9.11: apply the template-defined shared-folder config, then create/
+    mount the expose volume and mount any consumable peer shared volumes."""
+    # First, write template-defined shared folder config to DB (if defined)
+    if template_shared_folders:
+        try:
+            db.upsert_shared_folder_config(
+                agent_name=config.name,
+                expose_enabled=template_shared_folders.get("expose", False),
+                consume_enabled=template_shared_folders.get("consume", False)
+            )
+            logger.info(f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}")
+        except Exception as e:
+            logger.warning(f"Failed to apply template shared folder config for {config.name}: {e}")
+
+    shared_folder_config = db.get_shared_folder_config(config.name)
+    if shared_folder_config:
+        # If agent exposes a shared folder, create and mount the shared volume
+        if shared_folder_config.expose_enabled:
+            shared_volume_name = db.get_shared_volume_name(config.name)
+            volume_created = False
+            try:
+                await volume_get(shared_volume_name)
+            except docker.errors.NotFound:
+                await volume_create(
+                    name=shared_volume_name,
+                    labels={
+                        'trinity.platform': 'agent-shared',
+                        'trinity.agent-name': config.name
+                    }
+                )
+                volume_created = True
+
+            # Fix ownership of new volumes (Docker creates them as root)
+            if volume_created:
+                try:
+                    await containers_run(
+                        'alpine',
+                        command='chown 1000:1000 /shared',
+                        volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
+                        remove=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not fix shared volume ownership: {e}")
+
+            volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
+
+        # If agent consumes shared folders, mount available shared volumes
+        if shared_folder_config.consume_enabled:
+            available_folders = db.get_available_shared_folders(config.name)
+            for source_agent in available_folders:
+                source_volume = db.get_shared_volume_name(source_agent)
+                mount_path = db.get_shared_mount_path(source_agent)
+                # Only mount if the source volume exists
+                try:
+                    await volume_get(source_volume)
+                    volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
+                except docker.errors.NotFound:
+                    # Source agent hasn't started yet or doesn't have shared volume
+                    pass
+
+
+async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
+    """FILES-001 Step 2: create + mount the per-agent public volume when file
+    sharing is enabled (symmetric to the shared-folders expose flow)."""
+    if db.get_file_sharing_enabled(config.name):
+        public_volume_name = db.get_public_volume_name(config.name)
+        public_volume_created = False
+        try:
+            await volume_get(public_volume_name)
+        except docker.errors.NotFound:
+            await volume_create(
+                name=public_volume_name,
+                labels={
+                    'trinity.platform': 'agent-public',
+                    'trinity.agent-name': config.name,
+                },
+            )
+            public_volume_created = True
+
+        if public_volume_created:
+            try:
+                await containers_run(
+                    'alpine',
+                    command='chown 1000:1000 /public',
+                    volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
+                    remove=True,
+                )
+            except Exception as e:
+                logger.warning(f"Could not fix public volume ownership: {e}")
+
+        volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
+
+
+async def _build_volume_mounts(
+    config: AgentConfig,
+    config_path: Path,
+    credentials_path: Path,
+    template_volume: Optional[dict],
+    cred_files_volume: Optional[dict],
+    template_shared_folders: Optional[dict],
+) -> dict:
+    """Assemble the container volume-mount spec: config/creds/encrypted-data
+    binds, the durable workspace (skipped for volume-less ghosts, ent#69), the
+    template/cred bind mounts, and the shared-folder + FILES-001 public volumes."""
+    # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
+    # This ensures files created by the agent survive container restarts.
+    # trinity-enterprise#69: ephemeral ghosts are VOLUME-LESS — their
+    # /home/developer lives on the container writable layer (overlayfs),
+    # auto-reclaimed by container removal. Volumes exist to survive
+    # recreate, and ghosts never recreate.
+    volumes = {
+        str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
+        str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
+        'encrypted-data': {'bind': '/data', 'mode': 'rw'},
+    }
+    if not config.ephemeral:
+        await _workspace_volume_mount(config, volumes)
+
+    if template_volume:
+        volumes.update(template_volume)
+    if cred_files_volume:
+        volumes.update(cred_files_volume)
+
+    await _shared_folder_mounts(config, volumes, template_shared_folders)
+    await _public_volume_mount(config, volumes)
+    return volumes
+
+
+async def _create_agent_container(
+    config: AgentConfig,
+    volumes: dict,
+    env_vars: dict,
+    current_user: User,
+    ephemeral_expires_at: Optional[str],
+):
+    """`docker run` the agent container with the baseline security posture
+    (cap_drop ALL + mode caps, AppArmor, tmpfs #1098, mem/cpu limits). AC #5:
+    the agent network is HARD-CODED here — agents never join the platform net."""
+    # Get system-wide full_capabilities setting (not per-agent)
+    full_capabilities = get_agent_full_capabilities()
+
+    # Create container with security settings
+    # Security principle: ALWAYS apply baseline security, even in full_capabilities mode
+    # - Always drop ALL caps, then add back only what's needed
+    # - Always apply AppArmor profile
+    # - Always apply noexec,nosuid to /tmp
+    container_labels = {
+        'trinity.platform': 'agent',
+        'trinity.agent-name': config.name,
+        'trinity.agent-type': config.type,
+        'trinity.ssh-port': str(config.port),
+        'trinity.cpu': config.resources['cpu'],
+        'trinity.memory': config.resources['memory'],
+        'trinity.created': utc_now_iso(),
+        'trinity.template': config.template or '',
+        'trinity.agent-runtime': config.runtime or 'claude-code',
+        'trinity.full-capabilities': str(full_capabilities).lower(),
+        'trinity.base-image-version': get_platform_version()
+    }
+    if config.ephemeral:
+        # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
+        # orphan pass reclaims labeled containers whose ownership row
+        # is gone (backend restarted mid-create/mid-discard).
+        container_labels['trinity.ephemeral'] = 'true'
+        container_labels['trinity.ephemeral-expires-at'] = ephemeral_expires_at or ''
+    if current_user.agent_name:
+        # Part 2 spawn provenance rides on ANY agent-spawned creation
+        # (durable or ephemeral), pairing with the DB columns.
+        container_labels['trinity.spawned-by'] = current_user.agent_name
+
+    return await containers_run(
+        config.base_image,
+        detach=True,
+        name=f"agent-{config.name}",
+        ports={'22/tcp': config.port},
+        volumes=volumes,
+        environment=env_vars,
+        labels=container_labels,
+        # Always apply AppArmor for additional sandboxing
+        security_opt=['apparmor:docker-default'],
+        # Always drop ALL capabilities first (defense in depth)
+        cap_drop=['ALL'],
+        # Add back only the capabilities needed for the mode
+        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+        read_only=False,
+        # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+        # is redirected off this tiny tmpfs via the TMPDIR env var).
+        tmpfs=AGENT_TMPFS_MOUNT,
+        network='trinity-agent-network',
+        # #1197: cpu/memory normalized + validated above (raises 400 on
+        # a bad template value), so these are guaranteed Docker-valid.
+        mem_limit=config.resources['memory'],
+        # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+        # is Windows-only in docker-py and left NanoCpus=0, so newly
+        # created agents never got a CPU limit on Linux.
+        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+    )
+
+
+async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> None:
+    """Broadcast the `agent_created` WS event (best-effort, no-op without a
+    ws_manager)."""
+    if ws_manager:
+        await ws_manager.broadcast(json.dumps({
+            "event": "agent_created",
+            "data": {
+                "name": agent_status.name,
+                "type": agent_status.type,
+                "status": agent_status.status,
+                "port": agent_status.port,
+                "created": agent_status.created.isoformat(),
+                "resources": agent_status.resources,
+                "container_id": agent_status.container_id
+            }
+        }))
+
+
+def _register_agent(
+    config: AgentConfig,
+    current_user: User,
+    template_data: dict,
+    ephemeral_expires_at: Optional[str],
+    auto_assigned_subscription_id: Optional[str],
+) -> None:
+    """DB registration: ownership row (require_email #1129 + ephemeral fields +
+    provenance), the ent#69 parent→child spawn edge, the auto-assigned
+    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    Each post-registration grant is log-and-continue (non-fatal)."""
+    # #1129: seed require_email from the fleet-wide default
+    # (secure-by-default ON) at creation; owners can override per agent.
+    # trinity-enterprise#69 Part 2: spawn provenance is written for ANY
+    # agent-spawned creation; the parent's key id (not just its name)
+    # backs the control gate — a recycled name alone must never inherit
+    # control of surviving children.
+    spawned_by_key_id = None
+    if current_user.agent_name:
+        try:
+            parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
+            spawned_by_key_id = parent_key.id if parent_key else None
+        except Exception as e:
+            logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
+    db.register_agent_owner(
+        config.name,
+        current_user.username,
+        require_email=get_agent_default_require_email(),
+        is_ephemeral=bool(config.ephemeral),
+        ephemeral_max_executions=(config.ephemeral.max_executions if config.ephemeral else None),
+        ephemeral_expires_at=ephemeral_expires_at,
+        spawned_by_agent=current_user.agent_name,
+        spawned_by_key_id=spawned_by_key_id,
+        # Ghosts default to 1 concurrent turn: bounds check-then-act
+        # budget overshoot to a single in-flight execution and shrinks
+        # the blast radius of an untrusted workspace.
+        max_parallel_tasks=(1 if config.ephemeral else None),
+    )
+
+    # trinity-enterprise#69 Part 2: auto-grant the parent→child
+    # permission edge so the spawning agent can immediately
+    # chat/list/info its child (the MCP layer gates on
+    # agent_permissions; grant_default_permissions is deliberately
+    # empty). created_by carries the spawn sentinel so a human grant
+    # and an auto-grant stay distinguishable.
+    if current_user.agent_name:
+        try:
+            db.add_agent_permission(
+                current_user.agent_name,
+                config.name,
+                created_by=f"spawn:{current_user.agent_name}",
+            )
+            logger.info(
+                f"Auto-granted spawn permission edge {current_user.agent_name} -> {config.name}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to auto-grant spawn permission edge for {config.name}: {e}"
+            )
+
+    # Persist auto-assigned subscription (#74)
+    if auto_assigned_subscription_id:
+        try:
+            db.assign_subscription_to_agent(config.name, auto_assigned_subscription_id)
+        except Exception as e:
+            logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
+
+    # AVATAR-003: Seed avatar prompt from template
+    # (skipped for ephemeral ghosts — avatar generation is a paid,
+    # durable-identity nicety a disposable agent never benefits from)
+    _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
+    if _avatar_prompt:
+        try:
+            db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
+            logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
+        except Exception as e:
+            logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
+
+    # Phase 9.10: Grant default permissions (Option B - same-owner agents)
+    try:
+        permissions_count = db.grant_default_permissions(config.name, current_user.username)
+        if permissions_count > 0:
+            logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
+    except Exception as e:
+        logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
+
+    # Phase 7: git config was already reserved and persisted via
+    # `reserve_and_generate_instance_id` earlier in this function
+    # (S7 Layer 0). No second db.create_git_config call here — that
+    # would either be a no-op (agent_name UNIQUE) or, worse, mask
+    # a Layer 2 conflict.
+
+
+async def _materialize_agent_files(
+    config: AgentConfig,
+    template_data: dict,
+    github_repo_for_agent: Optional[str],
+    fork_upstream_repo: Optional[str],
+) -> None:
+    """Materialize the S4 persistent-state allowlist (#383) and the declared
+    data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
+    into the auto-sync heartbeat (#389). All three are non-fatal."""
+    # S4 (#383): Materialize persistent-state allowlist into the agent.
+    # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
+    # template.yaml is only read at creation (10-min cache), so this
+    # is the source of truth going forward. Non-fatal on failure —
+    # reset operations fall back to the default list at read time.
+    persistent_state = (
+        (template_data or {}).get(
+            "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
+        )
+    )
+    try:
+        await git_service.materialize_persistent_state(
+            config.name, persistent_state
+        )
+    except Exception as e:
+        logger.warning(
+            f"[S4] Failed to materialize persistent-state.yaml for "
+            f"{config.name}: {e}"
+        )
+
+    # #1169: Materialize the declared `data_paths` into the agent.
+    # Opt-in (empty list = no-op), so undeclared agents are
+    # untouched. Writes `.trinity/data-paths.yaml` and gitignores the
+    # `data/` root in the agent's own .gitignore. Non-fatal — the
+    # home volume is already durable; the declaration just enables
+    # selective snapshot/export and keeps runtime data out of git.
+    data_paths = (template_data or {}).get(
+        "data_paths", git_service.DEFAULT_DATA_PATHS
+    )
+    try:
+        await git_service.materialize_data_paths(
+            config.name, data_paths
+        )
+    except Exception as e:
+        logger.warning(
+            f"[#1169] Failed to materialize data-paths.yaml for "
+            f"{config.name}: {e}"
+        )
+
+    # #389 S1a: opt non-source-mode GitHub-template agents into the
+    # auto-sync heartbeat by default. Source-mode agents stay opt-in
+    # (auto-pushing to main would clobber protected branches) —
+    # except fork-to-own agents (#93), which own their repo.
+    # trinity-enterprise#69: ghosts never auto-push — their workspace
+    # is throwaway by definition, so the 15-min sync heartbeat stays off.
+    if github_repo_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+        try:
+            db.set_git_auto_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.warning(
+                f"Failed to enable auto-sync for {config.name}: {e}"
+            )
+
+
+def _rollback_failed_creation(handles: _RollbackHandles) -> None:
+    """The except-path rollback (AC #3, PRESERVED exactly): roll back the
+    agent_git_config reservation, the ephemeral quota slot, and the agent MCP
+    key — each guarded, each best-effort. Deliberately does NOT stop/remove the
+    container or its volumes (left for the cleanup watchdog)."""
+    # S7 Layer 0 (#382): if anything after the reservation fails,
+    # roll back the agent_git_config row so the working branch is
+    # released and a retry can claim it fresh.
+    if handles.github_repo_for_agent and handles.git_instance_id:
+        try:
+            db.delete_git_config(handles.agent_name)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to roll back agent_git_config for %s after "
+                "creation failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+    # trinity-enterprise#69: release the reserved ephemeral quota slot
+    # so a failed creation doesn't permanently consume owner capacity.
+    if handles.ephemeral_slot_reserved and handles.ephemeral_owner_id is not None:
+        try:
+            ephemeral_service.release_ephemeral_slot(handles.ephemeral_owner_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to release ephemeral quota slot for %s after "
+                "creation failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+    # #1197: the agent-scoped MCP key is minted before container
+    # creation, so a failure here would otherwise leave an orphaned
+    # mcp_api_keys row (one per failed attempt). Roll it back too.
+    if handles.agent_mcp_key:
+        try:
+            db.delete_agent_mcp_api_key(handles.agent_name)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to roll back MCP key for %s after creation "
+                "failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+
+
+def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
+    """The docker-unavailable else-branch cleanup (PRESERVED exactly): release
+    ONLY the ephemeral quota slot. The MCP key and git-config reservation are
+    deliberately NOT rolled back here (a pre-existing, preserved leak)."""
+    # trinity-enterprise#69 (review M2): release the quota reservation on
+    # the Docker-unavailable path too — otherwise repeated attempts during
+    # an outage consume the owner's ghost quota for the counter TTL.
+    if handles.ephemeral_slot_reserved and handles.ephemeral_owner_id is not None:
+        try:
+            ephemeral_service.release_ephemeral_slot(handles.ephemeral_owner_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to release ephemeral quota slot for %s (no docker): %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+
+
+def _check_name_availability(config: AgentConfig) -> None:
+    """Refuse a name already taken (#834 existence guard, incl. soft-deleted) or
+    whose data volumes another agent still owns after a rename (#1664). Both
+    raise 409 before any side effect."""
+    # #834: the name-reservation check must also catch soft-deleted agents.
+    # `get_agent_owner` filters them out (user-facing 404 transparency), so
+    # we use the unfiltered `is_agent_name_reserved` here. Without this the
+    # create flow walks past the existence guard, the container ends up
+    # created, and the agent_ownership INSERT hits a UNIQUE constraint
+    # IntegrityError leaving the system half-built.
+    if (
+        get_agent_by_name(config.name)
+        or db.get_agent_owner(config.name)
+        or db.is_agent_name_reserved(config.name)
+    ):
+        raise HTTPException(status_code=409, detail="Agent already exists")
+
+    # #1664: the name being free does NOT mean its volumes are. Rename frees the
+    # NAME while the agent keeps its volumes under the old base (Docker can
+    # rename neither a volume nor its label), so `agent-{name}-workspace` can
+    # still be a live agent's `/home/developer`. The volume block below is
+    # get-then-create — an existing volume is REUSED, not rejected — so without
+    # this gate a new agent created under a freed name silently boots on the
+    # renamed agent's home volume: its `.env`, its `.credentials.enc`, its
+    # workspace, with both containers writing the same disk. The owners need not
+    # be the same person, which makes it a cross-tenant credential disclosure,
+    # not just corruption. Refuse instead: the volumes are somebody's live data
+    # until their owning row is purged.
+    # Ghosts are exempt: they are volume-less by construction (the volume block
+    # below is `if not config.ephemeral`), so there is nothing to collide with —
+    # and this would put a DB read on the burst-spawn path for no reason.
+    if not config.ephemeral and db.is_volume_base_reserved(config.name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Agent name unavailable: its data volumes still belong to "
+                "another agent (it was renamed). Pick a different name."
+            ),
+        )
+
+
+def _enforce_role_quota(config: AgentConfig, current_user: User) -> None:
+    """QUOTA-001 per-role agent quota (429). Ephemeral agents have their OWN
+    quota (reserved atomically just before the docker block), so they bypass
+    this durable-agent limit."""
+    # Agent quota enforcement: per-role limits (QUOTA-001).
+    # Ephemeral agents have their OWN quota (atomic reservation just before
+    # the docker block) — counting ghosts against the durable quota would
+    # starve the burst-parallelism use case (trinity-enterprise#69).
+    max_agents = get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
+    if max_agents > 0:
+        owned = db.get_agents_by_owner(current_user.username)
+        # System agents don't count toward user quota
+        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
+        if len(non_system) >= max_agents:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": f"Agent quota exceeded. You have {len(non_system)}/{max_agents} agents. "
+                             f"Delete an agent to create a new one.",
+                    "code": "QUOTA_EXCEEDED",
+                    "current": len(non_system),
+                    "limit": max_agents
+                }
+            )
+
+
+def _mint_agent_mcp_key(config: AgentConfig, current_user: User) -> tuple[object, str]:
+    """Mint the agent-scoped Trinity MCP API key (best-effort; None on failure).
+    Returns `(agent_mcp_key, trinity_mcp_url)`. The key is a rollback handle —
+    minted here (before the container) and rolled back in the except."""
+    # Phase: Agent-to-Agent Collaboration
+    # Generate agent-scoped MCP API key for Trinity MCP access
+    agent_mcp_key = None
+    trinity_mcp_url = os.getenv('TRINITY_MCP_URL', 'http://mcp-server:8080/mcp')
+    try:
+        agent_mcp_key = db.create_agent_mcp_api_key(
+            agent_name=config.name,
+            owner_username=current_user.username,
+            description=f"Auto-generated Trinity MCP key for agent {config.name}"
+        )
+        if agent_mcp_key:
+            logger.info(f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}...")
+    except Exception as e:
+        logger.warning(f"Failed to create MCP API key for agent {config.name}: {e}")
+    return agent_mcp_key, trinity_mcp_url
+
+
+def _reserve_ephemeral_slot(
+    config: AgentConfig, current_user: User
+) -> tuple[bool, Optional[int]]:
+    """trinity-enterprise#69: atomic ephemeral quota reservation (Redis
+    INCR-with-cap; DB-count fallback when Redis is down). Returns
+    `(ephemeral_slot_reserved, ephemeral_owner_id)` — the two rollback handles
+    the except/else paths release."""
+    ephemeral_slot_reserved = False
+    ephemeral_owner_id = None
+    if config.ephemeral:
+        owner_row = db.get_user_by_username(current_user.username)
+        ephemeral_owner_id = (owner_row or {}).get("id") if isinstance(owner_row, dict) else getattr(owner_row, "id", None)
+        if ephemeral_owner_id is None:
+            raise HTTPException(status_code=500, detail="Could not resolve owner for ephemeral quota")
+        eph_cap = get_ephemeral_agent_quota()
+        if not ephemeral_service.try_reserve_ephemeral_slot(ephemeral_owner_id, eph_cap):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": f"Ephemeral agent quota exceeded ({eph_cap} live ghosts per owner).",
+                    "code": "ephemeral_quota_exceeded",
+                    "limit": eph_cap,
+                },
+            )
+        ephemeral_slot_reserved = True
+    return ephemeral_slot_reserved, ephemeral_owner_id
+
+
 async def create_agent_internal(
     config: AgentConfig,
     current_user: User,
@@ -1074,41 +1676,8 @@ async def create_agent_internal(
     # ghost name; returns the stamped expiry (None for a durable agent).
     ephemeral_expires_at = _apply_ephemeral_pregates(config, current_user)
 
-    # #834: the name-reservation check must also catch soft-deleted agents.
-    # `get_agent_owner` filters them out (user-facing 404 transparency), so
-    # we use the unfiltered `is_agent_name_reserved` here. Without this the
-    # create flow walks past the existence guard, the container ends up
-    # created, and the agent_ownership INSERT hits a UNIQUE constraint
-    # IntegrityError leaving the system half-built.
-    if (
-        get_agent_by_name(config.name)
-        or db.get_agent_owner(config.name)
-        or db.is_agent_name_reserved(config.name)
-    ):
-        raise HTTPException(status_code=409, detail="Agent already exists")
-
-    # #1664: the name being free does NOT mean its volumes are. Rename frees the
-    # NAME while the agent keeps its volumes under the old base (Docker can
-    # rename neither a volume nor its label), so `agent-{name}-workspace` can
-    # still be a live agent's `/home/developer`. The volume block below is
-    # get-then-create — an existing volume is REUSED, not rejected — so without
-    # this gate a new agent created under a freed name silently boots on the
-    # renamed agent's home volume: its `.env`, its `.credentials.enc`, its
-    # workspace, with both containers writing the same disk. The owners need not
-    # be the same person, which makes it a cross-tenant credential disclosure,
-    # not just corruption. Refuse instead: the volumes are somebody's live data
-    # until their owning row is purged.
-    # Ghosts are exempt: they are volume-less by construction (the volume block
-    # below is `if not config.ephemeral`), so there is nothing to collide with —
-    # and this would put a DB read on the burst-spawn path for no reason.
-    if not config.ephemeral and db.is_volume_base_reserved(config.name):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Agent name unavailable: its data volumes still belong to "
-                "another agent (it was renamed). Pick a different name."
-            ),
-        )
+    # #834 existence guard + #1664 volume-base guard (both 409, pre-side-effect).
+    _check_name_availability(config)
 
     # #1667: the gate above covers a volume some ROW still claims (the rename
     # case). This covers the volume NOTHING claims — refuse a leftover workspace
@@ -1125,26 +1694,8 @@ async def create_agent_internal(
     # the full sweep is reserved for teardown paths.
     clear_agent_breakers(config.name)
 
-    # Agent quota enforcement: per-role limits (QUOTA-001).
-    # Ephemeral agents have their OWN quota (atomic reservation just before
-    # the docker block) — counting ghosts against the durable quota would
-    # starve the burst-parallelism use case (trinity-enterprise#69).
-    max_agents = get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
-    if max_agents > 0:
-        owned = db.get_agents_by_owner(current_user.username)
-        # System agents don't count toward user quota
-        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
-        if len(non_system) >= max_agents:
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "error": f"Agent quota exceeded. You have {len(non_system)}/{max_agents} agents. "
-                             f"Delete an agent to create a new one.",
-                    "code": "QUOTA_EXCEEDED",
-                    "current": len(non_system),
-                    "limit": max_agents
-                }
-            )
+    # QUOTA-001: per-role durable-agent quota (429; ephemeral agents bypass it).
+    _enforce_role_quota(config, current_user)
 
     # SEC-172: Validate base image against allowlist before any Docker operations
     validate_base_image(config.base_image)
@@ -1154,15 +1705,6 @@ async def create_agent_internal(
     # FORK_* 4xx errors — stays OUTSIDE the docker try-block below, so those
     # errors are not flattened to a generic 500.
     tr = await _resolve_template(config, current_user)
-    template_data = tr.template_data
-    github_template_path = tr.github_template_path
-    github_repo_for_agent = tr.github_repo_for_agent
-    github_pat_for_agent = tr.github_pat_for_agent
-    github_pat_tier = tr.github_pat_tier
-    git_instance_id = tr.git_instance_id
-    git_working_branch = tr.git_working_branch
-    fork_upstream_repo = tr.fork_upstream_repo
-    template_shared_folders = tr.template_shared_folders
 
     # #1187: runtime is final here (request value, possibly overridden by the
     # template). Reject an unknown one now (clear 400) instead of letting the
@@ -1193,487 +1735,80 @@ async def create_agent_internal(
         credentials_path,
         template_volume,
         cred_files_volume,
-    ) = _stage_config_files(config, template_data, github_template_path)
+    ) = _stage_config_files(config, tr.template_data, tr.github_template_path)
 
-    # Phase: Agent-to-Agent Collaboration
-    # Generate agent-scoped MCP API key for Trinity MCP access
-    agent_mcp_key = None
-    trinity_mcp_url = os.getenv('TRINITY_MCP_URL', 'http://mcp-server:8080/mcp')
-    try:
-        agent_mcp_key = db.create_agent_mcp_api_key(
-            agent_name=config.name,
-            owner_username=current_user.username,
-            description=f"Auto-generated Trinity MCP key for agent {config.name}"
-        )
-        if agent_mcp_key:
-            logger.info(f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}...")
-    except Exception as e:
-        logger.warning(f"Failed to create MCP API key for agent {config.name}: {e}")
+    # Phase: Agent-to-Agent Collaboration — mint the agent-scoped MCP key
+    # (a rollback handle, rolled back in the except below).
+    agent_mcp_key, trinity_mcp_url = _mint_agent_mcp_key(config, current_user)
 
     env_vars, auto_assigned_subscription_id = _build_env_vars(
         config, agent_mcp_key, trinity_mcp_url, tr
     )
 
-    # trinity-enterprise#69: atomic ephemeral quota reservation (Redis
-    # INCR-with-cap; DB-count fallback when Redis is down). Placed immediately
-    # before the docker block so every later failure path releases it via the
-    # except-rollback below.
-    ephemeral_slot_reserved = False
-    ephemeral_owner_id = None
-    if config.ephemeral:
-        owner_row = db.get_user_by_username(current_user.username)
-        ephemeral_owner_id = (owner_row or {}).get("id") if isinstance(owner_row, dict) else getattr(owner_row, "id", None)
-        if ephemeral_owner_id is None:
-            raise HTTPException(status_code=500, detail="Could not resolve owner for ephemeral quota")
-        eph_cap = get_ephemeral_agent_quota()
-        if not ephemeral_service.try_reserve_ephemeral_slot(ephemeral_owner_id, eph_cap):
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "error": f"Ephemeral agent quota exceeded ({eph_cap} live ghosts per owner).",
-                    "code": "ephemeral_quota_exceeded",
-                    "limit": eph_cap,
-                },
-            )
-        ephemeral_slot_reserved = True
+    # trinity-enterprise#69: atomic ephemeral quota reservation, placed
+    # immediately before the docker block so every later failure path releases
+    # it via the except/else rollback below.
+    ephemeral_slot_reserved, ephemeral_owner_id = _reserve_ephemeral_slot(
+        config, current_user
+    )
+
+    # AC #3: assemble the rollback handles the except/else read. Only the
+    # orchestrator populates them; each field mirrors a value fixed BEFORE the
+    # docker block, so this is byte-identical to reading the locals in place.
+    handles = _RollbackHandles(
+        agent_name=config.name,
+        agent_mcp_key=agent_mcp_key,
+        git_instance_id=tr.git_instance_id,
+        github_repo_for_agent=tr.github_repo_for_agent,
+        ephemeral_slot_reserved=ephemeral_slot_reserved,
+        ephemeral_owner_id=ephemeral_owner_id,
+    )
 
     if docker_client:
         try:
             # Persist the resolved PAT as the per-agent PAT (#347) onto the
             # agent_git_config row the reservation above just created. Inside
             # this try so a failure hits the except below and rolls back the
-            # reserved row + MCP key. Fail-closed: the agent must never fall
-            # back to the platform PAT on recreate (get_github_pat_for_agent
-            # resolves per-agent first).
-            #
-            # ent#162 — persist ONLY for a deliberate identity: fork-to-own (#93)
-            # or the creator's per-user PAT. NEVER for the `global` tier: a
-            # global-fallback agent must keep github_pat_encrypted NULL so
-            # github_pat_propagation_service keeps reaching it on admin global
-            # rotation (persisting the global PAT would freeze it on a token the
-            # admin later revokes — the exact bug Decision 2 avoids). The recreate
-            # ladder (get_github_pat_for_agent) stays 2-tier per-agent → global,
-            # so a per-user agent that persists here re-resolves its own copy on
-            # recreate without ever re-deriving the live per-user tier.
-            if github_pat_tier in ("fork", "per_user") and github_repo_for_agent:
-                if not db.set_agent_github_pat(config.name, github_pat_for_agent):
+            # reserved row + MCP key. ent#162 — persist ONLY for a deliberate
+            # identity (fork-to-own #93 or the creator's per-user PAT), NEVER
+            # the `global` tier (Decision 2: keep github_pat_encrypted NULL so
+            # propagation keeps reaching it on admin rotation).
+            if tr.github_pat_tier in ("fork", "per_user") and tr.github_repo_for_agent:
+                if not db.set_agent_github_pat(config.name, tr.github_pat_for_agent):
                     raise RuntimeError(
                         f"failed to persist per-agent GitHub PAT for {config.name}"
                     )
 
-            # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
-            # This ensures files created by the agent survive container restarts.
-            # trinity-enterprise#69: ephemeral ghosts are VOLUME-LESS — their
-            # /home/developer lives on the container writable layer (overlayfs),
-            # auto-reclaimed by container removal. Volumes exist to survive
-            # recreate, and ghosts never recreate.
-            volumes = {
-                str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
-                str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-                'encrypted-data': {'bind': '/data', 'mode': 'rw'},
-            }
-            if not config.ephemeral:
-                agent_volume_name = f"agent-{config.name}-workspace"
-                # #1667: adopting a pre-existing volume is a DECISION, not a
-                # fallthrough. This used to be get-then-create with no branch —
-                # an existing volume was silently mounted as the new agent's
-                # `/home/developer`, so whatever the previous holder of this
-                # name left behind (its `.env`, its `.credentials.enc`, its
-                # workspace) resurfaced inside a different agent, possibly a
-                # different owner's. #1664's gate covers the case where a row
-                # still claims the base (rename); this covers the case where
-                # NOTHING claims it — a purge whose removal hit an in-use 409,
-                # a crash between `volume_create` and the ownership INSERT
-                # (creation writes the volume first — the reason the orphan
-                # sweep carries a 1h creation grace), or a restored backup.
-                #
-                # Emptiness cannot be the discriminator: the one legitimate
-                # adopter — deploy-local (#950) — PRE-POPULATES this volume with
-                # the template before calling create, so a valid adopt is
-                # non-empty. (And Docker auto-populates a named volume from the
-                # image on first mount, so "empty" wouldn't even identify a
-                # crashed create.) So the adopter declares itself, and everyone
-                # else is refused.
-                try:
-                    await volume_get(agent_volume_name)
-                    # Reaching here means the volume pre-exists. The refusal
-                    # gate above already ran, so this is a declared adopt —
-                    # deploy-local's pre-populated workspace (#950). Logged:
-                    # an adopt is never silent again (#1667).
-                    logger.info(
-                        "[#1667] adopting pre-existing workspace volume %s for %s",
-                        agent_volume_name,
-                        config.name,
-                    )
-                except docker.errors.NotFound:
-                    await volume_create(
-                        name=agent_volume_name,
-                        labels={
-                            'trinity.platform': 'agent-workspace',
-                            'trinity.agent-name': config.name
-                        }
-                    )
-                volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
-
-            if template_volume:
-                volumes.update(template_volume)
-            if cred_files_volume:
-                volumes.update(cred_files_volume)
-
-            # Phase 9.11: Agent Shared Folders - mount shared volumes based on config
-            # First, write template-defined shared folder config to DB (if defined)
-            if template_shared_folders:
-                try:
-                    db.upsert_shared_folder_config(
-                        agent_name=config.name,
-                        expose_enabled=template_shared_folders.get("expose", False),
-                        consume_enabled=template_shared_folders.get("consume", False)
-                    )
-                    logger.info(f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}")
-                except Exception as e:
-                    logger.warning(f"Failed to apply template shared folder config for {config.name}: {e}")
-
-            shared_folder_config = db.get_shared_folder_config(config.name)
-            if shared_folder_config:
-                # If agent exposes a shared folder, create and mount the shared volume
-                if shared_folder_config.expose_enabled:
-                    shared_volume_name = db.get_shared_volume_name(config.name)
-                    volume_created = False
-                    try:
-                        await volume_get(shared_volume_name)
-                    except docker.errors.NotFound:
-                        await volume_create(
-                            name=shared_volume_name,
-                            labels={
-                                'trinity.platform': 'agent-shared',
-                                'trinity.agent-name': config.name
-                            }
-                        )
-                        volume_created = True
-
-                    # Fix ownership of new volumes (Docker creates them as root)
-                    if volume_created:
-                        try:
-                            await containers_run(
-                                'alpine',
-                                command='chown 1000:1000 /shared',
-                                volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
-                                remove=True
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not fix shared volume ownership: {e}")
-
-                    volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
-
-                # If agent consumes shared folders, mount available shared volumes
-                if shared_folder_config.consume_enabled:
-                    available_folders = db.get_available_shared_folders(config.name)
-                    for source_agent in available_folders:
-                        source_volume = db.get_shared_volume_name(source_agent)
-                        mount_path = db.get_shared_mount_path(source_agent)
-                        # Only mount if the source volume exists
-                        try:
-                            await volume_get(source_volume)
-                            volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
-                        except docker.errors.NotFound:
-                            # Source agent hasn't started yet or doesn't have shared volume
-                            pass
-
-            # FILES-001 Step 2: if file sharing is enabled, create and mount the
-            # per-agent public volume (symmetric to the shared-folders expose flow).
-            if db.get_file_sharing_enabled(config.name):
-                public_volume_name = db.get_public_volume_name(config.name)
-                public_volume_created = False
-                try:
-                    await volume_get(public_volume_name)
-                except docker.errors.NotFound:
-                    await volume_create(
-                        name=public_volume_name,
-                        labels={
-                            'trinity.platform': 'agent-public',
-                            'trinity.agent-name': config.name,
-                        },
-                    )
-                    public_volume_created = True
-
-                if public_volume_created:
-                    try:
-                        await containers_run(
-                            'alpine',
-                            command='chown 1000:1000 /public',
-                            volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
-                            remove=True,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not fix public volume ownership: {e}")
-
-                volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
-
-            # Get system-wide full_capabilities setting (not per-agent)
-            full_capabilities = get_agent_full_capabilities()
-
-            # Create container with security settings
-            # Security principle: ALWAYS apply baseline security, even in full_capabilities mode
-            # - Always drop ALL caps, then add back only what's needed
-            # - Always apply AppArmor profile
-            # - Always apply noexec,nosuid to /tmp
-            container_labels = {
-                'trinity.platform': 'agent',
-                'trinity.agent-name': config.name,
-                'trinity.agent-type': config.type,
-                'trinity.ssh-port': str(config.port),
-                'trinity.cpu': config.resources['cpu'],
-                'trinity.memory': config.resources['memory'],
-                'trinity.created': utc_now_iso(),
-                'trinity.template': config.template or '',
-                'trinity.agent-runtime': config.runtime or 'claude-code',
-                'trinity.full-capabilities': str(full_capabilities).lower(),
-                'trinity.base-image-version': get_platform_version()
-            }
-            if config.ephemeral:
-                # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
-                # orphan pass reclaims labeled containers whose ownership row
-                # is gone (backend restarted mid-create/mid-discard).
-                container_labels['trinity.ephemeral'] = 'true'
-                container_labels['trinity.ephemeral-expires-at'] = ephemeral_expires_at or ''
-            if current_user.agent_name:
-                # Part 2 spawn provenance rides on ANY agent-spawned creation
-                # (durable or ephemeral), pairing with the DB columns.
-                container_labels['trinity.spawned-by'] = current_user.agent_name
-
-            container = await containers_run(
-                config.base_image,
-                detach=True,
-                name=f"agent-{config.name}",
-                ports={'22/tcp': config.port},
-                volumes=volumes,
-                environment=env_vars,
-                labels=container_labels,
-                # Always apply AppArmor for additional sandboxing
-                security_opt=['apparmor:docker-default'],
-                # Always drop ALL capabilities first (defense in depth)
-                cap_drop=['ALL'],
-                # Add back only the capabilities needed for the mode
-                cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-                read_only=False,
-                # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-                # is redirected off this tiny tmpfs via the TMPDIR env var).
-                tmpfs=AGENT_TMPFS_MOUNT,
-                network='trinity-agent-network',
-                # #1197: cpu/memory normalized + validated above (raises 400 on
-                # a bad template value), so these are guaranteed Docker-valid.
-                mem_limit=config.resources['memory'],
-                # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
-                # is Windows-only in docker-py and left NanoCpus=0, so newly
-                # created agents never got a CPU limit on Linux.
-                nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+            volumes = await _build_volume_mounts(
+                config,
+                config_path,
+                credentials_path,
+                template_volume,
+                cred_files_volume,
+                tr.template_shared_folders,
             )
-
+            container = await _create_agent_container(
+                config, volumes, env_vars, current_user, ephemeral_expires_at
+            )
             agent_status = get_agent_status_from_container(container)
-
-            if ws_manager:
-                await ws_manager.broadcast(json.dumps({
-                    "event": "agent_created",
-                    "data": {
-                        "name": agent_status.name,
-                        "type": agent_status.type,
-                        "status": agent_status.status,
-                        "port": agent_status.port,
-                        "created": agent_status.created.isoformat(),
-                        "resources": agent_status.resources,
-                        "container_id": agent_status.container_id
-                    }
-                }))
-
-            # #1129: seed require_email from the fleet-wide default
-            # (secure-by-default ON) at creation; owners can override per agent.
-            # trinity-enterprise#69 Part 2: spawn provenance is written for ANY
-            # agent-spawned creation; the parent's key id (not just its name)
-            # backs the control gate — a recycled name alone must never inherit
-            # control of surviving children.
-            spawned_by_key_id = None
-            if current_user.agent_name:
-                try:
-                    parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
-                    spawned_by_key_id = parent_key.id if parent_key else None
-                except Exception as e:
-                    logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
-            db.register_agent_owner(
-                config.name,
-                current_user.username,
-                require_email=get_agent_default_require_email(),
-                is_ephemeral=bool(config.ephemeral),
-                ephemeral_max_executions=(config.ephemeral.max_executions if config.ephemeral else None),
-                ephemeral_expires_at=ephemeral_expires_at,
-                spawned_by_agent=current_user.agent_name,
-                spawned_by_key_id=spawned_by_key_id,
-                # Ghosts default to 1 concurrent turn: bounds check-then-act
-                # budget overshoot to a single in-flight execution and shrinks
-                # the blast radius of an untrusted workspace.
-                max_parallel_tasks=(1 if config.ephemeral else None),
+            await _broadcast_agent_created(agent_status, ws_manager)
+            _register_agent(
+                config,
+                current_user,
+                tr.template_data,
+                ephemeral_expires_at,
+                auto_assigned_subscription_id,
             )
-
-            # trinity-enterprise#69 Part 2: auto-grant the parent→child
-            # permission edge so the spawning agent can immediately
-            # chat/list/info its child (the MCP layer gates on
-            # agent_permissions; grant_default_permissions is deliberately
-            # empty). created_by carries the spawn sentinel so a human grant
-            # and an auto-grant stay distinguishable.
-            if current_user.agent_name:
-                try:
-                    db.add_agent_permission(
-                        current_user.agent_name,
-                        config.name,
-                        created_by=f"spawn:{current_user.agent_name}",
-                    )
-                    logger.info(
-                        f"Auto-granted spawn permission edge {current_user.agent_name} -> {config.name}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to auto-grant spawn permission edge for {config.name}: {e}"
-                    )
-
-            # Persist auto-assigned subscription (#74)
-            if auto_assigned_subscription_id:
-                try:
-                    db.assign_subscription_to_agent(config.name, auto_assigned_subscription_id)
-                except Exception as e:
-                    logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
-
-            # AVATAR-003: Seed avatar prompt from template
-            # (skipped for ephemeral ghosts — avatar generation is a paid,
-            # durable-identity nicety a disposable agent never benefits from)
-            _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
-            if _avatar_prompt:
-                try:
-                    db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
-                    logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
-                except Exception as e:
-                    logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
-
-            # Phase 9.10: Grant default permissions (Option B - same-owner agents)
-            try:
-                permissions_count = db.grant_default_permissions(config.name, current_user.username)
-                if permissions_count > 0:
-                    logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
-            except Exception as e:
-                logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
-
-            # Phase 7: git config was already reserved and persisted via
-            # `reserve_and_generate_instance_id` earlier in this function
-            # (S7 Layer 0). No second db.create_git_config call here — that
-            # would either be a no-op (agent_name UNIQUE) or, worse, mask
-            # a Layer 2 conflict.
-
-            # S4 (#383): Materialize persistent-state allowlist into the agent.
-            # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
-            # template.yaml is only read at creation (10-min cache), so this
-            # is the source of truth going forward. Non-fatal on failure —
-            # reset operations fall back to the default list at read time.
-            persistent_state = (
-                (template_data or {}).get(
-                    "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
-                )
+            await _materialize_agent_files(
+                config, tr.template_data, tr.github_repo_for_agent, tr.fork_upstream_repo
             )
-            try:
-                await git_service.materialize_persistent_state(
-                    config.name, persistent_state
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[S4] Failed to materialize persistent-state.yaml for "
-                    f"{config.name}: {e}"
-                )
-
-            # #1169: Materialize the declared `data_paths` into the agent.
-            # Opt-in (empty list = no-op), so undeclared agents are
-            # untouched. Writes `.trinity/data-paths.yaml` and gitignores the
-            # `data/` root in the agent's own .gitignore. Non-fatal — the
-            # home volume is already durable; the declaration just enables
-            # selective snapshot/export and keeps runtime data out of git.
-            data_paths = (template_data or {}).get(
-                "data_paths", git_service.DEFAULT_DATA_PATHS
-            )
-            try:
-                await git_service.materialize_data_paths(
-                    config.name, data_paths
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[#1169] Failed to materialize data-paths.yaml for "
-                    f"{config.name}: {e}"
-                )
-
-            # #389 S1a: opt non-source-mode GitHub-template agents into the
-            # auto-sync heartbeat by default. Source-mode agents stay opt-in
-            # (auto-pushing to main would clobber protected branches) —
-            # except fork-to-own agents (#93), which own their repo.
-            # trinity-enterprise#69: ghosts never auto-push — their workspace
-            # is throwaway by definition, so the 15-min sync heartbeat stays off.
-            if github_repo_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
-                try:
-                    db.set_git_auto_sync_enabled(config.name, True)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to enable auto-sync for {config.name}: {e}"
-                    )
-
             return agent_status
         except Exception as e:
-            # S7 Layer 0 (#382): if anything after the reservation fails,
-            # roll back the agent_git_config row so the working branch is
-            # released and a retry can claim it fresh.
-            if github_repo_for_agent and git_instance_id:
-                try:
-                    db.delete_git_config(config.name)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to roll back agent_git_config for %s after "
-                        "creation failure: %s",
-                        config.name,
-                        cleanup_exc,
-                    )
-            # trinity-enterprise#69: release the reserved ephemeral quota slot
-            # so a failed creation doesn't permanently consume owner capacity.
-            if ephemeral_slot_reserved and ephemeral_owner_id is not None:
-                try:
-                    ephemeral_service.release_ephemeral_slot(ephemeral_owner_id)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to release ephemeral quota slot for %s after "
-                        "creation failure: %s",
-                        config.name,
-                        cleanup_exc,
-                    )
-            # #1197: the agent-scoped MCP key is minted before container
-            # creation, so a failure here would otherwise leave an orphaned
-            # mcp_api_keys row (one per failed attempt). Roll it back too.
-            if agent_mcp_key:
-                try:
-                    db.delete_agent_mcp_api_key(config.name)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to roll back MCP key for %s after creation "
-                        "failure: %s",
-                        config.name,
-                        cleanup_exc,
-                    )
+            _rollback_failed_creation(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
-        # trinity-enterprise#69 (review M2): release the quota reservation on
-        # the Docker-unavailable path too — otherwise repeated attempts during
-        # an outage consume the owner's ghost quota for the counter TTL.
-        if ephemeral_slot_reserved and ephemeral_owner_id is not None:
-            try:
-                ephemeral_service.release_ephemeral_slot(ephemeral_owner_id)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "Failed to release ephemeral quota slot for %s (no docker): %s",
-                    config.name,
-                    cleanup_exc,
-                )
+        _release_ephemeral_on_no_docker(handles)
         raise HTTPException(
             status_code=503,
             detail="Docker not available - cannot create agents in demo mode"
