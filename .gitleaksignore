@@ -1,0 +1,22 @@
+# gitleaks baseline for local FULL-history sweeps (#1164).
+#
+# NON-LOAD-BEARING. The CI gate (.github/workflows/secret-scan.yml) is
+# commit-range-scoped and never runs a full-history scan, so it does NOT
+# depend on this file. It exists only so a manual local full sweep —
+#   gitleaks git . --config .gitleaks.toml --redact=100
+# stays green on already-settled, accepted historical findings, and to be the
+# canonical, documented home for any future known-but-accepted one. Each entry
+# is a gitleaks fingerprint: <commit>:<file>:<ruleID>:<startline>.
+#
+# ---- Settled #1158 leak: NO fingerprint (verified undetectable) ----
+# The rotated re_-prefixed Resend key removed in PR #1162 was XOR-split across
+# two base85-encoded halves in src/cli/trinity_cli/_notify.py (added in
+# 3986c50b, removed in 5dc63bbd). gitleaks does NOT flag those halves — neither
+# half is a re_ key nor keyword-adjacent, and generic entropy on base85 is
+# unreliable. Verified this session by scanning the historical blob in
+# isolation under BOTH `useDefault`-only and .gitleaks.toml: 0 findings each.
+# So there is nothing to fingerprint here; fabricating a line gitleaks would
+# never emit would be false coverage. The real defense is credential rotation
+# (done, #1158) + the key never re-landing verbatim (the custom
+# trinity-resend-api-key rule). This is the documented "honest limit" of
+# regex+entropy secret scanning against a re-split/obfuscated secret.
