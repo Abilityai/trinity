@@ -21,8 +21,13 @@ description = "Resend API key (re_-prefixed) — audit finding N1 / #1158"
 # #1158 leak is alarming to a prefix rule) — a documented, accepted limit.
 # Escape hatch for a legitimate future hit: an inline `gitleaks:allow` comment.
 regex = '''\bre_[A-Za-z0-9_-]{20,}\b'''
-# Entropy floor tuned so snake_case-ish long identifiers stay out while a real
-# base62 key (~4.5-5.5) passes; calibrated by the plant->red / clean->green proof.
+# Entropy floor: the FP lever (RE2 can't require a digit/upper via lookahead). It
+# raises the bar for short/low-variety strings, but does NOT fully exclude a long
+# all-lowercase re_ snake_case identifier — verified some land ~3.82-4.03, which
+# overlaps the low end of a real (short/mixed) base62 key, so no single floor
+# separates them cleanly. That residual is rare (needs 20+ trailing chars), range-
+# scoped, fail-safe (blocks a PR -> human allowlists; leaks nothing), and handled by
+# the `gitleaks:allow` escape hatch above. Calibrated by the plant->red/clean->green proof.
 entropy = 3.8
 keywords = ["re_"]
 
