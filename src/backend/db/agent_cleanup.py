@@ -109,6 +109,15 @@ AGENT_REFS: List[AgentRef] = [
     # LINK_CHAINED_DELETES (no agent column of its own).
     AgentRef("agent_loops",                  "agent_name",        Policy.CASCADE),
 
+    # --- Agent self-reminders (#1296) --------------------------------------
+    # Ownership lives on the TARGET agent (target == source for a self-reminder).
+    # CASCADE: a purged agent's pending reminders are wiped; a renamed agent's
+    # follow via cascade_rename (else they'd fire against a nonexistent agent).
+    # The second column `source_agent_name` (initiator provenance, audit-only)
+    # is intentionally NOT registered — same as agent_loops.source_agent_name,
+    # and the parity-test regex doesn't match it.
+    AgentRef("agent_reminders",              "agent_name",        Policy.CASCADE),
+
     # --- Chat / session history --------------------------------------------
     # Children before parents for future FK-enforced Postgres migration:
     # chat_messages → chat_sessions; agent_session_messages → agent_sessions.

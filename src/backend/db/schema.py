@@ -331,6 +331,33 @@ TABLES = {
         )
     """,
 
+    # Agent self-reminders (#1296) — durable one-shot deferred self-trigger.
+    # The standalone scheduler arms a DateTrigger per pending row and, on fire,
+    # dispatches a normal execution of the same agent (triggered_by="reminder").
+    "agent_reminders": """
+        CREATE TABLE IF NOT EXISTS agent_reminders (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            fire_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            model TEXT,
+            timeout_seconds INTEGER,
+            allowed_tools TEXT,
+            owner_id INTEGER,
+            created_by_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            execution_id TEXT,
+            fire_attempts INTEGER NOT NULL DEFAULT 0,
+            firing_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            fired_at TEXT,
+            cancelled_at TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Chat Tables
     # -------------------------------------------------------------------------
@@ -1524,6 +1551,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)",
     "CREATE INDEX IF NOT EXISTS idx_executions_loop ON schedule_executions(loop_id) "
     "WHERE loop_id IS NOT NULL",
+
+    # Agent self-reminders (#1296)
+    "CREATE INDEX IF NOT EXISTS idx_agent_reminders_agent ON agent_reminders(agent_name)",
+    # Partial index covers BOTH the pending-scan and the stale-firing reclaim
+    # (the reconcile reads pending ∪ firing).
+    "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
+    "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')",
 ]
 
 

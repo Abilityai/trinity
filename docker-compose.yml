@@ -65,6 +65,14 @@ services:
       - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
       - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
       - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
+      # Agent self-reminders (#1296) — tunable caps (working code defaults).
+      # Must reach the container or the .env lever is inert (the #1056/#1039 packaging class).
+      - REMINDER_MESSAGE_MAX_CHARS=${REMINDER_MESSAGE_MAX_CHARS:-4000}          # max reminder message length
+      - REMINDER_MIN_DELAY_SECONDS=${REMINDER_MIN_DELAY_SECONDS:-60}            # earliest fire (floor)
+      - REMINDER_MAX_DELAY_SECONDS=${REMINDER_MAX_DELAY_SECONDS:-2592000}       # latest fire (30d ceiling)
+      - MAX_PENDING_REMINDERS_PER_AGENT=${MAX_PENDING_REMINDERS_PER_AGENT:-25}  # concurrent pending per agent
+      - MAX_REMINDERS_PER_AGENT_PER_DAY=${MAX_REMINDERS_PER_AGENT_PER_DAY:-100} # rolling 24h creation cap
+      - REMINDER_RATE_LIMIT=${REMINDER_RATE_LIMIT:-30}                          # set_reminder calls per agent per 60s
       # Operator-queue agent ingestion caps (#1632) — bound a compromised/runaway
       # agent flooding the queue. Must reach the container or the .env lever is
       # inert (the #1039 packaging class).

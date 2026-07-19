@@ -102,6 +102,15 @@ class SchedulerConfig:
         "MISFIRE_GRACE_TIME", "3600"
     )))  # seconds (Issue #145)
 
+    # #1296: bounded fire attempts for a self-reminder. A clean pre-start
+    # dispatch failure (503 warmup / connection error — the task never started)
+    # releases firing→pending for the reconcile to retry; after this many
+    # attempts the reminder is marked terminal `failed` (visible in list) so a
+    # permanently-broken target doesn't retry forever.
+    max_reminder_fire_attempts: int = field(default_factory=lambda: int(os.getenv(
+        "MAX_REMINDER_FIRE_ATTEMPTS", "3"
+    )))
+
     # Backend API (for process executions)
     backend_url: str = field(default_factory=lambda: os.getenv(
         "BACKEND_URL", "http://backend:8000"

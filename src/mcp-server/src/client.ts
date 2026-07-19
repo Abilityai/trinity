@@ -2072,6 +2072,55 @@ export class TrinityClient {
     );
   }
 
+  // ============================================================================
+  // Agent Self-Reminders (#1296)
+  // ============================================================================
+
+  async setReminder(
+    agentName: string,
+    data: {
+      message: string;
+      delay_seconds?: number;
+      fire_at?: string;
+      model?: string;
+      timeout_seconds?: number;
+      allowed_tools?: string[];
+    }
+  ): Promise<{
+    id: string;
+    agent_name: string;
+    message: string;
+    fire_at: string;
+    status: string;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders`,
+      data
+    );
+  }
+
+  async listReminders(agentName: string, status?: string): Promise<unknown> {
+    const query = status
+      ? `?status=${encodeURIComponent(status)}`
+      : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders${query}`
+    );
+  }
+
+  async cancelReminder(
+    agentName: string,
+    reminderId: string
+  ): Promise<{ id: string; status: string }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders/${encodeURIComponent(reminderId)}/cancel`
+    );
+  }
+
   /**
    * Export an agent's runtime data (`/home/developer/data`) inline as a
    * base64 tar (#1169). Only succeeds for small datasets — large data must

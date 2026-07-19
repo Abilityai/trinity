@@ -1,6 +1,7 @@
 """
 Pydantic models for the Trinity backend API.
 """
+import os
 import re
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
@@ -1983,6 +1984,104 @@ class LoopStatusResponse(BaseModel):
 class StopLoopResponse(BaseModel):
     loop_id: str
     status: str  # "stopping" | "already_done"
+
+
+# =============================================================================
+# Agent Self-Reminders (#1296) — routers/reminders.py
+# =============================================================================
+
+# Env-tunable abuse bounds. Read once at import; the router enforces the stateful
+# ones (pending cap, daily cap, resolved-window) with real DB counts, while the
+# field caps below are the hard Pydantic ceilings (422 before any DB work).
+REMINDER_MESSAGE_MAX_CHARS = int(os.getenv("REMINDER_MESSAGE_MAX_CHARS", "4000"))
+# Min delay ≥ the 60s scheduler reload interval so a reminder can be armed before
+# it is due (a near-min reminder fires ~one interval late, never dropped).
+REMINDER_MIN_DELAY_SECONDS = int(os.getenv("REMINDER_MIN_DELAY_SECONDS", "60"))
+# Max delay 30 days — deliberately < the 180-day soft-delete name reservation, so
+# a pending reminder can never outlive the reuse of its agent's name.
+REMINDER_MAX_DELAY_SECONDS = int(os.getenv("REMINDER_MAX_DELAY_SECONDS", "2592000"))
+# Concurrency cap on pending reminders per agent (429 on a real pending count).
+MAX_PENDING_REMINDERS_PER_AGENT = int(os.getenv("MAX_PENDING_REMINDERS_PER_AGENT", "25"))
+# Durable rolling-24h create cap — the non-fail-open backstop against
+# self-perpetuation (a reminder can itself call set_reminder). 429.
+MAX_REMINDERS_PER_AGENT_PER_DAY = int(os.getenv("MAX_REMINDERS_PER_AGENT_PER_DAY", "100"))
+
+
+class ReminderCreate(BaseModel):
+    """Request body for an agent scheduling a one-shot self-reminder (#1296).
+
+    Exactly one of ``fire_at`` (absolute ISO-8601) or ``delay_seconds``
+    (relative) must be supplied — the XOR is validated below. The resolved
+    fire instant's min/max window and the timeout clamp are enforced at the
+    router against the agent's config (they need the live agent cap).
+    """
+    message: str = Field(..., min_length=1, max_length=REMINDER_MESSAGE_MAX_CHARS)
+    fire_at: Optional[str] = Field(
+        default=None,
+        description="Absolute ISO-8601 time to fire (UTC recommended). XOR delay_seconds.",
+    )
+    delay_seconds: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Relative delay in seconds from now. XOR fire_at.",
+    )
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = Field(default=None, ge=10)
+    allowed_tools: Optional[List[str]] = None
+
+    @field_validator("fire_at")
+    @classmethod
+    def _check_fire_at_iso(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            raise ValueError("fire_at must be an ISO-8601 timestamp")
+        return v
+
+    @model_validator(mode="after")
+    def _check_fire_spec_xor(self) -> "ReminderCreate":
+        has_fire_at = self.fire_at is not None
+        has_delay = self.delay_seconds is not None
+        if has_fire_at == has_delay:
+            raise ValueError(
+                "Provide exactly one of fire_at (absolute) or delay_seconds (relative)."
+            )
+        return self
+
+    def raw_fire_spec(self) -> str:
+        """The literal fire spec as supplied — the create-idempotency key hashes
+        this (NOT the resolved instant), so a ``delay_seconds`` client-retry
+        dedupes instead of resolving ``now+delay`` to a fresh key each call."""
+        if self.delay_seconds is not None:
+            return f"delay_seconds={self.delay_seconds}"
+        return f"fire_at={self.fire_at}"
+
+
+class ReminderSummary(BaseModel):
+    """List-response model for a reminder (#1296)."""
+    id: str
+    agent_name: str
+    message: str
+    fire_at: str
+    status: str  # pending | firing | fired | cancelled | failed
+    created_at: str
+    fired_at: Optional[str] = None
+    cancelled_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Reminder(ReminderSummary):
+    """Detail-response model — full reminder row (#1296)."""
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    allowed_tools: Optional[List[str]] = None
+    execution_id: Optional[str] = None
+    fire_attempts: int = 0
+    error: Optional[str] = None
 
 
 # =============================================================================

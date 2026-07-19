@@ -73,6 +73,7 @@
 - `agent_data.py` - Runtime-data export/import (`data_paths`) over the durable home volume (#1169)
 - `agent_brain_orb.py` - Brain Orb proxy: `/brain-orb/data` + `/scopes` + `/tool` (read) + `/scope` (owner mutation) + `/voice-token` (Phase 3 ephemeral Gemini mint) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (#58, #60)
 - `loops.py` - Sequential agent loops: start/get/stop + agent-scoped list (#740)
+- `reminders.py` - Agent self-reminders: create/list/cancel (self-gated) (#1296) — see [Agent Self-Reminders](#agent-self-reminders-1296)
 - `files.py` - Public download endpoint for outbound agent file sharing (FILES-001)
 - `agent_rename.py` - Rename endpoint (RENAME-001)
 - `agent_ssh.py` - SSH access endpoint
@@ -204,6 +205,7 @@
 - `voice_reply_service.py` - Per-message voice-reply delivery (ent#117): backs the `send_voice_reply` MCP tool. Given an agent + resolved channel destination (channel/chat id/thread from the execution) + text, gates on TTS availability + agent-level enable + the per-channel flag, wraps delivery in `effect_guard("voice_reply", …)` (#1084), synthesizes, and delivers via each channel's send primitive (Telegram `_send_voice`, Slack `slack_service.upload_file`, WhatsApp `create_share_from_bytes` + Twilio `MediaUrl`). Fail-soft → not-delivered so the agent falls back to text. Replaces the old always-voice adapter path (`_maybe_send_voice` removed) — replies are TEXT by default, voice is a per-message agent choice
 - `agent_shared_files_service.py` - Outbound file sharing — see [Outbound File Sharing](#outbound-file-sharing-files-001)
 - `loop_service.py` - Sequential agent loop runner — see [Sequential Agent Loops](#sequential-agent-loops-740-ui-1106)
+- `reminder_service.py` - Agent self-reminder create (bounds + timeout clamp + provenance + relative→absolute) — see [Agent Self-Reminders](#agent-self-reminders-1296) (#1296)
 - `client_roster_service.py` - Aggregates external channel clients (Telegram + WhatsApp) into the Sharing-tab roster; cross-channel sort + per-channel failure degradation (#20)
 - `voip_service.py` - VoIP outbound-call orchestration — see [VoIP](#voip-telephony-voip-001-1056)
 
@@ -285,6 +287,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `files.ts` (1) | `share_file` | Publish file from `/home/developer/public/`, return download URL (FILES-001) |
 | `pipelines.ts` (2) | `list_agent_pipelines`, `get_agent_pipeline_state` | Read-only introspection of an agent's self-published pipelines (`~/.trinity/pipelines/*.yaml` + `~/.trinity/pipeline-state/<id>/<instance>.json`) over the **existing** `agent_files` surface — no backend/DB change (Invariant #8). Strict `^[A-Za-z0-9._-]+$` id validation (path-traversal guard), hardened YAML parse (size cap + dup-key + alias guard), latest-instance by mtime, only-404→empty (#919) |
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
+| `reminders.ts` (3) | `set_reminder`, `list_reminders`, `cancel_reminder` | Durable one-shot deferred self-trigger; self-scoped; fires a normal execution of the same agent (`triggered_by="reminder"`) via the scheduler (#1296) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
 | `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
@@ -339,12 +342,12 @@ Services that run continuously in the backend process:
 
 | Service | Module | Description |
 |---------|--------|-------------|
-| **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps, the **expired-SSH sweep** (`_sweep_expired_ssh_credentials` → `SshService.cleanup_expired_credentials` — removes an expired ephemeral key's line from the container `authorized_keys` sshd reads; TTL was previously enforced only on Redis metadata, #1616), and the #740 startup orphan-loop hook — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772). Runs the additive **lease-reaper** (`lease_reaper_service`) each cycle — re-queues (preserving `execution_id`) or poison-parks expired pull leases (#1081 Phase 3, #429/#1402; inert until an agent is piloted) |
+| **Cleanup Service** | `cleanup_service.py` | Every 5 min: active watchdog reconciliation against agent process registries (orphan recovery, auto-terminate timeouts) + passive stale recovery (CLEANUP-001, #129). Also runs retention + soft-delete purge sweeps, the **expired-SSH sweep** (`_sweep_expired_ssh_credentials` → `SshService.cleanup_expired_credentials` — removes an expired ephemeral key's line from the container `authorized_keys` sshd reads; TTL was previously enforced only on Redis metadata, #1616), and the #740 startup orphan-loop hook, and the **agent_reminders retention sweep** (`_sweep_agent_reminders_retention` — DELETEs terminal `fired`/`cancelled`/`failed` reminders past `agent_reminders_retention_days`, #1296) — see [Soft Delete & Retention](#soft-delete-retention--recovery-834-772). Runs the additive **lease-reaper** (`lease_reaper_service`) each cycle — re-queues (preserving `execution_id`) or poison-parks expired pull leases (#1081 Phase 3, #429/#1402; inert until an agent is piloted) |
 | **Operator Queue Sync** | `operator_queue_service.py` | Polls running agents every 5s, reads `~/.trinity/operator-queue.json`, syncs to DB, writes responses back (OPS-001). The item `id` is a platform-minted uuid; the agent's correlation string is `request_id` with `(agent_name, request_id)` uniqueness, so all sync reads/writes (exists, acknowledge, response write-back) are agent-scoped and two agents can't collide (#1631). **Leader-locked (#1632):** only the holder of `opqueue:leader` (SET NX, TTL `max(3×interval, 30s)` floor so a slow-write cycle can't flap leadership, own-lease refresh, fail-open — mirror monitoring #1464) runs a cycle, so `--workers 2` doesn't double-charge the ingestion rate limiter or double-broadcast the flood alert. Ingestion is capped per agent (depth + rate + fleet + field hygiene, #1632) — see [Operator Queue](#operator-queue-ops-001) |
 | **Sync Health Service** | `sync_health_service.py` | Polls git-enabled agents every 60s — see [Git Sync Health](#git-sync-health-389390) |
 | **Monitoring Service** | `monitoring_service.py` | Fleet-wide health checks on configurable interval (30s default); authoritative for aggregate status. **Lifespan-resumed (#1121):** boot reads the persisted `monitoring_config` (staggered +12s) and starts the loop only when `enabled` — the flag is the single source of truth, **defaults OFF**, persisted by `enable`/`disable`/`PUT /config` (which also reconcile the running loop) so the choice survives restarts; `*_check_interval` rejects non-positive values (422), loop clamps sleep ≥1s (MON-001). **Cross-worker leader lock (#1464):** the loop runs in every uvicorn worker but only the holder of the Redis `monitoring:leader` lease (SET NX, TTL 3×interval, own-lease-only refresh; fail-open to leader when Redis is down) performs each probe cycle, so `--workers 2` no longer double-probes the fleet or double-feeds the circuit breaker; leadership fails over automatically when the holder dies |
 | **Heartbeat Watch Loop** | `heartbeat_service.py` | 5s loop acting on missed agent heartbeats — see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307) |
-| **Scheduler Service** | `scheduler_service.py` | APScheduler cron execution; async fire-and-forget with DB polling for status. On each cron fire, optionally invokes the agent's `~/.trinity/pre-check` (see Agent Containers) |
+| **Scheduler Service** | `scheduler_service.py` | APScheduler cron execution; async fire-and-forget with DB polling for status. On each cron fire, optionally invokes the agent's `~/.trinity/pre-check` (see Agent Containers). Also owns one-shot `DateTrigger`s for RETRY-001 retries and **agent self-reminders** (#1296): `_reconcile_reminders` arms pending reminders + reclaims stale `firing` rows at boot, in the 60s sync loop (own try/except), and on full reload — see [Agent Self-Reminders](#agent-self-reminders-1296) |
 | **Capacity Maintenance** | `capacity_manager.py` | `run_maintenance()` every 60s — see [Capacity & Backlog](#capacity--backlog-428) |
 | **Audit Retention** | `audit_retention_service.py` | Daily 04:15 UTC: DELETEs `audit_log` rows past retention. `AUDIT_LOG_RETENTION_DAYS` (default 365, floored at 365 — the `audit_log_no_delete` trigger refuses younger rows). Pruning ages out hash-chain history past the cutoff by design (#552) |
 | **DB Vacuum** | `db_vacuum_service.py` | Daily 04:30 UTC: `VACUUM` on `/data/trinity.db` to reclaim pages freed by retention sweeps. `DB_VACUUM_ENABLED`/`DB_VACUUM_HOUR`/`DB_VACUUM_MINUTE`. Autocommit connection (VACUUM can't run in a transaction); accepts rare BUSY rather than retrying (#772) |
@@ -511,6 +514,16 @@ Bounded sequential task execution against one agent. Runner is an in-process `as
 **Failure policy (#1167):** per-loop `on_failure` — `abort` (default; fail-fast, first failed iteration ends the loop `failed`/`stop_reason=error`) or `continue` (tolerate a failed iteration and proceed). Both failure surfaces are gated: a raised exception from `execute_task` and a non-success `TaskExecutionResult`. Continue mode is bounded by `max_consecutive_failures` (default 3) — once that many iterations fail in a row the loop aborts `failed`/`stop_reason=max_consecutive_failures`; a success resets the streak. A continue-mode loop that reaches `max_runs` (or matches its stop-signal) with ≥1 tolerated failure finalizes as `completed_with_errors`, with the `failed_runs` count surfaced. `{{previous_response}}` always carries the last *successful* response (a failed iteration never overwrites it).
 
 **Web UI (#1106):** a **Loops** tab on Agent Detail (`components/LoopsPanel.vue` + agent-scoped `stores/loops.js`; `setAgent(name)` on mount, `clear()` on unmount). The global WS handler routes the fleet-wide loop events to the store, which filters by mounted agent and targeted-refreshes only the affected loop; a 12s backstop poll runs while any loop is `queued`/`running` to recover a missed terminal event. Last full response rendered via `utils/markdown.js` (DOMPurify).
+
+### Agent Self-Reminders (#1296)
+
+Durable one-shot deferred self-trigger — the time-deferred sibling of loops (§Sequential Agent Loops). While running, an agent schedules a **future re-invocation of itself** with a message it picks; on fire, Trinity dispatches a normal execution of that same agent through the standard `capacity_manager` admit/slot path (`triggered_by="reminder"`, shares `max_parallel_tasks`). The agent lists/cancels via 3 self-scoped MCP tools. Full flow: [agent-self-reminders.md](feature-flows/agent-self-reminders.md).
+
+- **Storage = dedicated `agent_reminders` table** (NOT an overload of the cron `agent_schedules` table, whose every consumer assumes a NOT-NULL `cron_expression`). 5-state machine: `pending → firing → fired` (delivered), `firing → pending` (transient-failure release for retry), `firing → failed` (bounded-attempts terminal), `pending → cancelled`. Reminder executions still land in `schedule_executions` (via the standard dispatch), so Executions/Overview visibility is preserved. Three-layer backend: `routers/reminders.py` → `services/reminder_service.py` (create only: resolved-window bound + timeout clamp + pending/daily caps + provenance + relative→absolute) → `db/reminders.py` (`RemindersOperations`; tenant-scoped by-id ops, CAS cancel, retention prune). The new `triggered_by="reminder"` is wired into all three trigger constants (`_TRIGGER_BUCKETS`→first-class "Reminders" bucket, `_AUTONOMOUS_TRIGGERS`, `_VALID_TRIGGERS`).
+- **Fire home = the standalone `src/scheduler/` container** (single-instance), NOT the `--workers 2` backend (an in-backend timer double-fires without a leader lock). A near-clone of the RETRY-001 one-shot machinery: `_schedule_reminder_job` arms an APScheduler `DateTrigger` per pending reminder; `_execute_reminder` fires it; `_reconcile_reminders` (fail-open, its OWN try/except independent of the cron-sync try) arms pending + reclaims stale `firing` rows — wired into `initialize()` (boot recovery, after `_recover_pending_retries`), the 60s `_sync_schedules()` loop, and `reload_schedules()` (the full-reload path). On fire the scheduler CREATES the `schedule_executions` row itself (real id, `schedule_id="__manual__"` — PG-safe, no FK) then dispatches over the existing idempotency-keyed `_call_backend_execute_task` → `POST /api/internal/execute-task`.
+- **Delivery = at-least-once, bounded, observable** (AC #3). The `firing` intermediate + committed single-fire CAS (`claim_reminder_firing`, `WHERE status='pending'`) make the fire atomic while letting a fire that did NOT land be retried by the reconcile. A dispatch **TimeoutException → outcome-unknown → assume-dispatched** (`firing→fired`, execution row NOT force-FAILED — the poll finalizes it) to avoid a double-execution on the "backend slow, task ran" case; only a clean pre-start failure (non-200 503-warmup/5xx or connection error — task never started) marks the attempt FAILED (status-guarded) and retries, bounded at `MAX_REMINDER_FIRE_ATTEMPTS` (default 3) → terminal `failed`.
+- **Self-only auth (AC #5)**: agent-scoped key set/list/cancel ONLY for itself — the reports self-gate (`current_user.agent_name == name`) on top of `AuthorizedAgent`; a sibling → 403. Connector keys rejected (`_reject_connector_principal` + reminders OFF the connector auth-entry allowlist — a consumption-only key must not schedule future budget-consuming executions); ghost keys 403'd (reminders deliberately OUT of the #69 ghost-key fence, since a pending reminder can outlive a discarded ghost). Tenant-scoped by-id (foreign id → uniform 404). **Abuse bounds** (env-tunable, at create): `MAX_PENDING_REMINDERS_PER_AGENT` (25→429), a **durable** `MAX_REMINDERS_PER_AGENT_PER_DAY` (100→429, the non-fail-open self-perpetuation backstop), `REMINDER_MIN_DELAY_SECONDS` (60, ≥ the reload interval), `REMINDER_MAX_DELAY_SECONDS` (30d, < the 180-day name reservation), message ≤4000 (422), a per-agent create rate-limit, and a timeout clamp to the agent cap (#929 parity). **Idempotency** (Invariant #18): caller `Idempotency-Key` wins, else a key over the RAW input (message + literal fire spec, NOT the resolved instant); terminal stored rows excluded from replay (cancel-then-recreate-identical → a fresh pending reminder).
+- **Autonomy hold + cascade**: `get_active_reminders` filters `autonomy_enabled=1` AND `deleted_at IS NULL` (disabling autonomy holds pending reminders; they resume, past-due-fire, when re-enabled). `agent_reminders` is registered in `AGENT_REFS` (CASCADE) — CI-blocking (`test_agent_cleanup_parity`) — so rename re-keys and purge wipes; L-03's orphan scan covers it. **Retention**: `agent_reminders_retention_days` (default 90, `0`=off) — the cleanup sweep DELETEs terminal (`fired`/`cancelled`/`failed`) rows past the window (`pending`/`firing` never deleted), chunked, gated through the #1644 blast-radius guard; in `RETENTION_OPS_KEYS`, surfaced at `GET /api/settings/retention`.
 
 ### Session Tab
 
@@ -1039,6 +1052,13 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | GET | `/api/loops/{loop_id}` | JWT/MCP | Status + per-run summaries + last full response; 404 unknown, 403 if caller neither initiator nor agent-accessor |
 | POST | `/api/loops/{loop_id}/stop` | JWT/MCP | Graceful stop → `{status: "stopping" \| "already_done"}` |
 
+### Agent Self-Reminders (#1296)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/agents/{name}/reminders` | JWT/MCP (`AuthorizedAgent` + self-gate) | Create a one-shot self-reminder; 201 → reminder. Body: `message` (≤4000), `fire_at` (ISO) **XOR** `delay_seconds` (60..2592000), optional `model`/`timeout_seconds`/`allowed_tools`. Accepts `Idempotency-Key` (else auto-derived over raw input). 400 min/max-window + timeout>cap; 429 pending/daily/rate cap; 403 sibling/connector |
+| GET | `/api/agents/{name}/reminders` | JWT/MCP (self-gate) | List reminders (`?status=pending` default; `all` for every status), soonest fire first |
+| POST | `/api/agents/{name}/reminders/{id}/cancel` | JWT/MCP (self-gate) | CAS `pending → cancelled`, tenant-scoped; already-cancelled → 200 no-op; firing/fired/failed → 409; foreign/unknown id → uniform 404 |
+
 ### Platform Settings
 | Method | Path | Description |
 |--------|------|-------------|
@@ -1368,6 +1388,39 @@ CREATE TABLE agent_loop_runs (
     FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
 );
 CREATE INDEX idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number);
+```
+
+**agent_reminders** (#1296 — see [Agent Self-Reminders](#agent-self-reminders-1296)). Durable
+one-shot deferred self-trigger; the standalone scheduler arms a `DateTrigger` per pending row.
+Dual-track migration (SQLite `agent_reminders_table` + Alembic `0028_agent_reminders`); `AGENT_REFS`
+CASCADE (rename cascade + purge). Status: `pending → firing → fired` / `firing → pending|failed` /
+`pending → cancelled`:
+```sql
+CREATE TABLE agent_reminders (
+    id TEXT PRIMARY KEY,                        -- 'rem_<hex>'
+    agent_name TEXT NOT NULL,                   -- target == source (self-reminder)
+    message TEXT NOT NULL,
+    fire_at TEXT NOT NULL,                      -- ISO-Z absolute (relative delay resolved at create)
+    status TEXT NOT NULL DEFAULT 'pending',     -- pending | firing | fired | cancelled | failed
+    model TEXT,                                 -- optional override
+    timeout_seconds INTEGER,                    -- optional; clamped to agent cap at create
+    allowed_tools TEXT,                         -- optional JSON array
+    owner_id INTEGER,                           -- resolved owner (provenance)
+    created_by_email TEXT,                      -- denormalized owner email (provenance)
+    source_agent_name TEXT,                     -- the agent that set it (provenance)
+    source_mcp_key_id TEXT,                     -- MCP key id that set it (provenance)
+    execution_id TEXT,                          -- latest fire attempt's execution row
+    fire_attempts INTEGER NOT NULL DEFAULT 0,   -- at-least-once retry counter (≤ MAX_REMINDER_FIRE_ATTEMPTS)
+    firing_at TEXT,                             -- in-flight fire start (stale-firing reclaim threshold)
+    error TEXT,                                 -- last-attempt failure detail
+    created_at TEXT NOT NULL,
+    fired_at TEXT,
+    cancelled_at TEXT
+);
+CREATE INDEX idx_agent_reminders_agent ON agent_reminders(agent_name);
+-- Partial index covers BOTH the pending-scan and the stale-firing reclaim.
+CREATE INDEX idx_agent_reminders_active ON agent_reminders(fire_at)
+    WHERE status IN ('pending', 'firing');
 ```
 
 **agent_activities** (unified activity stream):

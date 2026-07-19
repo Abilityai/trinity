@@ -29,6 +29,7 @@ import { createFileTools } from "./tools/files.js";
 import { createPipelineTools } from "./tools/pipelines.js";
 import { createMemoryTools } from "./tools/memory.js";
 import { createLoopTools } from "./tools/loops.js";
+import { createReminderTools } from "./tools/reminders.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
 import { createConnectorTools } from "./tools/connector.js";
 import { createGitTools } from "./tools/git.js";
@@ -265,6 +266,7 @@ export async function createServer(config: ServerConfig = {}) {
     createVoiceReplyTools(client, requireApiKey), // send_voice_reply — per-message voice (ent#117)
     createMemoryTools(client, requireApiKey),     // MEM-001 write path (#888)
     createLoopTools(client, requireApiKey),       // Sequential agent loops (#740)
+    createReminderTools(client, requireApiKey),   // Agent self-reminders (#1296)
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
     createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)

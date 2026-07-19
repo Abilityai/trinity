@@ -113,6 +113,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
@@ -431,6 +432,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
@@ -1452,6 +1454,43 @@ class DatabaseManager:
 
     def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000):
         return self._report_ops.prune_agent_reports(retention_days, chunk_size)
+
+    # =========================================================================
+    # Agent Self-Reminder Methods (#1296 — delegated to db/reminders.py)
+    # =========================================================================
+
+    def insert_reminder(self, agent_name, message, fire_at, *, model=None,
+                        timeout_seconds=None, allowed_tools=None, owner_id=None,
+                        created_by_email=None, source_agent_name=None,
+                        source_mcp_key_id=None):
+        return self._reminder_ops.insert_reminder(
+            agent_name, message, fire_at, model=model,
+            timeout_seconds=timeout_seconds, allowed_tools=allowed_tools,
+            owner_id=owner_id, created_by_email=created_by_email,
+            source_agent_name=source_agent_name, source_mcp_key_id=source_mcp_key_id,
+        )
+
+    def list_reminders(self, agent_name, status=None, limit=100):
+        return self._reminder_ops.list_reminders(agent_name, status, limit)
+
+    def get_reminder(self, agent_name, reminder_id):
+        return self._reminder_ops.get_reminder(agent_name, reminder_id)
+
+    def count_pending_reminders(self, agent_name):
+        return self._reminder_ops.count_pending_reminders(agent_name)
+
+    def count_reminders_created_since(self, agent_name, since_iso):
+        return self._reminder_ops.count_reminders_created_since(agent_name, since_iso)
+
+    def cancel_reminder(self, agent_name, reminder_id):
+        return self._reminder_ops.cancel_reminder(agent_name, reminder_id)
+
+    def prune_agent_reminders(self, retention_days: int = 90, chunk_size: int = 1000):
+        return self._reminder_ops.prune_agent_reminders(retention_days, chunk_size)
+
+    def count_agent_reminders_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_agent_reminders would delete (#1644)."""
+        return self._reminder_ops.count_agent_reminders_candidates(retention_days, limit)
 
     # =========================================================================
     # Cleanup Operations (for CleanupService)

@@ -315,6 +315,33 @@ agent_loop_runs = Table(
     Column("completed_at", Text),
 )
 
+# Agent self-reminders (#1296). Columns MUST byte-match the DDL in
+# db/schema.py / db/migrations.py / 0028_agent_reminders (schema-parity does NOT
+# import tables.py — the live select() accessor test in tests/unit is the guard).
+agent_reminders = Table(
+    "agent_reminders",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("message", Text),
+    Column("fire_at", Text),
+    Column("status", Text),
+    Column("model", Text),
+    Column("timeout_seconds", Integer),
+    Column("allowed_tools", Text),
+    Column("owner_id", Integer),
+    Column("created_by_email", Text),
+    Column("source_agent_name", Text),
+    Column("source_mcp_key_id", Text),
+    Column("execution_id", Text),
+    Column("fire_attempts", Integer),
+    Column("firing_at", Text),
+    Column("error", Text),
+    Column("created_at", Text),
+    Column("fired_at", Text),
+    Column("cancelled_at", Text),
+)
+
 chat_sessions = Table(
     "chat_sessions",
     metadata,
