@@ -107,6 +107,7 @@ def test_audit_log_is_not_an_ops_retention_key():
 def _admin():
     u = MagicMock()
     u.role = "admin"
+    u.connector_agent = None  # #1310: not a connector principal
     return u
 
 

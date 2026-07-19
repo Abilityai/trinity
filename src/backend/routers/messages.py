@@ -16,7 +16,7 @@ from models import (
 )
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName
+from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner
 from db_models import User
 from services.idempotency_service import EffectInProgressError
 from services.proactive_message_service import (
@@ -134,8 +134,7 @@ async def get_proactive_shares(
 
     Only the agent owner or admin can view this list.
     """
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Not authorized to view shares")
+    assert_agent_owner(current_user, agent_name, detail="Not authorized to view shares")
 
     emails = db.get_proactive_enabled_shares(agent_name)
 

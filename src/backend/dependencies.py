@@ -721,6 +721,85 @@ def get_owned_agent_by_name(
     return agent_name
 
 
+# ============================================================================
+# Imperative auth-guard family (INV-8, #1310)
+# ============================================================================
+# Callable from any router BODY (not a Depends), for the sites where the agent
+# name is DERIVED from a resolved resource (a session / notification /
+# subscription / execution row) or the gate is COMPOSITE — where a
+# path-dependency can't reach. Each raises 403 and is access-first (no existence
+# lookup → self-uniform per #186); the agent-name helpers run
+# _enforce_connector_scope first, matching the path-dependencies' second fence.
+#
+# Rule of thumb: agent name IN the path → prefer the path-dependency
+# (AuthorizedAgent[ByName] / OwnedAgent[ByName], uniform-404). Agent name
+# DERIVED / composite → use an imperative helper here (403, self-uniform).
+# ============================================================================
+
+
+def assert_admin(current_user: User, *, detail: str = "Admin access required") -> None:
+    """Imperative admin gate — parity with the ``require_admin`` Depends form.
+
+    Rejects connector principals first (they are consumption-only), then requires
+    ``role == "admin"``. Raises 403 on failure; returns None on success. Use in a
+    router body where the admin check is inline rather than a ``Depends``.
+    """
+    _reject_connector_principal(current_user)
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def assert_agent_access(current_user: User, agent_name: str, *, detail: str = "Access denied") -> None:
+    """Imperative agent read-access gate — 403 unless the caller can access
+    ``agent_name`` (``db.can_user_access_agent``; admin short-circuits True).
+
+    Access-first → self-uniform (403 before any existence lookup; no
+    404-then-403 enumeration oracle, #186). Runs ``_enforce_connector_scope``
+    first so the connector boundary is enforced identically to the path-deps.
+    """
+    _enforce_connector_scope(current_user, agent_name, owner_op=False)
+    if not db.can_user_access_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "Not authorized") -> None:
+    """Imperative agent owner gate — 403 unless the caller owns ``agent_name``
+    (``db.can_user_share_agent``; owner-or-admin).
+
+    **NOT delete-authorization.** ``can_user_share_agent`` does NOT carry the
+    ``is_system`` guard that ``can_user_delete_agent`` (``db/agents.py``) does —
+    a delete path must keep using the delete predicate, never this helper. Runs
+    the connector owner-op fence first (connectors can never own).
+    """
+    _enforce_connector_scope(current_user, agent_name, owner_op=True)
+    if not db.can_user_share_agent(current_user.username, agent_name):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def assert_owns_or_admin(current_user: User, owner_id: int, *, detail: str = "Not authorized") -> None:
+    """Imperative strict-self-OR-admin gate for a resource keyed by a user id
+    (a session/preview ``user_id``). 403 unless the caller IS the owner OR an
+    admin. The ``and`` is load-bearing — an ``or`` would admit everyone.
+    """
+    if current_user.id != owner_id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def assert_owns(
+    current_user: User, owner_id: int, *, detail: str = "You don't have access to this session"
+) -> None:
+    """Imperative strict-self gate — id-only, **NO admin bypass**. 403 unless the
+    caller IS the owner.
+
+    Distinct from ``assert_owns_or_admin``: use where an admin must NOT be able
+    to read another user's resource (e.g. a public-link chat session — "owners
+    cannot see other users' sessions"). Mapping such a site to
+    ``assert_owns_or_admin`` would WIDEN access (the #1310 regression guard).
+    """
+    if current_user.id != owner_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 # Type aliases for cleaner signatures
 # For routes using {name} path parameter (schedules, credentials, chat)
 AuthorizedAgent = Annotated[str, Depends(get_authorized_agent)]

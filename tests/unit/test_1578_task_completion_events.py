@@ -868,8 +868,14 @@ class TestReservedNamespaceGuards:
         )
         mock_db = MagicMock()
         mock_db.get_event_subscription.return_value = existing
-        mock_db.can_user_share_agent.return_value = True
-        with patch("routers.event_subscriptions.db", mock_db):
+        # The owner check now lives in dependencies.assert_agent_owner (#1310),
+        # not the router's own db call. This test targets the #1578 reserved-
+        # namespace guard (which runs AFTER the owner check), so no-op the owner
+        # gate via the router's imported binding — robust against the sibling
+        # test that re-imports the dependencies module (module-identity gotcha).
+        with patch("routers.event_subscriptions.db", mock_db), patch(
+            "routers.event_subscriptions.assert_agent_owner", lambda *a, **k: None
+        ):
             with pytest.raises(Exception) as ei:
                 _await(update_event_subscription(
                     "sub-1", EventSubscriptionUpdate(event_type="agent.task.completed"), user
