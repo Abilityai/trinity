@@ -1048,6 +1048,18 @@
         "unit"
       ],
       "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved - the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, two agents may share one. NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL. Soft-deleted agents are not editable. Batch read for the fleet list keeps the hottest endpoint at one query. Router: owner-gated PUT, label never coerced to the slug on read, null clears, 404 when the row vanished, WS agent_label_changed broadcast."
+    },
+    {
+      "file": "unit/test_1484_create_agent_characterization.py",
+      "feature": "#1484",
+      "added": "2026-07-18",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "refactor"
+      ],
+      "description": "Characterization suite pinning create_agent_internal's observable behavior BEFORE the #1484 phase-helper decomposition (behavior contract for the pure move). 40 tests over an extended test_fork_to_own harness (patch.dict sys.modules, whole db object swapped, ephemeral/entitlement/rate_limiter/pull_mode/runtime_state mocks added, resolve_github_pat tuple stub). Covers: local/github(predefined+dynamic)/no-template/request=None happy paths asserting the exact containers_run kwargs (network='trinity-agent-network', cap_drop, tmpfs, mem_limit/nano_cpus) + the full base+github env key-set + config/credentials/workspace bind mounts; Claude subscription auto-assign (token set, ANTHROPIC_API_KEY popped) and non-Claude skip; ephemeral SUCCESS with deterministic token_hex proving the suffixed name reaches every sink + clear_agent_breakers-before-containers_run ordering + volume-less ghost; the ephemeral gate ORDER (entitlement 403 / fork-conflict 400 / spawn-recursion 403 / rate-limit 429 / ttl-ceiling 400, earliest-wins overlap); PAT tier persistence (global not persisted / per_user persisted / fork persisted); #1664 volume-base 409 preceding the #1667 probe (+ adopt doesn't bypass); #1667 leftover-volume refuse-vs-adopt; existence guard (3 sources); role quota 429; runtime validation propagates pre-container; non-fatal side-effect failures still 200 (persistent-state/data-paths/permissions/subscription/spawn-edge/avatar); a 4-case rollback MATRIX injecting failure AFTER a successful container (local=mcp-key only / github=git-config+mcp-key / ephemeral=slot+mcp-key / repo-without-instance-id skips delete_git_config) asserting the orphaned container is never stop/removed; and two PINNED-LEAK tests (ephemeral-429 leaks the MCP key; docker-unavailable else leaks MCP key + git-config) that assert the leak PERSISTS, marked for a follow-up. Includes a one-line D7 repair to test_fork_to_own's harness (resolve_github_pat tuple stub) that 17d0c8ef silently broke."
     }
   ]
 }

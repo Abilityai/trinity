@@ -276,7 +276,18 @@ def test_create_path_clears_breakers_before_the_container_exists():
 
     assert "clear_agent_breakers(config.name)" in src
     assert "clear_agent_runtime_state" not in src
-    assert src.index("clear_agent_breakers(config.name)") < src.index("await containers_run(")
+    # #1484 decomposed create_agent_internal into phase helpers, so the raw
+    # `containers_run(` calls now live in helper defs ABOVE the orchestrator —
+    # a whole-file `src.index("await containers_run(")` no longer reflects the
+    # create-path order. Assert the ordering WITHIN the orchestrator body
+    # instead: the breaker clear precedes the container-create phase call
+    # (`_create_agent_container`, which wraps containers_run). The runtime order
+    # is additionally pinned by
+    # test_1484_create_agent_characterization.py::test_case6_* (order == clear→run).
+    orch = src[src.index("async def create_agent_internal("):]
+    assert orch.index("clear_agent_breakers(config.name)") < orch.index(
+        "await _create_agent_container("
+    ), "clear_agent_breakers must run before the container-create phase"
 
 
 def test_system_agent_create_clears_breakers_too():
