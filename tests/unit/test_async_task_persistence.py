@@ -21,10 +21,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from routers.chat import _run_async_task_with_persistence
+from services.chat_execution_service import run_async_task  # moved from routers.chat (#1483)
+from services import chat_persistence_service
 from models import ParallelTaskRequest, TaskExecutionStatus
 
-_CHAT = sys.modules[_run_async_task_with_persistence.__module__]
+# _CHAT anchors on the function's *current* module (chat_execution_service now),
+# so the patch.object(_CHAT, ...) targets follow the move automatically.
+_CHAT = sys.modules[run_async_task.__module__]
 
 
 def _result(status=TaskExecutionStatus.SUCCESS, response="ok"):
@@ -63,9 +66,10 @@ def _env(result=None):
 
     with patch.object(_CHAT, "get_task_execution_service", return_value=service), \
          patch.object(_CHAT, "_websocket_manager", ws), \
+         patch.object(chat_persistence_service, "_websocket_manager", ws), \
          patch.object(_CHAT, "activity_service", activity), \
          patch.object(_CHAT, "db", db), \
-         patch.object(_CHAT, "_persist_chat_session", persist), \
+         patch.object(chat_persistence_service, "persist_chat_session", persist), \
          patch.object(_CHAT, "signal_sync_waiter", signal):
         yield {
             "service": service, "ws": ws, "activity": activity, "db": db,
@@ -85,7 +89,7 @@ def _call(request=None, **overrides):
         user_email=None,
     )
     kwargs.update(overrides)
-    asyncio.run(_run_async_task_with_persistence(**kwargs))
+    asyncio.run(run_async_task(**kwargs))
 
 
 def test_basic_executes_and_signals_waiter():

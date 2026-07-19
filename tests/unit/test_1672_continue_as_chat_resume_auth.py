@@ -156,6 +156,7 @@ class TestTaskEndpointResumeGate:
         """Return a caller that invokes the real endpoint coroutine with a running
         container and the resume-gate's downstream patched to raise _GatePassed."""
         import routers.chat as chat_mod
+        import services.dispatch_admission_service as dispatch_admission_service
         from models import ParallelTaskRequest
 
         def _call(*, resume_id, role="user", owns=False, x_source_agent=None,
@@ -175,12 +176,15 @@ class TestTaskEndpointResumeGate:
             running = MagicMock()
             running.status = "running"
 
-            # idempotency_service.begin() is the first unconditional call AFTER the
-            # resume gate (line ~1462), so raising there marks "gate passed".
+            # The resume gate + #1068 timeout normalization stay in the router
+            # (execute_parallel_task); the dispatch orchestration moved to
+            # chat_execution_service (#1483), whose first unconditional call is
+            # dispatch_admission_service.begin_task_idempotency ->
+            # idempotency_service.begin. Raising there marks "resume gate passed".
             with patch.object(chat_mod, "get_agent_container", return_value=running), \
                  patch.object(chat_mod.db, "resume_session_belongs_to_user", return_value=owns), \
                  patch.object(chat_mod.db, "get_execution_timeout", return_value=3600), \
-                 patch.object(chat_mod.idempotency_service, "begin", side_effect=_GatePassed):
+                 patch.object(dispatch_admission_service.idempotency_service, "begin", side_effect=_GatePassed):
                 return _await(
                     chat_mod.execute_parallel_task(
                         request=req,

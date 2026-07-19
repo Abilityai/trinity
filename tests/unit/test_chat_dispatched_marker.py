@@ -250,20 +250,19 @@ class TestChatRouterSource:
 
     @pytest.fixture(scope="class")
     def chat_func(self):
-        """Parse routers/chat.py and return the function carrying the
-        dispatch/execute/finalize logic. After #1026 slice 3 this body lives in
-        `_run_chat_and_finalize` (extracted from `chat_with_agent`); the #686 /
-        #96 invariants are asserted against it."""
-        chat_src = _BACKEND / "routers" / "chat.py"
-        assert chat_src.exists(), f"routers/chat.py missing at {chat_src}"
-        tree = ast.parse(chat_src.read_text(), filename=str(chat_src))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.AsyncFunctionDef)
-                and node.name == "_run_chat_and_finalize"
-            ):
-                return node
-        pytest.fail("_run_chat_and_finalize function not found in routers/chat.py")
+        """Parse the module carrying the dispatch/execute/finalize logic and
+        return its AST tree. After #1483 this logic moved out of
+        `routers/chat.py::_run_chat_and_finalize` into
+        `services/chat_execution_service.py`, decomposed across
+        `build_chat_payload` (the dispatch marker), `run_chat_turn` (the agent
+        POST), and `_finalize_chat_success` (the SUCCESS row write). Returning the
+        whole module tree keeps the #686 / #96 structural invariants — the marker
+        is defined before the POST (file order), the SUCCESS update passes
+        claude_session_id, and the FAILED path writes a terminal row — asserted
+        across the decomposed functions."""
+        chat_src = _BACKEND / "services" / "chat_execution_service.py"
+        assert chat_src.exists(), f"chat_execution_service.py missing at {chat_src}"
+        return ast.parse(chat_src.read_text(), filename=str(chat_src))
 
     def _walk_calls_with_line(self, node):
         """Yield (lineno, attr_name, arg_repr) for every call expression
@@ -433,20 +432,22 @@ class TestMirrorPatternStillInSync:
     pytestmark = pytest.mark.unit
 
     def test_both_paths_call_mark_execution_dispatched(self):
-        """Both `routers/chat.py` and `services/task_execution_service.py`
-        must call `db.mark_execution_dispatched(...)`.
+        """Both the sync-chat applier (`services/chat_execution_service.py` after
+        the #1483 split — was `routers/chat.py`) and
+        `services/task_execution_service.py` must call
+        `db.mark_execution_dispatched(...)`.
 
         UC3 follow-up will pull this into a shared `dispatch_to_agent`
         primitive — until then, the call must exist in BOTH places.
         """
-        chat_src = (_BACKEND / "routers" / "chat.py").read_text()
+        chat_src = (_BACKEND / "services" / "chat_execution_service.py").read_text()
         task_src = (
             _BACKEND / "services" / "task_execution_service.py"
         ).read_text()
 
         assert "mark_execution_dispatched" in chat_src, (
-            "routers/chat.py is missing the mark_execution_dispatched call — "
-            "#686 regression"
+            "chat_execution_service.py is missing the mark_execution_dispatched "
+            "call — #686 regression"
         )
         assert "mark_execution_dispatched" in task_src, (
             "services/task_execution_service.py is missing the "
