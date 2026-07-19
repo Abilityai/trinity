@@ -1,0 +1,65 @@
+# Trinity secret-scan config (#1164).
+#
+# useDefault keeps gitleaks' built-in ruleset (sk-/ghp_/xox*/AKIA + stopwords and
+# allowlists incl. AKIAIOSFODNN7EXAMPLE). We ADD an explicit Resend re_ rule under
+# a REPO-SPECIFIC id so it can never collide-and-override a future default rule of
+# the same name. The v8.30.1 default ruleset has NO Resend/re_ rule, so this rule
+# is the SOLE re_ coverage (audit finding N1 / #1158). A repo-specific allowlist
+# then keeps intentional placeholders/fixtures from blocking PRs.
+
+title = "Trinity secret-scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "trinity-resend-api-key"        # repo-prefixed id — never overrides a default rule
+description = "Resend API key (re_-prefixed) — audit finding N1 / #1158"
+# Verbatim re_ key only. RE2 (Go regexp) has NO lookahead/backreferences, so a
+# digit-requirement can't be regex-enforced — the entropy floor is the FP lever.
+# Does NOT catch a re-split / XOR-obfuscated secret (neither base85 half of the
+# #1158 leak is alarming to a prefix rule) — a documented, accepted limit.
+# Escape hatch for a legitimate future hit: an inline `gitleaks:allow` comment.
+regex = '''\bre_[A-Za-z0-9_-]{20,}\b'''
+# Entropy floor: the FP lever (RE2 can't require a digit/upper via lookahead). It
+# raises the bar for short/low-variety strings, but does NOT fully exclude a long
+# all-lowercase re_ snake_case identifier — verified some land ~3.82-4.03, which
+# overlaps the low end of a real (short/mixed) base62 key, so no single floor
+# separates them cleanly. That residual is rare (needs 20+ trailing chars), range-
+# scoped, fail-safe (blocks a PR -> human allowlists; leaks nothing), and handled by
+# the `gitleaks:allow` escape hatch above. Calibrated by the plant->red/clean->green proof.
+entropy = 3.8
+keywords = ["re_"]
+
+# ---- Allowlist (additive: the [[allowlists]] array form EXTENDS, not clobbers,
+# the default config's stopwords/allowlist). ----
+#
+# gitleaks allowlist semantics: a `paths` allowlist is a PRE-SCAN file skip — it
+# short-circuits BEFORE per-finding regex, so a path-bearing block cannot reliably
+# mean "path AND shape". `tests/` is therefore a deliberate BLANKET path exclusion
+# (reliable) and the non-scanned zone is DOCUMENTED (requirements/security.md
+# §20.8) rather than papered over with an AND-block that may not narrow. A real
+# credential belongs in `.env`/injection, never a test/doc file; GUARD-002 runtime
+# scanning + human review are the complementary layers.
+#
+# `.env.example` is deliberately NOT excluded: its values are empty and its
+# placeholders are already covered by the global `your-domain\.com` regex, so a
+# real `RESEND_API_KEY=re_...` accidentally pasted there is STILL caught.
+[[allowlists]]
+description = "Test fixtures + documented placeholders + historical trees (#1164)"
+paths = [
+  '''(^|/)tests/''',                 # ~192 fake secret-shaped fixtures — BLANKET, documented non-scanned zone
+  '''(^|/)docs/memory/''',           # live engineering docs (architecture/requirements/feature-flows) carry
+                                     # API-usage examples — curl `Authorization: Bearer` commands, truncated
+                                     # JWTs, `KEY=`/`condition=` samples — that the DEFAULT rules flag
+                                     # (curl-auth-header/generic-api-key). Verified 8 such FPs this session
+                                     # (#1164). Same accepted docs-are-not-code tradeoff as tests/; documented zone.
+  '''(^|/)docs/archive/''',          # historical trees — enterprise-docs-guard excludes the same; documented zone
+  '''(^|/)docs/releases/''',
+  '''(^|/)docs/security-reports/''', # CSO reports literally contain secret-pattern examples
+  '''(^|/)\.gitleaks\.toml$''',      # this file names re_ as an example
+]
+regexes = [
+  '''your-api-key''',                # CLAUDE.md-sanctioned placeholders
+  '''your-domain\.com''',
+]

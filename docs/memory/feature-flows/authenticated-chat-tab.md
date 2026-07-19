@@ -197,7 +197,7 @@ if request.async_mode:
     return { "status": "accepted", "execution_id": execution_id, ... }
 ```
 
-**Session persistence in background** (`_persist_chat_session`, shared by the async wrapper `_run_async_task_with_persistence` and the sync `/task` branch; guarded on a **SUCCESS** terminal — FAILED/CANCELLED turns write no session):
+**Session persistence in background** (`chat_persistence_service.persist_chat_session` — extracted from `routers/chat.py` by #1483; shared by the async wrapper `chat_execution_service.run_async_task` and the sync `/task` branch; guarded on a **SUCCESS** terminal — FAILED/CANCELLED turns write no session; the fail-loud ERROR log's logger name is now `services.chat_persistence_service`):
 ```python
 if request.save_to_session and user_id and user_email:  # gate
   if result.status == SUCCESS:                            # only persist a completed turn
@@ -632,7 +632,9 @@ Tasks | Chat | Dashboard | Schedules | Credentials | Skills | ...
 ### Modified
 - `src/frontend/src/views/AgentDetail.vue` - Added Chat tab
 - `src/frontend/src/views/PublicChat.vue` - Refactored to use shared components
-- `src/backend/routers/chat.py` - `_run_async_task_with_persistence` now supports `save_to_session` + `user_id`/`user_email` args; SSE stream proxy endpoint; both async and sync paths use explicit `chat_session_id` when provided
+- `src/backend/services/chat_execution_service.py` - `run_async_task` (the async `/task` wrapper, extracted from `routers/chat.py` by #1483) supports `save_to_session` + `user_id`/`user_email` args; both async and sync paths use explicit `chat_session_id` when provided
+- `src/backend/services/chat_persistence_service.py` - `persist_chat_session` / `persist_and_broadcast_chat_session` (#1444, extracted by #1483)
+- `src/backend/routers/chat.py` - thin `/chat` + `/task` handlers + the SSE stream proxy endpoint (dispatch logic moved to the chat services)
 - `src/backend/models.py` - `ParallelTaskRequest.async_mode` and `chat_session_id` fields
 - `src/backend/db/chat.py` - `get_chat_messages()` uses subquery for correct ASC ordering
 

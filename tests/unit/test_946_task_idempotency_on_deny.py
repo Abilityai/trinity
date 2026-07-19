@@ -24,6 +24,8 @@ import pytest
 from fastapi import HTTPException
 
 from routers.chat import execute_parallel_task
+import services.dispatch_admission_service as _DISPATCH
+import services.chat_execution_service as _CE
 from models import ParallelTaskRequest
 from services.capacity_manager import CircuitOpen, CapacityFull
 
@@ -67,12 +69,14 @@ def _env(idem, acquire_exc):
     db.create_task_execution.return_value = MagicMock(id="e1")
 
     with patch.object(_CHAT, "get_agent_container", return_value=container), \
-         patch.object(_CHAT, "idempotency_service", isvc), \
-         patch.object(_CHAT, "dispatch_breaker_active", return_value=True), \
-         patch.object(_CHAT, "get_capacity_manager", return_value=cap), \
-         patch.object(_CHAT, "platform_audit_service", MagicMock(log=AsyncMock())), \
-         patch.object(_CHAT, "activity_service",
+         patch.object(_CE, "idempotency_service", isvc), \
+         patch.object(_DISPATCH, "idempotency_service", isvc), \
+         patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=AsyncMock())), \
+         patch.object(_CE, "dispatch_breaker_active", return_value=True), \
+         patch.object(_CE, "get_capacity_manager", return_value=cap), \
+         patch.object(_CE, "activity_service",
                       MagicMock(track_activity=AsyncMock(return_value="act1"))), \
+         patch.object(_CE, "db", db), \
          patch.object(_CHAT, "db", db):
         yield {"isvc": isvc, "cap": cap, "db": db}
 
