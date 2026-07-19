@@ -436,6 +436,14 @@ def _load_crud(docker_available=True):
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")
     settings_service.get_github_pat = MagicMock(return_value="platform-pat")
+    # #162 (17d0c8ef): crud swapped get_github_pat → resolve_github_pat(owner_id=…),
+    # which returns a (pat, tier) 2-tuple unpacked at crud.py. The retired
+    # get_github_pat stub above left resolve_github_pat an auto-child MagicMock,
+    # so every github-path test raised `ValueError: not enough values to unpack`.
+    # Default = global tier (non-fork agents keep github_pat_encrypted NULL, so
+    # set_agent_github_pat stays uncalled — the behavior these tests assert).
+    settings_service.resolve_github_pat = MagicMock(
+        return_value=("platform-pat", "global"))
     settings_service.get_agent_full_capabilities = MagicMock(return_value=False)
     settings_service.get_agent_quota_for_role = MagicMock(return_value=0)
     settings_service.get_agent_default_resources = MagicMock(

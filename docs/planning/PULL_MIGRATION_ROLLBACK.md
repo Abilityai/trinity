@@ -106,10 +106,11 @@ Only do this after a full code rollback (Tier 1) — never drop columns the runn
 - **DB:** `redelivery_count` climbing on `schedule_executions` rows; `running` rows with a stale
   `lease_expires_at`.
 - **Fleet health / execution failure rate** via existing monitoring.
-- **Canary invariants** — ⚠️ **caveat (G3, #1540):** the canary SQL collector is currently **SQLite-only**,
-  so on a **Postgres** instance the SQL-tier checks (S-01/E-01/E-05/E-02/B-01) read a stale/empty file and
-  go vacuously green. Redis/Docker-sourced checks still fire. **Do not rely on canary as your only signal on
-  a PG instance** until G3 lands.
+- **Canary invariants** — ✅ **closed by #1540:** all SQL-tier collector reads now route through the
+  `get_engine()`/`DATABASE_URL` seam, so on a **Postgres** instance the SQL-tier checks
+  (S-01/E-01/E-05/E-02/B-01 and the fleet-wide E-03/G-03/E-06/L-03) read the live PG database, not a stale
+  `/data/trinity.db`. The canary is a trustworthy signal on PG. (Historical G3 caveat: the collector was
+  SQLite-only and went vacuously green on PG.)
 
 ---
 
