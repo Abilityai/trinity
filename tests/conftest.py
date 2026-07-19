@@ -285,6 +285,12 @@ _SYS_MODULES_INVARIANT_KEYS = (
 _SYS_MODULES_BASELINE = {
     k: sys.modules.get(k) for k in _SYS_MODULES_INVARIANT_KEYS
 }
+# #1481: db.schedules is now a package — baseline any loaded db.schedules.<slice>
+# children too (prefix match, so a future sub-split needs no edit) so cross-file
+# pollution of a submodule is restored to its canonical object, not just the parent.
+_SYS_MODULES_BASELINE.update(
+    {k: sys.modules[k] for k in list(sys.modules) if k.startswith("db.schedules.")}
+)
 
 
 def _restore_invariant_sys_modules() -> None:

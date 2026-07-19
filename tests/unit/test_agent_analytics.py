@@ -44,8 +44,13 @@ _STUBBED_MODULE_NAMES = [
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
-    names = _STUBBED_MODULE_NAMES + ["db.connection"]
-    saved = {n: sys.modules.get(n) for n in names}
+    top_names = _STUBBED_MODULE_NAMES + ["db.connection"]
+    # #1481: db.schedules is now a PACKAGE — evict/restore its loaded children
+    # too, so a pop("db.schedules") can't leave a stale db.schedules.<slice>
+    # shadowing the fresh import (and so the analytics _PERCENTILE_ROWSET_CAP
+    # monkeypatch binds the freshly-imported db.schedules.analytics module).
+    child_names = [m for m in sys.modules if m.startswith("db.schedules.")]
+    saved = {n: sys.modules.get(n) for n in top_names + child_names}
     # Re-imports inside the fixtures also rebind the parent `db` package
     # attributes (`import db.X` sets `db.X` on the package). Later test files
     # that bind via `import db.X as Y` resolve through the package attribute,
@@ -54,11 +59,11 @@ def _restore_sys_modules():
     # the wrong module (the test_agent_soft_delete DB_PATH mismatch).
     db_pkg = sys.modules.get("db")
     saved_attrs = (
-        {n.split(".", 1)[1]: getattr(db_pkg, n.split(".", 1)[1], None) for n in names}
+        {n.split(".", 1)[1]: getattr(db_pkg, n.split(".", 1)[1], None) for n in top_names}
         if db_pkg is not None
         else {}
     )
-    for name in _STUBBED_MODULE_NAMES:
+    for name in _STUBBED_MODULE_NAMES + child_names:
         sys.modules.pop(name, None)
     try:
         yield
@@ -257,7 +262,7 @@ class TestDurationAvgFullSetVsSampledP95:
     must be the FULL-set mean, never the mean of the capped p95 pool."""
 
     def test_avg_is_full_set_p95_is_sampled(self, tmp_db, ops, monkeypatch):
-        import db.schedules as schedules_mod
+        import db.schedules.analytics as schedules_mod  # #1481: constant now defined here
         monkeypatch.setattr(schedules_mod, "_PERCENTILE_ROWSET_CAP", 5)
 
         # 5 newest rows = 100ms, 5 oldest = 1000ms. Full-set avg = 550.
