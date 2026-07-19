@@ -2474,6 +2474,10 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
+    def count_operator_queue_pending_for_agent(self, agent_name):
+        # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
+        return self._operator_queue_ops.count_pending_for_agent(agent_name)
+
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001
     # =========================================================================

@@ -165,6 +165,14 @@ def test_mark_acknowledged_is_agent_scoped():
 
 def _wire_sync(monkeypatch, db_mock, requests):
     monkeypatch.setattr(oqs, "db", db_mock)
+    # #1632 added depth/rate ingestion caps to this sync seam. These #1631 tests
+    # predate them and assert id-scoping behavior (the caps themselves are covered
+    # by test_1632_operator_queue_caps.py), so neutralize the caps here: report
+    # zero pending depth and always allow the rate limiter.
+    db_mock.count_operator_queue_pending_for_agent.return_value = 0
+    monkeypatch.setattr(
+        oqs.rate_limiter, "check", MagicMock(return_value=MagicMock(allowed=True))
+    )
     client = MagicMock()
     client.read_file = AsyncMock(return_value={
         "success": True,

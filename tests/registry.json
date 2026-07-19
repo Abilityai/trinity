@@ -954,6 +954,19 @@
       "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only — group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
     },
     {
+      "file": "unit/test_1632_operator_queue_caps.py",
+      "feature": "#1632",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "unit",
+        "operator-queue",
+        "security",
+        "reliability"
+      ],
+      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
+    },
+    {
       "file": "unit/test_1615_ssh_password_removed.py",
       "feature": "#1615",
       "added": "2026-07-16",
