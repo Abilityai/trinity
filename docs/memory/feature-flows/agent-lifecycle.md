@@ -232,7 +232,9 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
     return await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
 ```
 
-**Service Function** (`src/backend/services/agent_service/crud.py:52-552`):
+**Service Function** (`src/backend/services/agent_service/crud.py`):
+
+> **#1484 phase-helper layout**: `create_agent_internal` is now a **thin orchestrator over fenced private phase-helpers** (CC-trivial gates + the `if docker_client: try/except/else` stay inline; each fat phase — ephemeral pre-gate, template/fork resolution, config staging, env build, volume mounts, `_create_agent_container`, register, materialize — is a `_*` helper returning into the orchestrator's locals). The except/else read a single `_RollbackHandles` dataclass. The numbered "Business Logic" steps below still describe the same behavior (byte-identical decomposition) but their inline line numbers are stale — the canonical structure lives in `architecture.md` (Services → `agent_service/crud.py`). Behavior is pinned by `tests/unit/test_1484_create_agent_characterization.py`.
 
 **Imports** (lines 1-32):
 ```python
@@ -968,6 +970,7 @@ await log_audit_event(
 
 | Date | Changes |
 |------|---------|
+| 2026-07-18 | **#1484 — `create_agent_internal` decomposition (no behavior change)**: the CC-187 / 945-SLOC monolith was cut into a thin orchestrator + fenced private phase-helpers (each CC<20 / <100 SLOC), reading a single orchestrator-populated `_RollbackHandles` dataclass; the `if docker_client: try/except/else` and CC-trivial gates stay inline. Signature/callers unchanged. Characterization-tests-first (`tests/unit/test_1484_create_agent_characterization.py`, 40 tests) pin the byte-identical contract. See `architecture.md` (Services → `agent_service/crud.py`, Network Topology `_create_agent_container`). The numbered "Business Logic" line references above are now stale (helper-relocated). |
 | 2026-03-26 | **Line number refresh + Trinity injection removal**: Updated all line numbers across agents.py (647 lines), lifecycle.py (403 lines), crud.py (552 lines), helpers.py (467 lines), terminal.py (320 lines). Removed all `inject_trinity_meta_prompt()` references and AgentClient injection code (Issue #136). Updated startup injection order to: Credentials, Skills, Read-Only Hooks. Added documentation for bulk endpoints (context-stats :157, execution-stats :163, autonomy-status :232, slots :240), queue endpoints (queue :537, clear :546, release :555), and activity endpoints (activities :568, timeline :594). Updated delete flow for EVT-001 event subscriptions (:381) and AVATAR-002 emotion image cleanup (:410-425). |
 | 2026-03-07 | **AVATAR-001: Avatar lifecycle integration**: Delete agent now cleans up avatar files. Rename agent now renames avatar file from old to new name. Get agent response enriched with `avatar_url` field from `db.get_avatar_identity()`. Added avatar file to cascading deletes list. |
 | 2026-03-03 | **SUB-002: Env-var-based subscription tokens**: Subscription tokens now injected as `CLAUDE_CODE_OAUTH_TOKEN` env var at container creation/recreation, replacing the old SUB-001 post-start `.credentials.json` file injection. Removed `inject_subscription_on_start()` call and `subscription_result`/`subscription_status` from `start_agent_internal()` return dict. `check_api_key_env_matches()` now performs three-way check: subscription (must have token, no API key), platform key (must have key, no token), neither (both absent). `recreate_container_with_updated_config()` sets/removes `CLAUDE_CODE_OAUTH_TOKEN` alongside `ANTHROPIC_API_KEY`. |

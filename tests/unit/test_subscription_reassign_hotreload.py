@@ -58,6 +58,7 @@ def owner_user():
     u = MagicMock()
     u.username = "owner"
     u.role = "user"
+    u.connector_agent = None  # #1310: not a connector principal
     return u
 
 
@@ -66,6 +67,7 @@ def admin_user():
     u = MagicMock()
     u.username = "admin"
     u.role = "admin"
+    u.connector_agent = None  # #1310: not a connector principal
     return u
 
 
@@ -83,6 +85,12 @@ def manual_env(monkeypatch):
     sub.name = "sub-B"
     fake_db.get_subscription_by_name.return_value = sub
     monkeypatch.setattr(rs, "db", fake_db)
+    # #1310: the owner gate moved behind dependencies.assert_agent_owner, which
+    # reads its OWN module `db`, not routers.subscriptions.db. Point the helper's
+    # db global at the same fake_db so the (now-consolidated) gate resolves True.
+    # Patch via __globals__ (not the module object) to survive the between-test
+    # `dependencies` re-import (module-identity gotcha).
+    monkeypatch.setitem(rs.assert_agent_owner.__globals__, "db", fake_db)
 
     container = object()
     docker_service = types.ModuleType("services.docker_service")

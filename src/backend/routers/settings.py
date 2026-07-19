@@ -33,7 +33,7 @@ from models import (
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 # Import from settings_service (these are re-exported for backward compatibility)
@@ -92,12 +92,6 @@ def mask_api_key(key: str) -> str:
 # services.settings_service for proper architecture
 
 
-def require_admin(current_user: User):
-    """Verify user is an admin."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-
 @router.get("", response_model=List[SystemSetting])
 async def get_all_settings(
     request: Request,
@@ -108,7 +102,7 @@ async def get_all_settings(
 
     Admin-only endpoint to view all configuration values.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         settings = db.get_all_settings()
@@ -318,7 +312,7 @@ async def get_retention_status(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.entitlement_service import entitlement_service
     from services.settings_service import (
@@ -390,7 +384,7 @@ async def get_api_keys_status(
 
     Admin-only. Returns masked key info for security.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Get Anthropic key
@@ -432,7 +426,7 @@ async def update_anthropic_key(
 
     Admin-only. Key is stored in system settings.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Validate format
@@ -478,7 +472,7 @@ async def delete_anthropic_key(
 
     Admin-only. Will fall back to env var if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting('anthropic_api_key')
@@ -519,7 +513,7 @@ async def test_anthropic_key(
 
     Admin-only. Makes a lightweight API call to validate the key.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         key = body.api_key.strip()
@@ -580,7 +574,7 @@ async def update_github_pat(
     Admin-only. Token is stored in system settings and auto-propagated to all
     running agents that currently use the global PAT (#211).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Validate format
@@ -637,7 +631,7 @@ async def delete_github_pat(
 
     Admin-only. Will fall back to env var if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting('github_pat')
@@ -678,7 +672,7 @@ async def test_github_pat(
 
     Admin-only. Makes a lightweight API call to validate the token.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         key = body.api_key.strip()
@@ -781,7 +775,7 @@ async def get_slack_settings_status(
 
     Admin-only. Returns masked key info for security.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         from services.settings_service import (
@@ -832,7 +826,7 @@ async def update_slack_settings(
 
     Admin-only. All fields are optional - only provided values are updated.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         updated = []
@@ -867,7 +861,7 @@ async def delete_slack_settings(
 
     Admin-only. Will fall back to env vars if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = []
@@ -908,7 +902,7 @@ async def get_slack_transport_status(
     Returns transport mode, connection state, and workspace info.
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.settings_service import get_slack_app_token, get_slack_transport_mode
 
@@ -951,7 +945,7 @@ async def connect_slack_transport(
     Saves app_token and transport_mode to DB, stops any existing
     transport, and starts a new one. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Save settings to DB
     if body.app_token is not None:
@@ -1024,7 +1018,7 @@ async def install_slack_workspace(
     redirects back to the OAuth callback which stores the bot token
     and redirects to Settings page. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.settings_service import get_slack_client_id
     from services.slack_service import slack_service
@@ -1055,7 +1049,7 @@ async def disconnect_slack_transport(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     transport = getattr(request.app.state, 'slack_transport', None)
     if not transport:
@@ -1085,7 +1079,7 @@ async def list_email_whitelist(
 
     Admin-only endpoint.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     whitelist = db.list_whitelist(limit=1000)
 
@@ -1104,7 +1098,7 @@ async def add_email_to_whitelist(
     """
     from database import EmailWhitelistAdd
 
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Parse request
     body = await request.json()
@@ -1143,7 +1137,7 @@ async def remove_email_from_whitelist(
 
     Admin-only endpoint.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Remove from whitelist
     removed = db.remove_from_whitelist(email)
@@ -1175,7 +1169,7 @@ async def get_github_templates(
     Admin-only. Returns the configured list or the hardcoded defaults.
     Display names and descriptions are resolved from each repo's template.yaml.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import DEFAULT_GITHUB_TEMPLATE_REPOS
     from services.template_service import _fetch_all_metadata
@@ -1230,7 +1224,7 @@ async def update_github_templates(
 
     Admin-only. Validates owner/repo format for each entry.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Validate each entry
     for entry in body.templates:
@@ -1260,7 +1254,7 @@ async def delete_github_templates(
 
     Admin-only. Removes the DB override so the system falls back to config.py defaults.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     deleted = settings_service.delete_github_templates()
 
@@ -1351,7 +1345,7 @@ async def update_mcp_url(
 
     Admin-only. Validates URL format (must be http/https, must end with /mcp).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     validated_url = _validate_mcp_url(body.url)
     db.set_setting(MCP_URL_SETTING_KEY, validated_url)
@@ -1372,7 +1366,7 @@ async def delete_mcp_url(
 
     Admin-only. Removes the custom URL, reverting to hostname-based auto-detection.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     deleted = db.delete_setting(MCP_URL_SETTING_KEY)
 
@@ -1404,7 +1398,7 @@ async def get_agent_quotas(
     Admin-only. Returns quota limits for each role with defaults.
     Admin role is always unlimited and not configurable.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     all_settings = db.get_settings_dict()
 
@@ -1440,7 +1434,7 @@ async def update_agent_quotas(
     Admin-only. Only updates provided fields. Values must be non-negative integers.
     Set to "0" for unlimited.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
     for key in AGENT_QUOTA_DEFAULTS:
@@ -1482,7 +1476,7 @@ async def get_agent_default_resources(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
     memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
@@ -1511,7 +1505,7 @@ async def update_agent_default_resources(
     Valid CPU values (number of processors): 1, 2, 4, 8, 16
     Valid memory values: 1g, 2g, 4g, 8g, 16g, 32g
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
 
@@ -1560,7 +1554,7 @@ async def get_agent_default_access_policy(
     Currently scopes to `require_email` (#1129): when ON, new agents require a
     verified email on incoming DMs / public chat / shared access. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     return {
         "require_email": get_agent_default_require_email(),
@@ -1583,7 +1577,7 @@ async def update_agent_default_access_policy(
     Admin-only. Only the fields provided are updated. Stored in system_settings;
     consumed at agent-creation time. Does NOT rewrite existing agents.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
     if body.require_email is not None:
@@ -1631,7 +1625,7 @@ async def get_max_parallel_tasks_ceiling_setting(
     Admin-only. Owners pick a per-agent value within this ceiling.
     Registered before the `/{key}` catch-all (Invariant #4).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     return {
         "value": get_max_parallel_tasks_ceiling(),
@@ -1655,7 +1649,7 @@ async def update_max_parallel_tasks_ceiling_setting(
     never rewritten. Existing agents above the new ceiling are clamped on the
     next admit.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     if (
         not isinstance(body.value, int)
@@ -1709,7 +1703,7 @@ async def get_proactive_rate_limits_setting(
     per-agent, Telegram per-group / per-agent, proactive-DM per-recipient),
     per hour. ``0`` = unlimited. Inbound replies are never subject to these.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
     limits = {
         key: {
             "value": get_proactive_rate_limit(key),
@@ -1735,7 +1729,7 @@ async def update_proactive_rate_limits_setting(
     ``[0, MAX]`` (``0`` = unlimited, which is warned in the response). Named
     422 on bad input. Audit-logged. Runtime-resolved — no restart.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Validate ALL provided fields BEFORE writing any — a mixed valid/invalid body
     # must be all-or-nothing (a 422 leaves every cap unchanged), not partially
@@ -1820,7 +1814,7 @@ async def get_brain_orb_settings(
     `gemini_key_configured` reflects the env-only GEMINI_API_KEY secret the
     voice tile additionally requires (boolean only — never the key).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import GEMINI_API_KEY
 
@@ -1844,7 +1838,7 @@ async def update_brain_orb_settings(
     stored override, reverting it to its env/default value. Takes effect on
     the next request — route gates resolve at request time, no restart.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import GEMINI_API_KEY
     from services.settings_service import BRAIN_ORB_FLAGS
@@ -1937,7 +1931,7 @@ async def get_elevenlabs_settings(
     Admin-only. Registered before the `/{key}` catch-all (Invariant #4). The API
     key is surfaced as `key_configured: bool` + `key_source` only — never echoed.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
     return _elevenlabs_settings_state()
 
 
@@ -1953,7 +1947,7 @@ async def update_elevenlabs_settings(
     AES-256-GCM encrypted. Runtime-resolved — no restart. `clear: ["api_key",
     "default_voice_id"]` reverts to env/unset. A field may not be both set and cleared.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     clear = body.clear or []
     valid_clear = {"api_key", "default_voice_id"}
@@ -2026,7 +2020,7 @@ async def get_setting(
     Returns the setting value or 404 if not found.
     Admin-only for most settings.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         setting = db.get_setting(key)
@@ -2053,7 +2047,7 @@ async def update_setting(
 
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
@@ -2178,7 +2172,7 @@ async def delete_setting(
 
     Admin-only endpoint. Returns success even if setting didn't exist.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting(key)
@@ -2216,7 +2210,7 @@ async def get_ops_settings(
     Admin-only. Returns both stored values and defaults for ops settings.
     Useful for displaying the ops configuration panel.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Get current values from database
@@ -2252,7 +2246,7 @@ async def update_ops_settings(
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         updated = []
@@ -2292,7 +2286,7 @@ async def reset_ops_settings(
     side effect nobody expects from a reset. Retention is changed only through
     the dedicated retention path, where it is an explicit decision.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.settings_service import RETENTION_OPS_KEYS
 

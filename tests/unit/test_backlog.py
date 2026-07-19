@@ -691,8 +691,8 @@ class TestBacklogDrain:
         # AST-based regression test (TestLazyImportTarget) separately
         # asserts the real routers/chat.py defines this symbol — together
         # they catch the test-drift class that produced #496.
-        fake_chat = types.SimpleNamespace(_run_async_task_with_persistence=_fake_bg)
-        monkeypatch.setitem(sys.modules, "routers.chat", fake_chat)
+        fake_ce = types.SimpleNamespace(run_async_task=_fake_bg)
+        monkeypatch.setitem(sys.modules, "services.chat_execution_service", fake_ce)
 
         metadata = {
             "message": "hi",
@@ -746,8 +746,8 @@ class TestBacklogDrain:
             spawned.update(kwargs)
             spawned["request_inject_result"] = kwargs["request"].inject_result
 
-        fake_chat = types.SimpleNamespace(_run_async_task_with_persistence=_fake_bg)
-        monkeypatch.setitem(sys.modules, "routers.chat", fake_chat)
+        fake_ce = types.SimpleNamespace(run_async_task=_fake_bg)
+        monkeypatch.setitem(sys.modules, "services.chat_execution_service", fake_ce)
 
         metadata = {
             "message": "self-task at capacity",
@@ -800,13 +800,13 @@ class TestLazyImportTarget:
     lazy import in services/backlog_service.py._spawn_drain.
     """
 
-    LAZY_IMPORT_TARGETS = ("_run_async_task_with_persistence",)
+    LAZY_IMPORT_TARGETS = ("run_async_task",)
 
     def test_routers_chat_defines_lazy_import_targets(self):
         import ast
 
-        chat_src = _BACKEND / "routers" / "chat.py"
-        assert chat_src.exists(), f"routers/chat.py not found at {chat_src}"
+        chat_src = _BACKEND / "services" / "chat_execution_service.py"
+        assert chat_src.exists(), f"chat_execution_service.py not found at {chat_src}"
 
         tree = ast.parse(chat_src.read_text(), filename=str(chat_src))
         defined = {
@@ -833,13 +833,13 @@ class TestLazyImportTarget:
 
         backlog_src = _BACKEND / "services" / "backlog_service.py"
         text = backlog_src.read_text()
-        # Match: from routers.chat import <name>
+        # Match: from services.chat_execution_service import <name>
         matches = re.findall(
-            r"from\s+routers\.chat\s+import\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"from\s+services\.chat_execution_service\s+import\s+([A-Za-z_][A-Za-z0-9_]*)",
             text,
         )
         assert matches, (
-            "Expected at least one `from routers.chat import ...` in "
+            "Expected at least one `from services.chat_execution_service import ...` in "
             "services/backlog_service.py — has the lazy-import scheme changed?"
         )
         for imported in matches:

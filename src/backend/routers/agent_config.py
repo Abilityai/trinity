@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User, AgentCapacityUpdate, PublicChannelModelUpdate
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName
+from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_access, assert_agent_owner
 from services import settings_service
 from services.docker_service import get_agent_container
 from services.agent_service import (
@@ -148,8 +148,7 @@ async def get_agent_resources(
     - current_cpu: Current container CPU limit
     """
     # Check access
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, agent_name)
 
     container = get_agent_container(agent_name)
     if not container:
@@ -191,8 +190,7 @@ async def set_agent_resources(
     Valid CPU values: 1, 2, 4, 8, 16
     """
     # Only owners can change resources
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only owners can change resource limits")
+    assert_agent_owner(current_user, agent_name, detail="Only owners can change resource limits")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -318,8 +316,7 @@ async def set_agent_capabilities(
     The container label is updated on restart.
     """
     # Only owners can change capabilities
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only owners can change capabilities")
+    assert_agent_owner(current_user, agent_name, detail="Only owners can change capabilities")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -377,8 +374,7 @@ async def get_agent_capacity(
     )
 
     # Check access
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, agent_name)
 
     container = get_agent_container(agent_name)
     if not container:
@@ -441,8 +437,7 @@ async def set_agent_capacity(
     from services.settings_service import get_max_parallel_tasks_ceiling
 
     # Only owners can change capacity
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only owners can change capacity settings")
+    assert_agent_owner(current_user, agent_name, detail="Only owners can change capacity settings")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -519,8 +514,7 @@ async def set_agent_timeout(
     Only agent owners can modify timeout settings.
     """
     # Only owners can change timeout
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only owners can change timeout settings")
+    assert_agent_owner(current_user, agent_name, detail="Only owners can change timeout settings")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -620,8 +614,7 @@ async def set_public_channel_model(
     A null/empty ``model`` clears the override (inherit the platform default);
     a non-empty value must be a currently-selectable model (422 otherwise).
     """
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only owners can change the public-channel model")
+    assert_agent_owner(current_user, agent_name, detail="Only owners can change the public-channel model")
 
     container = get_agent_container(agent_name)
     if not container:
@@ -753,11 +746,7 @@ async def set_agent_guardrails(
     """Set per-agent guardrails overrides. Owner-only. Requires container
     recreation to take effect (the runtime config file is written during
     startup). An empty object clears all overrides."""
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(
-            status_code=403,
-            detail="Only agent owners can change guardrails settings",
-        )
+    assert_agent_owner(current_user, agent_name, detail="Only agent owners can change guardrails settings")
 
     container = get_agent_container(agent_name)
     if not container:

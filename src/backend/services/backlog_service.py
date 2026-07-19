@@ -256,13 +256,15 @@ class BacklogService:
         existing background execution helper. Late-imported to avoid the
         chat.py <-> backlog_service.py cycle.
 
-        #496: lazy-imports `_run_async_task_with_persistence` (post-#95
-        replacement). The drain pre-acquires the slot under the real
-        execution_id (drain_next), so the helper passes
+        #496: lazy-imports `run_async_task` (moved from routers.chat to
+        services.chat_execution_service by #1483; kept LAZY because it breaks a
+        real import cycle — chat_execution_service → capacity_manager →
+        backlog_service → chat_execution_service). The drain pre-acquires the
+        slot under the real execution_id (drain_next), so the helper passes
         `slot_already_held=True` to TaskExecutionService, which releases the
         slot in its `finally` block.
         """
-        from routers.chat import _run_async_task_with_persistence
+        from services.chat_execution_service import run_async_task
 
         request = ParallelTaskRequest(
             message=metadata.get("message") or "",
@@ -281,7 +283,7 @@ class BacklogService:
         )
 
         task = asyncio.create_task(
-            _run_async_task_with_persistence(
+            run_async_task(
                 agent_name=agent_name,
                 request=request,
                 execution_id=execution_id,

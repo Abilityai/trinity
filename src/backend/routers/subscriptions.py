@@ -16,7 +16,7 @@ from typing import Optional, List
 
 from models import User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
 from db_models import (
     SubscriptionCredentialCreate,
     SubscriptionCredential,
@@ -29,12 +29,6 @@ router = APIRouter(prefix="/api/subscriptions", tags=["subscriptions"])
 logger = logging.getLogger(__name__)
 
 
-def require_admin(current_user: User):
-    """Verify user is an admin."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-
 # ============================================================================
 # Subscription CRUD
 # ============================================================================
@@ -44,7 +38,7 @@ async def get_encryption_status(
     current_user: User = Depends(get_current_user)
 ):
     """Check if credential encryption is configured for subscriptions."""
-    require_admin(current_user)
+    assert_admin(current_user)
     key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
     return {"configured": bool(key and len(key) >= 64)}
 
@@ -63,7 +57,7 @@ async def register_subscription(
 
     Token must start with `sk-ant-oat01-` (Claude Code OAuth access token).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Validate encryption key before attempting storage
     encryption_key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
@@ -125,7 +119,7 @@ async def list_subscriptions(
     Admin-only. Returns subscription metadata and agent assignments.
     Never returns the encrypted credentials.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     return db.list_subscriptions_with_agents()
 
@@ -144,7 +138,7 @@ async def get_subscription_usage(
 
     Covers both chat messages and schedule executions attributed to this subscription.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Resolve by ID or name
     subscription = db.get_subscription(subscription_id)
@@ -171,7 +165,7 @@ async def get_subscription(
 
     Admin-only. Returns subscription metadata and assigned agents.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Try by ID first, then by name
     subscription = db.get_subscription(subscription_id)
@@ -201,7 +195,7 @@ async def delete_subscription(
     Admin-only. Cascade clears all agent assignments - agents will fall back
     to API key authentication.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Try by ID first, then by name
     subscription = db.get_subscription(subscription_id)
@@ -254,8 +248,7 @@ async def assign_subscription_to_agent(
     interleave with a concurrent auto-switch on the same agent.
     """
     # Owner or admin only — shared users must not mutate subscription assignments
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the agent owner or an admin can manage subscriptions")
+    assert_agent_owner(current_user, agent_name, detail="Only the agent owner or an admin can manage subscriptions")
 
     # Get subscription by name
     subscription = db.get_subscription_by_name(subscription_name)
@@ -348,8 +341,7 @@ async def clear_agent_subscription(
     Owner access required. Agent will fall back to API key authentication.
     """
     # Owner or admin only — shared users must not mutate subscription assignments
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the agent owner or an admin can manage subscriptions")
+    assert_agent_owner(current_user, agent_name, detail="Only the agent owner or an admin can manage subscriptions")
 
     # Get current subscription for logging
     current_sub = db.get_agent_subscription(agent_name)
@@ -401,8 +393,7 @@ async def get_agent_auth_status(
     Owner access required.
     """
     # Check agent access
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Access denied to this agent")
+    assert_agent_access(current_user, agent_name, detail="Access denied to this agent")
 
     try:
         from services.subscription_service import get_agent_auth_mode
@@ -421,7 +412,7 @@ async def get_auto_switch_setting(
     current_user: User = Depends(get_current_user)
 ):
     """Get the auto-switch subscriptions setting."""
-    require_admin(current_user)
+    assert_admin(current_user)
     # #441: default flipped to "true" (opt-out). Must match the default in
     # services/subscription_auto_switch.handle_subscription_failure so the UI
     # toggle and the runtime gate read the same value on a clean install.
@@ -435,7 +426,7 @@ async def set_auto_switch_setting(
     current_user: User = Depends(get_current_user)
 ):
     """Enable or disable automatic subscription switching on rate-limit errors."""
-    require_admin(current_user)
+    assert_admin(current_user)
     db.set_setting("auto_switch_subscriptions", "true" if enabled else "false")
     logger.info(f"Auto-switch subscriptions {'enabled' if enabled else 'disabled'} by {current_user.username}")
     return {"enabled": enabled}

@@ -17,7 +17,7 @@ import types
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 
 from models import User, VoiceStartRequest, VoiceStartResponse, VoiceStopRequest, VoiceStopResponse
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent
+from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin
 from database import db
 from config import GEMINI_API_KEY, VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services.gemini_voice import voice_service, WORKSPACE_PANEL_INSTRUCTIONS
@@ -108,8 +108,7 @@ async def voice_stop(
         raise HTTPException(status_code=404, detail="Voice session not found")
     if preview.agent_name != name:
         raise HTTPException(status_code=403, detail="Voice session does not belong to this agent")
-    if preview.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+    assert_owns_or_admin(current_user, preview.user_id, detail="Not authorized for this voice session")
 
     session = await voice_service.end_session(request.voice_session_id)
     if not session:
@@ -160,8 +159,7 @@ async def get_voice_panel(
         return {"type": "empty", "content": "", "title": None, "updated_at": None}
     if session.agent_name != name:
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
-    if session.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Not authorized for this voice session")
+    assert_owns_or_admin(current_user, session.user_id, detail="Not authorized for this voice session")
     return session.panel_state
 
 

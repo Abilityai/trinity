@@ -356,7 +356,7 @@ def test_cancelled_execution_keeps_body_and_no_settle():
 # ---------------------------------------------------------------------------
 
 def _admin():
-    return SimpleNamespace(role="admin", username="admin")
+    return SimpleNamespace(role="admin", username="admin", connector_agent=None)
 
 
 def _drive_retry(*, role="admin", log_entry="settle_failed"):
@@ -370,7 +370,7 @@ def _drive_retry(*, role="admin", log_entry="settle_failed"):
         entry = SimpleNamespace(action=log_entry, agent_name="agent-a")
     mock_db = MagicMock()
     mock_db.get_nevermined_payment_log_entry.return_value = entry
-    user = SimpleNamespace(role=role, username="u")
+    user = SimpleNamespace(role=role, username="u", connector_agent=None)
 
     with (
         patch.object(nvm, "NEVERMINED_AVAILABLE", True),
