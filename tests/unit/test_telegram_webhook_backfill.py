@@ -101,7 +101,16 @@ def _load_settings_module():
         SystemSettingUpdate=_SystemSettingUpdate,
     )
 
-    _stub("dependencies", get_current_user=MagicMock())
+    _stub(
+        "dependencies",
+        get_current_user=MagicMock(),
+        # #1310: routers now import the imperative auth helpers from dependencies.
+        assert_admin=MagicMock(),
+        assert_agent_access=MagicMock(),
+        assert_agent_owner=MagicMock(),
+        assert_owns_or_admin=MagicMock(),
+        assert_owns=MagicMock(),
+    )
 
     _stub(
         "services.platform_audit_service",

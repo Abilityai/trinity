@@ -313,7 +313,7 @@ Ran on `gtm-synthesizer` (rebuilt image, `AGENT_AUTH_SECRET` fixed; chosen becau
 |----|-----|--------|-----|
 | **G1** | `docker-compose.yml` didn't forward `PULL_MODE_PILOT_AGENTS` to the backend (explicit `environment:` list, not `env_file`). | The documented pilot opt-in (`.env` + restart) is a **no-op** out of the box. | ✅ **FIXED** — added `PULL_MODE_PILOT_AGENTS=${PULL_MODE_PILOT_AGENTS:-}` to the backend `environment:`. |
 | **G2** | Recreate dropped `TRINITY_BACKEND_URL` — injected only on fresh create; `recreate_container_with_updated_config` preserved old env but never re-added it. | A **legacy agent** opted into pull recreates without a backend URL → worker refuses to start. | ✅ **FIXED** — recreate now `setdefault`s `TRINITY_BACKEND_URL` (matching the #1098 TMPDIR idiom). |
-| **G3** | Canary collector is **SQLite-only** — `db/connection.py::get_db_connection` hardcodes `sqlite3`, ignoring the PG `DATABASE_URL`. On a PG instance `POST /api/canary/run-cycle` reads a frozen/empty `/data/trinity.db` → vacuously green. | The canary safety net doesn't watch live PG state (S-01/E-05/E-01/E-02/B-01 never see real rows). Material to any default-ON decision. | 📋 **Draft ticket #1540** (`status-incubating`). Direction: make the canary SQL collector use the resolved `DATABASE_URL`. |
+| **G3** | Canary collector was **SQLite-only** — `db/connection.py::get_db_connection` hardcodes `sqlite3`, ignoring the PG `DATABASE_URL`. On a PG instance `POST /api/canary/run-cycle` read a frozen/empty `/data/trinity.db` → vacuously green. | The canary safety net didn't watch live PG state (S-01/E-05/E-01/E-02/B-01 never saw real rows). Material to any default-ON decision. | ✅ **CLOSED by #1540** — all six SQL-tier collectors (`_collect_known_agents`, `_collect_executions`, `_collect_terminal_executions`, `_collect_terminal_rows`, `_collect_enabled_schedules`, `_collect_orphan_refs`) now read through the `get_engine()`/`DATABASE_URL` seam; verified against a real `postgres:16-alpine` (`sources_unavailable == []`, S-01/L-03 fire on synthetic mismatch). `db/connection.py` stays the sqlite-only maintenance seam; the canary is routed around it. |
 
 ---
 
@@ -329,8 +329,8 @@ Ran on `gtm-synthesizer` (rebuilt image, `AGENT_AUTH_SECRET` fixed; chosen becau
 
 ## 8. Net remaining before a default-ON decision
 
-Canary lease-awareness (E-05/E-01, §3 T3.6/T3.7) · Tier-6 `effect_guard` `execution_id` injection · G3
-canary-on-PG (#1540) · B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856).
+Canary lease-awareness (E-05/E-01, §3 T3.6/T3.7) · Tier-6 `effect_guard` `execution_id` injection · ~~G3
+canary-on-PG (#1540)~~ ✅ closed · B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856).
 
 ## Appendix — key file references
 

@@ -27,9 +27,17 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from routers.chat import chat_with_agent
+import services.dispatch_admission_service as _DISPATCH
+import services.chat_execution_service as _CE
 from models import ChatMessageRequest
 from services.capacity_manager import CapacityFull
+from services.chat_signals import ChatDispatchError
 
+# The /chat pipeline is split across three modules now (#1483): the admission
+# gate (idempotency + breaker + capacity acquire) in dispatch_admission_service
+# (_DISPATCH), the execution setup + run_chat_turn applier in
+# chat_execution_service (_CE), and the thin endpoint (chat_with_agent) in
+# routers.chat (_CHAT) which maps the services' domain signals to HTTP.
 _CHAT = sys.modules[chat_with_agent.__module__]
 
 
@@ -73,11 +81,13 @@ def _env(idem, breaker_state=None, acquire_exc=None):
     breaker.to_dict.return_value = {"state": breaker_state or "closed", "retry_after_seconds": 5}
 
     with patch.object(_CHAT, "get_agent_container", return_value=container), \
-         patch.object(_CHAT, "idempotency_service", isvc), \
-         patch.object(_CHAT, "dispatch_breaker_active", return_value=bool(breaker_state)), \
-         patch.object(_CHAT, "get_capacity_manager", return_value=cap), \
-         patch.object(_CHAT, "platform_audit_service", MagicMock(log=AsyncMock())), \
-         patch.object(_CHAT, "db", db), \
+         patch.object(_DISPATCH, "idempotency_service", isvc), \
+         patch.object(_CE, "idempotency_service", isvc), \
+         patch.object(_DISPATCH, "dispatch_breaker_active", return_value=bool(breaker_state)), \
+         patch.object(_DISPATCH, "get_capacity_manager", return_value=cap), \
+         patch.object(_DISPATCH, "platform_audit_service", MagicMock(log=AsyncMock())), \
+         patch.object(_DISPATCH, "db", db), \
+         patch.object(_CE, "db", db), \
          patch("services.dispatch_breaker.DispatchBreaker", return_value=breaker):
         yield {"isvc": isvc, "cap": cap, "db": db}
 
@@ -134,11 +144,12 @@ def test_capacity_full_raises_429_and_releases_idem():
 def test_admitted_returns_chat_admission():
     """Happy path: the extracted helper returns a ChatAdmission carrying the
     handoff values the endpoint consumes downstream."""
-    from routers.chat import _admit_chat_request, ChatAdmission
+    from services.dispatch_admission_service import admit_chat_request
+    from services.chat_signals import ChatAdmission
     cap_result = MagicMock(state="admitted", queue_position=0)
     with _env(_idem(replay=False)) as m:
         m["cap"].acquire = AsyncMock(return_value=cap_result)
-        admission = asyncio.run(_admit_chat_request(
+        admission = asyncio.run(admit_chat_request(
             name="agent1", request=ChatMessageRequest(message="hi"),
             current_user=_user(), x_source_agent=None, x_via_mcp=None,
             x_mcp_key_id=None, x_mcp_key_name=None, idempotency_key="k1",
@@ -168,12 +179,12 @@ def test_admitted_full_endpoint_path_succeeds():
     resp.json.return_value = {"response": "hi back", "metadata": {}, "session": {}}
 
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service",
+         patch.object(_CE, "activity_service",
                       MagicMock(track_activity=AsyncMock(return_value="act1"),
                                 complete_activity=AsyncMock())), \
-         patch.object(_CHAT, "agent_post_with_retry", AsyncMock(return_value=resp)) as post, \
-         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
-         patch.object(_CHAT, "is_execution_context_enabled", return_value=False):
+         patch.object(_CE, "agent_post_with_retry", AsyncMock(return_value=resp)) as post, \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False):
         result = _call()
 
     # No NameError; the endpoint returned the agent response augmented with the
@@ -188,14 +199,14 @@ def test_admitted_full_endpoint_path_succeeds():
 
 def _prep(x_source_agent=None):
     """Run the extracted execution-setup helper under the same patched env."""
-    from routers.chat import _prepare_chat_execution
+    from services.chat_execution_service import prepare_chat_execution
     cap_result = MagicMock(state="admitted", queue_position=0)
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service",
+         patch.object(_CE, "activity_service",
                       MagicMock(track_activity=AsyncMock(return_value="act1"),
                                 complete_activity=AsyncMock())), \
-         patch.object(_CHAT, "broadcast_collaboration_event", AsyncMock()) as bcast:
-        ctx = asyncio.run(_prepare_chat_execution(
+         patch.object(_CE, "broadcast_collaboration_event", AsyncMock()) as bcast:
+        ctx = asyncio.run(prepare_chat_execution(
             name="agent1", request=ChatMessageRequest(message="hi"),
             current_user=_user(), x_source_agent=x_source_agent, x_via_mcp=None,
             x_mcp_key_id=None, x_mcp_key_name=None,
@@ -208,7 +219,7 @@ def _prep(x_source_agent=None):
 def test_prepare_returns_full_context():
     """Every field the downstream body consumes is populated; the user message
     is logged and the execution row is linked to the idempotency claim."""
-    from routers.chat import ChatExecutionContext
+    from services.chat_signals import ChatExecutionContext
     ctx, m, bcast = _prep(x_source_agent=None)
     assert isinstance(ctx, ChatExecutionContext)
     assert ctx.execution.id == "cex1"
@@ -239,19 +250,19 @@ def test_run_finalize_http_error_releases_slot_and_idem_then_503():
     BOTH the capacity slot and the in-flight idempotency claim (idem_done stays
     False). SUB-003 is not triggered for a transport error with no status code."""
     import httpx
-    from routers.chat import _run_chat_and_finalize
+    from services.chat_execution_service import run_chat_turn
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=AsyncMock())), \
-         patch.object(_CHAT, "agent_post_with_retry",
+         patch.object(_CE, "activity_service", MagicMock(complete_activity=AsyncMock())), \
+         patch.object(_CE, "agent_post_with_retry",
                       AsyncMock(side_effect=httpx.ConnectError("boom"))), \
-         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
-         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False), \
          patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
          patch("services.subscription_auto_switch.handle_subscription_failure",
                AsyncMock(return_value=None)):
         idem = m["isvc"].begin.return_value
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(_run_chat_and_finalize(
+        with pytest.raises(ChatDispatchError) as exc:
+            asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
                 current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
@@ -272,24 +283,24 @@ def test_run_finalize_http_error_on_cancelled_row_closes_activity_cancelled():
     user-cancel doesn't read as a failure in activity-derived views. The handler's
     error string is not stamped over the cancel, and no FAILED row-write fires."""
     import httpx
-    from routers.chat import _run_chat_and_finalize
+    from services.chat_execution_service import run_chat_turn
     from models import ActivityState, TaskExecutionStatus
 
     act = AsyncMock()
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
-         patch.object(_CHAT, "agent_post_with_retry",
+         patch.object(_CE, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CE, "agent_post_with_retry",
                       AsyncMock(side_effect=httpx.ConnectError("boom"))), \
-         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
-         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False), \
          patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
          patch("services.subscription_auto_switch.handle_subscription_failure",
                AsyncMock(return_value=None)):
         # Operator-terminate already flipped the row to CANCELLED.
         m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.CANCELLED)
         idem = m["isvc"].begin.return_value
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(_run_chat_and_finalize(
+        with pytest.raises(ChatDispatchError) as exc:
+            asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
                 current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
@@ -313,7 +324,7 @@ def test_run_finalize_http_error_on_cancelled_row_closes_activity_cancelled():
 def test_run_finalize_budget_exhausted_on_cancelled_row_closes_activity_cancelled():
     """#1332: same invariant on the budget-exhausted (503) handler — a row already
     CANCELLED closes the chat activity CANCELLED, not FAILED."""
-    from routers.chat import _run_chat_and_finalize
+    from services.chat_execution_service import run_chat_turn
     from models import ActivityState, TaskExecutionStatus
 
     # Raise the exact BackendAgentCallBudgetExhausted class object that
@@ -326,19 +337,19 @@ def test_run_finalize_budget_exhausted_on_cancelled_row_closes_activity_cancelle
     # cannot catch — the simulated exception would escape uncaught and this test
     # would fail spuriously. Referencing the handler's own bound class keeps the
     # test order-independent (and is what the production raiser uses anyway).
-    budget_exc = _CHAT.BackendAgentCallBudgetExhausted(
+    budget_exc = _CE.BackendAgentCallBudgetExhausted(
         agent_name="agent1", agent_cap=2, global_cap=8, wait_ms=1500,
     )
     act = AsyncMock()
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
-         patch.object(_CHAT, "agent_post_with_retry", AsyncMock(side_effect=budget_exc)), \
-         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
-         patch.object(_CHAT, "is_execution_context_enabled", return_value=False):
+         patch.object(_CE, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CE, "agent_post_with_retry", AsyncMock(side_effect=budget_exc)), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False):
         m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.CANCELLED)
         idem = m["isvc"].begin.return_value
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(_run_chat_and_finalize(
+        with pytest.raises(ChatDispatchError) as exc:
+            asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
                 current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,
@@ -361,23 +372,23 @@ def test_run_finalize_http_error_on_running_row_still_closes_failed():
     closing the chat activity FAILED with the error text — the cancel-aware path
     must not turn real failures into cancels."""
     import httpx
-    from routers.chat import _run_chat_and_finalize
+    from services.chat_execution_service import run_chat_turn
     from models import ActivityState, TaskExecutionStatus
 
     act = AsyncMock()
     with _env(_idem(replay=False)) as m, \
-         patch.object(_CHAT, "activity_service", MagicMock(complete_activity=act)), \
-         patch.object(_CHAT, "agent_post_with_retry",
+         patch.object(_CE, "activity_service", MagicMock(complete_activity=act)), \
+         patch.object(_CE, "agent_post_with_retry",
                       AsyncMock(side_effect=httpx.ConnectError("boom"))), \
-         patch.object(_CHAT, "compose_system_prompt", return_value="sys"), \
-         patch.object(_CHAT, "is_execution_context_enabled", return_value=False), \
+         patch.object(_CE, "compose_system_prompt", return_value="sys"), \
+         patch.object(_CE, "is_execution_context_enabled", return_value=False), \
          patch("services.subscription_auto_switch.is_auth_failure", return_value=False), \
          patch("services.subscription_auto_switch.handle_subscription_failure",
                AsyncMock(return_value=None)):
         m["db"].get_execution.return_value = MagicMock(status=TaskExecutionStatus.RUNNING)
         idem = m["isvc"].begin.return_value
-        with pytest.raises(HTTPException):
-            asyncio.run(_run_chat_and_finalize(
+        with pytest.raises(ChatDispatchError):
+            asyncio.run(run_chat_turn(
                 name="agent1", request=ChatMessageRequest(message="hi"),
                 current_user=_user(), x_source_agent=None, x_mcp_key_name=None,
                 triggered_by="chat", task_execution_id="te1", _chat_subscription_id=None,

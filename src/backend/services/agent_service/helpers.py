@@ -271,6 +271,23 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     return [a["name"] for a in get_accessible_agents(current_user)]
 
 
+def narrow_to_agent(
+    agent_names: Optional[List[str]], agent: Optional[str]
+) -> Optional[List[str]]:
+    """Narrow an accessible-agent set to a single agent when ``?agent=`` is set.
+
+    Relocated from ``routers/executions.py`` (#1310) so both ``executions`` and
+    ``reports`` consume it from the service layer rather than a router→router
+    import. Semantics unchanged: no filter → pass through; admin (``None``) →
+    the single agent; non-admin → the agent only if it is in the accessible set.
+    """
+    if not agent:
+        return agent_names
+    if agent_names is None:
+        return [agent]  # admin: any single agent is fine
+    return [agent] if agent in agent_names else []  # non-admin: access-gate
+
+
 def sanitize_and_validate_name(name: str) -> str:
     """
     Sanitize and validate an agent name.

@@ -71,7 +71,9 @@ def _chat_session(*, owner_id: int):
 
 
 def _run_finalize(*, session, caller_user_id):
-    import routers.chat as chat
+    # #1483: finalize_self_task moved to chat_execution_service (renamed off the
+    # leading underscore).
+    import services.chat_execution_service as ce
 
     request = MagicMock(inject_result=True, chat_session_id="sess-1457")
 
@@ -80,12 +82,12 @@ def _run_finalize(*, session, caller_user_id):
 
     mock_activity = MagicMock(complete_activity=AsyncMock())
     with (
-        patch.object(chat, "db", mock_db),
-        patch.object(chat, "activity_service", mock_activity),
-        patch.object(chat, "_websocket_manager", None),
+        patch.object(ce, "db", mock_db),
+        patch.object(ce, "activity_service", mock_activity),
+        patch.object(ce, "_websocket_manager", None),
     ):
         _await(
-            chat._finalize_self_task(
+            ce.finalize_self_task(
                 is_self_task=True,
                 self_task_activity_id="self-act",
                 agent_name="test-agent",

@@ -26,7 +26,14 @@ from models import (
     User,
     WebhookStatusResponse,
 )
-from dependencies import get_current_user, get_authorized_agent, AuthorizedAgent, CurrentUser
+from dependencies import (
+    get_current_user,
+    get_authorized_agent,
+    AuthorizedAgent,
+    CurrentUser,
+    assert_admin,
+    assert_agent_access,
+)
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.schedule_validation import (
@@ -63,11 +70,7 @@ async def get_scheduler_status(
     Returns information about the scheduler state and scheduled jobs
     from the dedicated scheduler service.
     """
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
-        )
+    assert_admin(current_user)
 
     # Call dedicated scheduler service for status
     try:
@@ -158,8 +161,7 @@ async def create_schedule(
     # ever reaches the 404 that actually blocks orphan-schedule creation.
     # Ordered BEFORE the #929 timeout check (which reads the agent cap) so the
     # gate can't be probed via the timeout-validation path.
-    if not db.can_user_access_agent(current_user.username, name):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    assert_agent_access(current_user, name)
     if not db.is_agent_live(name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 

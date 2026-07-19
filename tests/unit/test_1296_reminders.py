@@ -118,7 +118,10 @@ def test_reminder_in_valid_triggers():
 
 def test_reminder_bucket_is_reminders():
     _load()
-    from db.schedules import _bucket_for_trigger, _BUCKET_ORDER
+    # #1693 split db/schedules.py into a package; the private bucket helpers
+    # live in the analytics slice (the package __init__ re-exports only the
+    # public facade surface).
+    from db.schedules.analytics import _bucket_for_trigger, _BUCKET_ORDER
     assert _bucket_for_trigger("reminder") == "Reminders"
     assert "Reminders" in _BUCKET_ORDER
 

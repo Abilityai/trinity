@@ -31,6 +31,10 @@ _REQ = {"id": "req-1", "status": "pending", "title": "t", "question": "q"}
 def _fake_db(create_side_effect):
     db = MagicMock()
     db.operator_queue_item_exists.return_value = False   # never persists
+    # #1632: the sync loop now measures per-agent pending depth before admitting.
+    # Return 0 so the depth gate is a no-op and this test keeps exercising the
+    # #1525 quarantine path (a MagicMock default would misfire the >= cap check).
+    db.count_operator_queue_pending_for_agent.return_value = 0
     db.create_operator_queue_item.side_effect = create_side_effect
     db.get_operator_queue_responded_for_agent.return_value = []
     db.get_operator_queue_terminal_for_agent.return_value = []

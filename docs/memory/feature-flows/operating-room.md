@@ -311,17 +311,18 @@ Background async service that bridges agent containers and the database. Global 
 - `QUEUE_FILE_PATH = ".trinity/operator-queue.json"` (line 30)
 - `DEFAULT_POLL_INTERVAL = 5` seconds (line 31)
 
-**Poll cycle** (`_poll_cycle`, line 79-100):
+**Poll cycle** (`_poll_cycle`):
+0. **Leader gate (#1632)**: acquires/refreshes the `opqueue:leader` Redis lease (SET NX, TTL `max(3×poll-interval, 30s)` — a floor so one slow-writing agent's cycle can't expire the lease mid-cycle and flap leadership — own-lease-only refresh, fail-open to leader on Redis down — mirror monitoring #1464). A non-leader worker **returns immediately**, so under `--workers 2` only one worker syncs → no double-charge of the ingestion rate limiter, no double-broadcast of the flood alert, no double-scan of agent files.
 1. Gets running agents via `list_all_agents_fast()` (lazy import from `services.docker_service`)
 2. Filters to only `status == "running"` agents
 3. Calls `db.mark_operator_queue_expired()` for items past `expires_at`
 4. Concurrently syncs each agent via `asyncio.gather(*tasks)`
 
-**Agent sync** (`_sync_agent`, line 102-199):
+**Agent sync** (`_sync_agent`):
 1. Creates `AgentClient(agent_name)` and reads `~/.trinity/operator-queue.json` via `client.read_file()` with 5s timeout
-2. **Restart resilience** (line 113-127): If the file does not exist (e.g., container restart wiped filesystem), the service no longer returns early. Instead it creates an empty `queue_data = {"$schema": "operator-queue-v1", "requests": []}` and continues, tracking `file_exists = False`. This allows responded items in the DB to be reconstructed and delivered back to the agent.
-3. Parses JSON (if file existed), iterates `requests` array
-4. For each request with `status=pending` not already in DB: creates DB record via `db.create_operator_queue_item()`, adds to `new_items` list
+2. **Restart resilience**: If the file does not exist (e.g., container restart wiped filesystem), the service no longer returns early. Instead it creates an empty `queue_data = {"$schema": "operator-queue-v1", "requests": []}` and continues, tracking `file_exists = False`. This allows responded items in the DB to be reconstructed and delivered back to the agent.
+3. **Oversized-file guard (#1632)**: if the file exceeds `OPERATOR_QUEUE_MAX_FILE_BYTES` (2 MiB) it is **not parsed** — one flood alert is emitted and the agent is skipped this cycle (C1 per-cycle DoS guard). Otherwise parses JSON and iterates the `requests` array (bounded to `OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE` = 500 items/cycle).
+4. **Ingestion caps (#1632)** — for each new `pending` request not already in DB (see "Ingestion caps" below): the reserved-id guard, per-agent **pending-DEPTH cap** (`db.count_operator_queue_pending_for_agent`, primary), and per-agent + fleet **RATE cap** gate admission; an admitted item is field-hygiene-clamped (`_clamp_ingested_item`) then created via `db.create_operator_queue_item()` and added to `new_items`. A depth-held / rate-skipped / malformed-id episode emits **one** aggregated flood alert.
 5. For each request with `status=acknowledged`: marks acknowledged in DB via `db.mark_operator_queue_acknowledged()`
 6. Broadcasts `operator_queue_new` WebSocket events for new items (line 156-171)
 7. Broadcasts `operator_queue_acknowledged` WebSocket events for acknowledged items (line 173-184)
@@ -368,6 +369,24 @@ Accepts `terminal_items` (#1017 — cancelled/expired) and a `file_exists` param
 ```
 
 **Lifecycle**: Started in `main.py` lifespan (line 254-258), stopped on shutdown (line 290-294).
+
+### Ingestion caps (#1632)
+
+The agent-authored sync boundary is the only untrusted operator-queue producer (there is **no HTTP create** — every item flows through `db.create_operator_queue_item`, and the four platform callers create directly, bypassing `_sync_agent`). #1402 makes this queue the approval channel for irreversible actions, so a compromised / prompt-injected agent flooding plausible "approve this" items causes operator fatigue → reflexive approval. The bound must stop a **hostile** agent (a rate-aware attacker), not just a runaway. All limits are env-tunable and generous by design (requirements §26.7).
+
+Two independent bounds plus field hygiene, applied in-order per new `pending` request:
+
+1. **DEPTH cap (primary, DB-measured ⇒ Redis-independent).** `pending = db.count_operator_queue_pending_for_agent(agent)` is computed once per cycle; a new item is admitted only while `pending + admitted < OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` (25). At the cap the scan **stops** (`break`) — it does not keep dripping a growing file (that would re-scan on every 5s cycle → per-cycle DoS). Because it is DB-measured it holds through a Redis outage, which is why fail-open on the rate limiters is safe. Depth is the fatigue metric: a rate-aware drip that never trips the rate limit still can't accumulate more than 25 pending items.
+2. **RATE cap (burst smoothing, Redis, fail-open).** Per-agent `rate_limiter.check("operator_queue_create:{agent}", 60, 60)` + fleet `check("operator_queue_create:_fleet", 300, 60)`, charged only at the real create point. Denied → the item is **held** this cycle and the scan `break`s (the window is monotonic within a cycle). The fleet cap bounds a colluding / shared-upstream-injected fleet in aggregate.
+3. **Field hygiene** (`_clamp_ingested_item`, a total helper run **inside** the #1525 create try/except so any failure is quarantined, never hot-looped): `title`→300 / `question`→4000 chars **truncate-with-marker** (losing a real approval is worse than a clamped one); `context` serialized >8 KiB or non-serializable → `{"_truncated":true,"_original_bytes":N,"execution_id":<validated ≤128 & id-shaped, else null>}` (so a huge `execution_id` can't smuggle past the context cap); non-dict `context` → `{}`; `options` >4 KiB → a small dropped-marker list; `priority` validate-only (unknown → `medium`, legit `critical` untouched — the depth cap already bounds critical *volume*); **`created_at` normalized to ingest time** (an agent-supplied future date would pin the item atop the `created_at DESC` sort). `expires_at` is honored as authored.
+4. **Reserved-id guard + malformed-id reject.** An agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`) is **rejected** so an agent can't pre-create — and via `create_item`'s `on_conflict_do_nothing` silence — its own flood alarm or the #1402 poison alert. An `id` >256 chars or not matching `^[A-Za-z0-9._:-]+$` is rejected (a create PK can't be safely rewritten).
+5. **Flood alert.** A depth-held / rate-skipped / malformed-id / oversize-file episode emits **one** `type:"alert"` item per episode via a platform **direct-DB create** (exempt), id `queue-flood-{agent}-{utc_now_iso()}` (**un-guessable** — the agent can't pre-suppress it), priority `high`, softened wording, in-memory `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` (300) cooldown, wrapped so an emit failure never kills the sync. The single leader ⇒ no WS double-broadcast.
+
+**Deferred/held semantics.** Held items are **not dropped** — they stay `pending` in the agent's file and are re-evaluated on a later cycle once depth/rate frees up (or after the operator resolves existing items). This is a behavior change agents must understand: an agent-supplied `created_at` is ignored, and a burst beyond the caps is throttled rather than fully ingested at once.
+
+**Generous DB-sink belt.** `create_item` independently rejects (`ValueError`) `title`>4 KiB / `question`>16 KiB / serialized `context`>64 KiB / `id`>512 — an order of magnitude above the service caps so a clamped agent item or a small platform item never trips it, but the "platform bypasses the boundary" exemption stops being *solely* load-bearing (#1525's validate-at-boundary-AND-at-sink).
+
+**Platform exemption.** The four platform callers (lease-reaper poison-park #1402, `task_execution_service` skill-not-found, `agent_client` circuit-breaker-dormant, `sync_health_service` git-sync/bloat) and `validation_service._notify_operator_on_failure` — **converted to a direct DB create in #1632** (which also fixed a latent bug where it appended to a bare list the sync loop can't parse) — create straight through `db.create_operator_queue_item`, bypassing `_sync_agent` and therefore every cap.
 
 ### Database Delegation
 
@@ -500,7 +519,9 @@ Agents write to `~/.trinity/operator-queue.json`:
 }
 ```
 
-**Request ids are per-agent scoped (#1631, shipped)** — the item `id` is now a platform-minted `uuid.uuid4().hex` (the global row handle; REST/MCP/frontend lookups unchanged), and the agent-authored correlation string lives in a nullable `request_id` column with `UNIQUE(agent_name, request_id)`. `create_item` mints the uuid, stores `request_id`, and targets `on_conflict_do_nothing` at `(agent_name, request_id)` — a same-agent re-insert stays idempotent (re-reads and returns the surviving row's uuid) while two agents reusing the same string no longer collide (previously the second agent's item was silently swallowed by the global PK). The sync loop's `item_exists`, `mark_acknowledged`, the `_create_failures` quarantine map, and `_write_responses_to_agent` are all keyed on `(agent_name, request_id)`, closing the cross-agent write where agent B's acknowledgement flipped agent A's row. A guard rejects (log-once, bounded) agent-authored ids using reserved platform prefixes (`poison-`, `sync-failing-`, `git-bloat-`, `cb-dormant-`, `skill-not-found-`) so an agent can't pre-claim the platform's own alert ids. The #1402 contract still mandates execution-id-derived ids (`approval-{execution_id}-{slug}`), which make a re-park under pull-mode re-delivery idempotent. Ingestion rate/size caps remain the separate open follow-up (#1632).
+**Request ids are per-agent scoped (#1631, shipped)** — the item `id` is now a platform-minted `uuid.uuid4().hex` (the global row handle; REST/MCP/frontend lookups unchanged), and the agent-authored correlation string lives in a nullable `request_id` column with `UNIQUE(agent_name, request_id)`. `create_item` mints the uuid, stores `request_id`, and targets `on_conflict_do_nothing` at `(agent_name, request_id)` — a same-agent re-insert stays idempotent (re-reads and returns the surviving row's uuid) while two agents reusing the same string no longer collide (previously the second agent's item was silently swallowed by the global PK). The sync loop's `item_exists`, `mark_acknowledged`, the `_create_failures` quarantine map, and `_write_responses_to_agent` are all keyed on `(agent_name, request_id)`, closing the cross-agent write where agent B's acknowledgement flipped agent A's row. A guard rejects (log-once, bounded) agent-authored ids using reserved platform prefixes so an agent can't pre-claim the platform's own alert ids (the guarded prefix set is extended by #1632 — see the ingestion caps below). The #1402 contract still mandates execution-id-derived ids (`approval-{execution_id}-{slug}`), which make a re-park under pull-mode re-delivery idempotent.
+
+**Ingestion caps (#1632, shipped).** Agent field values are bounded at ingestion: `title` ≤300 chars and `question` ≤4000 chars are truncated-with-marker; `context` >8 KiB and `options` >4 KiB collapse to a marker; an unknown `priority` becomes `medium`; **`created_at` is ignored and set to ingest time** (a future date can no longer pin the item atop the sort); the agent-authored `request_id` must be ≤256 chars and match `^[A-Za-z0-9._:-]+$`, and must **not** use a platform-reserved prefix (`queue-flood-`/`poison-`/`cb-dormant-`/`sync-failing-`/`git-bloat-`/`skill-not-found-`/`val_`) or it is rejected. Per-agent pending depth is capped (default 25) and creation is rate-limited (60/60s per agent, 300/60s fleet); items over the cap are **held** (left `pending` in the file, re-evaluated on a later cycle), not dropped, and trigger one aggregated `queue-flood-*` operator alert. See "Ingestion caps (#1632)" under the Sync Service. These bounds apply **only** to the agent-authored file path — platform-created items (poison-park, validation alerts, internal breaker/skill/git alerts) are exempt.
 
 ### Async contract — fire-and-park (#1402)
 
@@ -534,7 +555,8 @@ The "Operator Communication" instructions agents receive — the queue-file prot
 
 ## Side Effects
 
-- **WebSocket broadcast**: `operator_queue_new` -- When new items are synced from agents (sync service, line 155-171)
+- **WebSocket broadcast**: `operator_queue_new` -- When new items are synced from agents (sync service). Also carries the #1632 `queue-flood-{agent}-{utc_now_iso()}` alert emitted (once per cooldown episode, from the single leader worker) when an agent's ingestion is depth-held / rate-skipped / oversize — a platform direct-DB create, exempt from the caps
+- **Operator-queue item** (#1632): a `type:"alert"`, priority `high` `queue-flood-*` summary item created directly in the DB when an agent exceeds its per-agent ingestion depth/rate limit or writes an oversized queue file; un-guessable id so the agent can't pre-suppress it; one per `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` episode
 - **WebSocket broadcast**: `operator_queue_responded` -- When operator submits response (router, line 255-264)
 - **WebSocket broadcast**: `operator_queue_acknowledged` -- When agent acknowledges response (sync service, line 173-184)
 - **WebSocket broadcast**: `operator_queue_cleared` (#1017) -- One event per bulk-cancel (`scope: "pending"`) or clear-resolved (`scope: "resolved"`) operation; all connected clients refetch

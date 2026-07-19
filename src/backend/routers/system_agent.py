@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 
 from models import User
 from database import db
-from dependencies import get_current_user, decode_token
+from dependencies import get_current_user, decode_token, assert_admin
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, docker_client
 from services.docker_utils import (
@@ -30,12 +30,6 @@ from db.agents import SYSTEM_AGENT_NAME
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
 logger = logging.getLogger(__name__)
 
-def require_admin(current_user: User):
-    """Verify user is an admin."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-
 @router.get("/status")
 async def get_system_agent_status(
     request: Request,
@@ -46,7 +40,7 @@ async def get_system_agent_status(
 
     Admin-only. Returns container status, agent details, and health info.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
 
@@ -106,7 +100,7 @@ async def reinitialize_system_agent(
     Does NOT delete database records or MCP API key.
     This is a "reset to clean state" operation.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
     if not container:
@@ -193,7 +187,7 @@ async def restart_system_agent(
     Admin-only endpoint that stops and starts the system agent.
     Does NOT clear workspace or re-initialize - just a simple restart.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
     if not container:

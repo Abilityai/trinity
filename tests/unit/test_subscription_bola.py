@@ -2,8 +2,17 @@
 Unit tests for subscription BOLA fix (Issue #182).
 
 Verifies that PUT /api/subscriptions/agents/{name} and
-DELETE /api/subscriptions/agents/{name} use can_user_share_agent
-(owner/admin only) instead of can_user_access_agent (any shared user).
+DELETE /api/subscriptions/agents/{name} enforce owner/admin-only auth
+(NOT any shared user).
+
+INV-8 (#1310) moved the inline `can_user_share_agent`/`can_user_access_agent`
+checks behind the shared imperative helpers in dependencies.py:
+  * assert_agent_owner  wraps can_user_share_agent  (owner/admin only)
+  * assert_agent_access wraps can_user_access_agent (owner/admin/shared)
+so this guard now asserts the *helper* each endpoint uses — which is the exact
+BOLA-relevant boundary — instead of the raw db-call it used to inline. The
+behavioral side (a shared reader is denied at the owner endpoints) is covered by
+tests/unit/test_1310_auth_consolidation.py::test_owner_sites_deny_shared_reader.
 
 Issue: https://github.com/abilityai/trinity/issues/182
 Module: src/backend/routers/subscriptions.py
@@ -40,75 +49,72 @@ class TestSubscriptionBOLA:
 
     # ---- PUT /api/subscriptions/agents/{name} ----
 
-    def test_assign_uses_can_user_share_agent(self):
-        """assign_subscription_to_agent must call can_user_share_agent, not can_user_access_agent."""
+    def test_assign_uses_owner_gate(self):
+        """assign_subscription_to_agent must gate on assert_agent_owner (owner/admin
+        only), NOT assert_agent_access (which would admit any shared user)."""
         src = self._get_function_source("assign_subscription_to_agent")
-        assert "can_user_share_agent" in src, (
-            "assign_subscription_to_agent must use can_user_share_agent (owner/admin only)"
+        assert "assert_agent_owner" in src, (
+            "assign_subscription_to_agent must use assert_agent_owner (owner/admin only)"
         )
-        assert "can_user_access_agent" not in src, (
-            "assign_subscription_to_agent must NOT use can_user_access_agent (allows shared users)"
+        assert "assert_agent_access" not in src, (
+            "assign_subscription_to_agent must NOT use assert_agent_access (allows shared users)"
         )
 
-    def test_assign_returns_403_message(self):
-        """assign_subscription_to_agent 403 response should mention owner/admin."""
+    def test_assign_owner_gate_message(self):
+        """assign_subscription_to_agent owner-gate detail should mention owner/admin."""
         src = self._get_function_source("assign_subscription_to_agent")
-        assert "403" in src, "Must raise 403 on unauthorized access"
-        # Ensure the error message is informative
         lower_src = src.lower()
         assert "owner" in lower_src or "admin" in lower_src, (
-            "403 detail should mention owner or admin requirement"
+            "owner-gate detail should mention owner or admin requirement"
         )
 
     # ---- DELETE /api/subscriptions/agents/{name} ----
 
-    def test_clear_uses_can_user_share_agent(self):
-        """clear_agent_subscription must call can_user_share_agent, not can_user_access_agent."""
+    def test_clear_uses_owner_gate(self):
+        """clear_agent_subscription must gate on assert_agent_owner, not assert_agent_access."""
         src = self._get_function_source("clear_agent_subscription")
-        assert "can_user_share_agent" in src, (
-            "clear_agent_subscription must use can_user_share_agent (owner/admin only)"
+        assert "assert_agent_owner" in src, (
+            "clear_agent_subscription must use assert_agent_owner (owner/admin only)"
         )
-        assert "can_user_access_agent" not in src, (
-            "clear_agent_subscription must NOT use can_user_access_agent (allows shared users)"
+        assert "assert_agent_access" not in src, (
+            "clear_agent_subscription must NOT use assert_agent_access (allows shared users)"
         )
 
-    def test_clear_returns_403_message(self):
-        """clear_agent_subscription 403 response should mention owner/admin."""
+    def test_clear_owner_gate_message(self):
+        """clear_agent_subscription owner-gate detail should mention owner/admin."""
         src = self._get_function_source("clear_agent_subscription")
-        assert "403" in src
         lower_src = src.lower()
         assert "owner" in lower_src or "admin" in lower_src
 
     # ---- GET /api/subscriptions/agents/{name}/auth (read-only, should remain permissive) ----
 
-    def test_auth_status_still_uses_can_user_access_agent(self):
-        """get_agent_auth_status should still use can_user_access_agent (read-only endpoint)."""
+    def test_auth_status_uses_access_gate(self):
+        """get_agent_auth_status is read-only and should use assert_agent_access
+        (owner/admin/shared), NOT the owner-only assert_agent_owner."""
         src = self._get_function_source("get_agent_auth_status")
-        assert "can_user_access_agent" in src, (
+        assert "assert_agent_access" in src, (
             "get_agent_auth_status is read-only and should allow shared users"
         )
-        assert "can_user_share_agent" not in src, (
+        assert "assert_agent_owner" not in src, (
             "get_agent_auth_status should NOT restrict to owners only"
         )
 
     # ---- Global: no regression ----
 
-    def test_no_can_user_access_agent_in_mutation_endpoints(self):
-        """Ensure can_user_access_agent is NOT used anywhere in assign or clear functions."""
+    def test_no_access_gate_in_mutation_endpoints(self):
+        """Ensure the permissive access gate (or the raw can_user_access_agent) is
+        NOT used in the assign/clear mutation endpoints — that was the #182 BOLA."""
         for func_name in ["assign_subscription_to_agent", "clear_agent_subscription"]:
             src = self._get_function_source(func_name)
-            assert "can_user_access_agent" not in src, (
-                f"{func_name} must not use can_user_access_agent — "
+            assert "assert_agent_access" not in src and "can_user_access_agent" not in src, (
+                f"{func_name} must not use the permissive access gate — "
                 f"this was the BOLA vulnerability in Issue #182"
             )
 
-    def test_mutation_endpoints_have_authorization_check(self):
-        """Both mutation endpoints must have an explicit authorization check."""
+    def test_mutation_endpoints_have_owner_gate(self):
+        """Both mutation endpoints must carry the owner-only authorization gate."""
         for func_name in ["assign_subscription_to_agent", "clear_agent_subscription"]:
             src = self._get_function_source(func_name)
-            assert "can_user_share_agent" in src, (
-                f"{func_name} is missing authorization check"
-            )
-            assert "HTTPException" in src, (
-                f"{func_name} must raise HTTPException on auth failure"
+            assert "assert_agent_owner" in src, (
+                f"{func_name} is missing the owner-only authorization gate"
             )

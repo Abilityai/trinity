@@ -110,6 +110,21 @@ services:
       - MAX_PENDING_REMINDERS_PER_AGENT=${MAX_PENDING_REMINDERS_PER_AGENT:-25}  # concurrent pending per agent
       - MAX_REMINDERS_PER_AGENT_PER_DAY=${MAX_REMINDERS_PER_AGENT_PER_DAY:-100} # rolling 24h creation cap
       - REMINDER_RATE_LIMIT=${REMINDER_RATE_LIMIT:-30}                          # set_reminder calls per agent per 60s
+      # Operator-queue agent ingestion caps (#1632) — bound a compromised/runaway
+      # agent flooding the queue. Prod launches standalone (no base merge), so wire here too.
+      - OPERATOR_QUEUE_MAX_PENDING_PER_AGENT=${OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:-25}       # per-agent pending-DEPTH cap (primary)
+      - OPERATOR_QUEUE_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_CREATE_RATE_LIMIT:-60}               # per-agent creates / window
+      - OPERATOR_QUEUE_CREATE_RATE_WINDOW=${OPERATOR_QUEUE_CREATE_RATE_WINDOW:-60}             # rate-limit window (s)
+      - OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT:-300}  # fleet-wide creates / window
+      - OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE=${OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE:-500}            # requests scanned / agent / cycle
+      - OPERATOR_QUEUE_MAX_FILE_BYTES=${OPERATOR_QUEUE_MAX_FILE_BYTES:-2097152}                # skip a queue file over this (bytes)
+      - OPERATOR_QUEUE_TITLE_MAX=${OPERATOR_QUEUE_TITLE_MAX:-300}                              # title char cap (truncate)
+      - OPERATOR_QUEUE_QUESTION_MAX=${OPERATOR_QUEUE_QUESTION_MAX:-4000}                       # question char cap (truncate)
+      - OPERATOR_QUEUE_CONTEXT_MAX_BYTES=${OPERATOR_QUEUE_CONTEXT_MAX_BYTES:-8192}             # context byte cap (marker over)
+      - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
+      - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
+      - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
+      - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - GITHUB_PAT=${GITHUB_PAT}
       # Log Retention & Archival Configuration (#1039)
       # These were MISSING from prod — prod launches standalone (no base-compose

@@ -7,7 +7,7 @@ and manual archival operations.
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from models import ArchiveRequest, RetentionConfig, User
-from dependencies import get_current_user
+from dependencies import get_current_user, require_admin
 from services.log_archive_service import log_archive_service, LOG_RETENTION_DAYS
 import logging
 
@@ -15,13 +15,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
 
-# Dependencies
-
-def require_admin(current_user: User = Depends(get_current_user)):
-    """Require admin role for log management."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return current_user
+# Admin gate: the shared `require_admin` dependency (dependencies.py, INV-8
+# #1310) — identical 403 "Admin access required", plus a connector-principal
+# reject (a no-op tightening; connector keys are fenced upstream anyway).
 
 
 # Endpoints

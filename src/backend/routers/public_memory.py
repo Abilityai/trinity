@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from models import WriteUserMemoryRequest
 
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_agent_access
 from db_models import User
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,7 @@ async def write_user_memory(
     The user email is never accepted from the caller — it is looked up from the
     execution record to prevent cross-user memory poisoning.
     """
-    if not db.can_user_access_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Not authorized")
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
 
     execution = db.get_execution(body.execution_id)
     if not execution:
