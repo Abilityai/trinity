@@ -81,7 +81,7 @@ curl -s http://localhost:8001/a2a/new_cool_agent/.well-known/agent-card.json | j
 
 ### 2. Authenticate — a Trinity MCP API key
 
-Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with the external client. It's sent as `Authorization: Bearer trinity_mcp_…` on every task call; unauthenticated calls fail closed with `401`.
+Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with the external client. It's a `trinity_mcp_…` key, sent as `Authorization: Bearer $TOKEN` on every task call; unauthenticated calls fail closed with `401`. The examples below assume you've exported it: `export TOKEN=trinity_mcp_…`.
 
 ### 3. Task — JSON-RPC 2.0
 
@@ -89,7 +89,7 @@ Issue an MCP key from **Settings → MCP Keys** (or the API) and share it with t
 
 ```bash
 curl -s -X POST http://localhost:8001/a2a/new_cool_agent \
-  -H "Authorization: Bearer trinity_mcp_YOUR_KEY" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
     "jsonrpc": "2.0", "id": 1, "method": "message/send",
