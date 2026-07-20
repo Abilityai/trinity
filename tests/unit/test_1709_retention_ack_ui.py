@@ -12,6 +12,7 @@ can catch — the endpoint keeps working; it just becomes unreachable.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -40,13 +41,20 @@ def test_settings_vue_calls_the_retention_acknowledge_endpoint(settings_src):
 
 def test_acknowledge_call_sends_the_window(settings_src):
     """The ack is window-bound (endpoint 409s on mismatch), so the caller must
-    send `window_days` — approving blind would fail or authorize the wrong window."""
-    idx = settings_src.find("/api/settings/retention/acknowledge")
-    # window_days must appear near the call site, not just anywhere in the file.
-    nearby = settings_src[idx: idx + 400]
-    assert "window_days" in nearby, (
-        "the acknowledge POST must include window_days (the endpoint binds the "
-        "approval to the window in force and 409s on mismatch)."
+    send `window_days` — approving blind would fail or authorize the wrong window.
+
+    The endpoint string appears more than once (a doc comment + the real call),
+    so check every occurrence: at least one must carry `window_days` in its
+    immediate vicinity (the POST body), not just somewhere in the file.
+    """
+    positions = [
+        m.start()
+        for m in re.finditer(re.escape("/api/settings/retention/acknowledge"), settings_src)
+    ]
+    assert positions, "no reference to the acknowledge endpoint at all"
+    assert any("window_days" in settings_src[p: p + 400] for p in positions), (
+        "the acknowledge POST must include window_days near the call site (the "
+        "endpoint binds the approval to the window in force and 409s on mismatch)."
     )
 
 
