@@ -1065,7 +1065,11 @@ def _install_fake_codex(
     # Neutralize OS-level process-group operations — there is no real pgid.
     monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda proc: None)
     monkeypatch.setattr(codex_runtime, "_terminate_process_group", lambda *a, **k: None)
-    monkeypatch.setattr(codex_runtime, "_safe_close_pipes", lambda *a, **k: None)
+
+    async def _noop_bounded_close(*a, **k):
+        return None
+
+    monkeypatch.setattr(codex_runtime, "_bounded_safe_close_pipes", _noop_bounded_close)
 
     def _drain(process, t_out, t_err, grace=5, pgid=None, execution_tag=None):
         # Join the reader threads so parsed state is settled before we read it.

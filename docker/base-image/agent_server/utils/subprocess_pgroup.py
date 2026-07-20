@@ -166,6 +166,16 @@ def safe_close_pipes(process: subprocess.Popen) -> None:
     surviving grandchild still holds the write end of the pipe open.
     Closing our read end causes readline() to raise ValueError or return
     EOF, which lets the thread exit.
+
+    #728: if the reader thread is genuinely still blocked inside the
+    ``TextIOWrapper``'s underlying blocking read (i.e. the pipe-holder was
+    NOT actually killed first), ``pipe.close()`` needs the same internal
+    buffer lock the reader is holding while parked in the syscall — this
+    call can then block forever. Callers on the event loop MUST invoke
+    this through :func:`_bounded_safe_close_pipes` (async contexts) or
+    :func:`_bounded_safe_close_pipes_sync` (sync contexts that don't own —
+    or are about to tear down — an event loop) instead of calling it
+    directly, so the caller is never wedged.
     """
     for pipe in (process.stdout, process.stderr):
         if pipe is None:
@@ -174,6 +184,71 @@ def safe_close_pipes(process: subprocess.Popen) -> None:
             pipe.close()
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
+
+
+async def _bounded_safe_close_pipes(
+    process: subprocess.Popen, timeout: float = 5.0
+) -> None:
+    """Force-close ``process``'s pipes with a hard wall-clock bound.
+
+    #728: ``safe_close_pipes()`` can deadlock forever on the
+    ``TextIOWrapper`` buffer lock if a reader thread is genuinely still
+    parked in a blocking read (see its docstring). Running the close in a
+    worker thread via ``asyncio.to_thread`` and bounding it with
+    ``asyncio.wait_for`` guarantees THIS coroutine always returns — even in
+    the pathological case where the close itself wedges — so callers on
+    the event loop never hang past ``timeout``. Best-effort: swallowing the
+    timeout is intentional (cleanup must never raise); the underlying
+    worker thread is left to finish or leak, same as a leaked reader
+    thread.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(safe_close_pipes, process), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "[Subprocess] safe_close_pipes did not return within %.1fs — "
+            "TextIOWrapper lock is likely still held by a genuinely stuck "
+            "reader thread (pid=%s); abandoning the force-close attempt so "
+            "the caller doesn't wedge. #728",
+            timeout, process.pid,
+        )
+
+
+def _bounded_safe_close_pipes_sync(process: subprocess.Popen, timeout: float = 5.0) -> None:
+    """Sync counterpart of :func:`_bounded_safe_close_pipes` for callers
+    that do not own (or are about to tear down) an event loop.
+
+    #728 follow-up: a sync caller that wraps the async helper in
+    ``asyncio.run(...)`` is NOT actually bounded at ``timeout`` — when the
+    close genuinely wedges, ``asyncio.wait_for`` still returns after
+    ``timeout``, but the leaked ``asyncio.to_thread`` worker is a **non-
+    daemon** thread borrowed from the loop's default ``ThreadPoolExecutor``.
+    ``asyncio.run()`` tears that loop down via
+    ``loop.shutdown_default_executor()``, which *joins* every outstanding
+    worker with a wait of up to ``concurrent.futures.thread._threads_queues``'
+    ``THREAD_JOIN_TIMEOUT`` (300s on CPython 3.13) before returning — so the
+    calling (sync) function would still block for up to ~5 minutes, not 5s.
+
+    This helper sidesteps that entirely: it runs ``safe_close_pipes`` in a
+    plain ``threading.Thread(daemon=True)`` and joins it with ``timeout``.
+    Daemon threads are never joined by anything at interpreter or loop
+    teardown, so if the close is genuinely wedged the thread is simply
+    abandoned (leaked, same as a leaked reader thread) and this function
+    returns at ``timeout`` — a real, unconditional bound.
+    """
+    t = threading.Thread(target=safe_close_pipes, args=(process,), daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        logger.error(
+            "[Subprocess] safe_close_pipes did not return within %.1fs — "
+            "TextIOWrapper lock is likely still held by a genuinely stuck "
+            "reader thread (pid=%s); abandoning the force-close attempt "
+            "(daemon thread leaked) so the caller doesn't wedge. #728",
+            timeout, process.pid,
+        )
 
 
 async def drain_reader_threads(
@@ -206,13 +281,26 @@ async def drain_reader_threads(
     otherwise lose the ability to signal grandchildren.
 
     Issue #817 follow-up: the function unconditionally calls
-    :func:`kill_cgroup_orphans` in a try/finally at the end. This
-    runs on every exit path (no-stuck, drained-naturally,
-    force-closed) and catches descendants regardless of how they
-    tried to escape — setsid, FD detachment, env stripping. Replaces
-    the prior pipe-writer sweep (#618, #728, #808) and env-tag sweep
-    (#827); both are subsumed by cgroup membership being the
+    :func:`kill_cgroup_orphans` (via :func:`_sweep_cgroup_orphans`) in a
+    try/finally at the end. This runs on every exit path (no-stuck,
+    drained-naturally, force-closed) and catches descendants regardless
+    of how they tried to escape — setsid, FD detachment, env stripping.
+    Replaces the prior pipe-writer sweep (#618, #728, #808) and env-tag
+    sweep (#827); both are subsumed by cgroup membership being the
     inescapable boundary.
+
+    Issue #728 (lock-ordering fix): on the genuine-wedge branch, the sweep
+    additionally runs BEFORE the force-close attempt, not only in the
+    trailing ``finally``. The stuck reader thread is parked inside the
+    ``TextIOWrapper``'s blocking read, holding its buffer lock; a
+    synchronous ``safe_close_pipes()`` needs that same lock, so calling it
+    while the actual pipe-holder is still alive deadlocks the coroutine
+    forever — and a deadlocked coroutine never reaches the trailing
+    ``finally``'s sweep either. Killing the pipe-holder first lets the
+    reader's blocking read return (EOF), releasing the lock, so the
+    force-close that follows is fast or a no-op. The close itself is also
+    now bounded (:func:`_bounded_safe_close_pipes`) as a second, independent
+    layer of protection against a pipe-holder the sweep can't reach.
 
     The ``execution_tag`` parameter is informational; the cgroup
     sweep does not depend on it (kept for API stability).
@@ -298,16 +386,35 @@ async def drain_reader_threads(
             return
 
         # Genuine wedge — readers did not return even after grandchildren
-        # died and the kernel should have EOF'd. Force-close and accept
-        # data loss.
+        # died and the kernel should have EOF'd. #728: the reader thread is
+        # parked in a blocking read() inside readline(), holding the
+        # TextIOWrapper's buffer lock; safe_close_pipes() needs that same
+        # lock, so calling it synchronously here — while whatever is still
+        # holding the pipe write-end (an escapee the pgid kill above missed,
+        # e.g. a setsid'd MCP grandchild) is still alive — deadlocks this
+        # coroutine forever. The old code ran the cgroup sweep in the
+        # `finally` block below, AFTER this call, which meant it never got
+        # a chance to run once the deadlock hit.
+        #
+        # Fix: run the cgroup sweep FIRST, right here, so the actual
+        # pipe-holder gets SIGKILLed before we attempt the close. Once it's
+        # dead the kernel EOFs the read end, the reader's blocking read
+        # returns, and the lock is released — so the close either becomes a
+        # true no-op or completes almost immediately. The `finally` sweep
+        # stays in place as a backstop for any process that dies between
+        # here and function exit.
         elapsed = time.monotonic() - drain_start
         logger.error(
             "[Subprocess] Reader thread(s) still stuck after %.1fs post-kill "
-            "grace — force-closing pipes; some buffered data may be lost "
-            "(pid=%s, stuck_count=%s)",
+            "grace — sweeping cgroup orphans before force-closing pipes; "
+            "some buffered data may be lost (pid=%s, stuck_count=%s)",
             elapsed, process.pid, len(still_stuck),
         )
-        safe_close_pipes(process)
+        _sweep_cgroup_orphans(process)
+        # #728: even with the sweep run first, bound the close itself — a
+        # pathological pipe-holder the sweep can't reach (e.g. outside the
+        # container's cgroup entirely) must not wedge this coroutine.
+        await _bounded_safe_close_pipes(process)
 
         for t in still_stuck:
             try:
@@ -345,31 +452,49 @@ async def drain_reader_threads(
                 stuck_initial,
             )
     finally:
-        # Issue #817 follow-up: cgroup-walk runs on every exit path.
-        # Best-effort — never fail the drain on sweep exceptions.
-        # Issue #912: forward all *other* in-flight executions' pids/pgids
-        # as the allowlist so the sweep doesn't SIGKILL a legitimate
-        # concurrent claude subprocess running another task in the same
-        # cgroup. The pre-#912 bare call was the bug — it left only the
-        # sweep's own pid + parents on the allowlist, so any concurrent
-        # task's claude got killed whenever a sibling task drained.
-        # The draining process itself has already exited at this point
-        # so it doesn't need to be in the allowlist.
-        try:
-            extra_pids = _active_execution_pids_for_drain()
-            killed = kill_cgroup_orphans(extra_pids=extra_pids)
-            if killed:
-                logger.info(
-                    "[Subprocess] Cgroup sweep killed %d orphan(s) after drain "
-                    "(preserved %d allowlisted pid(s): other in-flight "
-                    "executions + transient subprocesses)",
-                    killed, len(extra_pids),
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "[Subprocess] cgroup sweep raised in drain_reader_threads — "
-                "continuing"
+        # Issue #817 follow-up: cgroup-walk runs on every exit path, as a
+        # backstop in addition to the pre-close sweep on the genuine-wedge
+        # branch above (#728). Best-effort — never fail the drain on sweep
+        # exceptions.
+        _sweep_cgroup_orphans(process)
+
+
+def _sweep_cgroup_orphans(process: subprocess.Popen) -> int:
+    """Kill any process in the container cgroup not on the allowlist.
+
+    Extracted so it can run BEFORE the force-close on the genuine-wedge
+    branch of :func:`drain_reader_threads` (#728 — killing the pipe-holder
+    first is what lets a deadlocked ``safe_close_pipes()`` become a no-op),
+    as well as at the end of the function as an unconditional backstop
+    (#817). Never raises — a registry/sweep hiccup at drain time must not
+    crash the drain.
+
+    Issue #912: forwards all *other* in-flight executions' pids/pgids as
+    the allowlist so the sweep doesn't SIGKILL a legitimate concurrent
+    claude subprocess running another task in the same cgroup. The
+    pre-#912 bare call was the bug — it left only the sweep's own pid +
+    parents on the allowlist, so any concurrent task's claude got killed
+    whenever a sibling task drained. ``process`` itself has already
+    exited (or is being wedged out) by the time this runs, so it doesn't
+    need to be in the allowlist.
+    """
+    try:
+        extra_pids = _active_execution_pids_for_drain()
+        killed = kill_cgroup_orphans(extra_pids=extra_pids)
+        if killed:
+            logger.info(
+                "[Subprocess] Cgroup sweep killed %d orphan(s) for pid=%s "
+                "(preserved %d allowlisted pid(s): other in-flight "
+                "executions + transient subprocesses)",
+                killed, process.pid, len(extra_pids),
             )
+        return killed
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[Subprocess] cgroup sweep raised for pid=%s — continuing",
+            process.pid,
+        )
+        return 0
 
 
 def _active_execution_pids_for_drain() -> list[int]:

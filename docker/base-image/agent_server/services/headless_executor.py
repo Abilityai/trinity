@@ -51,9 +51,9 @@ from .jsonl_recovery import (
 from .process_registry import get_process_registry
 from .stream_parser import process_stream_line
 from .subprocess_lifecycle import (
+    _bounded_safe_close_pipes_sync,
     _capture_pgid,
     _drain_bounded,
-    _safe_close_pipes,
     _terminate_process_group,
 )
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
@@ -345,13 +345,33 @@ class HeadlessRunContext:
         The ``self.process is not None`` guard makes this method safe even
         when outer-timeout fires before ``Popen`` has returned — a slight
         improvement over the original closure-captured ``process`` variable.
+
+        #728: the plain ``_safe_close_pipes(self.process)`` call this used
+        to make is exactly the deadlock described in
+        ``subprocess_pgroup._bounded_safe_close_pipes``'s docstring — if the
+        concurrent draining thread's reader is genuinely still parked in a
+        blocking read, ``pipe.close()`` here would wait on the same
+        ``TextIOWrapper`` lock forever, wedging THIS executor thread (and
+        the outer ``asyncio.wait_for`` caller awaiting it) too.
+
+        Routed through :func:`_bounded_safe_close_pipes_sync` — NOT
+        ``asyncio.run(_bounded_safe_close_pipes(...))``. This method has no
+        event loop of its own (it's invoked via ``run_in_executor``), so
+        wrapping the async helper in ``asyncio.run()`` would create one
+        just to tear it down again immediately after; if the close is
+        genuinely wedged, that teardown (``loop.shutdown_default_executor``)
+        joins the leaked non-daemon ``asyncio.to_thread`` worker for up to
+        ``THREAD_JOIN_TIMEOUT`` (300s on CPython 3.13), silently defeating
+        the 5s bound. The sync helper runs the close in a plain daemon
+        thread instead, so this method really does return within ``timeout``
+        even in the pathological case.
         """
         if self.process is not None:
             _terminate_process_group(
                 self.process, graceful_timeout=2,
                 pgid=self.process_pgid, execution_tag=self.task_session_id,
             )
-            _safe_close_pipes(self.process)
+            _bounded_safe_close_pipes_sync(self.process)
 
 
 def _setup_headless_command(

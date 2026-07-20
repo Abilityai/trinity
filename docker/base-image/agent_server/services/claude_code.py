@@ -44,9 +44,9 @@ from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .stream_parser import process_stream_line
 from .subprocess_lifecycle import (
+    _bounded_safe_close_pipes,
     _capture_pgid,
     _drain_bounded,
-    _safe_close_pipes,
     _terminate_process_group,
 )
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
@@ -435,7 +435,14 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
                     None,
                     lambda: _terminate_process_group(process, graceful_timeout=2, pgid=process_pgid, execution_tag=execution_id),
                 )
-                await loop.run_in_executor(None, _safe_close_pipes, process)
+                # #728: a bare run_in_executor(None, _safe_close_pipes, process)
+                # never resolves if a setsid'd escapee is genuinely still
+                # holding the pipe — the awaited future just never completes.
+                # _bounded_safe_close_pipes enforces a 5s wall-clock bound via
+                # asyncio.wait_for; the leaked to_thread worker is harmless
+                # here since this coroutine runs on the long-lived app loop
+                # (no per-call loop teardown to get stuck joining it).
+                await _bounded_safe_close_pipes(process)
                 raise HTTPException(
                     status_code=504,
                     detail=f"Chat execution timed out after {timeout_seconds} seconds"

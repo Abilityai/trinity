@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -498,6 +499,188 @@ sys.exit(0)
             except Exception:
                 pass
 
+    def test_drained_via_sweep_before_close_when_grandchild_survives_entire_window(
+        self, monkeypatch, tmp_path,
+    ):
+        """Regression for #728: the reader-lock deadlock this PR fixes.
+
+        The pathology: a setsid'd grandchild (e.g. a persistent MCP
+        connection) holds claude's stdout write-end open for the ENTIRE
+        natural-drain window (``post_kill_grace``) and beyond — i.e. it is
+        genuinely still alive, and the reader thread is genuinely still
+        parked inside a blocking read, when ``drain_reader_threads`` reaches
+        the force-close branch. This is the one condition
+        ``test_setsid_escapee_drained_via_orphan_killer_preserves_result_line``
+        and ``test_buffered_data_preserved_after_grandchild_kill`` above do
+        NOT cover — in both of those the grandchild's sleep is short enough
+        that it (or the pgid kill) may have already freed the pipe by the
+        time force-close runs. Here the grandchild outlives the whole
+        window by design, so the only thing that can unblock the reader is
+        an orphan-kill that runs BEFORE the force-close attempt.
+
+        Pre-fix, ``drain_reader_threads`` called ``safe_close_pipes()``
+        synchronously on this branch and only ran the cgroup sweep
+        afterwards in ``finally`` — so a synchronous close attempted while
+        the real pipe-holder is still alive deadlocks on the
+        ``TextIOWrapper`` buffer lock the blocked reader holds, and the
+        sweep that could have killed the holder and freed the lock never
+        gets a chance to run. The drain coroutine then hangs until
+        ``_DRAIN_BUDGET_SECONDS`` (90s) forces a SIGKILL of the whole
+        executor thread, discarding the model's output.
+
+        The cgroup sweep itself (:func:`kill_cgroup_orphans`) depends on
+        ``/sys/fs/cgroup`` and is Linux/container-only (see
+        ``test_setsid_escapee_drained_via_orphan_killer_preserves_result_line``'s
+        skipif above) — it is stubbed here, precisely as
+        ``test_emits_metric_on_natural_drain`` / `..._force_close_path`
+        already do, so this test is deterministic and runs on every
+        platform. The stub still performs a REAL ``SIGKILL`` of the real
+        grandchild PID (recovered via a side-channel pidfile, since stdout
+        is reserved for the sentinel line), so the assertions below prove
+        the actual production mechanism: sweep-kills-holder unblocks the
+        genuinely-stuck reader.
+        """
+        import subprocess_pgroup as spg
+
+        pidfile = tmp_path / "grandchild.pid"
+        # Parent writes the result sentinel, forks a grandchild that
+        # setsid()s (escapes terminate_process_group's pgid kill — same
+        # #586 escape as the sibling test above), records its own pid to
+        # a side-channel file, then holds stdout open for the ENTIRE
+        # drain window and well beyond it before the parent exits.
+        script = r"""
+import os, sys, time
+sys.stdout.write("RESULT_LINE\n")
+sys.stdout.flush()
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    with open(sys.argv[1], "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(20)   # outlives the whole natural-drain window
+    os._exit(0)
+sys.exit(0)
+"""
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", script, str(pidfile)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        pgid = capture_pgid(proc)
+        assert pgid is not None
+        captured: list[str] = []
+        reader_ready = threading.Event()
+
+        def reader():
+            reader_ready.set()
+            assert proc.stdout is not None
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if not line:
+                        break
+                    captured.append(line.strip())
+            except (ValueError, OSError):
+                pass  # pipe force-closed — acceptable on the fallback path
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        reader_ready.wait(timeout=2)
+
+        # Parent exits; setsid'd grandchild stays alive holding the pipe.
+        proc.wait(timeout=5)
+        assert "RESULT_LINE" in captured, "sentinel not read before parent exit"
+
+        # Wait for the grandchild to actually record its pid and confirm
+        # it (and not just the reader) is genuinely still alive — this is
+        # the "entire window" precondition the test is named for.
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "grandchild never wrote its pidfile"
+        grandchild_pid = int(pidfile.read_text().strip())
+
+        def grandchild_alive() -> bool:
+            try:
+                os.kill(grandchild_pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+
+        assert grandchild_alive(), "grandchild should still be alive holding the pipe"
+        assert t.is_alive(), (
+            "reader should still be blocked — setsid'd grandchild holds pipe open "
+            "for the whole natural-drain window"
+        )
+
+        # Stand in for the real (Linux-only) cgroup sweep: a deterministic,
+        # cross-platform fake that performs a REAL SIGKILL of the actual
+        # pipe-holding grandchild, exactly like production's
+        # kill_cgroup_orphans() would once it walks the cgroup and finds
+        # this pid.
+        def fake_kill_cgroup_orphans(*, extra_pids=()):
+            del extra_pids
+            if grandchild_alive():
+                os.kill(grandchild_pid, signal.SIGKILL)
+                return 1
+            return 0
+
+        monkeypatch.setattr(spg, "kill_cgroup_orphans", fake_kill_cgroup_orphans)
+
+        try:
+            # grace=0 forces the stuck-reader path immediately;
+            # post_kill_grace=1 is far shorter than the grandchild's 20s
+            # sleep, so we reliably reach the genuine-wedge / force-close
+            # branch with the grandchild still alive — the exact
+            # precondition for the #728 deadlock.
+            start = time.monotonic()
+            asyncio.run(drain_reader_threads(
+                proc, t,
+                grace=0,
+                post_kill_grace=1,
+                pgid=pgid,
+            ))
+            elapsed = time.monotonic() - start
+
+            # (a) Must return well within budget — nowhere near the 90s
+            # _DRAIN_BUDGET_SECONDS ceiling, and comfortably shorter than
+            # the grandchild's 20s sleep (which is how long the pre-fix
+            # code would have taken, since it only frees the lock once the
+            # grandchild dies on its own — see the docstring above).
+            assert elapsed < 10.0, (
+                f"drain took {elapsed:.2f}s — should have returned in a few "
+                "seconds via the pre-close sweep, not by waiting out the "
+                "grandchild's sleep (or worse, the budget ceiling)"
+            )
+
+            # (b) The buffered result line must have survived.
+            assert "RESULT_LINE" in captured, (
+                f"sentinel lost — captured={captured!r}"
+            )
+
+            # (c) The reader thread must not be leaked.
+            assert not t.is_alive(), (
+                "reader thread still alive after drain — the sweep-before-close "
+                "fix did not unblock it"
+            )
+
+            # (d) The orphan must actually have been killed (proves the sweep
+            # ran, and ran early enough to matter — not just eventually).
+            assert not grandchild_alive(), (
+                "grandchild survived the drain — sweep-before-close did not fire"
+            )
+        finally:
+            try:
+                terminate_process_group(proc, graceful_timeout=1, pgid=pgid)
+            except Exception:
+                pass
+            try:
+                if grandchild_alive():
+                    os.kill(grandchild_pid, signal.SIGKILL)
+            except Exception:
+                pass
+
     def test_emits_metric_on_natural_drain(self, monkeypatch, caplog):
         """[METRIC] drain_outcome must fire on the natural-drain branch.
 
@@ -675,6 +858,96 @@ class TestSafeClosePipes:
             stderr = None
 
         safe_close_pipes(Dummy())
+
+
+@pytest.mark.unit
+class TestBoundedSafeClosePipes:
+    """Regression for #728's second finding: a bounded close must return in
+    ``timeout``, full stop — including the sync variant's specific failure
+    mode (an ``asyncio.run()``-wrapped async close is NOT actually bounded,
+    because loop teardown joins the leaked non-daemon worker for up to
+    ``THREAD_JOIN_TIMEOUT``, 300s on CPython 3.13).
+
+    Both tests simulate a genuinely wedged ``safe_close_pipes`` directly
+    (an ``Event`` that is never set, rather than a real pipe-holding
+    grandchild) so the "still wedged after timeout" case is deterministic
+    and fast, independent of the real end-to-end scenario already covered
+    by ``TestDrainReaderThreads.test_drained_via_sweep_before_close_when_grandchild_survives_entire_window``.
+    """
+
+    def test_sync_helper_returns_within_timeout_when_close_wedges(self, monkeypatch):
+        import subprocess_pgroup as spg
+
+        never_set = threading.Event()
+
+        def _wedged_safe_close_pipes(process):
+            del process
+            never_set.wait()  # blocks until the test explicitly releases it
+
+        monkeypatch.setattr(spg, "safe_close_pipes", _wedged_safe_close_pipes)
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            proc.wait(timeout=5)
+
+            start = time.monotonic()
+            spg._bounded_safe_close_pipes_sync(proc, timeout=1.0)
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 3.0, (
+                f"_bounded_safe_close_pipes_sync took {elapsed:.2f}s for a "
+                "1.0s timeout — a wedged close must not block the caller"
+            )
+        finally:
+            # Release the leaked daemon thread so it doesn't linger past
+            # this test (it's a daemon, so it wouldn't block interpreter
+            # exit either way, but tidy up regardless).
+            never_set.set()
+
+    def test_async_helper_returns_within_timeout_when_close_wedges(self, monkeypatch):
+        """Same wedge scenario, exercised on the async helper directly.
+
+        Deliberately does NOT wrap this in ``asyncio.run(...)`` — doing so
+        would recreate the exact hazard from finding #1: ``asyncio.run()``
+        tears its loop down via ``shutdown_default_executor(THREAD_JOIN_
+        TIMEOUT)`` (300s), which would join the leaked ``asyncio.to_thread``
+        worker and make THIS TEST take up to 300s despite the coroutine
+        itself returning at 1s. A bare loop that is run-until-complete but
+        never closed mirrors the production shape (a long-lived app event
+        loop that is never torn down per-call) and isolates what this test
+        is actually about: the coroutine itself returns within ``timeout``.
+        """
+        import subprocess_pgroup as spg
+
+        never_set = threading.Event()
+
+        def _wedged_safe_close_pipes(process):
+            del process
+            never_set.wait()
+
+        monkeypatch.setattr(spg, "safe_close_pipes", _wedged_safe_close_pipes)
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        loop = asyncio.new_event_loop()
+        try:
+            proc.wait(timeout=5)
+
+            start = time.monotonic()
+            loop.run_until_complete(spg._bounded_safe_close_pipes(proc, timeout=1.0))
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 3.0, (
+                f"_bounded_safe_close_pipes took {elapsed:.2f}s for a 1.0s "
+                "timeout — a wedged close must not block the coroutine"
+            )
+        finally:
+            # Release the leaked worker BEFORE dropping the loop — a
+            # never-released one would deadlock the whole test process at
+            # interpreter exit (concurrent.futures.thread._python_exit
+            # joins every ThreadPoolExecutor worker unconditionally, no
+            # timeout). Intentionally not calling loop.close() here: see
+            # the docstring above.
+            never_set.set()
 
 
 @pytest.mark.unit

@@ -21,6 +21,8 @@ from ..utils.subprocess_pgroup import (
     terminate_process_group as _terminate_process_group,
     safe_close_pipes as _safe_close_pipes,
     drain_reader_threads as _drain_reader_threads,
+    _bounded_safe_close_pipes,
+    _bounded_safe_close_pipes_sync,
 )
 
 # Outcome of a bounded drain, returned to the caller so the orchestrator can
@@ -38,6 +40,8 @@ __all__ = [
     "_terminate_process_group",
     "_safe_close_pipes",
     "_drain_reader_threads",
+    "_bounded_safe_close_pipes",
+    "_bounded_safe_close_pipes_sync",
 ]
 
 logger = logging.getLogger(__name__)
