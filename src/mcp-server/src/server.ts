@@ -238,9 +238,29 @@ export async function createServer(config: ServerConfig = {}) {
 
   // ent#46 visibility gates: connector keys (end-user consumption tier) see
   // ONLY the connector tools; every other (operator) key never sees them.
-  // When auth is disabled (dev), auth is undefined → operator tools show,
-  // connector tools hide (they require a connector key anyway).
-  const connectorDenied = (auth: any): boolean => auth?.scope !== "connector";
+  //
+  // #848: these MUST be allow-lists, not "not connector" deny-checks. Two
+  // fastmcp@4.4.0 behaviours make a deny-check fail OPEN:
+  //   1. `#createSession` skips filtering entirely when auth is falsy —
+  //      `const allowedTools = auth ? this.#tools.filter(...) : this.#tools`
+  //      — so a session with no auth context gets EVERY registered tool.
+  //   2. The stateful httpStream branch (the one we run) does NOT reject an
+  //      `authenticate()` that returns undefined; only the stateless branch
+  //      guards that. Today our callback throws instead of returning undefined,
+  //      so nothing is exposed — but a pre-login session (#848) is exactly the
+  //      change that would trip it.
+  // A deny-check also admits every scope it has not heard of. Widening the
+  // operator surface must therefore be a deliberate edit to this set.
+  const OPERATOR_SCOPES: ReadonlySet<string> = new Set(["user", "agent", "system"]);
+
+  const operatorOnly = (auth: any): boolean => {
+    // Dev mode (MCP_REQUIRE_API_KEY=false) installs no authenticate callback,
+    // so FastMCP never calls canAccess at all and every tool is advertised.
+    // This branch therefore only guards a direct caller of the predicate.
+    // With auth required, an absent context is never an operator.
+    if (auth === undefined || auth === null) return !requireApiKey;
+    return OPERATOR_SCOPES.has((auth as { scope?: string }).scope ?? "");
+  };
   const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
 
   // Build tool groups once, then register + count (SEC-001 Phase 3).
@@ -271,9 +291,9 @@ export async function createServer(config: ServerConfig = {}) {
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
     createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
   ];
-  // Operator tools: hidden from connector-scoped keys.
+  // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {
-    addAllTools(group, connectorDenied);
+    addAllTools(group, operatorOnly);
   }
   // Connector tools (ent#46): visible ONLY to connector-scoped keys.
   const connectorGroup = createConnectorTools(client, requireApiKey);
@@ -315,7 +335,7 @@ export async function createServer(config: ServerConfig = {}) {
     requireApiKey,
     agentChatPullEnabled,
     trinityApiUrl,
-    connectorDenied,
+    operatorOnly,
     builtinToolNames,
     registerDynamicTool,
     unregisterDynamicTool,
