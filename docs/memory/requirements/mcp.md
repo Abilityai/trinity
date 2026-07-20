@@ -111,9 +111,32 @@ event cannot be correlated back to the minted credential) and would leak rows in
 Inline login **bypasses the email whitelist**, matching Telegram's inline `/login`. This is
 required for the feature to serve its purpose: `POST /api/auth/email/request` silently no-ops
 for a non-whitelisted email, so a whitelist-gated flow could never onboard the external users
-this exists for. Authorization is instead the channel access gate: `email_has_agent_access`
-→ allow; otherwise `upsert_access_request` (owner approval, #311). First login creates a
-`user`-role account per #314 (chat-only grant, no silent promotion).
+this exists for. First login creates a `user`-role account per #314 (chat-only grant, no
+silent promotion).
+
+Authorization is `db.email_has_agent_access` (the same primitive the channel gate uses),
+re-checked on **every** data call. A denial is a **flat, uniform 403** — it does NOT write an
+`access_requests` row, deliberately diverging from the channel gate:
+
+- The channel gate runs **once per inbound conversation**, so an access request there is a
+  bounded, user-initiated act. The inline gate runs **per tool call**, where the same write
+  would let any caller spam `access_requests` rows for arbitrary agent names.
+- There is also no natural trigger: inline login has no per-agent request step, and `verify`
+  returning an empty `agents` list is already the normal "nothing shared with you yet"
+  outcome.
+
+`no-access`, `connector-disabled` and `no-such-agent` all return the **same** 403 body —
+splitting them would enumerate the fleet (Invariant #8, self-uniform handlers).
+
+**Deferred:** a deliberate "request access to agent X" affordance (an explicit tool, rate-limited
+per session, writing one `access_requests` row) is the right home for the #311 request path and
+is out of scope here.
+
+**Known-address gate.** `request_login` is reachable unauthenticated, so it must not become an
+open email relay: a code is generated only for an address Trinity already knows (a `users` row,
+or an `agent_sharing` entry). This lookup **fails closed** — an inability to answer "do we know
+this address" must not degrade into "email anyone who asks". It is a send-worthiness test only,
+never authorization.
 
 Because the whitelist is bypassed, the OTP primitives (`db.create_login_code` /
 `db.verify_login_code`) are used directly rather than the whitelist-gated

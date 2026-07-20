@@ -946,6 +946,64 @@ class ConnectorKeySecret(BaseModel):
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# MCP inline email auth (#848) — /api/internal/mcp-auth/*
+#
+# The MCP server calls these with X-Internal-Secret on behalf of a keyless
+# session. The internal secret authenticates the CALLER, never the action: every
+# body carries the asserted ``email`` and the backend re-gates each call on that
+# email's own access. Nothing here ever returns a credential.
+# ---------------------------------------------------------------------------
+
+class McpInlineLoginRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/request."""
+    email: str = Field(..., min_length=3, max_length=254)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineLoginVerify(BaseModel):
+    """Body for POST /api/internal/mcp-auth/verify."""
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=1, max_length=32)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineAgent(BaseModel):
+    """One agent a verified email may reach through the connector surface."""
+    name: str
+    description: Optional[str] = None
+
+
+class McpInlineVerifyResponse(BaseModel):
+    """Response for a SUCCESSFUL verify. Carries no credential of any kind —
+    the MCP session binding is the credential and it lives only in the MCP
+    server's memory (§7.6: session, not a minted key)."""
+    verified: bool = True
+    username: Optional[str] = None
+    agents: List[McpInlineAgent] = Field(default_factory=list)
+
+
+class McpInlinePlaybooksRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/playbooks."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+
+
+class McpInlineChatRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/chat."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+    message: str = Field(..., min_length=1, max_length=100000)
+    idempotency_key: Optional[str] = Field(default=None, max_length=255)
+
+
+class McpInlineChatResponse(BaseModel):
+    """Response for POST /api/internal/mcp-auth/chat."""
+    agent: str
+    response: str
+    execution_id: Optional[str] = None
+
+
 class VoiceRepliesUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25; v2 ent#117).
 

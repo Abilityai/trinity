@@ -18,7 +18,6 @@ gate is removed and the router is mounted unconditionally in ``main.py``.
 """
 from __future__ import annotations
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import List
 
@@ -35,10 +34,11 @@ from models import (
     ConnectorPlaybook,
 )
 from database import db
-from services.docker_service import get_agent_container
-from services.docker_utils import container_reload
-from services.agent_auth import agent_httpx_client
-from services.connector_service import build_snippets, resolve_exposed_playbooks
+from services.connector_service import (
+    build_snippets,
+    fetch_live_playbooks,
+    resolve_exposed_playbooks,
+)
 from routers.settings import resolve_mcp_url
 
 router = APIRouter(prefix="/api/agents", tags=["mcp_connector"])
@@ -61,26 +61,6 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
         created_at=cfg["created_at"] if cfg else None,
         updated_at=cfg["updated_at"] if cfg else None,
     )
-
-
-async def _fetch_live_playbooks(agent_name: str) -> List[dict]:
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    await container_reload(container)
-    if container.status != "running":
-        raise HTTPException(status_code=503, detail="Agent is not running.")
-    try:
-        url = f"http://agent-{agent_name}:8000/api/skills"
-        async with agent_httpx_client(agent_name, timeout=10.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return resp.json().get("skills", [])
-            raise HTTPException(status_code=resp.status_code, detail=f"Agent error: {resp.text}")
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Could not connect to agent")
 
 
 @router.get("/{agent_name}/connector", response_model=ConnectorStatus)
@@ -135,6 +115,6 @@ async def list_connector_playbooks(agent_name: AuthorizedAgentByName):
     cfg = db.get_connector_config(agent_name)
     if cfg and not cfg["enabled"]:
         raise HTTPException(status_code=403, detail="Connector is disabled for this agent")
-    live = await _fetch_live_playbooks(agent_name)
+    live = await fetch_live_playbooks(agent_name)
     allow = cfg["exposed_playbooks"] if cfg else None
     return resolve_exposed_playbooks(live, allow)
