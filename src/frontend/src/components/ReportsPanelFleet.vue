@@ -24,7 +24,7 @@
         @change="store.setFilter('agent', $event.target.value)"
       >
         <option value="">All agents</option>
-        <option v-for="name in agentNames" :key="name" :value="name">{{ name }}</option>
+        <option v-for="name in agentNames" :key="name" :value="name">{{ agentOptionLabel(agentsStore.agentRefForSlug(name)) }}</option>
       </select>
       <select
         :value="store.filters.report_type"
@@ -100,6 +100,7 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useFleetReportsStore } from '../stores/reports'
 import { useAgentsStore } from '../stores/agents'
+import { agentOptionLabel } from '../utils/agentName'
 import ReportRenderer from './reports/ReportRenderer.vue'
 
 const store = useFleetReportsStore()

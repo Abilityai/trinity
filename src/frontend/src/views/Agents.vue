@@ -829,10 +829,14 @@ const totalAgentCount = computed(() => {
 const displayAgents = computed(() => {
   let agents = isAdmin.value ? agentsStore.sortedAgentsWithSystem : agentsStore.sortedAgents
 
-  // Filter by name
+  // Filter by name — #1642: match BOTH the slug and the display name, so typing
+  // "TOM" finds an agent labelled "TOM" whose slug is `tom-marketing-ops`.
   const nameQuery = filterName.value.trim().toLowerCase()
   if (nameQuery) {
-    agents = agents.filter(agent => agent.name.toLowerCase().includes(nameQuery))
+    agents = agents.filter(agent =>
+      agent.name.toLowerCase().includes(nameQuery) ||
+      agentDisplayName(agent).toLowerCase().includes(nameQuery)
+    )
   }
 
   // Filter by status

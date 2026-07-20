@@ -33,7 +33,7 @@
                 :key="agent.name"
                 :value="agent.name"
               >
-                {{ agent.name }}
+                {{ agentOptionLabel(agent) }}
               </option>
             </select>
             <button
@@ -282,6 +282,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '@/stores/agents'
+import { agentOptionLabel } from '@/utils/agentName'
 import NavBar from '@/components/NavBar.vue'
 import FileTreeNode from '@/components/file-manager/FileTreeNode.vue'
 import FilePreview from '@/components/file-manager/FilePreview.vue'

@@ -70,7 +70,7 @@
               : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
           >
             <option value="">All agents</option>
-            <option v-for="name in agentNames" :key="name" :value="name">{{ name }}</option>
+            <option v-for="name in agentNames" :key="name" :value="name">{{ agentOptionLabel(agentsStore.agentRefForSlug(name)) }}</option>
           </select>
           <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
         </div>
@@ -292,7 +292,7 @@ import { parseUTC } from '@/utils/timestamps'
 import { useExecutionsStore } from '../stores/executions'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
-import { agentNameTooltip } from '../utils/agentName'
+import { agentNameTooltip, agentOptionLabel } from '../utils/agentName'
 import { useWebSocket } from '../utils/websocket'
 
 const router = useRouter()

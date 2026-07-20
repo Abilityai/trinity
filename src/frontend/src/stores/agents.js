@@ -67,11 +67,16 @@ export const useAgentsStore = defineStore('agents', {
           case 'created_asc':
             sorted.sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0))
             break
+          // #1642: "Name (A-Z/Z-A)" sorts by what the user sees — the display
+          // name when set, else the slug (agentDisplayName). Sorting by the slug
+          // while the row renders the label would order the list by an invisible
+          // key. Actions still key on the slug elsewhere; only the sort comparator
+          // changes.
           case 'name_asc':
-            sorted.sort((a, b) => a.name.localeCompare(b.name))
+            sorted.sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b)))
             break
           case 'name_desc':
-            sorted.sort((a, b) => b.name.localeCompare(a.name))
+            sorted.sort((a, b) => agentDisplayName(b).localeCompare(agentDisplayName(a)))
             break
           case 'status':
             sorted.sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0))
