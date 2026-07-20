@@ -7,16 +7,17 @@
 
 ## Overview
 
-The Dashboard's third view mode alongside **Graph** (Vue Flow topology) and
-**Timeline** (waterfall activity). Grid is a **magnetic tile canvas**: richer
-384×216 landscape agent tiles that snap to a sparse, **unbounded** integer
-lattice (negative coordinates included) the operator arranges freely —
-islands, gaps, parked loners — with iPhone-style drag and live snap preview,
-on the same pan/zoom dotted-canvas language as the graph view.
+One of the Dashboard's two view modes alongside **Timeline** (waterfall
+activity). The legacy **Graph** mode (Vue Flow topology) was decommissioned in
+#1689. Grid is a **magnetic tile canvas**: richer 384×216 landscape agent tiles
+that snap to a sparse, **unbounded** integer lattice (negative coordinates
+included) the operator arranges freely — islands, gaps, parked loners — with
+iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
 
-- Mode toggle: `Grid / Graph / Timeline` in the Dashboard header; selection
-  persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
-  default** for users with no saved preference.
+- Mode toggle: `Grid / Timeline` in the Dashboard header; selection persists to
+  `localStorage['trinity-dashboard-view']`. **Timeline stays the default** for
+  users with no saved preference (and a stale `'graph'` preference degrades to
+  it via the `VIEW_MODES.includes()` guard).
 - **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
 
 ## Components & Data Flow
@@ -35,7 +36,7 @@ views/Dashboard.vue          mode toggle, grid pane (v-if), Tidy up / Reset pill
   │                          batch chip data (sync-health + operator-queue pending)
   │                          on a 60s visibility-aware poll, active only while mounted
   ├─ stores/network.js       agents list, contextStats / executionStats / slotStats
-  │                          (15s shared poll), NEW: viewMode ('grid'|'graph'|'timeline'),
+  │                          (15s shared poll), NEW: viewMode ('grid'|'timeline'; graph decommissioned #1689),
   │                          circuitBreakers map, WS-driven workingState map
   ├─ stores/executions.js    fetchAgentAnalytics(name, '14d') — existing
   │                          `${name}:${window}` cache (#1107)
@@ -121,7 +122,7 @@ drops become instant placement. Multi-touch is discriminated by pointer id
 
 `src/frontend/e2e/dashboard-grid-view.spec.js` — mode toggle + tile render
 (@smoke), mode persistence across reload, drag-to-cell with socket preview +
-layout persistence, tidy/reset, and Graph/Timeline coexistence (@smoke).
+layout persistence, tidy/reset, and Timeline coexistence (@smoke; Graph mode decommissioned #1689).
 
 ## Out of scope (tracked follow-ups)
 

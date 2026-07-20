@@ -1,6 +1,6 @@
 <template>
   <div class="gtile" :class="{ system: isSystemAgent }">
-    <!-- Avatar half-out on the left edge (same convention as AgentNode) -->
+    <!-- Avatar half-out on the left edge -->
     <div class="gtile-avatar">
       <div
         class="rounded-full border-2 shadow-md overflow-hidden"
@@ -383,7 +383,7 @@ const contextTooltip = computed(() => {
   return `Avg context per day, last 7 days — now ${Math.round(used / 1000)}k / ${Math.round(contextMax.value / 1000)}k tokens`
 })
 
-// --- Zone 4: success + stats (24h window, same thresholds as AgentNode) ---
+// --- Zone 4: success + stats (24h window) ---
 const hasTasks = computed(() => (stats.value?.taskCount || 0) > 0)
 const successRate = computed(() => Math.round(stats.value?.successRate || 0))
 const successClass = computed(() =>
