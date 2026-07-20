@@ -366,6 +366,33 @@ class TestRestoreRoundTrip:
 # runs where the full backend imported first must keep their real modules).
 import types as _types  # noqa: E402
 
+_STUBBED_MODULE_NAMES = [
+    "database",
+    "services.settings_service",
+    "services.agent_client",
+    "utils.url_validation",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore after.
+
+    The stubs below are installed at import time (skill_service reaches them
+    at module scope, before any fixture could run), so without this they would
+    leak into other files in the same pytest session — the #762 class.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 _STUBS = {
     "database": {"db": MagicMock()},
     "services.settings_service": {
@@ -942,6 +969,28 @@ class TestListAndGetSurface:
     def test_get_skill_rejects_traversal_names(self, service):
         assert service.get_skill("../../etc/passwd") is None
         assert service.get_skill("..") is None
+
+    def test_skill_dir_containment_holds_without_the_regex(self, service,
+                                                           monkeypatch):
+        # The realpath containment check is the guard that must still hold if
+        # the name regex is ever loosened — pin it independently by disabling
+        # the regex (CodeQL flagged these joins; both guards are load-bearing).
+        monkeypatch.setattr(pkg, "validate_skill_name", lambda name: True)
+        assert service._skill_dir("../../../etc") is None
+        assert service._skill_dir("..") is None
+        assert service._skill_dir("ok") is not None
+
+    def test_skill_dir_refuses_symlink_escaping_the_root(self, service,
+                                                         tmp_path):
+        # A symlinked skill dir pointing outside the library must not resolve
+        # into a readable package (realpath, not lexical, containment).
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("# stolen\n")
+        link = service.library_path / ".claude" / "skills" / "sneaky"
+        link.symlink_to(outside, target_is_directory=True)
+        assert service._skill_dir("sneaky") is None
+        assert service.get_skill("sneaky") is None
 
     def test_get_skill_lists_files(self, service):
         _write_skill(service, "demo", {"SKILL.md": "# d\n", "ref/a.txt": "x"})

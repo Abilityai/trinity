@@ -334,11 +334,31 @@ class SkillService:
             self._list_cache = (commit, skills)
         return skills
 
+    def _skills_root(self) -> str:
+        return os.path.realpath(str(self.library_path / ".claude" / "skills"))
+
+    def _skill_dir(self, skill_name: str) -> Optional[Path]:
+        """Resolve a library skill directory, or None if the name is unsafe.
+
+        TWO independent guards, because skill names arrive from URL paths and
+        from persisted assignments: the name regex (`validate_skill_name`) and
+        a realpath containment check against the skills root. The containment
+        check is the one that still holds if the regex is ever loosened — and
+        it is the single chokepoint every path in this module derives from.
+        """
+        if not pkg.validate_skill_name(skill_name):
+            return None
+        root = self._skills_root()
+        target = os.path.realpath(os.path.join(root, skill_name))
+        if target != root and not target.startswith(root + os.sep):
+            return None
+        return Path(target)
+
     def _skill_files(self, skill_name: str) -> List[Dict[str, Any]]:
         """Walk a skill dir, litter-excluded — [{path, size, executable}]."""
-        skill_dir = self.library_path / ".claude" / "skills" / skill_name
+        skill_dir = self._skill_dir(skill_name)
         files: List[Dict[str, Any]] = []
-        if not skill_dir.is_dir():
+        if skill_dir is None or not skill_dir.is_dir():
             return files
         for candidate in sorted(skill_dir.rglob("*")):
             # lstat-order guards: never follow symlinks out of the skill dir.
@@ -417,9 +437,10 @@ class SkillService:
         Returns:
             Skill info dict with full content and file list, or None if not found
         """
-        if not pkg.validate_skill_name(skill_name):
+        skill_dir = self._skill_dir(skill_name)
+        if skill_dir is None:
             return None
-        skill_file = self.library_path / ".claude" / "skills" / skill_name / "SKILL.md"
+        skill_file = skill_dir / "SKILL.md"
 
         if not skill_file.exists():
             return None
@@ -750,11 +771,11 @@ print(json.dumps(out))
 
             # Direct parse, not get_skill(): the batch tree_shas above already
             # covers versions — get_skill would fork one git subprocess per
-            # skill per injection.
-            skill_file = (
-                self.library_path / ".claude" / "skills" / skill_name / "SKILL.md"
-            )
-            if not skill_file.exists():
+            # skill per injection. Path still derives from the one sanitized
+            # chokepoint.
+            skill_dir = self._skill_dir(skill_name)
+            skill_file = None if skill_dir is None else skill_dir / "SKILL.md"
+            if skill_file is None or not skill_file.exists():
                 results[skill_name] = {
                     "success": False, "status": "failed", "files_written": 0,
                     "error": "Skill not found in library", "warnings": [],
