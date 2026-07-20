@@ -636,7 +636,7 @@ const timeTicks = computed(() => {
   return ticks
 })
 
-// Create agent rows with full tile data matching AgentNode.vue
+// Create agent rows with full tile data for the timeline lane tiles
 const agentRows = computed(() => {
   if (!props.agents.length || !startTime.value || !duration.value) return []
 
