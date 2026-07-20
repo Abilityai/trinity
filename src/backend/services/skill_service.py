@@ -47,7 +47,13 @@ logger = logging.getLogger(__name__)
 # Local path for skills library clone
 SKILLS_LIBRARY_PATH = Path("/data/skills-library")
 
-_REDIS_URL = os.getenv("REDIS_URL", "")
+# Route Redis URL resolution through config (#589/#645): a direct
+# os.getenv here would bypass config.py's credential gate. Import-guarded so
+# the module still loads in host-side unit tests without backend config.
+try:
+    from config import REDIS_URL as _REDIS_URL
+except Exception:  # noqa: BLE001 — no config → lock fails open (see _acquire_inject_lock)
+    _REDIS_URL = ""
 
 # Issue #184 (UnderDefense pentest 3.3.1): override git's default
 # User-Agent (`git/<version> (libcurl/...)`) on every HTTP-bearing git
