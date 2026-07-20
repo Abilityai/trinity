@@ -83,6 +83,7 @@ A short teaser of the live interface — the full, zoomable detail is in [the sc
 **Watch more:**
 
 - [Trinity Demo](https://youtu.be/ivljtZqsxeo) — full platform walkthrough
+- [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — animated explainer (4:44): one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery
 - [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) — your first Trinity agent in 30 minutes
 - [Plugins + Trinity: Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) — the plugin workflow end-to-end
 - [Loops Engineering with Trinity](https://youtu.be/q3YvFYtuhec) — bounded autonomous work loops in practice
