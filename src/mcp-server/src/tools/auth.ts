@@ -235,12 +235,15 @@ export function createAuthTools(client: TrinityClient, _requireApiKey: boolean) 
         // Same object FastMCP holds, so every later tool call on this session
         // sees the binding. `scope` deliberately stays "anonymous": this
         // session still has no API key and must never satisfy `operatorOnly`.
+        const agents = result.agents ?? [];
         session.verifiedEmail = email;
         session.userEmail = email;
         session.userId = result.username ?? email;
+        // Convenience only — lets the connector tools default to the sole
+        // agent and name the alternatives when there are several. Never the
+        // authorization boundary; the backend re-gates every call.
+        session.agents = agents.map((a) => a.name);
         delete session.pendingEmail;
-
-        const agents = result.agents ?? [];
         return JSON.stringify(
           {
             status: "ok",

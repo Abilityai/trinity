@@ -1,11 +1,26 @@
 /**
- * Per-agent MCP connector tools (ent#46).
+ * Per-agent MCP connector tools (ent#46, + #848 inline email auth).
  *
- * These tools are exposed ONLY to connector-scoped keys (see the canAccess
- * gating in server.ts). The agent is taken from the auth context (the key is
- * bound to exactly one agent server-side), never from a tool argument, so a
- * connector key can only ever reach its own agent. The backend additionally
- * fences connector keys to their bound agent and refuses owner operations.
+ * Two kinds of caller reach these tools, and they resolve BOTH the agent and
+ * the backend credential differently:
+ *
+ *   1. **Connector key** (ent#46) — bound to exactly one agent server-side.
+ *      The agent comes from the auth context, never from a tool argument, so
+ *      the key can only ever reach its own agent. The backend independently
+ *      fences connector keys to that agent and refuses owner operations.
+ *
+ *   2. **Email-verified anonymous session** (#848) — holds no API key at all.
+ *      The agent is chosen from the set shared with the verified email, so
+ *      these tools take an OPTIONAL `agent` argument: unambiguous when exactly
+ *      one agent is available, required when several are. Backend calls go
+ *      over the internal surface carrying the verified email, and the backend
+ *      re-gates every one of them on that email's own access — the tool
+ *      argument is a selection among already-authorized agents, never a way to
+ *      reach an unauthorized one.
+ *
+ * An anonymous session that has NOT verified an email is advertised these
+ * tools (the tool list is frozen at session construction, so it cannot change
+ * on login) and refuses to act until it has.
  *
  * Tools:
  *   - list_playbooks: the playbooks (skills) this connector exposes as actions
@@ -16,12 +31,33 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
+/** Thrown when a caller must log in (or pick an agent) before we can act. */
+class NeedsLoginError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly available?: string[]
+  ) {
+    super(message);
+  }
+}
+
 export function createConnectorTools(
   client: TrinityClient,
   requireApiKey: boolean
 ) {
+  const isAnonymous = (auth?: McpAuthContext): boolean => auth?.scope === "anonymous";
+
+  /** The verified email of an upgraded anonymous session, or undefined. */
+  const verifiedEmail = (auth?: McpAuthContext): string | undefined =>
+    isAnonymous(auth) ? (auth?.verifiedEmail as string | undefined) : undefined;
+
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
     if (requireApiKey) {
+      // #848: an email-verified anonymous session legitimately has no key. It
+      // reaches the backend over the internal surface instead (see
+      // resolveTarget / the client's inline-auth methods), so callers must go
+      // through `act()` below rather than this client.
       if (!authContext?.mcpApiKey) {
         throw new Error("MCP API key authentication required but no API key found in request context");
       }
@@ -32,21 +68,101 @@ export function createConnectorTools(
     return client;
   };
 
-  // The bound agent for a connector key. Hard error if somehow missing — a
-  // connector key without an agent must never silently fall through to a
-  // different agent.
-  const boundAgent = (authContext?: McpAuthContext): string => {
-    const name = authContext?.agentName;
-    if (!name) {
+  /**
+   * Resolve which agent this call is for, for either caller kind.
+   *
+   * Connector key → its bound agent; an explicit `agent` argument that
+   * disagrees is refused rather than silently ignored, so a client cannot
+   * believe it targeted one agent while reaching another.
+   *
+   * Anonymous session → the requested agent, or the sole available one.
+   */
+  const resolveAgent = (auth: McpAuthContext | undefined, requested?: string): string => {
+    const email = verifiedEmail(auth);
+    if (email) {
+      const available = (auth?.agents as string[] | undefined) ?? [];
+      if (requested) {
+        if (available.length > 0 && !available.includes(requested)) {
+          throw new NeedsLoginError(
+            `"${requested}" is not one of the agents shared with ${email}.`,
+            "agent_not_available",
+            available
+          );
+        }
+        return requested;
+      }
+      if (available.length === 1) return available[0];
+      if (available.length === 0) {
+        throw new NeedsLoginError(
+          "No agents are shared with your address yet — an owner needs to grant access.",
+          "no_agents_available"
+        );
+      }
+      throw new NeedsLoginError(
+        "Several agents are available; pass `agent` to choose one.",
+        "agent_required",
+        available
+      );
+    }
+
+    if (isAnonymous(auth)) {
+      throw new NeedsLoginError(
+        "You are not signed in. Call request_login with your email address, then verify_login with the code.",
+        "login_required"
+      );
+    }
+
+    // Connector key: the bound agent is authoritative.
+    const bound = auth?.agentName;
+    if (!bound) {
       throw new Error("Connector key is not bound to an agent");
     }
-    return name;
+    if (requested && requested !== bound) {
+      throw new NeedsLoginError(
+        `This connector is bound to "${bound}" and cannot reach "${requested}".`,
+        "agent_not_available",
+        [bound]
+      );
+    }
+    return bound;
+  };
+
+  /** Render a NeedsLoginError as a structured tool result rather than a throw. */
+  const asError = (err: unknown): string | null => {
+    if (!(err instanceof NeedsLoginError)) return null;
+    return JSON.stringify(
+      {
+        error: err.code,
+        message: err.message,
+        ...(err.available ? { available_agents: err.available } : {}),
+      },
+      null,
+      2
+    );
   };
 
   const keyInfo = (authContext?: McpAuthContext) => ({
     keyId: authContext?.keyId,
     keyName: authContext?.keyName,
   });
+
+  /** Fetch exposed playbooks for either caller kind. */
+  const fetchPlaybooks = async (auth: McpAuthContext | undefined, agent: string) => {
+    const email = verifiedEmail(auth);
+    if (email) return client.getInlineConnectorPlaybooks(email, agent);
+    return getClient(auth).getConnectorPlaybooks(agent);
+  };
+
+  /** Dispatch a chat for either caller kind. */
+  const dispatchChat = async (
+    auth: McpAuthContext | undefined,
+    agent: string,
+    message: string
+  ) => {
+    const email = verifiedEmail(auth);
+    if (email) return client.inlineConnectorChat(email, agent, message);
+    return getClient(auth).chat(agent, message, undefined, keyInfo(auth));
+  };
 
   return {
     listPlaybooks: {
@@ -55,12 +171,28 @@ export function createConnectorTools(
         "List the playbooks this agent exposes as actions you can run. " +
         "Each playbook is a named capability with an optional argument hint. " +
         "Use run_playbook to execute one.",
-      parameters: z.object({}),
-      execute: async (_args: unknown, context?: { session?: McpAuthContext }) => {
-        const apiClient = getClient(context?.session);
-        const agent = boundAgent(context?.session);
-        const playbooks = await apiClient.getConnectorPlaybooks(agent);
-        return JSON.stringify({ agent, playbooks }, null, 2);
+      parameters: z.object({
+        agent: z
+          .string()
+          .optional()
+          .describe(
+            "Which agent, when several are available to you. Ignored for a " +
+              "connector bound to a single agent."
+          ),
+      }),
+      execute: async (
+        { agent: requested }: { agent?: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        try {
+          const agent = resolveAgent(context?.session, requested);
+          const playbooks = await fetchPlaybooks(context?.session, agent);
+          return JSON.stringify({ agent, playbooks }, null, 2);
+        } catch (err) {
+          const structured = asError(err);
+          if (structured) return structured;
+          throw err;
+        }
       },
     },
 
@@ -73,31 +205,41 @@ export function createConnectorTools(
       parameters: z.object({
         name: z.string().describe("Playbook name, exactly as returned by list_playbooks"),
         input: z.string().optional().describe("Optional input / arguments for the playbook"),
+        agent: z
+          .string()
+          .optional()
+          .describe("Which agent, when several are available to you."),
       }),
       execute: async (
-        { name, input }: { name: string; input?: string },
+        { name, input, agent: requested }: { name: string; input?: string; agent?: string },
         context?: { session?: McpAuthContext }
       ) => {
-        const apiClient = getClient(context?.session);
-        const agent = boundAgent(context?.session);
+        try {
+          const agent = resolveAgent(context?.session, requested);
 
-        // Server-side enforcement: only run a playbook the connector actually
-        // exposes (allow-list ∩ user_invocable). Never trust the client to
-        // stay within the advertised set.
-        const allowed = await apiClient.getConnectorPlaybooks(agent);
-        if (!allowed.some((p) => p.name === name)) {
-          return JSON.stringify({
-            error: "playbook_not_exposed",
-            message: `Playbook "${name}" is not exposed by this connector.`,
-            available: allowed.map((p) => p.name),
-          });
+          // Server-side enforcement: only run a playbook the connector actually
+          // exposes (allow-list ∩ user_invocable). Never trust the client to
+          // stay within the advertised set. This holds for both caller kinds —
+          // the inline path resolves the same allow-list backend-side.
+          const allowed = await fetchPlaybooks(context?.session, agent);
+          if (!allowed.some((p) => p.name === name)) {
+            return JSON.stringify({
+              error: "playbook_not_exposed",
+              message: `Playbook "${name}" is not exposed by this connector.`,
+              available: allowed.map((p) => p.name),
+            });
+          }
+
+          const message = input
+            ? `Please run the "${name}" playbook.\n\nInput:\n${input}`
+            : `Please run the "${name}" playbook.`;
+          const result = await dispatchChat(context?.session, agent, message);
+          return JSON.stringify(result, null, 2);
+        } catch (err) {
+          const structured = asError(err);
+          if (structured) return structured;
+          throw err;
         }
-
-        const message = input
-          ? `Please run the "${name}" playbook.\n\nInput:\n${input}`
-          : `Please run the "${name}" playbook.`;
-        const result = await apiClient.chat(agent, message, undefined, keyInfo(context?.session));
-        return JSON.stringify(result, null, 2);
       },
     },
 
@@ -108,15 +250,24 @@ export function createConnectorTools(
         "for when no specific playbook fits). Returns the agent's response.",
       parameters: z.object({
         message: z.string().describe("Your message to the agent"),
+        agent: z
+          .string()
+          .optional()
+          .describe("Which agent, when several are available to you."),
       }),
       execute: async (
-        { message }: { message: string },
+        { message, agent: requested }: { message: string; agent?: string },
         context?: { session?: McpAuthContext }
       ) => {
-        const apiClient = getClient(context?.session);
-        const agent = boundAgent(context?.session);
-        const result = await apiClient.chat(agent, message, undefined, keyInfo(context?.session));
-        return JSON.stringify(result, null, 2);
+        try {
+          const agent = resolveAgent(context?.session, requested);
+          const result = await dispatchChat(context?.session, agent, message);
+          return JSON.stringify(result, null, 2);
+        } catch (err) {
+          const structured = asError(err);
+          if (structured) return structured;
+          throw err;
+        }
       },
     },
   };

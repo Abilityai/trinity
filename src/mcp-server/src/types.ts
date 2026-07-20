@@ -94,6 +94,14 @@ export interface McpAuthContext extends Record<string, unknown> {
   pendingEmail?: string;
   /** Opaque per-session id, for correlating rate limits and audit rows. */
   sessionId?: string;
+  /**
+   * Agent names this verified email may reach, as resolved by the backend at
+   * verify time. Used only to pick a default and to give a helpful error when
+   * several are available — it is NOT the authorization boundary. The backend
+   * re-gates every call on `email_has_agent_access`, so a stale or tampered
+   * list here cannot widen access.
+   */
+  agents?: string[];
 }
 
 export interface AgentAccessInfo {

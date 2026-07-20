@@ -1695,6 +1695,50 @@ export class TrinityClient {
     };
   }
 
+  /**
+   * Exposed playbooks for `agent`, acting as a verified email.
+   *
+   * The backend re-gates this on `email_has_agent_access(agent, email)` — the
+   * internal secret says who is asking, never what they may reach.
+   */
+  async getInlineConnectorPlaybooks(
+    email: string,
+    agent: string
+  ): Promise<Array<{ name: string; description?: string }>> {
+    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/playbooks`, {
+      method: "POST",
+      headers: this.internalHeaders(),
+      body: JSON.stringify({ email, agent }),
+    });
+    if (response.status === 403) {
+      throw new Error(`You do not have access to "${agent}".`);
+    }
+    if (!response.ok) {
+      throw new Error(`Could not list playbooks for "${agent}": ${response.status}`);
+    }
+    return (await response.json()) as Array<{ name: string; description?: string }>;
+  }
+
+  /** Chat with `agent` acting as a verified email. Same backend gate as above. */
+  async inlineConnectorChat(
+    email: string,
+    agent: string,
+    message: string
+  ): Promise<unknown> {
+    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/chat`, {
+      method: "POST",
+      headers: this.internalHeaders(),
+      body: JSON.stringify({ email, agent, message }),
+    });
+    if (response.status === 403) {
+      throw new Error(`You do not have access to "${agent}".`);
+    }
+    if (!response.ok) {
+      throw new Error(`Chat with "${agent}" failed: ${response.status}`);
+    }
+    return await response.json();
+  }
+
   // ============================================================================
   // Agent Monitoring (MON-001)
   // ============================================================================
