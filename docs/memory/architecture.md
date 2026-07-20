@@ -213,7 +213,8 @@
 - `image_generation_service.py` / `image_generation_prompts.py` - Platform image generation via Gemini (IMG-001)
 
 *Skills & System:*
-- `skill_service.py` - Skill CRUD and injection
+- `skill_service.py` - Skills library sync + full-directory package injection (ent#183): `git archive`-sourced tars via the existing agent-server restore primitive, tree-SHA versioning, manifest prune, declaration-only dep check — see [skill-injection.md](feature-flows/skill-injection.md)
+- `skill_packaging.py` - Pure skill-package primitives (ent#183): hardened frontmatter contract parse, archive member vetting, injection-tar assembly, prune diff
 - `system_agent_service.py` - System agent lifecycle
 - `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (bundled `local:cornelius`, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107)
 - `system_service.py` - System manifest operations

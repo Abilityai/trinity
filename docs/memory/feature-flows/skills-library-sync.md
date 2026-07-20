@@ -451,16 +451,30 @@ Page loads or sync completes
 
 ```
 /data/skills-library/           <- SKILLS_LIBRARY_PATH constant
-├── .git/                       <- Git repository data
+├── .git/                       <- Git repository data (HEAD is the injection
+│                                  source: `git archive` + per-skill tree SHAs,
+│                                  ent#183 — so injection is atomic vs a
+│                                  concurrent `git reset --hard` here)
 ├── .claude/
 │   └── skills/
 │       ├── skill-name-1/
-│       │   └── SKILL.md        <- Skill definition
+│       │   ├── SKILL.md        <- Skill definition + frontmatter contract
+│       │   ├── scripts/        <- Full directory ships at injection (ent#183)
+│       │   └── ...resources
 │       ├── skill-name-2/
 │       │   └── SKILL.md
 │       └── ...
 └── README.md                   <- Optional repository docs
 ```
+
+Since ent#183, `list_skills`/`get_skill` also parse the frontmatter **contract**
+(`automation`, `user_invocable`, `requires: {packages, binaries, env}`,
+`allowed-tools`) plus package metadata (`multi_file`, `file_count`,
+`size_bytes`, `version` = git tree SHA); `get_skill` adds a `files` list. The
+list metadata is cached per library commit SHA and invalidated by
+`sync_library()`. `GET /api/skills/library/status` additionally reports
+`multi_file_count`. See [skill-injection.md](skill-injection.md) for the
+contract details and injection pipeline.
 
 ### Skills Discovery (`src/backend/services/skill_service.py:182-205`)
 
@@ -622,6 +636,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-07-19 | **ent#183 skill packages**: skills are full directory packages; list/get surface the frontmatter contract + package metadata (commit-SHA-cached); status adds `multi_file_count`; HEAD of the clone is the atomic injection source. |
 | 2026-03-27 | **SEC-179 SSRF prevention**: Added URL validation at write-time and sync-time. New `utils/url_validation.py` module. Updated error handling and security considerations. |
 | 2026-01-25 | **Initial document creation**: Complete vertical slice from Settings.vue through skill_service.py git operations. Documented URL formats, shallow clone, PAT handling, status endpoint, error cases. |
 

@@ -220,19 +220,34 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 
     logger.info(f"Injecting {len(skill_names)} skills into agent {agent_name}: {skill_names}")
 
-    # Inject skills
-    result = await skill_service.inject_skills(agent_name, skill_names)
+    # Inject skills. force=False: the start path skips skills whose agent-side
+    # version already matches the library tree SHA (ent#183); manual sync via
+    # the REST/MCP inject endpoint stays an unconditional repair (force=True).
+    from services.skill_service import SkillInjectionBusy
+    try:
+        result = await skill_service.inject_skills(agent_name, skill_names, force=False)
+    except SkillInjectionBusy:
+        return {"status": "skipped", "reason": "injection_already_running"}
 
+    warning_count = sum(
+        len(r.get("warnings") or []) for r in result.get("results", {}).values()
+    )
     if result.get("success"):
         return {
             "status": "success",
-            "skills_injected": result.get("skills_injected", 0)
+            "skills_injected": result.get("skills_injected", 0),
+            "skills_unchanged": result.get("skills_unchanged", 0),
+            "skills_warnings": warning_count,
+            "results": result.get("results", {}),
         }
     else:
+        injected = result.get("skills_injected", 0) + result.get("skills_unchanged", 0)
         return {
-            "status": "partial" if result.get("skills_injected", 0) > 0 else "failed",
+            "status": "partial" if injected > 0 else "failed",
             "skills_injected": result.get("skills_injected", 0),
+            "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_failed": result.get("skills_failed", 0),
+            "skills_warnings": warning_count,
             "results": result.get("results", {})
         }
 

@@ -13,13 +13,22 @@ import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
- * Skill information from the library
+ * Skill information from the library.
+ * ent#183: carries the frontmatter contract + package metadata.
  */
 interface SkillInfo {
   name: string;
   description: string | null;
   path: string;
   content?: string;
+  automation?: string | null;
+  user_invocable?: boolean;
+  allowed_tools?: unknown;
+  requires?: { packages: string[]; binaries: string[]; env: string[] };
+  multi_file?: boolean;
+  file_count?: number;
+  size_bytes?: number;
+  version?: string | null;
 }
 
 /**
@@ -36,13 +45,21 @@ interface SkillsLibraryStatus {
 }
 
 /**
- * Skill injection result
+ * Skill injection result (ent#183: per-skill status + warnings are the
+ * honest-result contract — surface them even on success)
  */
 interface SkillInjectionResult {
   success: boolean;
   skills_injected: number;
+  skills_unchanged?: number;
   skills_failed: number;
-  results: Record<string, { success: boolean; error?: string }>;
+  results: Record<string, {
+    success: boolean;
+    status?: string;
+    files_written?: number;
+    error?: string;
+    warnings?: string[];
+  }>;
 }
 
 /**
@@ -101,7 +118,15 @@ export function createSkillsTools(
           skills: skills.map(s => ({
             name: s.name,
             description: s.description || "No description",
-            path: s.path
+            path: s.path,
+            automation: s.automation ?? null,
+            user_invocable: s.user_invocable ?? true,
+            requires: s.requires ?? { packages: [], binaries: [], env: [] },
+            allowed_tools: s.allowed_tools ?? null,
+            multi_file: s.multi_file ?? false,
+            file_count: s.file_count ?? 0,
+            size_bytes: s.size_bytes ?? 0,
+            version: s.version ?? null
           }))
         }, null, 2);
       },
@@ -229,9 +254,11 @@ export function createSkillsTools(
     syncAgentSkills: {
       name: "sync_agent_skills",
       description:
-        "Inject all assigned skills into a running agent. " +
-        "Copies SKILL.md files to the agent's .claude/skills/ directory. " +
-        "Agent must be running. Use this after assigning skills to apply them immediately.",
+        "Inject all assigned skills into a running agent as full directory " +
+        "packages (SKILL.md + scripts/ + resources) under .claude/skills/. " +
+        "Unconditional repair: re-injects even unchanged skills. Agent must be " +
+        "running. Per-skill warnings (missing deps, skipped files) are " +
+        "reported even on success.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to sync skills to"),
       }),
@@ -247,17 +274,28 @@ export function createSkillsTools(
           `/api/agents/${encodeURIComponent(agent_name)}/skills/inject`
         );
 
+        // ent#183 honest results: warnings (missing deps, skipped files) must
+        // surface even when every skill succeeded — never collapse to a bare
+        // success message.
+        const warnings: Record<string, string[]> = {};
+        for (const [name, r] of Object.entries(result.results || {})) {
+          if (r.warnings && r.warnings.length > 0) warnings[name] = r.warnings;
+        }
         if (result.success) {
           return JSON.stringify({
             success: true,
-            message: `Successfully injected ${result.skills_injected} skills to agent ${agent_name}`,
-            skills_injected: result.skills_injected
+            message: `Injected ${result.skills_injected} skills to agent ${agent_name}` +
+              (result.skills_unchanged ? ` (${result.skills_unchanged} already up to date)` : ""),
+            skills_injected: result.skills_injected,
+            skills_unchanged: result.skills_unchanged ?? 0,
+            ...(Object.keys(warnings).length > 0 ? { warnings } : {})
           }, null, 2);
         } else {
           return JSON.stringify({
             success: false,
             message: `Injected ${result.skills_injected} skills, ${result.skills_failed} failed`,
             skills_injected: result.skills_injected,
+            skills_unchanged: result.skills_unchanged ?? 0,
             skills_failed: result.skills_failed,
             results: result.results
           }, null, 2);
