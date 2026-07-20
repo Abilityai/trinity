@@ -163,12 +163,12 @@
                     <span
                       class="text-sm font-semibold text-gray-900 dark:text-white truncate cursor-pointer hover:text-blue-600 dark:hover:text-blue-400"
                       @click="navigateToAgent(row.name)"
-                      :title="agentNameTooltip(agentsStore.agentRefForSlug(row.name))"
+                      :title="agentNameTooltip({ name: row.name, display_label: row.displayLabel })"
                     >
-                      {{ agentDisplayName(agentsStore.agentRefForSlug(row.name)) }}
+                      {{ agentDisplayName({ name: row.name, display_label: row.displayLabel }) }}
                     </span>
                     <span
-                      v-if="hasDistinctLabel(agentsStore.agentRefForSlug(row.name))"
+                      v-if="hasDistinctLabel({ name: row.name, display_label: row.displayLabel })"
                       class="text-[10px] text-gray-400 dark:text-gray-500 truncate leading-none"
                     >{{ row.name }}</span>
                   </div>
@@ -764,6 +764,11 @@ const agentRows = computed(() => {
 
     return {
       name: agent.name,
+      // #1641: the human label rides on the row, sourced from the same
+      // networkStore agent / node data this tile is already built from — the
+      // Dashboard populates networkStore, NOT agentsStore, so resolving off the
+      // agents store here renders the slug for everyone.
+      displayLabel: agent.display_label || nodeData.display_label || null,
       status: agent.status,
       activities: bars,
       hasActivity,
