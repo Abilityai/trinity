@@ -44,7 +44,91 @@
   - MCP proxy tools (`src/mcp-server/src/tools/connector.ts`, already OSS): `list_playbooks`, `run_playbook`, `ask` — visible only to `scope='connector'` sessions.
   - UI: `ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` in the Sharing tab, shown to all agent owners (un-gated).
 - **Schema**: `enterprise_connectors` (name kept for zero-migration adoption of existing enterprise installs) — dual-track (SQLite `db/migrations.py:enterprise_connectors_table` + Alembic `0015_enterprise_connectors`).
-- **Deferred (Part B, blocked on #848 design sign-off)**: email-auth onboarding — inline `request_login`/`verify_login` MCP tools so an external user on the agent's sharing allow-list connects with just their email (no pre-minted key). Tracked separately.
+- **Part B (email-auth onboarding)**: see §7.6 — inline `request_login`/`verify_login` so an external user on the agent's sharing allow-list connects with just their email (no pre-minted key).
+- **Flow**: `docs/memory/feature-flows/mcp-connector.md`
+
+---
+
+## 7.6 MCP Inline Email Auth (#848)
+
+- **Status**: 🚧 In Progress
+- **GitHub Issue**: #848 (public) — Part B of trinity-enterprise#118
+- **Description**: Let an external user authenticate to Trinity **from inside their MCP
+  client** using the existing 6-digit email-code flow, with no pre-minted API key and no
+  web-UI visit. They install a keyless connector config, call `request_login(email)`,
+  receive a code, call `verify_login(code)`, and can then use the exposed playbooks of
+  every agent shared with that email. Mirrors Telegram's inline `/login` (§Channels), the
+  established Trinity pattern for binding a verified email to a channel identity.
+
+### Credential model — session, not a minted key
+
+Per the #848 design sign-off, inline login credentials the **session**; it never returns a
+`trinity_mcp_*` key to the client. This matches every other channel (Telegram/Slack/WhatsApp
+bind a verified email server-side and hand the user nothing).
+
+Consequence to design around: **FastMCP sessions are per-connection**, so an inline login
+lasts only as long as the MCP client's connection — a client restart requires logging in
+again. Accepted as the cost of the no-credential-on-disk model.
+
+### Anonymous session tier
+
+- `MCP_INLINE_AUTH_ENABLED` (env, **default OFF**) gates the whole feature. With it off,
+  behaviour is byte-identical to today: a request with no `Authorization` header is
+  rejected at `authenticate` and no session is created.
+- With it on, a request carrying **no** `Authorization` header yields a truthy
+  **anonymous sentinel** auth context (`scope: "anonymous"`), not `undefined`. A request
+  carrying an **invalid** key still throws — a wrong credential is an error, an absent one
+  is an invitation to log in.
+- The sentinel must be truthy and must not carry an `authenticated: false` key: `fastmcp@4.4.0`
+  skips `canAccess` filtering entirely for a falsy auth (`#createSession`, giving a session
+  EVERY registered tool) and rejects `{authenticated: false}` outright.
+- Tool visibility is enforced by the §7.5 allow-list gates (`operatorOnly` /
+  `connectorOnly` / anonymous), hardened for this feature — operator tools are never
+  visible to an anonymous or unknown scope.
+
+### Static tool surface (no reconnect)
+
+The anonymous session is advertised the **same** tool set before and after login —
+`request_login`, `verify_login`, and the connector tools. Login flips tool *behaviour*, not
+tool *visibility*: before verification the connector tools return a "log in first" error.
+This is deliberate — a session's tool list is frozen at construction and there is no
+per-session refresh API, so gating visibility on login state would require a client
+reconnect to take effect.
+
+### Backend access path
+
+An email-verified session holds no API key, so the MCP server reaches Trinity over a
+dedicated **internal** surface authenticated with `X-Internal-Secret` and carrying the
+verified email. The backend gates every such call on `db.email_has_agent_access(agent, email)`
+(the same primitive the channel access gate uses, #311) — the internal secret authenticates
+the *caller*, never the *authorization*. Alternatives rejected: minting a session-scoped key
+cannot be revoked on disconnect (FastMCP's session `#auth` is private, so a `disconnect`
+event cannot be correlated back to the minted credential) and would leak rows into
+`mcp_api_keys` indefinitely.
+
+### Whitelist and access gate
+
+Inline login **bypasses the email whitelist**, matching Telegram's inline `/login`. This is
+required for the feature to serve its purpose: `POST /api/auth/email/request` silently no-ops
+for a non-whitelisted email, so a whitelist-gated flow could never onboard the external users
+this exists for. Authorization is instead the channel access gate: `email_has_agent_access`
+→ allow; otherwise `upsert_access_request` (owner approval, #311). First login creates a
+`user`-role account per #314 (chat-only grant, no silent promotion).
+
+Because the whitelist is bypassed, the OTP primitives (`db.create_login_code` /
+`db.verify_login_code`) are used directly rather than the whitelist-gated
+`/api/auth/email/*` endpoints. **Telegram's path has no rate limiting** — acceptable behind
+Telegram's bot API, not on an open MCP port — so inline auth additionally applies the
+existing `check_login_rate_limit` / `check_otp_rate_limit` limiters.
+
+### Enumeration safety
+
+`request_login` returns a **generic, branch-independent** response whether or not the email
+is known (mirrors `auth.py`'s generic response, #186) and emits **no** audit event — any
+per-branch signal (message, timing, audit row) is an enumeration oracle. `verify_login`
+outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`login_failed`,
+`source="mcp"`), matching the web email path.
+
 - **Flow**: `docs/memory/feature-flows/mcp-connector.md`
 
 ---

@@ -70,13 +70,30 @@ export interface TokenResponse {
  * Extends Record<string, unknown> to satisfy FastMCP's session type requirements
  */
 export interface McpAuthContext extends Record<string, unknown> {
-  userId: string;        // Username of the key owner
+  userId: string;        // Username of the key owner ("anonymous" pre-login, #848)
   userEmail?: string;    // Email of the key owner
   keyId?: string;        // MCP API key ID (AUDIT-001: for execution origin tracking)
   keyName: string;       // Name of the MCP API key
   agentName?: string;    // Agent name if scope is 'agent', 'system', or 'connector'
-  scope: "user" | "agent" | "system" | "connector"; // user=human, agent=regular agent, system=bypasses all permissions, connector=end-user consumption key bound to one agent (ent#46)
+  // user=human, agent=regular agent, system=bypasses all permissions,
+  // connector=end-user consumption key bound to one agent (ent#46),
+  // anonymous=keyless pre-login session that may only call the inline-auth
+  // tools until verify_login upgrades it (#848).
+  scope: "user" | "agent" | "system" | "connector" | "anonymous";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+
+  // --- #848 inline email auth (anonymous scope only) ---------------------
+  // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
+  // object by reference, so an in-place upgrade is observed by all subsequent
+  // calls on the session without any library support. The session's advertised
+  // tool list is frozen at construction and is deliberately NOT changed by
+  // login — tool behaviour flips, tool visibility does not.
+  /** Set once the OTP is verified. Absent ⇒ still pre-login. */
+  verifiedEmail?: string;
+  /** Email awaiting a code, set by request_login. Not proof of anything. */
+  pendingEmail?: string;
+  /** Opaque per-session id, for correlating rate limits and audit rows. */
+  sessionId?: string;
 }
 
 export interface AgentAccessInfo {

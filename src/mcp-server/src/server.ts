@@ -5,6 +5,7 @@
  * via the Model Context Protocol (MCP).
  */
 
+import { randomUUID } from "node:crypto";
 import { FastMCP } from "fastmcp";
 import { TrinityClient } from "./client.js";
 import { createAgentTools } from "./tools/agents.js";
@@ -32,6 +33,7 @@ import { createLoopTools } from "./tools/loops.js";
 import { createReminderTools } from "./tools/reminders.js";
 import { createOperatorQueueTools } from "./tools/operator_queue.js";
 import { createConnectorTools } from "./tools/connector.js";
+import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { withAudit } from "./audit.js";
 import type { McpAuthContext } from "./types.js";
@@ -52,6 +54,15 @@ export interface ServerConfig {
    * startup (mirrors requireApiKey ← MCP_REQUIRE_API_KEY). Default OFF.
    */
   agentChatPullEnabled?: boolean;
+  /**
+   * #848 inline email auth. When true, a request arriving with NO Authorization
+   * header opens an anonymous sentinel session that may call request_login /
+   * verify_login (and the connector tools, which refuse to act until an email
+   * is verified). An INVALID key is still rejected. Read from
+   * MCP_INLINE_AUTH_ENABLED at startup. Default OFF — this is a posture change
+   * on a network-exposed port, so it is opt-in.
+   */
+  inlineAuthEnabled?: boolean;
 }
 
 export interface McpApiKeyValidationResult {
@@ -106,6 +117,11 @@ export async function createServer(config: ServerConfig = {}) {
     // ServerConfig.agentChatPullEnabled). Same env key the backend declares in
     // config.py (MCP_AGENT_CHAT_PULL_ENABLED) so a single-.env deploy can't drift.
     agentChatPullEnabled = process.env.MCP_AGENT_CHAT_PULL_ENABLED === "true",
+    // #848 inline email auth — default OFF. When off, a request with no
+    // Authorization header is rejected exactly as before and no session is
+    // created. When on, it yields an anonymous sentinel session that may only
+    // reach the inline-auth tools until verify_login upgrades it.
+    inlineAuthEnabled = process.env.MCP_INLINE_AUTH_ENABLED === "true",
   } = config;
 
   // Create Trinity API client (base URL only)
@@ -160,6 +176,23 @@ export async function createServer(config: ServerConfig = {}) {
           // Extract API key from Authorization header (http.IncomingMessage uses lowercase headers object)
           const authHeader = request.headers["authorization"] as string | undefined;
           if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            // #848: an ABSENT credential is an invitation to log in inline; an
+            // INVALID one (below) stays an error. Gated OFF by default, in
+            // which case this is the pre-#848 rejection, unchanged.
+            if (inlineAuthEnabled) {
+              // MUST be a truthy object: fastmcp@4.4.0 skips canAccess
+              // filtering entirely for falsy auth, which would hand this
+              // session every registered tool. Must also NOT carry
+              // `authenticated: false`, which fastmcp treats as a rejection.
+              const anon: McpAuthContext = {
+                userId: "anonymous",
+                keyName: "anonymous",
+                scope: "anonymous",
+                sessionId: randomUUID(),
+              };
+              console.log(`MCP anonymous session opened (#848 inline auth): ${anon.sessionId}`);
+              return anon;
+            }
             console.log("MCP request rejected: Missing or invalid Authorization header");
             throw new Error("Missing or invalid Authorization header");
           }
@@ -200,6 +233,15 @@ export async function createServer(config: ServerConfig = {}) {
   // #946 pilot — surface the routing mode at startup so the soak's control vs
   // treatment window is unambiguous in the logs.
   console.log(`Agent→agent chat pull routing (#946): ${agentChatPullEnabled ? "ON (async /task)" : "OFF (sync /chat)"}`);
+  // #848 — a keyless session tier is a posture change; make it unambiguous in
+  // the startup log which mode the server came up in.
+  console.log(
+    `Inline email auth (#848): ${
+      inlineAuthEnabled
+        ? "ON (keyless sessions may call request_login/verify_login)"
+        : "OFF (a request without an API key is rejected)"
+    }`
+  );
 
   // #846: every registered tool name (built-in + dynamic) — the dynamic-tool
   // reconciler uses the built-in set as a final collision guard.
@@ -263,6 +305,19 @@ export async function createServer(config: ServerConfig = {}) {
   };
   const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
 
+  // #848 inline auth gates.
+  //
+  // The anonymous session's advertised tool list is deliberately IDENTICAL
+  // before and after login: a FastMCP session's tools are resolved once at
+  // construction (`setupToolHandlers` builds the call map from the filtered
+  // list), and there is no per-session refresh API. Gating visibility on login
+  // state would therefore require the client to reconnect before the tools it
+  // just earned appeared. Instead the connector tools are advertised to
+  // anonymous sessions up front and refuse to act until `verifiedEmail` is set.
+  const anonymousOnly = (auth: any): boolean => auth?.scope === "anonymous";
+  const connectorOrAnonymous = (auth: any): boolean =>
+    connectorOnly(auth) || anonymousOnly(auth);
+
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [
     createAgentTools(client, requireApiKey),
@@ -295,13 +350,24 @@ export async function createServer(config: ServerConfig = {}) {
   for (const group of toolGroups) {
     addAllTools(group, operatorOnly);
   }
-  // Connector tools (ent#46): visible ONLY to connector-scoped keys.
+  // Connector tools (ent#46): connector keys, plus #848 anonymous sessions
+  // (which they refuse to serve until verify_login binds an email).
   const connectorGroup = createConnectorTools(client, requireApiKey);
-  addAllTools(connectorGroup, connectorOnly);
+  addAllTools(connectorGroup, inlineAuthEnabled ? connectorOrAnonymous : connectorOnly);
+
+  // #848 inline-auth tools: registered only when the feature is on, and
+  // visible only to anonymous sessions (a key-bearing session has no use for
+  // them). Each tool re-checks the scope at execute time — canAccess governs
+  // advertisement, not authorization.
+  const authGroup = inlineAuthEnabled ? createAuthTools(client, requireApiKey) : {};
+  if (inlineAuthEnabled) {
+    addAllTools(authGroup, anonymousOnly);
+  }
 
   const totalTools =
     toolGroups.reduce((sum, g) => sum + Object.keys(g).length, 0) +
-    Object.keys(connectorGroup).length;
+    Object.keys(connectorGroup).length +
+    Object.keys(authGroup).length;
   console.log(`Registered ${totalTools} tools with audit wrapping (SEC-001 Phase 3)`);
 
   // #846: dynamic-tool registration handles. The exposed-agents reconciler

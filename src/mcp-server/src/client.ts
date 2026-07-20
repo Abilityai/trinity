@@ -1628,6 +1628,74 @@ export class TrinityClient {
   }
 
   // ============================================================================
+  // Inline email auth (#848)
+  // ============================================================================
+  //
+  // These bypass `_fetch` on purpose: an anonymous session has no bearer token,
+  // and `_fetch` throws without one. They authenticate the *caller* (this MCP
+  // server) with the internal secret instead. The secret proves who is asking;
+  // it never proves authorization — the backend gates every inline-auth call on
+  // the verified email's own access (`email_has_agent_access`).
+
+  private internalHeaders(): Record<string, string> {
+    const secret = process.env.INTERNAL_API_SECRET || "";
+    if (!secret) {
+      throw new Error(
+        "INTERNAL_API_SECRET is not set — inline email auth (#848) cannot reach the backend."
+      );
+    }
+    return { "Content-Type": "application/json", "X-Internal-Secret": secret };
+  }
+
+  /**
+   * Ask the backend to email a login code. Fire-and-forget by contract: the
+   * backend always answers 202 with a constant body regardless of whether the
+   * address is known, so this resolves identically in both cases and callers
+   * must not branch on the result (#186 enumeration safety).
+   */
+  async requestInlineLoginCode(email: string, sessionId?: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/request`, {
+      method: "POST",
+      headers: this.internalHeaders(),
+      body: JSON.stringify({ email, session_id: sessionId }),
+    });
+    if (!response.ok) {
+      throw new Error(`Inline login request failed: ${response.status}`);
+    }
+  }
+
+  /**
+   * Verify a login code and resolve what the address may reach. Returns the
+   * verified identity plus the agents shared with it; never a credential.
+   */
+  async verifyInlineLoginCode(
+    email: string,
+    code: string,
+    sessionId?: string
+  ): Promise<{
+    verified: boolean;
+    username?: string;
+    agents?: Array<{ name: string; description?: string }>;
+  }> {
+    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/verify`, {
+      method: "POST",
+      headers: this.internalHeaders(),
+      body: JSON.stringify({ email, code, session_id: sessionId }),
+    });
+    if (response.status === 401) {
+      return { verified: false };
+    }
+    if (!response.ok) {
+      throw new Error(`Inline login verification failed: ${response.status}`);
+    }
+    return (await response.json()) as {
+      verified: boolean;
+      username?: string;
+      agents?: Array<{ name: string; description?: string }>;
+    };
+  }
+
+  // ============================================================================
   // Agent Monitoring (MON-001)
   // ============================================================================
 
