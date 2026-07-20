@@ -19,8 +19,8 @@
  *      reach an unauthorized one.
  *
  * An anonymous session that has NOT verified an email is advertised these
- * tools (the tool list is frozen at session construction, so it cannot change
- * on login) and refuses to act until it has.
+ * tools — the surface is deliberately static across login (see server.ts) — and
+ * refuses to act until it has.
  *
  * Tools:
  *   - list_playbooks: the playbooks (skills) this connector exposes as actions
@@ -82,10 +82,19 @@ export function createConnectorTools(
     if (email) {
       const available = (auth?.agents as string[] | undefined) ?? [];
       if (requested) {
-        if (available.length > 0 && !available.includes(requested)) {
+        // No `available.length > 0` guard: an empty list means NOTHING is
+        // shared with this address, so every requested agent must be refused.
+        // Guarding on non-empty let an attacker-chosen name pass straight
+        // through in exactly the state the code models as "you have nothing" —
+        // harmless today only because the backend re-gates uniformly, which is
+        // the wrong thing to depend on for a client-side check whose entire job
+        // is defence in depth.
+        if (!available.includes(requested)) {
           throw new NeedsLoginError(
-            `"${requested}" is not one of the agents shared with ${email}.`,
-            "agent_not_available",
+            available.length === 0
+              ? "No agents are shared with your address yet — an owner needs to grant access."
+              : `"${requested}" is not one of the agents shared with ${email}.`,
+            available.length === 0 ? "no_agents_available" : "agent_not_available",
             available
           );
         }

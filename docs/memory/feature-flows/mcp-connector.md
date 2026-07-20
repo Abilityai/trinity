@@ -73,8 +73,9 @@ mcp-server authenticate()            server.ts
   │  INVALID key → throw either way
   ▼
 tools advertised: request_login, verify_login, list_playbooks, run_playbook, ask
-  │  (identical before AND after login — a session's tool list is frozen at
-  │   construction, so gating visibility on login would need a reconnect)
+  │  (identical before AND after login — NOT because the list is frozen: FastMCP
+  │   re-filters live sessions on addTool/removeTool, which the #846 reconciler
+  │   fires every ~20s, so a login-keyed gate would flip non-deterministically)
   ▼
 request_login({email})               tools/auth.ts
   │  POST /api/internal/mcp-auth/request   (X-Internal-Secret)

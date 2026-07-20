@@ -18,27 +18,30 @@
  * returning undefined. Inline email auth (#848) needs a pre-login session, so
  * the predicate must deny every scope it does not explicitly know.
  *
- * These tests pin the predicate contract directly rather than booting a real
- * FastMCP server — `createServer()` requires a live backend, and the property
- * under test is the predicate itself.
+ * These tests import the REAL predicates from `server.ts` rather than booting a
+ * FastMCP server — the property under test is the predicate itself, and
+ * importing the module only *defines* `createServer` (no side effects, no live
+ * backend needed).
+ *
+ * They deliberately do NOT re-declare the predicates. An earlier revision of
+ * this file carried a hand-copied mirror whose comment claimed it was "kept in
+ * sync" — it was not, and a scope added to `server.ts` would have left these
+ * tests green. That is the exact trap in docs/memory/learnings.md (2026-07-16):
+ * a mirrored constant has no owner, and a test pinning its own copy pins the
+ * drift as the requirement.
  *
  * Runner: built-in node:test → `node --import tsx --test src/*.test.ts`.
  */
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
-/**
- * Verbatim mirror of the predicates in `server.ts`. Kept in sync by
- * `pins the operator scope set` below, which fails if `server.ts` widens
- * OPERATOR_SCOPES without a deliberate edit here.
- */
-const OPERATOR_SCOPES: ReadonlySet<string> = new Set(["user", "agent", "system"]);
-
-const makeOperatorOnly = (requireApiKey: boolean) => (auth: any): boolean => {
-  if (auth === undefined || auth === null) return !requireApiKey;
-  return OPERATOR_SCOPES.has((auth as { scope?: string }).scope ?? "");
-};
-const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
+import {
+  OPERATOR_SCOPES,
+  makeOperatorOnly,
+  connectorOnly,
+  anonymousOnly,
+  connectorOrAnonymous,
+} from "./server.js";
 
 /** The old, vulnerable predicate — kept to prove the fix actually changes behaviour. */
 const legacyConnectorDenied = (auth: any): boolean => auth?.scope !== "connector";
@@ -104,7 +107,25 @@ describe("#848 operator tool-visibility gate", () => {
   });
 
   it("pins the operator scope set — widening it must be deliberate", () => {
+    // Reads the REAL set imported from server.ts, so adding a scope there fails
+    // here until someone updates this line on purpose.
     assert.deepEqual([...OPERATOR_SCOPES].sort(), ["agent", "system", "user"]);
+  });
+
+  it("the anonymous and connector-or-anonymous gates behave as registered", () => {
+    // These are the predicates actually passed to addAllTools for the #848
+    // login tools and the connector group; exercised here against the real
+    // implementations rather than a copy.
+    assert.equal(anonymousOnly({ scope: "anonymous" }), true);
+    assert.equal(anonymousOnly({ scope: "connector" }), false);
+    assert.equal(anonymousOnly({ scope: "user" }), false);
+    assert.equal(anonymousOnly(undefined), false);
+
+    assert.equal(connectorOrAnonymous({ scope: "connector" }), true);
+    assert.equal(connectorOrAnonymous({ scope: "anonymous" }), true);
+    assert.equal(connectorOrAnonymous({ scope: "user" }), false);
+    assert.equal(connectorOrAnonymous({ scope: "system" }), false);
+    assert.equal(connectorOrAnonymous(undefined), false);
   });
 
   it("operator and connector gates are mutually exclusive for every scope", () => {

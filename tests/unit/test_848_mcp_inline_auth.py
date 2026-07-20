@@ -101,11 +101,62 @@ def client(inline_db, monkeypatch):
     monkeypatch.setenv("INTERNAL_API_SECRET", _SECRET)
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    import config
     from routers.mcp_auth import router
+
+    # #848 is default-OFF; the router 404s the whole surface unless the flag is
+    # on. Patch the resolved module attribute rather than the env var — config
+    # reads os.getenv at import time, and the unit conftest's module eviction
+    # makes "which import won" unpredictable.
+    monkeypatch.setattr(config, "MCP_INLINE_AUTH_ENABLED", True)
 
     app = FastAPI()
     app.include_router(router)
     return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture
+def client_flag_off(inline_db, monkeypatch):
+    """The same surface with inline auth disabled — the default posture."""
+    monkeypatch.setenv("INTERNAL_API_SECRET", _SECRET)
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import config
+    from routers.mcp_auth import router
+
+    monkeypatch.setattr(config, "MCP_INLINE_AUTH_ENABLED", False)
+
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_request_limiter(client, monkeypatch):
+    """Neutralise the coarse global /request ceiling for most tests.
+
+    ``rate_limiter`` falls back to a MODULE-LEVEL in-process bucket when Redis
+    is absent, so its state is shared by every test in this file and the ~60/min
+    budget is exhausted part-way through the run — silently, because an
+    over-limit /request is a deliberate no-op with the same 202. Tests would
+    then fail for a reason unrelated to what they assert.
+
+    The ceiling itself is covered explicitly by
+    ``TestGlobalRequestRateLimit``, which opts back in.
+    """
+    # Through the router's live reference, not a fresh import: the unit
+    # conftest evicts backend modules before every test, so a fresh import can
+    # hand back a different module object and the patch would land on nothing.
+    # Same trap the ``audit_rows``/``sent_emails`` fixtures document.
+    import routers.mcp_auth as router_mod
+    svc = router_mod.mcp_auth_service
+    RateLimitResult = type(svc.rate_limiter.check("__probe__", 10**6, 1))
+
+    monkeypatch.setattr(
+        svc.rate_limiter,
+        "check",
+        lambda *a, **k: RateLimitResult(allowed=True, remaining=999, retry_after=0, limit=999),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -229,7 +280,7 @@ class TestRequestEnumerationSafety:
                             json={"email": _SHARED}, headers=_HDR)
             assert r.status_code == 202
             bodies.append(r.content)
-
+    
         assert len(sent_emails) == 3, "cap is 3 sends per 10-minute window"
         assert len(set(bodies)) == 1, "every response identical, limited or not"
 
@@ -454,6 +505,87 @@ class TestChatIdempotency:
         assert second.headers.get("X-Idempotent-Replay") == "true"
         assert svc.execute_task.await_count == 1
 
+    def test_same_key_different_identity_does_not_replay(self, client):
+        """The idempotency scope must include the verified email.
+
+        Regression for the cross-user disclosure found in review: the scope was
+        ``agent:{name}`` and the key is caller-supplied, so two different
+        verified users of the SAME shared agent collided on one (scope, key).
+        The second caller was served the first caller's stored response snapshot
+        and execution_id — reachable by accident as well as by malice, since MCP
+        clients derive deterministic keys from call args, so two users asking
+        the same agent the same question collide by design.
+
+        The original idempotency test used one identity for both calls, which is
+        exactly why this shipped: it proved replay worked, never that it was
+        scoped.
+        """
+        from services.task_execution_service import TaskExecutionResult
+
+        svc = AsyncMock()
+        svc.execute_task = AsyncMock(side_effect=[
+            TaskExecutionResult(execution_id="exec-alice", status="success",
+                                response="ALICE PRIVATE ANSWER"),
+            TaskExecutionResult(execution_id="exec-bob", status="success",
+                                response="bob answer"),
+        ])
+        key = "collision-key"
+
+        with patch("services.task_execution_service.get_task_execution_service",
+                   return_value=svc):
+            alice = client.post(_CHAT, headers=_HDR, json={
+                "email": _SHARED, "agent": "agent-a",
+                "message": "alice secret question", "idempotency_key": key})
+            bob = client.post(_CHAT, headers=_HDR, json={
+                "email": _OWNER, "agent": "agent-a",
+                "message": "bob totally different", "idempotency_key": key})
+
+        assert alice.status_code == 200 and bob.status_code == 200
+        assert bob.headers.get("X-Idempotent-Replay") != "true", \
+            "a different identity must not replay another user's snapshot"
+        assert bob.json()["response"] != "ALICE PRIVATE ANSWER", \
+            "cross-user response disclosure"
+        assert bob.json()["execution_id"] != "exec-alice", \
+            "cross-user execution_id disclosure"
+        assert svc.execute_task.await_count == 2, \
+            "the second identity's turn must actually dispatch"
+
+
+# ---------------------------------------------------------------------------
+# Default-OFF posture — the backend must not rely on the MCP server's gate
+# ---------------------------------------------------------------------------
+
+class TestInlineAuthFlagGate:
+    """MCP_INLINE_AUTH_ENABLED must gate the BACKEND surface too.
+
+    Regression for a review finding: the flag was implemented only in the
+    mcp-server, so these endpoints answered on every install regardless — a
+    surface that bypasses the email whitelist, creates accounts and dispatches
+    agent chat. The backend's default-OFF posture must not depend on a different
+    process behaving.
+    """
+
+    _CALLS = [
+        ("/api/internal/mcp-auth/request", {"email": _SHARED}),
+        ("/api/internal/mcp-auth/verify", {"email": _SHARED, "code": "123456"}),
+        (_PLAYBOOKS, {"email": _SHARED, "agent": "agent-a"}),
+        (_CHAT, {"email": _SHARED, "agent": "agent-a", "message": "hi"}),
+    ]
+
+    @pytest.mark.parametrize("path,body", _CALLS)
+    def test_404_when_flag_off_even_with_a_valid_secret(
+        self, client_flag_off, path, body
+    ):
+        r = client_flag_off.post(path, json=body, headers=_HDR)
+        assert r.status_code == 404, (
+            f"{path} answered {r.status_code} with the feature disabled"
+        )
+
+    def test_disabled_surface_creates_no_login_code(self, client_flag_off, sent_emails):
+        client_flag_off.post("/api/internal/mcp-auth/request",
+                             json={"email": _SHARED}, headers=_HDR)
+        assert sent_emails == []
+
 
 # ---------------------------------------------------------------------------
 # C-003 — the internal-secret gate on all four endpoints
@@ -478,3 +610,57 @@ class TestInternalSecretGate:
         r = client.post(path, json=body, headers={"X-Internal-Secret": "wrong"})
         assert r.status_code in (401, 403)
         assert sent_emails == []
+
+
+# ---------------------------------------------------------------------------
+# The coarse global ceiling on /request (the per-address cap sits behind the
+# known-check, so it never bounds unknown-address lookups)
+# ---------------------------------------------------------------------------
+
+class TestGlobalRequestRateLimit:
+    def test_over_limit_is_a_silent_skip_with_the_same_202(
+        self, client, monkeypatch, sent_emails
+    ):
+        """Over-limit must not become its own oracle.
+
+        A 429 here would tell a caller their earlier requests were "real", which
+        is exactly the differential the constant response exists to deny.
+        """
+        import routers.mcp_auth as router_mod
+        svc = router_mod.mcp_auth_service
+        RateLimitResult = type(svc.rate_limiter.check("__probe2__", 10**6, 1))
+
+        monkeypatch.setattr(
+            svc.rate_limiter, "check",
+            lambda *a, **k: RateLimitResult(
+                allowed=False, remaining=0, retry_after=42, limit=60),
+        )
+
+        r = client.post("/api/internal/mcp-auth/request",
+                        json={"email": _SHARED}, headers=_HDR)
+
+        assert r.status_code == 202, "over-limit must not surface a distinct status"
+        assert r.json() == {"status": "ok"}
+        assert "Retry-After" not in r.headers, "a Retry-After header is a differential"
+        assert sent_emails == [], "over-limit must not send"
+        assert _code_rows() == [], "over-limit must not create a code row"
+
+    def test_limit_is_checked_before_the_known_branch(self, client, monkeypatch):
+        """The ceiling must bound UNKNOWN addresses too — that is its whole
+        purpose, since the per-address cap is only reached after the
+        known-check passes."""
+        import routers.mcp_auth as router_mod
+        svc = router_mod.mcp_auth_service
+
+        seen = []
+        real_check = svc.rate_limiter.check
+        monkeypatch.setattr(
+            svc.rate_limiter, "check",
+            lambda key, *a, **k: (seen.append(key), real_check(key, 10**6, 1))[1],
+        )
+
+        client.post("/api/internal/mcp-auth/request",
+                    json={"email": _UNKNOWN}, headers=_HDR)
+
+        assert seen == ["mcp_inline_auth:request"], \
+            "the global limiter must run for an unknown address, not be skipped"

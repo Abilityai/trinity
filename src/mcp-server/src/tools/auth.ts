@@ -58,11 +58,39 @@ const GENERIC_REQUEST_RESPONSE = JSON.stringify(
   2
 );
 
+/**
+ * The ONE body a failed verify_login ever returns. Constant by contract: wrong
+ * code, expired code, unknown address and an upstream/transport failure are all
+ * indistinguishable to the caller.
+ */
+const INVALID_CODE_RESPONSE = JSON.stringify(
+  {
+    status: "error",
+    error: "invalid_code",
+    message: "That code is not valid or has expired. Request a new one.",
+  },
+  null,
+  2
+);
+
 /** Per-session counters. Keyed by the session's opaque id, not by email. */
 interface SessionCounters {
   requests: number;
   verifies: number;
 }
+
+/**
+ * Hard ceiling on tracked sessions. FastMCP gives this closure no session-close
+ * hook, so entries cannot be freed on disconnect — without a bound, one Map
+ * entry per anonymous connection would be retained for the process lifetime and
+ * an unauthenticated caller could exhaust memory just by connecting in a loop.
+ *
+ * Eviction is oldest-first (insertion-ordered Map). Losing a counter only
+ * resets a per-connection convenience cap, never a security control: the real
+ * limits are the backend's per-email OTP limiter and the global /request
+ * ceiling, neither of which a client can reset by reconnecting.
+ */
+const MAX_TRACKED_SESSIONS = 10_000;
 
 export function createAuthTools(client: TrinityClient, _requireApiKey: boolean) {
   const counters = new Map<string, SessionCounters>();
@@ -71,6 +99,11 @@ export function createAuthTools(client: TrinityClient, _requireApiKey: boolean) 
     const id = session?.sessionId ?? "unknown";
     let c = counters.get(id);
     if (!c) {
+      if (counters.size >= MAX_TRACKED_SESSIONS) {
+        // Map preserves insertion order, so the first key is the oldest.
+        const oldest = counters.keys().next();
+        if (!oldest.done) counters.delete(oldest.value);
+      }
       c = { requests: 0, verifies: 0 };
       counters.set(id, c);
     }
@@ -207,28 +240,25 @@ export function createAuthTools(client: TrinityClient, _requireApiKey: boolean) 
         try {
           result = await client.verifyInlineLoginCode(email, args.code, session.sessionId);
         } catch (err) {
-          return JSON.stringify(
-            {
-              status: "error",
-              error: "verification_failed",
-              message: err instanceof Error ? err.message : String(err),
-            },
-            null,
-            2
+          // Log the real cause server-side, return the SAME body as a bad code.
+          // Echoing the error to the caller leaked backend detail to an
+          // unauthenticated client — raw upstream status codes, and the name of
+          // a backend env var when INTERNAL_API_SECRET was unset. It was also a
+          // second failure shape the "uniform failure" contract does not allow:
+          // a caller could distinguish "backend is unreachable/misconfigured"
+          // from "your code is wrong".
+          console.error(
+            `[#848] verify_login upstream failure: ${
+              err instanceof Error ? err.message : String(err)
+            }`
           );
+          return INVALID_CODE_RESPONSE;
         }
 
         if (!result?.verified) {
-          // Uniform failure: never distinguish wrong-code from unknown-email.
-          return JSON.stringify(
-            {
-              status: "error",
-              error: "invalid_code",
-              message: "That code is not valid or has expired. Request a new one.",
-            },
-            null,
-            2
-          );
+          // Uniform failure: never distinguish wrong-code from unknown-email —
+          // or, per the catch above, from an upstream error.
+          return INVALID_CODE_RESPONSE;
         }
 
         // --- upgrade the session, in place ---------------------------------

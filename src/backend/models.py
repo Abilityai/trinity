@@ -1887,6 +1887,11 @@ class InternalAuditRequest(BaseModel):
     mcp_key_name: Optional[str] = None
     mcp_scope: Optional[str] = None
     actor_agent_name: Optional[str] = None
+    # #848: a keyless inline-auth caller has no key and no agent — the verified
+    # email is its only identity. Without this field Pydantic would silently
+    # DROP it (extra='ignore' by default), leaving an unattributable audit row
+    # and no error to notice.
+    actor_email: Optional[str] = None
     # Target
     target_type: Optional[str] = None
     target_id: Optional[str] = None

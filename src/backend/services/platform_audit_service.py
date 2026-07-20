@@ -79,6 +79,12 @@ class PlatformAuditService:
         actor_user: Optional[Any] = None,        # Pydantic User model
         actor_agent_name: Optional[str] = None,
         actor_ip: Optional[str] = None,
+        # Explicit actor email, for principals the resolver cannot derive one
+        # for. #848 inline-auth callers hold no key, no user row at call time
+        # and no agent name — the verified email is their only identity, and
+        # without this the row is unattributable. Never overrides an email the
+        # resolver established from a real user.
+        actor_email: Optional[str] = None,
         # MCP context (when via MCP API key)
         mcp_key_id: Optional[str] = None,
         mcp_key_name: Optional[str] = None,
@@ -101,12 +107,15 @@ class PlatformAuditService:
             event_id = str(uuid.uuid4())
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-            actor_type, actor_id, actor_email = self._resolve_actor(
+            actor_type, actor_id, resolved_email = self._resolve_actor(
                 actor_user=actor_user,
                 actor_agent_name=actor_agent_name,
                 mcp_scope=mcp_scope,
                 mcp_key_id=mcp_key_id,
             )
+            # Resolver wins when it found a real identity; the explicit value is
+            # a fallback, not an override.
+            actor_email = resolved_email or actor_email
 
             entry: Dict[str, Any] = {
                 "event_id": event_id,

@@ -15,7 +15,10 @@ Two properties this module exists to hold:
    allow-list entry). Everything else silently does nothing.
 
 2. **The unknown-address branch is indistinguishable from the known one.** Same
-   status, same bytes, same latency, and — deliberately — no audit row. Any
+   status, same bytes, and — deliberately — no audit row. Latency too, but only
+   because NOTHING branch-dependent runs on the request path: the known-check,
+   the cap read and the code INSERT all run in a background task, after the 202
+   has been flushed (see ``schedule_login_code``). Any
    per-branch signal is an oracle for "is this address registered here". This is
    the #186 property, mirrored from ``routers/auth.py::request_email_login_code``.
 
@@ -27,14 +30,14 @@ MCP server's memory and dies with the connection.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import List, Optional
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from database import db
 from models import McpInlineAgent, McpInlineVerifyResponse
+from services import rate_limiter
 from services.connector_service import fetch_live_playbooks, resolve_exposed_playbooks
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,13 @@ logger = logging.getLogger(__name__)
 CODE_REQUESTS_PER_WINDOW = 3
 CODE_REQUEST_WINDOW_MINUTES = 10
 
+# Coarse global ceiling on /request across the whole surface. The per-address
+# cap above only applies AFTER the known-check, so it never bounds lookups for
+# unknown addresses; this does. Sized well above any plausible legitimate rate
+# (inline sign-in is a rare, human-paced act) so it only ever trips on abuse.
+INLINE_REQUEST_GLOBAL_LIMIT = 60
+INLINE_REQUEST_GLOBAL_WINDOW = 60
+
 # Login codes live 10 minutes, same as the web email flow.
 CODE_EXPIRY_MINUTES = 10
 
@@ -52,12 +62,6 @@ CODE_EXPIRY_MINUTES = 10
 # the public path uses, and lands in the "MCP" analytics bucket.
 CHAT_TIMEOUT_SECONDS = 900
 CHAT_TRIGGERED_BY = "mcp"
-
-# Strong refs for fire-and-forget email dispatch (the asyncio GC footgun — a
-# task with no live reference can be collected mid-send). Same guard as
-# ``routers/auth.py::_email_dispatch_tasks``.
-_email_dispatch_tasks: set = set()
-
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
@@ -103,16 +107,74 @@ async def _dispatch_code_email(email: str, code: str) -> None:
         logger.exception("[#848] failed to send inline login code")
 
 
-def request_login_code(email: str, session_id: Optional[str] = None) -> None:
-    """Email a login code iff the address is known. Always returns None.
+def _resolve_and_create_code(email: str, session_id: Optional[str]) -> Optional[str]:
+    """The blocking half: known-check, per-address cap, code row.
 
-    The caller returns one constant body no matter what happened in here — that
-    is the whole enumeration-safety contract, so this function must never signal
-    its branch through a return value, an exception, or an audit row.
+    Returns the code to send, or None if nothing should be sent. Never raises —
+    every failure is a silent suppression, because the caller has already
+    answered 202 and there is no channel left to signal on.
+    """
+    if not _email_is_known(email):
+        logger.info("[#848] inline login code suppressed: unknown address (session=%s)", session_id)
+        return None
 
-    Every send is dispatched fire-and-forget so the known-address path returns
-    as fast as the unknown one. A blocking send would leak membership through
-    latency even with identical bodies (#186 timing oracle).
+    try:
+        recent = db.count_recent_code_requests(email, minutes=CODE_REQUEST_WINDOW_MINUTES)
+    except Exception:
+        logger.exception("[#848] rate-limit read failed; suppressing code send")
+        return None
+
+    if recent >= CODE_REQUESTS_PER_WINDOW:
+        logger.warning("[#848] inline login code suppressed: rate limit for %s", email)
+        return None
+
+    try:
+        return db.create_login_code(email, expiry_minutes=CODE_EXPIRY_MINUTES)["code"]
+    except Exception:
+        logger.exception("[#848] failed to create inline login code")
+        return None
+
+
+async def _process_login_request(email: str, session_id: Optional[str]) -> None:
+    """Everything branch-dependent, run after the response has been sent.
+
+    The DB work stays on the request thread on purpose. An earlier revision
+    pushed it to ``asyncio.to_thread`` and every send silently stopped: SQLite
+    connections are thread-affine, so ``_email_is_known`` raised in the worker,
+    hit its own fail-closed handler and suppressed the code — a total outage of
+    the feature that presented as "the email just never arrives". Starlette runs
+    background tasks after the response is flushed, which is all the
+    constant-time property needs; it does not need another thread.
+    """
+    code = _resolve_and_create_code(email, session_id)
+    if code:
+        await _dispatch_code_email(email, code)
+
+
+def schedule_login_code(
+    background_tasks: "BackgroundTasks",
+    email: str,
+    session_id: Optional[str] = None,
+) -> None:
+    """Queue a login-code send to run after the response. Constant time.
+
+    The caller returns one constant body no matter what happens — that is the
+    whole enumeration-safety contract, so this must never signal its branch
+    through a return value, an exception, an audit row, **or latency**.
+
+    Latency is why *nothing* branch-dependent happens inline. An earlier version
+    did the known-check, the per-address cap read and the code INSERT
+    synchronously, and only the email send was deferred. That still leaked: the
+    known branch performed a committing write the unknown branch did not, which
+    measured ~1.9x (~1ms) even on in-process SQLite, and the gap widens with a
+    real database because a durable commit is the dominant term. Identical bytes
+    do not help if the response arrives at a measurably different time (#186 is
+    about the oracle, not the body).
+
+    So the request path now does exactly two things regardless of input:
+    normalize, and enqueue. Starlette runs the queued task only after the
+    response has been flushed, so no branch-dependent work can contribute to
+    measured latency.
 
     Rate limiting is keyed on the EMAIL, not the caller IP: every request here
     arrives from the MCP server, so one IP bucket would be shared by the whole
@@ -125,32 +187,20 @@ def request_login_code(email: str, session_id: Optional[str] = None) -> None:
     if not email:
         return
 
-    if not _email_is_known(email):
-        # Silent, and identical to every other branch from the caller's view.
-        logger.info("[#848] inline login code suppressed: unknown address (session=%s)", session_id)
+    # Coarse global bound (#848 H3). The per-address cap lives behind the
+    # known-check, so an UNKNOWN address is never counted by it — leaving an
+    # unauthenticated caller free to pump unlimited lookups. This bounds the
+    # whole surface regardless of which branch a request takes, and is
+    # deliberately checked BEFORE the branch so it cannot itself become a
+    # differential. Over-limit is a silent skip: the caller still gets the same
+    # 202, because a 429 here would be its own oracle.
+    if not rate_limiter.check(
+        "mcp_inline_auth:request", INLINE_REQUEST_GLOBAL_LIMIT, INLINE_REQUEST_GLOBAL_WINDOW
+    ).allowed:
+        logger.warning("[#848] inline login request suppressed: global rate limit")
         return
 
-    try:
-        recent = db.count_recent_code_requests(email, minutes=CODE_REQUEST_WINDOW_MINUTES)
-    except Exception:
-        logger.exception("[#848] rate-limit read failed; suppressing code send")
-        return
-
-    if recent >= CODE_REQUESTS_PER_WINDOW:
-        # WARN server-side (fail-loud for ops) but return the same nothing, so a
-        # repeat-request differential can't distinguish "limited" from "unknown".
-        logger.warning("[#848] inline login code suppressed: rate limit for %s", email)
-        return
-
-    try:
-        code_data = db.create_login_code(email, expiry_minutes=CODE_EXPIRY_MINUTES)
-    except Exception:
-        logger.exception("[#848] failed to create inline login code")
-        return
-
-    task = asyncio.create_task(_dispatch_code_email(email, code_data["code"]))
-    _email_dispatch_tasks.add(task)
-    task.add_done_callback(_email_dispatch_tasks.discard)
+    background_tasks.add_task(_process_login_request, email, session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +291,7 @@ def build_verify_response(user: dict, email: str) -> McpInlineVerifyResponse:
 # the per-call authorization gate
 # ---------------------------------------------------------------------------
 
-def assert_email_may_reach_agent(email: str, agent: str) -> None:
+def assert_email_may_reach_agent(email: str, agent: str) -> Optional[dict]:
     """403 unless the email may reach this agent through the connector surface.
 
     Applied on EVERY inline-auth data call, before anything else. The internal
@@ -273,16 +323,26 @@ def assert_email_may_reach_agent(email: str, agent: str) -> None:
     if not has_access:
         raise denied
 
+    # Returned so callers can reuse it instead of re-reading (see
+    # list_exposed_playbooks) — the gate is the single read point.
+    return cfg
+
 
 # ---------------------------------------------------------------------------
 # playbooks + chat
 # ---------------------------------------------------------------------------
 
 async def list_exposed_playbooks(email: str, agent: str) -> List:
-    """Exposed playbooks (allow-list ∩ ``user_invocable``) for a verified email."""
-    assert_email_may_reach_agent(email, agent)
+    """Exposed playbooks (allow-list ∩ ``user_invocable``) for a verified email.
 
-    cfg = db.get_connector_config(agent)
+    Uses the config the gate already read rather than re-reading it. A second
+    read would open a TOCTOU window spanning a DB round-trip plus the container
+    call in ``fetch_live_playbooks`` (10s timeout), during which a revoke could
+    land and still yield playbooks from a now-disabled connector — and, being
+    unwrapped, would surface a DB error as a 500 where the gate fails closed.
+    """
+    cfg = assert_email_may_reach_agent(email, agent)
+
     live = await fetch_live_playbooks(agent)
     allow = cfg.get("exposed_playbooks") if cfg else None
     return resolve_exposed_playbooks(live, allow)

@@ -26,7 +26,9 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status,
+)
 from fastapi.responses import JSONResponse
 
 from models import (
@@ -39,21 +41,39 @@ from models import (
     McpInlineVerifyResponse,
 )
 from routers.auth import (
-    check_login_rate_limit,
+    check_login_rate_limit_account_only,
     check_otp_rate_limit,
-    record_login_attempt,
+    record_login_attempt_account_only,
     record_otp_attempt,
 )
+import config
 from routers.internal import verify_internal_secret
 from services import idempotency_service, mcp_auth_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
+
+def require_inline_auth_enabled() -> None:
+    """404 the whole surface unless MCP_INLINE_AUTH_ENABLED is on.
+
+    The mcp-server has its own gate on the same env key, but the backend must
+    not depend on another process for its default-OFF posture: these endpoints
+    bypass the email whitelist, create accounts, and dispatch agent chat. An
+    install that never opted in should not be answering here at all.
+
+    404 rather than 403 so a disabled deployment does not advertise that the
+    surface exists.
+    """
+    if not config.MCP_INLINE_AUTH_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
 router = APIRouter(
     prefix="/api/internal/mcp-auth",
     tags=["mcp_inline_auth"],
-    dependencies=[Depends(verify_internal_secret)],
+    # Order matters only for cost, not correctness — both run for every route.
+    dependencies=[Depends(verify_internal_secret), Depends(require_inline_auth_enabled)],
 )
 
 # The ONE body ``/request`` ever returns. Constant by contract — see below.
@@ -61,7 +81,10 @@ _GENERIC_REQUEST_BODY = {"status": "ok"}
 
 
 @router.post("/request", status_code=status.HTTP_202_ACCEPTED)
-async def request_inline_login(body: McpInlineLoginRequest) -> dict:
+async def request_inline_login(
+    body: McpInlineLoginRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
     """Email a login code — iff the address is already known to Trinity.
 
     Reachable by an unauthenticated MCP client, so it must not become an open
@@ -69,14 +92,16 @@ async def request_inline_login(body: McpInlineLoginRequest) -> dict:
     or an ``agent_sharing`` allow-list entry, and silently does nothing
     otherwise.
 
-    **The response is constant.** Same 202, same bytes, same latency whether the
-    address is known, unknown, or rate-limited, and **no audit row is written**
+    **The response is constant.** Same 202, same bytes whether the address is
+    known, unknown, or rate-limited, and **no audit row is written**. Latency is
+    constant too, but only because every branch-dependent step runs off the
+    request path in a worker thread — do not move any of it back inline
     — an audit entry is itself an enumeration oracle, which is why the web path
     (``routers/auth.py``, #186) emits none either. Do NOT add a 4xx for an
     unknown address, a distinct message, an ``expires_in_seconds`` field, or a
     blocking send: each one re-opens the oracle this endpoint exists to close.
     """
-    mcp_auth_service.request_login_code(body.email, body.session_id)
+    mcp_auth_service.schedule_login_code(background_tasks, body.email, body.session_id)
     return _GENERIC_REQUEST_BODY
 
 
@@ -98,17 +123,26 @@ async def verify_inline_login(
     email = mcp_auth_service.normalize_email(body.email)
     client_ip = request.client.host if request.client else "unknown"
 
-    # Same limiters as the web flow (§7.6: Telegram's inline login has none,
-    # which is tolerable behind a bot API but not on an open MCP port). Note the
-    # per-IP bucket sees the MCP server for every caller, so the per-ACCOUNT
-    # bucket is the one doing real work here.
-    check_login_rate_limit(client_ip, account=email)
+    # Per-ACCOUNT limiters only. The real client IP is never visible here —
+    # every inline-auth call arrives from the MCP server container — so the
+    # per-IP bucket would collapse the whole fleet of MCP clients into ONE
+    # shared bucket. That is not merely a useless limit, it is a DoS primitive:
+    # `check_login_rate_limit` locks out at 30 failures per 5 minutes, so a
+    # single anonymous client submitting 30 wrong codes would lock inline login
+    # for every user of the instance — and, because `_ip_key` is a shared
+    # namespace, would also burn the bucket for real web logins from that
+    # egress IP. That is exactly the platform-wide lockout the #591 split-bucket
+    # redesign removed; routing this path through the IP bucket would
+    # reintroduce it in a worse form (the collapse is structural, not
+    # incidental). So: pass the ACCOUNT bucket only, and never record into the
+    # IP bucket from here.
+    check_login_rate_limit_account_only(email)
     check_otp_rate_limit(email)
 
     user = mcp_auth_service.verify_login_code(email, body.code)
 
     if not user:
-        record_login_attempt(client_ip, success=False, account=email)
+        record_login_attempt_account_only(email, success=False)
         record_otp_attempt(email, success=False)
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHENTICATION,
@@ -126,7 +160,7 @@ async def verify_inline_login(
             detail="Invalid or expired verification code",
         )
 
-    record_login_attempt(client_ip, success=True, account=email)
+    record_login_attempt_account_only(email, success=True)
     record_otp_attempt(email, success=True)
 
     await platform_audit_service.log(
@@ -166,8 +200,13 @@ async def inline_chat(
 
     Invariant #18: this is a trigger boundary, so it accepts an idempotency key
     — from the ``Idempotency-Key`` header, or from the request body (the MCP
-    server's inline-auth calls are plain JSON POSTs and carry it there). Scoped
-    per agent, so two agents can never collide on one key.
+    server's inline-auth calls are plain JSON POSTs and carry it there).
+
+    Scoped per (agent, verified email), NOT per agent: the key is
+    caller-supplied and the identity arrives in the body, so an agent-only
+    scope would let two different verified users of the same shared agent
+    collide and replay each other's response snapshot. See
+    ``idempotency_service.make_inline_auth_scope``.
     """
     key = idempotency_key or body.idempotency_key
 
@@ -176,7 +215,7 @@ async def inline_chat(
     mcp_auth_service.assert_email_may_reach_agent(body.email, body.agent)
 
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(body.agent), key
+        idempotency_service.make_inline_auth_scope(body.agent, body.email), key
     )
     if idem.replay:
         if idem.in_flight:

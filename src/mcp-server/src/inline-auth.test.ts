@@ -380,3 +380,89 @@ describe("#848 connector-key path is unchanged (ent#46)", () => {
     );
   });
 });
+
+// --------------------------------------------------------------------------
+// Review regressions (#848)
+// --------------------------------------------------------------------------
+
+describe("#848 review regressions", () => {
+  it("refuses ANY requested agent when nothing is shared (empty available)", async () => {
+    // The gate was `available.length > 0 && !available.includes(requested)`,
+    // so an empty list — the state meaning "you have nothing" — let an
+    // attacker-chosen name pass straight through to the backend.
+    const { client, chats } = fakeConnectorClient();
+    const tools = createConnectorTools(client, true);
+    const session = anonSession({ verifiedEmail: "a@example.com", agents: [] });
+
+    const out = parse(
+      await tools.ask.execute({ message: "hi", agent: "someone-elses" }, { session })
+    );
+    assert.equal(out.error, "no_agents_available");
+    assert.equal(chats.length, 0, "nothing may be dispatched");
+  });
+
+  it("verify_login reports an upstream failure as a plain invalid code", async () => {
+    // Echoing the error leaked backend detail to an unauthenticated caller
+    // (raw upstream status codes, and the name of a backend env var when
+    // INTERNAL_API_SECRET was unset) and created a second, distinguishable
+    // failure shape the uniform-failure contract does not allow.
+    const failing = createAuthTools(fakeAuthClient({ verifyThrows: true }).client, true);
+    const rejecting = createAuthTools(fakeAuthClient({ verified: false }).client, true);
+
+    const upstream = await failing.verifyLogin.execute(
+      { code: "123456" },
+      { session: anonSession({ pendingEmail: "a@example.com" }) }
+    );
+    const badCode = await rejecting.verifyLogin.execute(
+      { code: "000000" },
+      { session: anonSession({ pendingEmail: "a@example.com" }) }
+    );
+
+    assert.equal(upstream, badCode,
+      "an upstream error must be indistinguishable from a wrong code");
+    // NB: not a bare "status" check — `{"status":"error"}` is the legitimate
+    // response schema. Look for the things that actually leaked: the backend
+    // env-var name, raw HTTP status codes, and upstream error prose.
+    const blob = upstream.toLowerCase();
+    for (const leak of [
+      "internal_api_secret",
+      "backend",
+      "exploded",
+      "404",
+      "500",
+      "429",
+      "verification_failed",
+    ]) {
+      assert.ok(!blob.includes(leak), `verify_login leaked '${leak}'`);
+    }
+  });
+
+  it("an upstream failure does not bind the session", async () => {
+    const tools = createAuthTools(fakeAuthClient({ verifyThrows: true }).client, true);
+    const session = anonSession({ pendingEmail: "a@example.com" });
+    await tools.verifyLogin.execute({ code: "123456" }, { session });
+    assert.equal(session.verifiedEmail, undefined);
+  });
+
+  it("bounds the per-session counter map so anonymous connections cannot grow it forever", async () => {
+    // FastMCP gives the tool closure no session-close hook, so without a bound
+    // one entry per anonymous connection is retained for the process lifetime —
+    // memory exhaustion reachable with zero credentials.
+    const { client } = fakeAuthClient();
+    const tools = createAuthTools(client, true);
+
+    for (let i = 0; i < 10_050; i++) {
+      await tools.requestLogin.execute(
+        { email: "a@example.com" },
+        { session: anonSession({ sessionId: `sess-${i}` }) }
+      );
+    }
+    // Not observable directly; assert the process still serves correctly and
+    // the cap is enforced by the module constant (a leak would OOM long-run).
+    const out = await tools.requestLogin.execute(
+      { email: "a@example.com" },
+      { session: anonSession({ sessionId: "final" }) }
+    );
+    assert.ok(out.includes("6-digit code"), "still functional after eviction churn");
+  });
+});

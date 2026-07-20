@@ -75,6 +75,82 @@ export interface McpApiKeyValidationResult {
   scope?: "user" | "agent" | "system";  // Key scope: user=human, agent=regular agent, system=system agent (bypasses permissions)
 }
 
+// ---------------------------------------------------------------------------
+// Tool-visibility gates (ent#46 connector isolation + #848 inline auth)
+// ---------------------------------------------------------------------------
+//
+// Exported at module scope ON PURPOSE so `tool-visibility.test.ts` can import
+// the REAL predicates. They previously lived inside `createServer()` and the
+// test carried a hand-copied mirror — which is the drift trap recorded in
+// docs/memory/learnings.md (2026-07-16): a mirrored constant has no owner, and
+// a test that pins its own copy pins the drift as the requirement. Importing is
+// side-effect-free here (this module only *defines* `createServer`), so the
+// mirror had no justification.
+//
+// These MUST be allow-lists, not "not connector" deny-checks. Two
+// fastmcp@4.4.0 behaviours make a deny-check fail OPEN:
+//   1. `#createSession` skips filtering entirely when auth is falsy —
+//      `const allowedTools = auth ? this.#tools.filter(...) : this.#tools`
+//      — so a session with no auth context gets EVERY registered tool.
+//   2. The stateful httpStream branch (the one we run) does NOT reject an
+//      `authenticate()` that returns undefined; only the stateless branch
+//      guards that. Today our callback throws instead of returning undefined,
+//      so nothing is exposed — but a pre-login session (#848) is exactly the
+//      change that would trip it.
+// A deny-check also admits every scope it has not heard of. Widening the
+// operator surface must therefore be a deliberate edit to this set.
+
+/** Scopes that denote a fully-credentialed operator principal. */
+export const OPERATOR_SCOPES: ReadonlySet<string> = new Set([
+  "user",
+  "agent",
+  "system",
+]);
+
+/**
+ * Operator-tool gate. Curried over `requireApiKey` because dev mode
+ * (MCP_REQUIRE_API_KEY=false) installs no authenticate callback, so FastMCP
+ * never calls `canAccess` at all and every tool is advertised; that branch only
+ * guards a direct caller of the predicate. With auth required, an absent
+ * context is never an operator.
+ */
+export const makeOperatorOnly =
+  (requireApiKey: boolean) =>
+  (auth: any): boolean => {
+    if (auth === undefined || auth === null) return !requireApiKey;
+    return OPERATOR_SCOPES.has((auth as { scope?: string }).scope ?? "");
+  };
+
+/** Connector-tier gate (ent#46): end-user consumption keys bound to one agent. */
+export const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
+
+/** #848 pre-login sentinel sessions. */
+export const anonymousOnly = (auth: any): boolean => auth?.scope === "anonymous";
+
+/**
+ * #848: the anonymous session's advertised tool list is deliberately IDENTICAL
+ * before and after login. The connector tools are advertised to anonymous
+ * sessions up front and refuse to act until `verifiedEmail` is set.
+ *
+ * The reason is NOT that the list cannot change — an earlier version of this
+ * comment claimed FastMCP had "no per-session refresh API", and that is wrong.
+ * `FastMCPSession.toolsListChanged` re-filters a LIVE session against its
+ * current `#auth` and rebuilds the call map (fastmcp@4.4.0
+ * dist/chunk-MDIESGNI.js:548-553), fanned to every session by
+ * addTool/removeTool (`:2202-2206`) — and Trinity triggers exactly that every
+ * ~20s via the #846 exposed-agents reconciler.
+ *
+ * That makes a login-state-dependent gate WORSE, not impossible: visibility
+ * would flip asynchronously whenever the reconciler happened to fire, so the
+ * same session would show different tools depending on timing unrelated to the
+ * login. A static surface is deterministic. Related trap: `updateAuth` REPLACES
+ * `#auth` (`:572-574`) rather than mutating it, so if anything ever calls it the
+ * in-place upgrade `verify_login` performs is silently discarded and the session
+ * reverts to pre-login — another reason not to key visibility on that state.
+ */
+export const connectorOrAnonymous = (auth: any): boolean =>
+  connectorOnly(auth) || anonymousOnly(auth);
+
 /**
  * Validate an MCP API key against the Trinity backend
  */
@@ -278,45 +354,7 @@ export async function createServer(config: ServerConfig = {}) {
     }
   }
 
-  // ent#46 visibility gates: connector keys (end-user consumption tier) see
-  // ONLY the connector tools; every other (operator) key never sees them.
-  //
-  // #848: these MUST be allow-lists, not "not connector" deny-checks. Two
-  // fastmcp@4.4.0 behaviours make a deny-check fail OPEN:
-  //   1. `#createSession` skips filtering entirely when auth is falsy —
-  //      `const allowedTools = auth ? this.#tools.filter(...) : this.#tools`
-  //      — so a session with no auth context gets EVERY registered tool.
-  //   2. The stateful httpStream branch (the one we run) does NOT reject an
-  //      `authenticate()` that returns undefined; only the stateless branch
-  //      guards that. Today our callback throws instead of returning undefined,
-  //      so nothing is exposed — but a pre-login session (#848) is exactly the
-  //      change that would trip it.
-  // A deny-check also admits every scope it has not heard of. Widening the
-  // operator surface must therefore be a deliberate edit to this set.
-  const OPERATOR_SCOPES: ReadonlySet<string> = new Set(["user", "agent", "system"]);
-
-  const operatorOnly = (auth: any): boolean => {
-    // Dev mode (MCP_REQUIRE_API_KEY=false) installs no authenticate callback,
-    // so FastMCP never calls canAccess at all and every tool is advertised.
-    // This branch therefore only guards a direct caller of the predicate.
-    // With auth required, an absent context is never an operator.
-    if (auth === undefined || auth === null) return !requireApiKey;
-    return OPERATOR_SCOPES.has((auth as { scope?: string }).scope ?? "");
-  };
-  const connectorOnly = (auth: any): boolean => auth?.scope === "connector";
-
-  // #848 inline auth gates.
-  //
-  // The anonymous session's advertised tool list is deliberately IDENTICAL
-  // before and after login: a FastMCP session's tools are resolved once at
-  // construction (`setupToolHandlers` builds the call map from the filtered
-  // list), and there is no per-session refresh API. Gating visibility on login
-  // state would therefore require the client to reconnect before the tools it
-  // just earned appeared. Instead the connector tools are advertised to
-  // anonymous sessions up front and refuse to act until `verifiedEmail` is set.
-  const anonymousOnly = (auth: any): boolean => auth?.scope === "anonymous";
-  const connectorOrAnonymous = (auth: any): boolean =>
-    connectorOnly(auth) || anonymousOnly(auth);
+  const operatorOnly = makeOperatorOnly(requireApiKey);
 
   // Build tool groups once, then register + count (SEC-001 Phase 3).
   const toolGroups: Record<string, any>[] = [

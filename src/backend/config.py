@@ -142,6 +142,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 # for the breaker to engage — a true opt-in canary (D7/D11).
 DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
 
+# MCP inline email auth (#848). Same env key the mcp-server reads, so a
+# single-.env deploy cannot drift between the two halves. Default OFF: with it
+# off the whole /api/internal/mcp-auth surface 404s, so the backend does not
+# depend on the MCP server's own gate for its default-OFF posture. Gating BOTH
+# halves matters because this surface bypasses the email whitelist and creates
+# accounts — it must not be live on an install that never opted in.
+MCP_INLINE_AUTH_ENABLED = os.getenv("MCP_INLINE_AUTH_ENABLED", "false").lower() == "true"
+
 # Fire-and-Forget Dispatch — global master switch (#1083).
 # When ON, eligible autonomous turns are dispatched to the agent with a 202
 # accept and finalized via the result-callback endpoint, so a wedged turn

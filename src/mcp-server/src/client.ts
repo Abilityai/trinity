@@ -103,6 +103,9 @@ export function pickRecentMcpExecution(
   return matches[0];
 }
 
+/** Bound for #848 inline-auth control-plane calls (not chat). */
+const INLINE_AUTH_TIMEOUT_MS = Number(process.env.MCP_INLINE_AUTH_TIMEOUT_MS || 15000);
+
 export class TrinityClient {
   private baseUrl: string;
   private token?: string;
@@ -1631,11 +1634,48 @@ export class TrinityClient {
   // Inline email auth (#848)
   // ============================================================================
   //
+  // Timeout for the three control-plane calls (request/verify/playbooks). Chat
+  // uses the longer MCP_CHAT_TIMEOUT_MS ceiling, matching the key-based path.
+  //
   // These bypass `_fetch` on purpose: an anonymous session has no bearer token,
   // and `_fetch` throws without one. They authenticate the *caller* (this MCP
   // server) with the internal secret instead. The secret proves who is asking;
   // it never proves authorization — the backend gates every inline-auth call on
   // the verified email's own access (`email_has_agent_access`).
+
+  /**
+   * Bounded fetch for the inline-auth surface (#848).
+   *
+   * These four calls originally used bare `fetch` with no timeout, so a slow or
+   * hung agent pinned a socket and the anonymous tool call forever — and,
+   * because no tool sets `timeoutMs`, FastMCP's own tool timeout never fires
+   * either. The key-based chat path already bounds itself
+   * (MCP_CHAT_TIMEOUT_MS, see `chat`); leaving the inline path unbounded made
+   * the two caller tiers behave differently for the same underlying agent.
+   */
+  private async internalFetch(
+    path: string,
+    body: unknown,
+    timeoutMs: number
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: this.internalHeaders(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(`Trinity did not respond within ${timeoutMs}ms.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private internalHeaders(): Record<string, string> {
     const secret = process.env.INTERNAL_API_SECRET || "";
@@ -1654,11 +1694,11 @@ export class TrinityClient {
    * must not branch on the result (#186 enumeration safety).
    */
   async requestInlineLoginCode(email: string, sessionId?: string): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/request`, {
-      method: "POST",
-      headers: this.internalHeaders(),
-      body: JSON.stringify({ email, session_id: sessionId }),
-    });
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/request",
+      { email, session_id: sessionId },
+      INLINE_AUTH_TIMEOUT_MS
+    );
     if (!response.ok) {
       throw new Error(`Inline login request failed: ${response.status}`);
     }
@@ -1677,11 +1717,11 @@ export class TrinityClient {
     username?: string;
     agents?: Array<{ name: string; description?: string }>;
   }> {
-    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/verify`, {
-      method: "POST",
-      headers: this.internalHeaders(),
-      body: JSON.stringify({ email, code, session_id: sessionId }),
-    });
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/verify",
+      { email, code, session_id: sessionId },
+      INLINE_AUTH_TIMEOUT_MS
+    );
     if (response.status === 401) {
       return { verified: false };
     }
@@ -1705,11 +1745,11 @@ export class TrinityClient {
     email: string,
     agent: string
   ): Promise<Array<{ name: string; description?: string }>> {
-    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/playbooks`, {
-      method: "POST",
-      headers: this.internalHeaders(),
-      body: JSON.stringify({ email, agent }),
-    });
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/playbooks",
+      { email, agent },
+      INLINE_AUTH_TIMEOUT_MS
+    );
     if (response.status === 403) {
       throw new Error(`You do not have access to "${agent}".`);
     }
@@ -1725,11 +1765,13 @@ export class TrinityClient {
     agent: string,
     message: string
   ): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/api/internal/mcp-auth/chat`, {
-      method: "POST",
-      headers: this.internalHeaders(),
-      body: JSON.stringify({ email, agent, message }),
-    });
+    // Chat gets the same ceiling as the key-based path so the two caller tiers
+    // time out identically for the same agent.
+    const response = await this.internalFetch(
+      "/api/internal/mcp-auth/chat",
+      { email, agent, message },
+      Number(process.env.MCP_CHAT_TIMEOUT_MS || 25000)
+    );
     if (response.status === 403) {
       throw new Error(`You do not have access to "${agent}".`);
     }

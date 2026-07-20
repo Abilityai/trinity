@@ -704,6 +704,7 @@ async def log_audit_entry(request: InternalAuditRequest):
             mcp_key_name=request.mcp_key_name,
             mcp_scope=request.mcp_scope,
             actor_agent_name=request.actor_agent_name,
+            actor_email=request.actor_email,
             target_type=request.target_type,
             target_id=request.target_id,
             request_id=request.request_id,

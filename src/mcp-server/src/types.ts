@@ -86,8 +86,9 @@ export interface McpAuthContext extends Record<string, unknown> {
   // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
   // object by reference, so an in-place upgrade is observed by all subsequent
   // calls on the session without any library support. The session's advertised
-  // tool list is frozen at construction and is deliberately NOT changed by
-  // login — tool behaviour flips, tool visibility does not.
+  // advertised tool list is deliberately NOT keyed on login state — behaviour
+  // flips, visibility does not. (FastMCP does re-filter live sessions; a
+  // login-keyed gate would just flip at reconciler timing. See server.ts.)
   /** Set once the OTP is verified. Absent ⇒ still pre-login. */
   verifiedEmail?: string;
   /** Email awaiting a code, set by request_login. Not proof of anything. */

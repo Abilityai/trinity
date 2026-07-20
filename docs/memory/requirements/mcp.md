@@ -91,9 +91,13 @@ again. Accepted as the cost of the no-credential-on-disk model.
 The anonymous session is advertised the **same** tool set before and after login —
 `request_login`, `verify_login`, and the connector tools. Login flips tool *behaviour*, not
 tool *visibility*: before verification the connector tools return a "log in first" error.
-This is deliberate — a session's tool list is frozen at construction and there is no
-per-session refresh API, so gating visibility on login state would require a client
-reconnect to take effect.
+This is deliberate, but NOT because the list cannot change. FastMCP *does* re-filter a
+live session against its current auth (`FastMCPSession.toolsListChanged`), and Trinity
+triggers exactly that every ~20s through the #846 exposed-agents reconciler. That makes a
+login-state-dependent gate **non-deterministic**: visibility would flip whenever the
+reconciler happened to fire, unrelated to the login itself. A static surface is
+predictable. (A second hazard points the same way: `updateAuth` *replaces* the session's
+auth object rather than mutating it, which would silently discard the in-place upgrade.)
 
 ### Backend access path
 
