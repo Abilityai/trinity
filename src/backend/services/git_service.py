@@ -924,6 +924,12 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".claude/debug/",
     ".claude/sessions/",
     ".claude/shell-snapshots/",
+    # Marketplace plugin caches (#1702): Claude Code copies each installed
+    # plugin (skills/agents/hooks) into ~/.claude/plugins/cache/<plugin>@<ver>/.
+    # Since HOME == the agent's repo root, that lands in the working tree and
+    # the 15-min sync loop commits it (and every plugin update commits another
+    # copy) — repo bloat, same class as #1596. Re-installable, so never in git.
+    ".claude/plugins/",
     # Temporary files
     "*.log",
     "*.tmp",
