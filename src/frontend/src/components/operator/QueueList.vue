@@ -32,7 +32,7 @@
           class="flex-1 text-xs rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 focus:ring-blue-500 focus:border-blue-500"
         >
           <option value="">All Agents</option>
-          <option v-for="name in store.agentNames" :key="name" :value="name">{{ name }}</option>
+          <option v-for="name in store.agentNames" :key="name" :value="name">{{ agentOptionLabel(agentsStore.agentRefForSlug(name)) }}</option>
         </select>
         <select
           :value="store.filters.status"
@@ -118,7 +118,7 @@
 import { h } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
 import { useAgentsStore } from '../../stores/agents'
-import { agentNameTooltip } from '../../utils/agentName'
+import { agentNameTooltip, agentOptionLabel } from '../../utils/agentName'
 
 const store = useOperatorQueueStore()
 const agentsStore = useAgentsStore()

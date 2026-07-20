@@ -1292,7 +1292,7 @@
                                       :key="agent.name"
                                       :value="agent.name"
                                     >
-                                      {{ agentDisplayName(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
+                                      {{ agentOptionLabel(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
                                     </option>
                                   </select>
                                   <button
@@ -2262,7 +2262,7 @@ import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
-import { agentDisplayName } from '../utils/agentName'
+import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
