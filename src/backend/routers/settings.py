@@ -217,12 +217,12 @@ async def acknowledge_retention_prune(
     to approve a mass deletion of their own audit trail, and it lives in a table
     one of the guarded sweeps prunes.
 
-    Human-only. `require_admin` alone is NOT sufficient today: an agent-scoped MCP
+    Human-only. Admin-role alone is NOT sufficient today: an agent-scoped MCP
     key resolves to its owner *carrying the owner's role*, so on an install whose
     agents are admin-owned (the default — see cornelius_agent_service.CORNELIUS_OWNER)
-    an agent key passes `require_admin`. `reject_agent_principal` is therefore
-    applied explicitly here rather than relied upon from `require_admin`. See
-    abilityai/trinity-ops-agent#232 for the underlying fix.
+    an agent key passes the admin check. `reject_agent_principal` is therefore
+    applied explicitly here. See abilityai/trinity-ops-agent#232 for the
+    underlying fix.
 
     The ack is bound to `window_days`: approving a prune at 30 days does not
     approve one at 1 day. It is single-use — `cleanup_service` consumes it once the
@@ -233,7 +233,11 @@ async def acknowledge_retention_prune(
     # existing in-function import style).
     from dependencies import reject_agent_principal
 
-    require_admin(current_user)
+    # #1709: was `require_admin(current_user)` — a NameError (only `assert_admin`
+    # is imported here; `require_admin` is a FastAPI Depends factory, not an
+    # imperative call). The #1310 auth-wiring refactor left the endpoint 500ing on
+    # every request, so the guard's approval path never worked even for a caller.
+    assert_admin(current_user)
     reject_agent_principal(current_user)
 
     from services.retention_guard import record_acknowledgement
@@ -335,7 +339,51 @@ async def get_retention_status(
 
     # #1644: the guard's threshold is a fixed constant, not an operator setting —
     # reported here for visibility only.
-    from services.retention_guard import MAX_ROWS_PER_SWEEP
+    from services.retention_guard import (
+        MAX_ROWS_PER_SWEEP,
+        FLOOR_AGENTS,
+        FLOOR_SCHEDULES,
+        evaluate as _guard_evaluate,
+    )
+
+    # #1709: surface the sweeps a cleanup cycle would REFUSE right now, so the
+    # panel can offer an approve control. We re-run the guard live (the exact
+    # logic + count fns cleanup_service uses) rather than reading stale state or
+    # coupling to the operator queue — the result is always fresh and cannot
+    # show a "pending" that's already been acknowledged or pruned. Only the two
+    # low-floor, irreversible sweeps are ack-gated in practice; the agent purge
+    # (floor 0) is the one #1581 depends on. `limit` is bounded to floor+1, so
+    # each check counts at most a handful of rows.
+    _ack_sweeps = (
+        ("agent_soft_delete_retention_days",
+         "Soft-deleted agents (this destroys each agent's workspace/public/shared Docker volumes — irreversible)",
+         FLOOR_AGENTS, db.count_soft_deleted_agents_past_retention),
+        ("schedule_soft_delete_retention_days",
+         "Soft-deleted schedules",
+         FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
+    )
+    pending_acknowledgements = []
+    for _key, _label, _floor, _count_fn in _ack_sweeps:
+        _window = _ops_int(_key)
+        if _window <= 0:
+            continue  # sweep disabled → nothing to prune, nothing to approve
+        _verdict = _guard_evaluate(
+            _key, _window,
+            lambda limit, _cf=_count_fn, _w=_window: _cf(_w, limit),
+            floor=_floor,
+        )
+        # Only "over_threshold" is a genuine pending-approval. `count_failed` /
+        # `ack_lookup_failed` are fail-closed error states, not approvable, and
+        # an already-acked sweep returns allowed=True (so it drops off the list —
+        # the single-use, no-stale-state guarantee the panel needs).
+        if not _verdict.allowed and _verdict.reason == "over_threshold":
+            pending_acknowledgements.append({
+                "key": _key,
+                "label": _label,
+                "window_days": _window,
+                "candidate_count": _verdict.candidates,
+                "floor": _floor,
+            })
 
     return {
         "edition": "enterprise" if entitled else "community",
@@ -357,6 +405,9 @@ async def get_retention_status(
             "max_rows": MAX_ROWS_PER_SWEEP,
             "agents_always_require_acknowledgement": True,
         },
+        # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
+        # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
+        "pending_acknowledgements": pending_acknowledgements,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
