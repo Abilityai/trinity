@@ -803,8 +803,9 @@ Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md
 | GET | `/api/agents/context-stats` | Context & activity state for all agents |
 | GET | `/api/agents/autonomy-status` | Autonomy status for all accessible agents |
 | GET | `/api/agents/sync-health` | Per-agent git sync health for dashboard dots (#389) |
-| POST | `/api/agents` | Create agent |
+| POST | `/api/agents` | Create agent. Accepts an optional `display_label` (ent#1640) — the human-facing name set at creation (normalized + named-error validated like `PUT /label`); omit/blank → renders under the slug |
 | GET | `/api/agents/{name}` | Get agent details |
+| GET/PUT | `/api/agents/{name}/label` | Get / set-or-clear the agent's human-facing **display label** (ent#181/#1640). Owner-only (`OwnedAgentByName`); `label` nullable — blank/None clears to the slug fallback; presentation-only (the slug never moves, unlike `PUT /rename`); trims + rejects control chars/line-breaks with a **named** error, **not** unique (the slug guarantees uniqueness), audit-logged, broadcasts `agent_label_changed` |
 | DELETE | `/api/agents/{name}` | Soft-delete agent (see [Soft Delete](#soft-delete-retention--recovery-834-772)) |
 | POST | `/api/agents/{name}/start` | Start agent |
 | POST | `/api/agents/{name}/stop` | Stop agent |

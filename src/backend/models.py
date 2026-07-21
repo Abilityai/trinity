@@ -3,6 +3,7 @@ Pydantic models for the Trinity backend API.
 """
 import os
 import re
+import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
@@ -86,7 +87,11 @@ class EphemeralConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     """Configuration for creating a new agent."""
-    name: str
+    name: str  # the immutable slug — every route/container/volume/key keys on it
+    # ent#1640: optional human-facing display label set AT creation. Presentation
+    # only; None → the agent renders under its slug (exactly today's behavior).
+    # Same normalization + named validation as the post-creation PUT /label.
+    display_label: Optional[str] = None
     type: Optional[str] = "business-assistant"
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
@@ -113,6 +118,42 @@ class AgentConfig(BaseModel):
     # hard-discarded at budget. Entitlement-gated at the creation path.
     ephemeral: Optional[EphemeralConfig] = None
 
+    @field_validator("display_label")
+    @classmethod
+    def _normalize_display_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
+
+
+# ent#181/#1640 — the human-facing display label. Shared normalization + a
+# NAMED validation error (not a generic 422 blob), used everywhere a label is
+# accepted (set-after-creation AND at creation), so the policy lives in one place.
+DISPLAY_LABEL_MAX_LEN = 120
+
+
+def normalize_display_label(value: Optional[str]) -> Optional[str]:
+    """Trim, empty→None (clear), reject control chars / line breaks, cap length.
+
+    Uniqueness is deliberately NOT enforced — the slug (`agent_name`) already
+    guarantees uniqueness; a display label is a presentation string that may
+    legitimately repeat across agents (#1640). Raises ``ValueError`` with a
+    specific message on bad input so callers surface a named error.
+    """
+    if value is None:
+        return None
+    # Normalize to NFC so visually-identical labels compare/store consistently.
+    value = unicodedata.normalize("NFC", value).strip()
+    if not value:
+        return None  # blank clears the label → render under the slug again
+    if len(value) > DISPLAY_LABEL_MAX_LEN:
+        raise ValueError(
+            f"display label must be at most {DISPLAY_LABEL_MAX_LEN} characters"
+        )
+    # A display name is a single line: reject control chars (category Cc, incl.
+    # \n\t\r) and the Unicode line/paragraph separators.
+    if any(unicodedata.category(ch) == "Cc" or ch in (" ", " ") for ch in value):
+        raise ValueError("display label must not contain control characters or line breaks")
+    return value
+
 
 class AgentLabelUpdate(BaseModel):
     """PUT body — set or clear an agent's human-facing label (ent#181).
@@ -121,7 +162,12 @@ class AgentLabelUpdate(BaseModel):
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
     """
-    label: Optional[str] = Field(default=None, max_length=120)
+    label: Optional[str] = None
+
+    @field_validator("label")
+    @classmethod
+    def _normalize_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
 
 
 class AgentStatus(BaseModel):

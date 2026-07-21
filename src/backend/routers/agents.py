@@ -886,6 +886,22 @@ async def set_agent_label_endpoint(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     label = db.get_display_label(agent_name)
+
+    # ent#1640: audit the label change (set vs clear). Best-effort — never blocks
+    # the (already-committed) write. `label` is the resolved stored value.
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AGENT_LIFECYCLE,
+            event_action="set_display_label" if label else "clear_display_label",
+            source="api",
+            actor_user=current_user,
+            target_type="agent",
+            target_id=agent_name,
+            details={"display_label": label},
+        )
+    except Exception:
+        logger.debug("[#1640] display-label audit log failed", exc_info=True)
+
     if manager:
         await manager.broadcast(json.dumps({
             # `event` is the field the frontend WS client switches on; `type`
