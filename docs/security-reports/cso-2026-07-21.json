@@ -1,0 +1,62 @@
+{
+  "version": "cso",
+  "date": "2026-07-21",
+  "mode": "daily",
+  "scope": "--diff",
+  "base": "f0ce22c4f8867b28562892db4cd6451ee8e7fa9f",
+  "branch": "feature/848-mcp-inline-email-auth",
+  "subject": "#848 MCP inline email auth (anonymous MCP session tier + /api/internal/mcp-auth/*)",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14],
+  "attack_surface": {
+    "new_internal_endpoints": 4,
+    "new_unauth_mcp_tools": 2,
+    "new_session_tier": "anonymous (keyless) MCP session",
+    "new_outbound_http": "4 internalFetch calls, fixed literal paths, config baseUrl (no user-controlled host)",
+    "widened_trust": "INTERNAL_API_SECRET can now act as any verified email via /chat + /playbooks (flag-gated, default off)"
+  },
+  "findings": [],
+  "accepted_risk_notes": [
+    {
+      "id": "N1",
+      "severity": "INFORMATIONAL",
+      "title": "INTERNAL_API_SECRET widened to act as any verified email",
+      "detail": "The /chat and /playbooks endpoints let a caller holding the internal secret dispatch chat / list playbooks as any email that passes email_has_agent_access. This is the mechanism option A requires. It grants NO privilege beyond internal-secret compromise, which already gates all of /api/internal/* (backend god-mode). Gated behind MCP_INLINE_AUTH_ENABLED (default OFF) and the internal secret (network-internal). Documented in the PR. Note the pre-existing INTERNAL_API_SECRET -> SECRET_KEY fallback (routers/internal.py:42): the widened surface is another reason to set INTERNAL_API_SECRET explicitly in production rather than rely on the fallback.",
+      "action": "Accepted design. No code change required. Keep the flag off unless sharing agents with external users; set INTERNAL_API_SECRET explicitly."
+    },
+    {
+      "id": "N2",
+      "severity": "INFORMATIONAL",
+      "title": "Inline /verify shares the per-account login bucket (pre-existing, targeted DoS only)",
+      "detail": "check_login_rate_limit_account_only uses login_attempts_acct:{email} (LOGIN_ACCOUNT_LIMIT=5), the same bucket the web login path already increments. 5 bad inline codes for a known email can 429 that email's web login for 15 min. Pre-existing property of the shared account bucket; #848 adds no new capability. DoS-class, hard-excluded.",
+      "action": "No change. Noted for completeness."
+    }
+  ],
+  "verification": {
+    "method": "fresh-context adversarial refutation subagent over 7 attack axes",
+    "result": "all 7 REFUTED with quoted proof lines",
+    "axes": [
+      "default-safe posture (flag off => surface inert, both halves)",
+      "internal-secret authz boundary (re-gate before idempotency + dispatch; no normalization split)",
+      "cross-user idempotency replay (make_inline_auth_scope folds normalized email)",
+      "enumeration / email relay (constant response + BackgroundTask + fail-closed known-check + global cap)",
+      "anonymous -> operator tool reach (allow-list gate; canAccess enforced at tools/call in fastmcp 4.4.0)",
+      "verify_login info disclosure (uniform INVALID_CODE_RESPONSE, upstream detail swallowed)",
+      "audit integrity (actor_email is resolver-fallback only; forgery needs the internal secret)"
+    ]
+  },
+  "guards_checked": {
+    "secrets_in_diff": "none",
+    "enterprise_docs_guard": "intact (covers main.py + entitlement_service.py); no paid-feature tokens in changed docs/seam",
+    "agent_auth_header_guard": "pass",
+    "enumeration_uniformity_186": "pass",
+    "credential_paths_parity": "pass"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "informational": 2
+  },
+  "note": "This --diff scan followed two adversarial /review passes on the same branch that surfaced and fixed 7 findings (1 critical cross-user replay, 1 critical ungated backend, 3 high, plus mediums). /cso verified those fixes hold in the final code and attacked the security-specific axes independently; nothing new survived the confidence gate."
+}
