@@ -479,6 +479,19 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting session cleanup service: {e}")
     asyncio.create_task(_start_session_cleanup_delayed())
 
+    # ent#12: Tier-2 opt-in telemetry-sharing heartbeat. Sleeps-first (no boot
+    # burst) and is inert unless the operator opted in AND the config switch is
+    # on — a cheap consent read otherwise. Staggered +9s.
+    async def _start_telemetry_sharing_delayed():
+        await asyncio.sleep(9)
+        try:
+            from services.telemetry_sharing_service import telemetry_sharing_service
+            telemetry_sharing_service.start()
+            logger.info("Telemetry-sharing heartbeat started (staggered +9s)")
+        except Exception as e:
+            logger.error(f"Error starting telemetry-sharing service: {e}")
+    asyncio.create_task(_start_telemetry_sharing_delayed())
+
     # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
     async def _start_sync_health_delayed():
         await asyncio.sleep(5)

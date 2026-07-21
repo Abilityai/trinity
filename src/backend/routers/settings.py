@@ -4,6 +4,7 @@ System settings routes for the Trinity backend.
 Provides endpoints for managing system-wide configuration like the Trinity prompt.
 Admin-only access for modification, read access for all authenticated users.
 """
+import asyncio
 import logging
 import os
 import re
@@ -30,11 +31,13 @@ from models import (
     RetentionAcknowledge,
     SlackConnectRequest,
     SlackSettingsUpdate,
+    TelemetrySharingUpdate,
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
 from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
@@ -200,7 +203,70 @@ async def get_public_feature_flags(
         # enterprise-only tabs cleanly without server-side conditional
         # rendering. Mirrors the deny-list pattern of the other flags.
         "enterprise_features": entitlement_service.list_entitled_features(),
+        # ent#12 Tier-2 opt-in sharing — observability only (the egress gate is
+        # the stored consent + config switch). Default-off; the UI reads it to
+        # show the sharing state without a second round-trip. Non-sensitive bool.
+        "telemetry_sharing_enabled": telemetry_sharing_service.is_consent_enabled(),
     }
+
+
+@router.get("/telemetry-sharing")
+async def get_telemetry_sharing(current_user: User = Depends(get_current_user)):
+    """Tier-2 opt-in sharing status + an inspectable preview of the exact
+    anonymized payload that would be sent (ent#12). Admin-only. Local read — no
+    egress. The preview lets the operator see precisely what is shared before
+    consenting (AC: payload documented and inspectable before send)."""
+    assert_admin(current_user)
+    status = telemetry_sharing_service.get_status()
+    # Preview over the configured backfill window — what a consent-time share
+    # would contain. Coarse aggregates only; never any PII.
+    status["payload_preview"] = telemetry_sharing_service.build_aggregate_payload(
+        window_days=status.get("backfill_days"), backfill=True
+    )
+    return status
+
+
+@router.put("/telemetry-sharing")
+async def set_telemetry_sharing(
+    body: TelemetrySharingUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Set (or revoke) the Tier-2 sharing consent (ent#12). Admin + human-only.
+    Default-off, reversible. On enable, an immediate backfill share is scheduled
+    (fire-and-forget) so the first send includes the disclosed history window;
+    disabling stops egress at the next heartbeat. Audit-logged."""
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    if telemetry_sharing_service.is_hard_disabled() and body.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Telemetry sharing is disabled by configuration "
+            "(TELEMETRY_SHARING_ENABLED / DO_NOT_TRACK); consent cannot enable egress.",
+        )
+
+    was_enabled = telemetry_sharing_service.is_consent_enabled()
+    status = telemetry_sharing_service.set_consent(
+        body.enabled, backfill_days=body.backfill_days
+    )
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.SETTINGS,
+            event_action="telemetry_sharing_consent",
+            source="api",
+            actor_user=current_user,
+            details={"enabled": body.enabled, "backfill_days": status.get("backfill_days")},
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[telemetry-share] audit log failed", exc_info=True)
+
+    # Consent-time backfill: only on the off→on transition, fire-and-forget.
+    if body.enabled and not was_enabled:
+        asyncio.create_task(telemetry_sharing_service.share_now(backfill=True))
+
+    return status
 
 
 @router.post("/retention/acknowledge")

@@ -22,6 +22,19 @@
       </select>
     </div>
 
+    <!-- ent#12 Tier-2 — fleet benchmark reciprocity carrot (gated view). v1 is a
+         status surface until the hosted benchmark service lands. -->
+    <div
+      v-if="benchmark"
+      class="mx-6 mt-4 rounded-md border px-4 py-3 text-sm"
+      :class="benchmark.sharing_enabled
+        ? 'border-action-primary-200 dark:border-action-primary-800 bg-action-primary-50 dark:bg-action-primary-900/20'
+        : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40'"
+    >
+      <p class="font-medium text-gray-900 dark:text-gray-100">Fleet benchmarks</p>
+      <p class="mt-0.5 text-xs text-gray-600 dark:text-gray-400">{{ benchmark.message }}</p>
+    </div>
+
     <div class="p-6">
       <div v-if="loading" class="text-sm text-gray-500 dark:text-gray-400">Loading…</div>
 
@@ -113,6 +126,7 @@ const error = ref('')
 const funnelCounts = ref({})
 const firstValueCounts = ref({})
 const installationId = ref('')
+const benchmark = ref(null)  // ent#12 Tier-2 carrot status
 
 const funnel = computed(() =>
   FUNNEL_STEPS.map((s) => ({ ...s, count: funnelCounts.value[s.key] || 0 }))
@@ -152,6 +166,13 @@ async function load() {
     funnelCounts.value = r.data?.funnel || {}
     firstValueCounts.value = r.data?.first_value || {}
     installationId.value = r.data?.installation_id || ''
+    // ent#12: fetch the Tier-2 benchmark status (best-effort, non-blocking).
+    try {
+      const b = await api.get('/api/enterprise/telemetry/benchmark')
+      benchmark.value = b.data || null
+    } catch {
+      benchmark.value = null
+    }
   } catch (e) {
     error.value =
       e?.response?.data?.detail ||

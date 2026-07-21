@@ -167,6 +167,12 @@
                The panel fetches the gated enterprise endpoint itself. -->
           <ActivationFunnelPanel v-if="activeTab === 'activation'" />
 
+          <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
+               reversible. Admin-only (General tab), visible in every edition. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <TelemetrySharingPanel />
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2312,6 +2318,7 @@ import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
+import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
