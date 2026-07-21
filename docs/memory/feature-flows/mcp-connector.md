@@ -99,6 +99,22 @@ backend re-gates EVERY call: email_has_agent_access(agent, email) AND connector 
   → uniform 403 otherwise; chat runs through TaskExecutionService (triggered_by="mcp")
 ```
 
+**Keyless setup (AC6).** With the flag on, the owner shares the agent WITHOUT minting
+a key — the collaborator drops in a keyless config and signs in by email. The connector
+panel surfaces this ("Share without a key — sign in by email") whenever
+`ConnectorStatus.inline_auth_available` is true, alongside the keyed setup; the same
+`connector_service` builds both variants (`build_keyless_snippets` → `_client_snippets`
+with no key) so they cannot drift. The `.mcp.json` a collaborator pastes is simply the
+keyed block minus the `Authorization` header:
+
+```json
+{ "mcpServers": { "trinity-<agent>": { "type": "http", "url": "<mcp_url>" } } }
+```
+
+Then `request_login("me@example.com")` → `verify_login("123456")` in the client. The
+keyless config is offered ONLY when `MCP_INLINE_AUTH_ENABLED` is on — an anonymous MCP
+session is rejected otherwise, so a keyless config would not connect.
+
 **Why a session and not a minted key** (§7.6): every other channel binds a verified
 email server-side and hands the user nothing. The cost is that a FastMCP session is
 per-connection, so a client restart requires signing in again.

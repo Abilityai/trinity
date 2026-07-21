@@ -99,6 +99,18 @@ reconciler happened to fire, unrelated to the login itself. A static surface is
 predictable. (A second hazard points the same way: `updateAuth` *replaces* the session's
 auth object rather than mutating it, which would silently discard the in-place upgrade.)
 
+### Keyless setup surface
+
+The owner shares the agent **without minting a key**: the connector panel shows a
+"Share without a key — sign in by email" block whenever `ConnectorStatus.inline_auth_available`
+is true (i.e. `MCP_INLINE_AUTH_ENABLED` is on), carrying `keyless_snippets` — the same
+per-client config blocks as the keyed setup but with no `Authorization` header, so the
+client connects as an anonymous session and signs in via `request_login`/`verify_login`.
+`services/connector_service.build_keyless_snippets` and `build_snippets` share one
+`_client_snippets` builder so the keyed and keyless variants cannot drift. The keyless
+config is offered **only** when the flag is on — an anonymous MCP session is rejected
+otherwise, so the config would not connect (no dead setup instructions).
+
 ### Backend access path
 
 An email-verified session holds no API key, so the MCP server reaches Trinity over a

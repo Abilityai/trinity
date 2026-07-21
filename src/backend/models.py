@@ -933,6 +933,12 @@ class ConnectorStatus(BaseModel):
     key_prefix: Optional[str] = None
     mcp_url: Optional[str] = None
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    # #848 inline email auth. When the platform flag is on, an owner can share
+    # the agent WITHOUT minting a key: the collaborator connects keyless and
+    # signs in by email. `inline_auth_available` mirrors the flag;
+    # `keyless_snippets` is the no-key config (empty when the flag is off).
+    inline_auth_available: bool = False
+    keyless_snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

@@ -33,8 +33,10 @@ from models import (
     ConnectorKeySecret,
     ConnectorPlaybook,
 )
+import config
 from database import db
 from services.connector_service import (
+    build_keyless_snippets,
     build_snippets,
     fetch_live_playbooks,
     resolve_exposed_playbooks,
@@ -50,6 +52,10 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
     cfg = db.get_connector_config(agent_name)
     key_prefix = db.get_connector_key_prefix(agent_name)
     mcp_url = resolve_mcp_url(request)
+    # #848: offer the keyless (email-login) setup only when inline auth is on —
+    # an anonymous MCP session is rejected otherwise, so the config would not
+    # work. Independent of `has_key`: the two are alternative ways to share.
+    inline_available = config.MCP_INLINE_AUTH_ENABLED
     return ConnectorStatus(
         agent_name=agent_name,
         enabled=bool(cfg["enabled"]) if cfg else False,
@@ -58,6 +64,8 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
         key_prefix=key_prefix,
         mcp_url=mcp_url,
         snippets=build_snippets(agent_name, mcp_url, _KEY_PLACEHOLDER) if key_prefix else [],
+        inline_auth_available=inline_available,
+        keyless_snippets=build_keyless_snippets(agent_name, mcp_url) if inline_available else [],
         created_at=cfg["created_at"] if cfg else None,
         updated_at=cfg["updated_at"] if cfg else None,
     )
