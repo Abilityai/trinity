@@ -56,7 +56,12 @@ jobs:
     # Per-PR diff job — no base/head exists on a push, so skip there.
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The suite runs ~7-8 min on a normal runner, but GitHub's shared runners
+    # vary ~2-2.5x; a slow one was hitting the old 15-min cap at ~78% done and
+    # getting killed (a spurious red — the tests were all passing). 25 gives real
+    # headroom for the slow tail without masking a genuine hang (pytest-timeout
+    # still bounds any single test).
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
