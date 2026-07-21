@@ -503,6 +503,21 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Local product-event capture — activation funnel, Tier-1 (ent#184)
+    # Local-only, default-on, zero egress. Wizard step transitions are emitted;
+    # first-value events are derived on read from audit_log/agent_activities.
+    # -------------------------------------------------------------------------
+    "product_events": """
+        CREATE TABLE IF NOT EXISTS product_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            installation_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_context TEXT,
+            created_at TEXT NOT NULL
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Notifications (NOTIF-001)
     # -------------------------------------------------------------------------
     "agent_notifications": """
@@ -1379,6 +1394,11 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
+
+    # Product-event capture (ent#184): funnel aggregation groups by event_type,
+    # backfill/query orders by created_at.
+    "CREATE INDEX IF NOT EXISTS idx_product_events_type_created ON product_events(event_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_product_events_created ON product_events(created_at)",
 
     # Permission indexes
     "CREATE INDEX IF NOT EXISTS idx_permissions_source ON agent_permissions(source_agent)",

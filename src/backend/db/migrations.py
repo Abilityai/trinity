@@ -3083,6 +3083,41 @@ def _migrate_schedule_executions_redelivery_count(cursor, conn):
     conn.commit()
 
 
+def _migrate_product_events_table(cursor, conn):
+    """Create product_events table (ent#184).
+
+    Local product-event capture — activation funnel, Tier-1. Local-only,
+    default-on, zero egress. Records onboarding-wizard step transitions; the
+    first-value events are derived on read from audit_log/agent_activities.
+    Schema is also in db/schema.py for fresh installs; this handles existing
+    installs. Idempotent. Mirrored by the Alembic revision 0029_product_events
+    for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(product_events)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS product_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            installation_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_context TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_events_type_created "
+        "ON product_events(event_type, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_events_created "
+        "ON product_events(created_at)"
+    )
+    conn.commit()
+    print("Created product_events table (ent#184)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3183,4 +3218,5 @@ MIGRATIONS = [
     ("operator_queue_request_id", _migrate_operator_queue_request_id),
     ("users_github_pat", _migrate_users_github_pat),
     ("agent_reminders_table", _migrate_agent_reminders_table),
+    ("product_events_table", _migrate_product_events_table),
 ]

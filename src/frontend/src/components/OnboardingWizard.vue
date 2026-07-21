@@ -154,6 +154,7 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import CreateAgentModal from './CreateAgentModal.vue'
+import { useProductTelemetryStore } from '../stores/productTelemetry'
 
 defineProps({
   // Whether platform Claude auth is configured (from feature-flags). Decides
@@ -163,6 +164,10 @@ defineProps({
 const emit = defineEmits(['close', 'deployed'])
 
 const router = useRouter()
+
+// Local product-event funnel (ent#184). Fire-and-forget beacons; never awaited,
+// never blocks the wizard. Zero egress — recorded on this instance only.
+const telemetry = useProductTelemetryStore()
 
 // Intent → starter template. Each maps to a real local template shipped in
 // config/agent-templates. CreateAgentModal falls back to a blank agent if a
@@ -218,6 +223,8 @@ onMounted(() => {
   // Scroll-lock the page behind the modal; restored on unmount.
   document.body.style.overflow = 'hidden'
   nextTick(() => focusable()[0]?.focus())
+  // Funnel: the operator opened the first-run wizard (top of the funnel).
+  telemetry.record('setup_started')
 })
 
 onUnmounted(() => {
@@ -228,6 +235,8 @@ onUnmounted(() => {
 function select(p) {
   selectedTemplate.value = p.template
   step.value = 'create'           // hand off to the real create form
+  // Funnel: picked an intent, advanced to the create form.
+  telemetry.record('setup_step_create', { purpose: p.key })
 }
 
 function onModalClose() {
@@ -241,18 +250,25 @@ function onCreated(agent) {
   createdName.value = agent?.name || ''
   emit('deployed', createdName.value)
   step.value = 'credential'        // lead to the credential they must provide
+  // Funnel: first agent created → reached the credential step.
+  telemetry.record('setup_step_credential')
 }
 
 function dismiss() {
+  // Funnel: an exit with an agent already created counts as completed; a bare
+  // dismiss (X/Escape/backdrop before creating) is a drop-off.
+  telemetry.record(createdName.value ? 'setup_completed' : 'setup_dismissed', { via: 'dismiss' })
   emit('close')
 }
 
 function goToCredentials() {
+  telemetry.record('setup_completed', { via: 'credentials' })
   emit('close')
   router.push({ path: '/settings', query: { tab: 'integrations' } })
 }
 
 function openChat() {
+  telemetry.record('setup_completed', { via: 'chat' })
   emit('close')
   if (createdName.value) {
     router.push({ path: `/agents/${createdName.value}`, query: { tab: 'chat' } })

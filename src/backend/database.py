@@ -113,6 +113,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.product_events import ProductEventOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -432,6 +433,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._product_event_ops = ProductEventOperations()
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -1454,6 +1456,24 @@ class DatabaseManager:
 
     def prune_agent_reports(self, retention_days: int = 90, chunk_size: int = 1000):
         return self._report_ops.prune_agent_reports(retention_days, chunk_size)
+
+    # =========================================================================
+    # Local Product-Event Capture Methods (ent#184 — delegated to db/product_events.py)
+    # =========================================================================
+
+    def record_product_event(self, installation_id, event_type, event_context=None):
+        return self._product_event_ops.record_product_event(
+            installation_id, event_type, event_context
+        )
+
+    def count_product_events_by_type(self, since=None):
+        return self._product_event_ops.count_product_events_by_type(since)
+
+    def list_product_events(self, event_type=None, since=None, limit=1000, offset=0):
+        return self._product_event_ops.list_product_events(event_type, since, limit, offset)
+
+    def prune_product_events(self, retention_days, chunk_size=1000):
+        return self._product_event_ops.prune_product_events(retention_days, chunk_size)
 
     # =========================================================================
     # Agent Self-Reminder Methods (#1296 — delegated to db/reminders.py)
