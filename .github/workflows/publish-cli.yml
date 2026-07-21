@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0  # Need full history for tag detection
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -85,7 +85,7 @@ jobs:
       - name: Publish to PyPI
         if: steps.check.outputs.skip != 'true'
         # SHA-pinned to mitigate supply-chain hijack of the release/v1 branch.
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
           packages-dir: src/cli/dist/
 
