@@ -1,14 +1,14 @@
 <template>
-  <nav class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900">
+  <nav ref="navRef" data-testid="global-navigation" class="border-b border-gray-200 bg-white shadow dark:border-gray-700 dark:bg-gray-800 dark:shadow-gray-900">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex justify-between h-16">
-        <div class="flex">
+      <div class="flex h-16 items-stretch justify-between gap-2">
+        <div class="flex min-w-0">
           <router-link to="/" class="flex-shrink-0 flex items-center hover:opacity-80 transition-opacity">
             <img src="../assets/trinity-logo.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 dark:hidden" />
             <img src="../assets/trinity-logo-white.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 hidden dark:block" />
             <h1 class="text-xl font-bold text-gray-900 dark:text-white">Trinity</h1>
           </router-link>
-          <div class="hidden sm:ml-6 sm:flex sm:space-x-8">
+          <div data-testid="desktop-navigation" class="hidden min-w-0 xl:ml-6 xl:flex xl:space-x-6 2xl:space-x-8">
             <router-link
               to="/"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
@@ -82,18 +82,29 @@
             </router-link>
           </div>
         </div>
-        <div class="flex items-center space-x-4">
+        <div class="flex flex-shrink-0 items-center space-x-2 lg:space-x-3 xl:space-x-4">
           <!-- WebSocket Status -->
-          <span class="text-sm text-gray-500 dark:text-gray-400">
-            <span class="inline-block h-2 w-2 rounded-full mr-1" :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"></span>
-            {{ isConnected ? 'Connected' : 'Disconnected' }}
+          <span
+            class="hidden flex-shrink-0 items-center whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 xl:inline-flex"
+            data-testid="desktop-connection-status"
+            role="status"
+            aria-live="polite"
+            :aria-label="isConnected ? 'Connected' : 'Disconnected'"
+            :title="isConnected ? 'Connected' : 'Disconnected'"
+          >
+            <span
+              class="mr-1 inline-block h-2 w-2 rounded-full"
+              :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"
+              aria-hidden="true"
+            ></span>
+            <span>{{ isConnected ? 'Connected' : 'Disconnected' }}</span>
           </span>
 
           <!-- Build Info Chip (#926) — small muted version label; click opens detail modal -->
           <button
             v-if="buildInfo.info.value"
             @click="showBuildInfoModal = true"
-            class="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono"
+            class="hidden font-mono text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 xl:inline-flex"
             :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
           >
             v{{ buildInfo.displayVersion.value }}<span
@@ -108,7 +119,7 @@
             href="https://docs.ability.ai"
             target="_blank"
             rel="noopener noreferrer"
-            class="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            class="hidden p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 lg:inline-flex"
             title="Documentation (opens docs.ability.ai)"
             aria-label="Documentation"
           >
@@ -121,7 +132,7 @@
           <!-- Theme Toggle Button -->
           <button
             @click="cycleTheme"
-            class="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            class="hidden p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 lg:inline-flex"
             :title="themeTitle"
           >
             <!-- Sun icon for light mode -->
@@ -135,6 +146,26 @@
             <!-- Computer/System icon for system mode -->
             <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+          </button>
+
+          <!-- Compact navigation trigger: the full route strip cannot fit safely
+               alongside connection and account utilities below xl. -->
+          <button
+            ref="compactNavButtonRef"
+            data-testid="compact-navigation-trigger"
+            @click="toggleCompactNav"
+            class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 xl:hidden"
+            type="button"
+            :aria-label="showCompactNav ? 'Close navigation' : 'Open navigation'"
+            aria-controls="trinity-compact-navigation"
+            :aria-expanded="showCompactNav"
+          >
+            <svg v-if="!showCompactNav" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            <svg v-else class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
 
@@ -235,6 +266,67 @@
           </div>
         </div>
       </div>
+
+      <!-- Compact primary navigation. Route links and runtime state get their
+           own rows so async badges and build metadata cannot collide. -->
+      <div
+        v-if="showCompactNav"
+        id="trinity-compact-navigation"
+        data-testid="compact-navigation-panel"
+        role="navigation"
+        aria-label="Primary navigation"
+        class="border-t border-gray-200 py-3 dark:border-gray-700 xl:hidden"
+      >
+        <div class="grid gap-1 sm:grid-cols-2">
+          <router-link
+            v-for="item in compactNavItems"
+            :key="item.key"
+            :to="item.to"
+            class="flex min-h-11 items-center justify-between rounded-lg px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-300 dark:hover:bg-gray-700 dark:hover:text-white"
+            :class="item.active ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : ''"
+            @click="showCompactNav = false"
+          >
+            <span>{{ item.label }}</span>
+            <span
+              v-if="item.key === 'operations' && combinedOpsCount > 0"
+              class="inline-flex items-center justify-center rounded-full px-1.5 py-0.5 text-xs font-bold leading-none text-white"
+              :class="hasCriticalOpsItem ? 'bg-status-danger-500 animate-pulse' : 'bg-status-urgent-500'"
+            >
+              {{ combinedOpsCount > 99 ? '99+' : combinedOpsCount }}
+            </span>
+            <span
+              v-else-if="item.key === 'enterprise'"
+              class="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-bold leading-none text-purple-700 dark:bg-purple-900 dark:text-purple-200"
+            >PRO</span>
+          </router-link>
+        </div>
+
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 px-3 pt-3 text-xs text-gray-500 dark:border-gray-700 dark:text-gray-400">
+          <span
+            class="inline-flex items-center whitespace-nowrap"
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              class="mr-1.5 inline-block h-2 w-2 rounded-full"
+              :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"
+              aria-hidden="true"
+            ></span>
+            {{ isConnected ? 'Connected' : 'Disconnected' }}
+          </span>
+          <button
+            v-if="buildInfo.info.value"
+            @click="showBuildInfoModal = true; showCompactNav = false"
+            class="font-mono text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+            :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
+          >
+            v{{ buildInfo.displayVersion.value }}<span
+              v-if="buildInfo.info.value.git_commit_short && buildInfo.info.value.git_commit_short !== 'unknown'"
+              class="ml-1 opacity-70"
+            >· {{ buildInfo.info.value.git_commit_short }}</span>
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Build Info Modal (#926) — click-out to dismiss -->
@@ -301,7 +393,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
@@ -346,6 +438,27 @@ const hasCriticalOpsItem = computed(() =>
   operatorQueueStore.criticalCount > 0 || notificationsStore.hasUrgentPending
 )
 
+const compactNavItems = computed(() => {
+  const items = [
+    { key: 'dashboard', label: 'Dashboard', to: '/', active: route.value.path === '/' },
+    { key: 'agents', label: 'Agents', to: '/agents', active: isAgentSection.value },
+    { key: 'templates', label: 'Templates', to: '/templates', active: route.value.path === '/templates' },
+    { key: 'operations', label: 'Operations', to: '/operations', active: route.value.path === '/operations' },
+    { key: 'settings', label: 'Settings', to: '/settings', active: route.value.path === '/settings' }
+  ]
+
+  if (enterpriseStore.hasAnyEnterprise) {
+    items.push({
+      key: 'enterprise',
+      label: 'Enterprise',
+      to: '/enterprise',
+      active: route.value.path.startsWith('/enterprise')
+    })
+  }
+
+  return items
+})
+
 // Theme management
 const themeTitle = computed(() => {
   const titles = {
@@ -366,12 +479,20 @@ const setTheme = (theme) => {
 
 // User menu state
 const showUserMenu = ref(false)
+const showCompactNav = ref(false)
+const navRef = ref(null)
+const compactNavButtonRef = ref(null)
 const userMenuRef = ref(null)
 const avatarError = ref(false)
+
+watch(() => route.value.fullPath, () => {
+  showCompactNav.value = false
+})
 
 onMounted(async () => {
   // Add click outside listener
   document.addEventListener('click', handleClickOutside)
+  document.addEventListener('keydown', handleKeydown)
 
   // Start polling for notifications
   notificationsStore.startPolling(60000)
@@ -398,16 +519,38 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', handleKeydown)
   notificationsStore.stopPolling()
 })
 
 const toggleUserMenu = () => {
+  showCompactNav.value = false
   showUserMenu.value = !showUserMenu.value
+}
+
+const toggleCompactNav = () => {
+  showUserMenu.value = false
+  showCompactNav.value = !showCompactNav.value
 }
 
 const handleClickOutside = (event) => {
   if (userMenuRef.value && !userMenuRef.value.contains(event.target)) {
     showUserMenu.value = false
+  }
+  if (navRef.value && !navRef.value.contains(event.target)) {
+    showCompactNav.value = false
+  }
+}
+
+const handleKeydown = async (event) => {
+  if (event.key === 'Escape') {
+    const compactNavWasOpen = showCompactNav.value
+    showCompactNav.value = false
+    showUserMenu.value = false
+    if (compactNavWasOpen) {
+      await nextTick()
+      compactNavButtonRef.value?.focus()
+    }
   }
 }
 

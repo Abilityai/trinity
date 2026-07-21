@@ -1,11 +1,11 @@
 <template>
-  <div class="replay-timeline flex flex-col h-full bg-gray-50 dark:bg-gray-900">
+  <div data-testid="replay-timeline" class="replay-timeline flex min-h-0 min-w-0 flex-col h-full bg-gray-50 dark:bg-gray-900">
     <!-- Header with controls -->
-    <div class="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 flex-shrink-0">
+    <div data-testid="replay-timeline-toolbar" class="flex flex-col items-stretch gap-2 px-4 py-2 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 flex-shrink-0 lg:flex-row lg:items-center lg:justify-between">
       <!-- Left: Controls -->
-      <div class="flex items-center space-x-3">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <!-- Zoom Controls -->
-        <div class="flex items-center space-x-1">
+        <div class="flex flex-shrink-0 items-center space-x-1">
           <button
             @click="zoomOut"
             class="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400"
@@ -22,7 +22,7 @@
             min="0.5"
             max="20"
             step="0.5"
-            class="w-20 h-1 accent-blue-500"
+            class="h-1 w-16 accent-blue-500 sm:w-20"
             title="Zoom level"
           />
           <button
@@ -34,12 +34,12 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
             </svg>
           </button>
-          <span class="text-xs text-gray-400 dark:text-gray-500 ml-1 w-8">{{ Math.round(zoomLevel * 100) }}%</span>
+          <span class="ml-1 w-10 whitespace-nowrap text-right text-xs tabular-nums text-gray-400 dark:text-gray-500">{{ Math.round(zoomLevel * 100) }}%</span>
         </div>
 
         <!-- Hide inactive toggle -->
-        <div class="flex items-center space-x-1 border-l border-gray-300 dark:border-gray-600 pl-3">
-          <label class="flex items-center space-x-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
+        <div class="flex flex-shrink-0 items-center space-x-1 border-l border-gray-300 dark:border-gray-600 pl-3">
+          <label class="flex items-center space-x-1.5 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400 cursor-pointer">
             <input
               type="checkbox"
               v-model="hideInactiveAgents"
@@ -53,7 +53,7 @@
         <button
           v-if="isLiveMode && !autoScrollEnabled"
           @click="jumpToNow"
-          class="flex items-center space-x-1 px-2 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 rounded hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors"
+          class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap px-2 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 rounded hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors"
         >
           <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd" />
@@ -63,43 +63,45 @@
       </div>
 
       <!-- Right: Legend and Stats -->
-      <div class="flex items-center space-x-4 text-xs text-gray-500 dark:text-gray-400">
+      <div class="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-gray-500 dark:text-gray-400 lg:flex-nowrap lg:justify-end">
         <!-- Activity type legend -->
-        <div class="hidden sm:flex items-center space-x-3 border-r border-gray-300 dark:border-gray-600 pr-3">
-          <span class="flex items-center space-x-1" title="Manual task executions">
+        <div data-testid="replay-timeline-legend" class="hidden min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-r border-gray-300 pr-3 dark:border-gray-600 sm:flex lg:flex-nowrap">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Manual task executions">
             <span class="w-2 h-2 rounded" style="background-color: #22c55e"></span>
             <span>Manual</span>
           </span>
-          <span class="flex items-center space-x-1" title="MCP executions (via Claude Code)">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="MCP executions (via Claude Code)">
             <span class="w-2 h-2 rounded" style="background-color: #ec4899"></span>
             <span>MCP</span>
           </span>
-          <span class="flex items-center space-x-1" title="Scheduled task executions">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Scheduled task executions">
             <span class="w-2 h-2 rounded" style="background-color: #8b5cf6"></span>
             <span>Scheduled</span>
           </span>
-          <span class="flex items-center space-x-1" title="Agent-triggered executions (called by another agent)">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Agent-triggered executions (called by another agent)">
             <span class="w-2 h-2 rounded" style="background-color: #06b6d4"></span>
             <span>Agent-Triggered</span>
           </span>
-          <span class="flex items-center space-x-1" title="Paid executions (via Nevermined payment)">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Paid executions (via Nevermined payment)">
             <span class="w-2 h-2 rounded" style="background-color: #eab308"></span>
             <span>Paid</span>
           </span>
-          <span class="flex items-center space-x-1" title="Public link executions">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Public link executions">
             <span class="w-2 h-2 rounded" style="background-color: #0d9488"></span>
             <span>Public</span>
           </span>
-          <span class="flex items-center space-x-1" title="Schedule marker (shows next scheduled run time)">
+          <span class="flex flex-shrink-0 items-center space-x-1 whitespace-nowrap" title="Schedule marker (shows next scheduled run time)">
             <span class="text-accent-purple-500 text-xs font-bold">▼</span>
             <span>Next Run</span>
           </span>
         </div>
-        <span v-if="isLiveMode" class="flex items-center space-x-1">
-          <span class="w-1.5 h-1.5 rounded-full bg-status-success-500 animate-pulse"></span>
-          <span>Live</span>
-        </span>
-        <span>{{ totalEvents }} events</span>
+        <div class="flex flex-shrink-0 items-center gap-4 whitespace-nowrap">
+          <span v-if="isLiveMode" class="flex items-center space-x-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-status-success-500 animate-pulse"></span>
+            <span>Live</span>
+          </span>
+          <span>{{ totalEvents }} events</span>
+        </div>
       </div>
     </div>
 
