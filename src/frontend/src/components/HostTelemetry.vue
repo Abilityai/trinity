@@ -149,14 +149,17 @@ onUnmounted(() => {
 .host-telemetry {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   font-size: 12px;
+  min-width: 0;
 }
 
 .stat-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
 }
 
 .stat-label {
@@ -199,5 +202,19 @@ onUnmounted(() => {
 /* Dark mode adjustments */
 .dark .disk-bar {
   background: rgba(55, 65, 81, 0.5);
+}
+
+@media (max-width: 1100px) {
+  .host-telemetry {
+    gap: 8px;
+  }
+
+  .host-telemetry :deep(.sparkline-chart) {
+    display: none;
+  }
+
+  .disk-bar {
+    width: 36px;
+  }
 }
 </style>

@@ -12,10 +12,10 @@
       <div class="flex flex-col flex-1 overflow-hidden">
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
-          <div class="flex items-center justify-between">
+          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <!-- Left: Stats -->
-            <div class="flex items-center min-w-0 overflow-hidden">
-              <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+            <div class="flex min-w-0 flex-1 basis-80 items-center overflow-hidden">
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                 <span class="flex items-center space-x-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
                   <span class="font-medium text-status-success-600 dark:text-status-success-400">{{ runningCount }}/{{ agents.length }}</span>
@@ -39,7 +39,7 @@
             </div>
 
             <!-- Right: Controls -->
-            <div class="flex items-center space-x-2 flex-shrink-0">
+            <div class="flex min-w-0 flex-shrink flex-wrap items-center justify-end gap-2">
               <!-- Quick Tag Filter Dropdown -->
               <div v-if="availableTags.length > 0" class="relative">
                 <button
