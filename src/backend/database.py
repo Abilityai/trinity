@@ -1500,15 +1500,34 @@ class DatabaseManager:
         """Get all schedule executions currently in 'running' status."""
         return self._schedule_ops.get_running_executions()
 
-    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0):
-        """Mark executions stuck in 'running' past threshold as failed."""
+    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0, collect_failed=None):
+        """Mark executions stuck in 'running' past threshold as failed.
+
+        #1714: pass a list as ``collect_failed`` to also receive CAS-won
+        ``(execution_id, agent_name)`` tuples for completion-event emission.
+        """
         return self._schedule_ops.mark_stale_executions_failed(
-            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds
+            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds,
+            collect_failed=collect_failed,
         )
 
-    def mark_no_session_executions_failed(self, timeout_seconds: int = 60):
-        """Mark running executions with no claude_session_id as failed (Issue #106)."""
-        return self._schedule_ops.mark_no_session_executions_failed(timeout_seconds)
+    def mark_no_session_executions_failed(self, timeout_seconds: int = 60, collect_failed=None):
+        """Mark running executions with no claude_session_id as failed (Issue #106).
+
+        #1714: ``collect_failed`` list receives CAS-won ``(execution_id,
+        agent_name)`` tuples for completion-event emission.
+        """
+        return self._schedule_ops.mark_no_session_executions_failed(
+            timeout_seconds, collect_failed=collect_failed
+        )
+
+    def has_task_terminal_subscribers(self) -> bool:
+        """#1714: is any enabled subscription listening for agent.task.completed/
+        failed? Cheap gate so a bulk sweep with no subscribers costs nothing."""
+        from services.event_dispatch_service import TASK_COMPLETED_EVENT, TASK_FAILED_EVENT
+        return self._event_subscription_ops.has_enabled_subscriptions_for_types(
+            [TASK_COMPLETED_EVENT, TASK_FAILED_EVENT]
+        )
 
     def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
         """Mark a running execution as failed when its slot is reclaimed (#219)."""

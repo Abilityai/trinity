@@ -42,6 +42,17 @@ EXECUTION_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to s
 # the execution service into the cleanup background loop. The existing descriptive
 # text is preserved after the prefix (substring assertions stay green).
 _LEASE_EXPIRED_TAG = "lease_expired"
+
+# #1714: bulk watchdog sweeps (stale / no-session) fail many rows in one cycle
+# with no per-row context, so they emitted no agent.task.failed event and never
+# woke a subscribed orchestrator (the #1578 residual). We now emit per CAS-won
+# row. To avoid a thundering herd on a large sweep, the emits are paced: after
+# each BATCH the loop yields for PACE_S so N create_task spawns don't fire at
+# once. No row is dropped (unlike a hard cap) — pacing bounds the burst, matching
+# subscription gating in emit_task_terminal_event bounds who is woken, and the
+# cheap has_task_terminal_subscribers() gate makes a no-subscriber sweep free.
+_BULK_TERMINAL_EMIT_BATCH = 50
+_BULK_TERMINAL_EMIT_PACE_S = 0.1
 ACTIVITY_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 NO_SESSION_TIMEOUT_SECONDS = 60  # Issue #106: fast-fail executions that never got a Claude session
 WATCHDOG_HTTP_TIMEOUT = 15.0  # Timeout for agent HTTP calls during reconciliation (#869: increased from 5s to handle agents under load)
@@ -452,8 +463,14 @@ class CleanupService:
         # blanket-FAILED by them; those sweeps then skip it (no longer `running`).
         # Inert until a PULL_MODE_PILOT_AGENTS agent is opted in.
         await self._sweep_expired_leases(report)
-        self._sweep_stale_executions(report)
-        self._sweep_no_session_executions(report)
+        stale_rows = self._sweep_stale_executions(report)
+        no_session_rows = self._sweep_no_session_executions(report)
+        # #1714: wake subscribers of bulk-swept executions (parity with the
+        # individually-reaped writers). One combined, gated, paced, fail-open emit.
+        await self._emit_bulk_terminal_events(
+            (stale_rows or []) + (no_session_rows or []),
+            "marked failed by cleanup watchdog sweep",
+        )
         self._sweep_orphaned_skipped(report)
         self._sweep_stale_activities(report)
         await self._sweep_stale_slots(report, confirmed_running_ids)
@@ -591,26 +608,85 @@ class CleanupService:
         """
         try:
             agent_timeouts = db.get_all_execution_timeouts()
+            failed_rows: list = []
             count = db.mark_stale_executions_failed(
                 EXECUTION_STALE_TIMEOUT_MINUTES,
                 agent_timeouts=agent_timeouts,
                 buffer_seconds=SLOT_TTL_BUFFER,
+                collect_failed=failed_rows,
             )
             report.stale_executions = count
             if count > 0:
                 logger.info(f"[Cleanup] Marked {count} stale executions as failed")
+            # #1714: emit agent.task.failed for each CAS-won bulk-swept row so a
+            # subscribed orchestrator is woken (parity with individually-reaped
+            # executions). Gated + paced + fail-open in the helper.
+            return failed_rows
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale executions: {e}")
+            return []
 
     def _sweep_no_session_executions(self, report: CleanupReport) -> None:
         """1b. Fast-fail running executions with no Claude session (Issue #106)."""
         try:
-            count = db.mark_no_session_executions_failed(NO_SESSION_TIMEOUT_SECONDS)
+            failed_rows: list = []
+            count = db.mark_no_session_executions_failed(
+                NO_SESSION_TIMEOUT_SECONDS, collect_failed=failed_rows
+            )
             report.no_session_executions = count
             if count > 0:
                 logger.info(f"[Cleanup] Marked {count} no-session executions as failed")
+            return failed_rows  # #1714: for the completion-event emit
         except Exception as e:
             logger.error(f"[Cleanup] Error marking no-session executions: {e}")
+            return []
+
+    async def _emit_bulk_terminal_events(self, rows: list, reason: str) -> None:
+        """#1714: emit ``agent.task.failed`` for each CAS-won bulk-swept row.
+
+        Closes the #1578 residual — a bulk watchdog sweep now wakes a subscribed
+        orchestrator exactly like an individually-reaped execution does. Properties:
+
+        * **Costs nothing with no subscribers** — one cheap
+          ``has_task_terminal_subscribers()`` gate short-circuits the whole loop
+          (no per-row ``get_execution``/``find_matching`` when nobody listens).
+        * **No thundering herd** — emits are paced in batches of
+          ``_BULK_TERMINAL_EMIT_BATCH`` with a short yield between them, so a large
+          sweep never fires N dispatch tasks at once. No row is dropped.
+        * **All #1578 invariants inherited** — the shared
+          ``spawn_task_terminal_event`` → ``emit_task_terminal_event`` helper does
+          per-agent matching-subscription gating (no row/dispatch when the specific
+          agent has no sub), the reserved ``agent.task.*`` namespace + recursion
+          break (suppresses a ``triggered_by="event"`` origin), and is fail-open.
+        * **Never affects the terminal write** — the FAILED rows are already
+          committed by the sweep; this whole method is best-effort and swallows.
+        """
+        if not rows:
+            return
+        try:
+            if not db.has_task_terminal_subscribers():
+                return  # nobody listening — skip all per-row work
+            emitted = 0
+            for execution_id, agent_name in rows:
+                if not (execution_id and agent_name):
+                    continue
+                event_dispatch_service.spawn_task_terminal_event(
+                    agent_name,
+                    execution_id,
+                    terminal_status=TaskExecutionStatus.FAILED,
+                    summary_or_error=reason,
+                )
+                emitted += 1
+                if emitted % _BULK_TERMINAL_EMIT_BATCH == 0:
+                    # Pace the herd: yield so the just-spawned dispatch tasks run
+                    # before the next batch is queued.
+                    await asyncio.sleep(_BULK_TERMINAL_EMIT_PACE_S)
+            if emitted:
+                logger.info(
+                    "[#1714] Emitted %d bulk-sweep agent.task.failed event(s)", emitted
+                )
+        except Exception as e:  # fail-open: never affect the sweep's terminal writes
+            logger.warning("[#1714] bulk terminal-event emit failed: %s", e)
 
     def _sweep_orphaned_skipped(self, report: CleanupReport) -> None:
         """1c. Finalize orphaned skipped executions (Issue #106)."""
