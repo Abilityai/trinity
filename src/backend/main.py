@@ -997,6 +997,21 @@ app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 # repo is restructured into `backend/` and `frontend/` subdirs so the
 # same repo can be dual-mounted (`src/backend/enterprise/` for Python,
 # `src/frontend/src/enterprise/` for Vite).
+def _report_enterprise_failure(exc: BaseException) -> None:
+    """Surface a real enterprise-registration failure loudly.
+
+    A BUG in registration (schema init, migration, router mount, a bad import)
+    must NOT take down the core platform — degrade and report instead of
+    crashing boot. Modules that registered before the failure stay active.
+    """
+    import traceback
+    print(
+        f"Trinity Enterprise registration FAILED — continuing OSS-only: {exc!r}",
+        flush=True,
+    )
+    traceback.print_exc()
+
+
 try:
     from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
     register_enterprise(app)
@@ -1006,24 +1021,25 @@ try:
     # would be silently swallowed. Print to stdout instead — docker
     # logs captures it for ops + the CI workflow greps for it.
     print("Trinity Enterprise modules registered", flush=True)
-except ImportError:
-    print(
-        "Trinity Enterprise submodule not present — OSS-only build "
-        "(this is normal; enterprise modules are an optional private submodule)",
-        flush=True,
-    )
+except ModuleNotFoundError as e:
+    # "Not present" is ONLY true when the enterprise package itself is missing.
+    # A bare `except ImportError` here also swallowed a *failed* import inside a
+    # mounted submodule — e.g. a module importing a name that doesn't exist yet
+    # — and reported it as the reassuring line below. An operator then saw
+    # "this is normal" while a feature they paid for was silently absent, and
+    # diagnosing it needed a hand-run `register_enterprise()` to see the real
+    # traceback. Narrow the benign case to its actual signature; everything
+    # else falls through to the loud handler.
+    if (e.name or "").split(".")[0] == "enterprise":
+        print(
+            "Trinity Enterprise submodule not present — OSS-only build "
+            "(this is normal; enterprise modules are an optional private submodule)",
+            flush=True,
+        )
+    else:
+        _report_enterprise_failure(e)
 except Exception as e:
-    # A BUG in enterprise registration (schema init, migration, router
-    # mount, pusher start) must NOT take down the core platform. Degrade
-    # to OSS-only and surface loudly instead of crashing boot. Any modules
-    # that registered before the failure stay active; the rest are absent
-    # (their entitlement simply won't appear in feature-flags). (#995/#997)
-    import traceback
-    print(
-        f"Trinity Enterprise registration FAILED — continuing OSS-only: {e!r}",
-        flush=True,
-    )
-    traceback.print_exc()
+    _report_enterprise_failure(e)
 
 
 # WebSocket endpoint

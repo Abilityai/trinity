@@ -264,10 +264,19 @@ def test_submodule_registers_audit_and_sso():
     # SSO-OIDC (#32) landed in the submodule via #1303. It self-registers the
     # `sso` feature_id inside `.sso.register` (mirroring the other real modules),
     # so `register_module("sso")` is NOT called here in __init__.py — the pin is
-    # on the import + registration call instead.
-    assert "from .sso import register as register_sso" in src, (
-        "SSO-OIDC (#32) is implemented — __init__.py must import the .sso package"
-    )
-    assert "register_sso(app)" in src, (
-        "SSO-OIDC must be registered on the enterprise app via register_sso(app)"
+    # on the registration call instead.
+    #
+    # ent#196 changed the MECHANISM, not the fact: each module is now registered
+    # through an isolating helper (`_register_module(app, "<name>")`) so one
+    # module's failure can't abort every later module. The old literal
+    # `from .sso import register as register_sso` + `register_sso(app)` pair no
+    # longer appears. Pin the intent — "the submodule registers sso" — not the
+    # import style, so this cross-repo static check doesn't break on a
+    # refactor that preserves behavior.
+    assert '_register_module(app, "sso")' in src or (
+        "from .sso import register as register_sso" in src and "register_sso(app)" in src
+    ), (
+        "SSO-OIDC (#32) is implemented — __init__.py must register the .sso "
+        "package (via _register_module(app, \"sso\") since ent#196, or the "
+        "pre-ent#196 direct import + call)"
     )
