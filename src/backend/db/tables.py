@@ -458,6 +458,18 @@ agent_reports = Table(
     Column("created_at", Text),
 )
 
+product_events = Table(
+    # Local product-event capture — activation funnel, Tier-1 (ent#184).
+    # Local-only, default-on, zero egress. INTEGER autoincrement PK.
+    "product_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("installation_id", Text),
+    Column("event_type", Text),
+    Column("event_context", Text),
+    Column("created_at", Text),
+)
+
 agent_notifications = Table(
     "agent_notifications",
     metadata,

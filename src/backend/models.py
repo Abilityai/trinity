@@ -392,6 +392,17 @@ class ReportCreate(BaseModel):
         return self
 
 
+class ProductEventCreate(BaseModel):
+    """Request body for a local product-event beacon (ent#184).
+
+    ``event_type`` is validated against a fixed allow-list at the router (unknown
+    → 422) so the local table can't be spammed with arbitrary strings. Local-only,
+    zero egress — one local row per accepted event.
+    """
+    event_type: str = Field(..., min_length=1, max_length=64)
+    context: Optional[Dict] = None  # small optional metadata (byte-capped at the router)
+
+
 class ReportSummary(BaseModel):
     """List-response model — metadata only, never carries ``payload`` (#918)."""
     id: str
