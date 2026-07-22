@@ -301,7 +301,7 @@ const chips = computed(() => {
     out.push({
       kind: runnerStatus.value.enabled ? 'calm' : 'warn',
       text: runnerStatus.value.enabled
-        ? `${runnerStatus.value.exposed_skill_count} skills exposed`
+        ? `${runnerStatus.value.exposed_skill_count} skill${runnerStatus.value.exposed_skill_count === 1 ? '' : 's'} exposed`
         : 'skill running disabled',
       title: runnerStatus.value.enabled
         ? `${runnerStatus.value.grant_count} grant(s) across ${runnerStatus.value.exposed_skill_count} skill(s)`
