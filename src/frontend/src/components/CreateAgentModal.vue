@@ -12,7 +12,7 @@
 
             <div class="space-y-4">
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Agent Name</label>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Slug / Identifier</label>
                 <input
                   v-model="form.name"
                   type="text"
@@ -20,6 +20,28 @@
                   class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
                   placeholder="my-agent"
                 />
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  The permanent identifier used in URLs, containers, and API keys.
+                  Lowercase, no spaces — it can't be changed casually later.
+                </p>
+              </div>
+
+              <!-- ent#1640: optional human-facing display name, set at creation. -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Display name <span class="font-normal text-gray-400">(optional)</span>
+                </label>
+                <input
+                  v-model="form.display_label"
+                  type="text"
+                  maxlength="120"
+                  class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
+                  placeholder="e.g. Marketing Assistant"
+                />
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  A friendly name shown in the UI. Leave blank to display the slug.
+                  You can change this any time.
+                </p>
               </div>
 
               <div>
@@ -319,6 +341,7 @@ const authStore = useAuthStore()
 
 const form = reactive({
   name: '',
+  display_label: '',   // ent#1640: optional human-facing display name
   template: props.initialTemplate || ''
 })
 
@@ -441,6 +464,10 @@ const createAgent = async () => {
     const payload = {
       name: form.name
     }
+    // ent#1640: optional display name (trimmed); omit when blank so the agent
+    // falls back to its slug, exactly as before.
+    const label = (form.display_label || '').trim()
+    if (label) payload.display_label = label
 
     if (form.template === 'github-custom') {
       const repo = parseGithubRepo(githubRepoUrl.value)

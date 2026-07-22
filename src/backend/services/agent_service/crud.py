@@ -1327,6 +1327,16 @@ def _register_agent(
         max_parallel_tasks=(1 if config.ephemeral else None),
     )
 
+    # ent#1640: persist the optional display label set at creation. Reuses the
+    # same setter as PUT /label (trim + blank→NULL), on the row just created.
+    # Best-effort: a label write must never fail a successful agent creation —
+    # the agent is fully functional under its slug without it.
+    if config.display_label:
+        try:
+            db.set_display_label(config.name, config.display_label)
+        except Exception as e:
+            logger.warning(f"Could not set display label for {config.name}: {e}")
+
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
     # chat/list/info its child (the MCP layer gates on
