@@ -49,6 +49,7 @@ class ScheduleCleanupMixin:
         timeout_minutes: int = 30,
         agent_timeouts: Optional[Dict[str, int]] = None,
         buffer_seconds: int = 0,
+        collect_failed: Optional[List] = None,
     ) -> int:
         """Mark running executions older than their stale window as failed.
 
@@ -70,6 +71,13 @@ class ScheduleCleanupMixin:
                 ``db.get_all_execution_timeouts()``). None → flat behaviour.
             buffer_seconds: Added to each per-agent timeout (pass ``SLOT_TTL_BUFFER``
                 to match the slot reaper / E-01 window).
+
+        #1714: pass a list as ``collect_failed`` to also receive
+        ``(execution_id, agent_name)`` for each CAS-won row, so the bulk sweep
+        can emit the same ``agent.task.failed`` completion event an
+        individually-reaped execution does (#1578). Only CAS-won rows are
+        collected (the ``result.rowcount`` guard), never a row a real terminal
+        beat us to. Default ``None`` keeps the int-count contract unchanged.
 
         Returns:
             Number of executions marked as failed.
@@ -151,10 +159,14 @@ class ScheduleCleanupMixin:
                 )
                 if result.rowcount:
                     failed += 1
+                    if collect_failed is not None:
+                        collect_failed.append((row["id"], row["agent_name"]))
 
             return failed
 
-    def mark_no_session_executions_failed(self, timeout_seconds: int = 60) -> int:
+    def mark_no_session_executions_failed(
+        self, timeout_seconds: int = 60, collect_failed: Optional[List] = None
+    ) -> int:
         """Mark running executions with no claude_session_id as failed.
 
         Executions that are 'running' but never received a claude_session_id
@@ -164,6 +176,11 @@ class ScheduleCleanupMixin:
         Args:
             timeout_seconds: Executions running longer than this without a session
                 are considered failed launches.
+            collect_failed: #1714 — pass a list to also receive
+                ``(execution_id, agent_name)`` for each CAS-won row so the bulk
+                sweep can emit the ``agent.task.failed`` completion event (#1578).
+                Only CAS-won rows are collected. Default ``None`` keeps the
+                int-count contract unchanged.
 
         Returns:
             Number of executions marked as failed.
@@ -178,6 +195,7 @@ class ScheduleCleanupMixin:
                 select(
                     schedule_executions.c.id,
                     schedule_executions.c.started_at,
+                    schedule_executions.c.agent_name,
                 ).where(
                     and_(
                         schedule_executions.c.status == TaskExecutionStatus.RUNNING,
@@ -207,7 +225,7 @@ class ScheduleCleanupMixin:
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 # RELIABILITY-005: guard the UPDATE so a SUCCESS that arrived
                 # between the SELECT and this UPDATE is never overwritten.
-                conn.execute(
+                result = conn.execute(
                     update(schedule_executions)
                     .where(
                         and_(
@@ -222,6 +240,9 @@ class ScheduleCleanupMixin:
                         error=error_msg,
                     )
                 )
+                # #1714: collect only CAS-won rows for the completion-event emit.
+                if result.rowcount and collect_failed is not None:
+                    collect_failed.append((row["id"], row["agent_name"]))
 
             return len(no_session_rows)
 

@@ -56,7 +56,7 @@ the invariant: any *future* terminal writer that bypasses the helper silently wo
 | `_write_terminal_and_gate` | **timeout, budget-exhausted, unexpected-exception** (+ circuit-open/capacity/ephemeral inline) | `services/task_execution_service.py` (`if won and agent_name:`) | `agent.task.failed` |
 | #1083 lease-reaper (async died) | LEASE_EXPIRED | `services/cleanup_service.py::_process_stale_slot_reclaims` (both `if updated:` sites) | `agent.task.failed` |
 | pull sink `apply_task_result` | success/failure | `services/pull_coordination_service.py` (`if won:`) — **dark** until a pull pilot | completed/failed |
-| bulk watchdog sweeps | stale/no-session (bulk `mark_*_failed` → COUNT, no per-row context) | `cleanup_service.py` | ⚠️ **documented residual** (per-row emit needs iteration) |
+| bulk watchdog sweeps (#1714) | stale / no-session | `cleanup_service.py::_sweep_stale_executions` / `_sweep_no_session_executions` → `_emit_bulk_terminal_events` | `agent.task.failed` per CAS-won row — subscriber-gated (`has_task_terminal_subscribers()` short-circuit + per-agent matching in the helper), paced in batches (no herd, no drop), fail-open |
 
 Both #1083 caller paths (inline sync + async result-callback) converge on `apply_result`,
 so both are covered there. The async-callback replay-ACK (`_AUTHORITATIVE_TERMINALS`,
