@@ -280,3 +280,42 @@ def test_submodule_registers_audit_and_sso():
         "package (via _register_module(app, \"sso\") since ent#196, or the "
         "pre-ent#196 direct import + call)"
     )
+
+
+# --- unregister_module (ent#196) ---------------------------------------------
+
+def test_unregister_module_withdraws_a_claim():
+    """The registration seam is a CLAIM that a feature is present and served.
+    A module that claims its id then fails partway leaves that claim standing
+    with nothing behind it — advertised in feature-flags, UI shown, every call
+    404s. The registering side needs a way to roll its own claim back.
+    """
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    svc.register_module("thing")
+    assert svc.is_entitled("thing") is True
+
+    assert svc.unregister_module("thing") is True
+    assert svc.is_entitled("thing") is False
+    assert "thing" not in svc.list_entitled_features()
+
+
+def test_unregister_module_is_idempotent():
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    assert svc.unregister_module("never-registered") is False   # no-op, no raise
+    svc.register_module("thing")
+    assert svc.unregister_module("thing") is True
+    assert svc.unregister_module("thing") is False
+
+
+def test_unregister_module_leaves_other_claims_alone():
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    svc.register_module("keep")
+    svc.register_module("drop")
+    svc.unregister_module("drop")
+    assert svc.list_entitled_features() == ["keep"]

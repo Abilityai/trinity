@@ -97,6 +97,29 @@ class EntitlementService:
             f"(total: {len(self._registered_modules)})"
         )
 
+    def unregister_module(self, feature_id: str) -> bool:
+        """Withdraw a previously-registered feature_id. Returns True if it was
+        registered.
+
+        The registration seam is a *claim* that a feature is present and served.
+        A module that claims its id and then fails partway through mounting
+        leaves that claim standing with nothing behind it — the feature is
+        advertised by ``GET /api/settings/feature-flags``, the OSS bundle shows
+        its UI, and every request 404s. This lets the registering side roll its
+        own claim back so a half-registered module is simply absent, which is
+        the honest state.
+
+        Idempotent — withdrawing an unregistered id is a no-op.
+        """
+        if feature_id not in self._registered_modules:
+            return False
+        self._registered_modules.discard(feature_id)
+        logger.warning(
+            f"[EntitlementService] withdrew enterprise module: {feature_id!r} "
+            f"(total: {len(self._registered_modules)})"
+        )
+        return True
+
     def is_entitled(self, feature_id: str) -> bool:
         """Return True if the named feature is licensed AND registered.
 
