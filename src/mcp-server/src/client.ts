@@ -329,6 +329,35 @@ export class TrinityClient {
   }
 
   /**
+   * Skills the calling agent is permitted to execute on the skill runner
+   * (ent#139). The acting agent is resolved server-side from the API key, so
+   * an agent-scoped key can never ask on another agent's behalf.
+   * Returns `enabled: false` with an empty list when the feature is off.
+   */
+  async getRunnableSkills(): Promise<{
+    caller_agent: string;
+    enabled: boolean;
+    skills: Array<{ name: string; description?: string; version?: string }>;
+  }> {
+    return this.request("GET", "/api/enterprise/skill-runner/available");
+  }
+
+  /**
+   * Execute one library skill on the skill runner (ent#139). Server-side the
+   * per-skill allow-list is re-checked at dispatch — this client never decides
+   * what is runnable.
+   */
+  async runSkill(
+    skillName: string,
+    input?: string
+  ): Promise<{ skill: string; result: string; cost?: number; execution_id?: string }> {
+    return this.request("POST", "/api/enterprise/skill-runner/run", {
+      skill_name: skillName,
+      input,
+    });
+  }
+
+  /**
    * Get the agent compatibility report (#668).
    * STATIC checks recompute live; pass includeAi=true to force a fresh AI
    * evaluation (otherwise the last persisted AI verdicts are returned).
