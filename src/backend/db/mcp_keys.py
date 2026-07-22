@@ -19,7 +19,7 @@ from typing import Optional, List, Dict
 from sqlalchemy import select, insert, update, delete
 
 from .engine import get_engine
-from .tables import mcp_api_keys, users
+from .tables import mcp_api_keys, users, agent_ownership
 from db_models import McpApiKey, McpApiKeyCreate, McpApiKeyWithSecret
 from utils.helpers import utc_now_iso
 
@@ -213,6 +213,67 @@ class McpKeyOperations:
         with get_engine().begin() as conn:
             result = conn.execute(stmt)
             return result.rowcount > 0
+
+    def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
+        """Activate/deactivate every per-agent key for `agent_name` (#1745).
+
+        Soft-deleting an agent used to leave its keys `is_active = 1`, so the
+        credential kept authenticating for the whole soft-delete window (default
+        180 days) — enumerating the fleet, reading other agents, and able to mint
+        a fresh key of its own, which made revoking it afterwards pointless.
+        `mcp_api_keys` is registered CASCADE in `AGENT_REFS` for exactly this
+        reason ("an orphaned key must not survive its agent"), but that cascade
+        only runs at the hard purge at the END of that window.
+
+        Deactivation rather than deletion because soft-delete is *recoverable*:
+        recovering the agent flips the same keys back on, so a recovered agent
+        keeps working without re-issuing credentials to a running container.
+        `validate_mcp_api_key` already requires `is_active = 1`, so this is
+        sufficient on both the REST and MCP paths.
+
+        Covers scope='agent' AND scope='connector' — both are per-agent
+        credentials and both are CASCADE entries.
+
+        Returns: number of key rows changed.
+        """
+        stmt = (
+            update(mcp_api_keys)
+            .where(
+                mcp_api_keys.c.agent_name == agent_name,
+                mcp_api_keys.c.scope.in_(("agent", "connector")),
+                mcp_api_keys.c.is_active == (0 if active else 1),
+            )
+            .values(is_active=1 if active else 0)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount or 0
+
+    def deactivate_orphaned_agent_keys(self) -> int:
+        """Deactivate per-agent keys whose agent is not live (#1745 backfill).
+
+        "Not live" = no `agent_ownership` row at all, or one carrying
+        `deleted_at`. Idempotent — only flips rows that are still active, so it
+        finds nothing once an instance is clean.
+
+        This is not hypothetical: on the instance where the bug was found, 12 of
+        17 active agent-scoped keys were already orphaned, 10 of them from
+        ephemeral test agents.
+        """
+        live = select(agent_ownership.c.agent_name).where(
+            agent_ownership.c.deleted_at.is_(None)
+        )
+        stmt = (
+            update(mcp_api_keys)
+            .where(
+                mcp_api_keys.c.agent_name.isnot(None),
+                mcp_api_keys.c.scope.in_(("agent", "connector")),
+                mcp_api_keys.c.is_active == 1,
+                mcp_api_keys.c.agent_name.notin_(live),
+            )
+            .values(is_active=0)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount or 0
 
     def validate_mcp_api_key(
         self, api_key: str, *, track_usage: bool = True
