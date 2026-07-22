@@ -1014,22 +1014,19 @@ def _report_enterprise_failure(exc: BaseException) -> None:
 
 try:
     from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
-    register_enterprise(app)
-    # `print(..., flush=True)`: this import block runs at module init,
-    # which is BEFORE `lifespan` calls `setup_logging()`. The default
-    # Python logger drops INFO-level records, so `logger.info` here
-    # would be silently swallowed. Print to stdout instead — docker
-    # logs captures it for ops + the CI workflow greps for it.
-    print("Trinity Enterprise modules registered", flush=True)
 except ModuleNotFoundError as e:
-    # "Not present" is ONLY true when the enterprise package itself is missing.
-    # A bare `except ImportError` here also swallowed a *failed* import inside a
-    # mounted submodule — e.g. a module importing a name that doesn't exist yet
-    # — and reported it as the reassuring line below. An operator then saw
-    # "this is normal" while a feature they paid for was silently absent, and
-    # diagnosing it needed a hand-run `register_enterprise()` to see the real
-    # traceback. Narrow the benign case to its actual signature; everything
-    # else falls through to the loud handler.
+    # SCOPE: this arm covers ONLY the top-level import. It used to wrap
+    # `register_enterprise(app)` too, so a ModuleNotFoundError raised deep inside
+    # a module's `register()` — enterprise modules lazily import OSS seams there
+    # — was reported as the calm line below. On a MOUNTED install that message is
+    # actively false, the diagnostic traceback never printed, and the failing
+    # module's routes could stay mounted-but-unentitled, 403-ing forever with
+    # nothing in the logs connecting the two (#1653, spotted by @vybe).
+    #
+    # Even here "not present" is only true when the missing module IS the
+    # enterprise package. If `enterprise.backend` imports some third-party
+    # package that isn't installed, that is a real failure wearing the same
+    # exception type — so check which module went missing.
     if (e.name or "").split(".")[0] == "enterprise":
         print(
             "Trinity Enterprise submodule not present — OSS-only build "
@@ -1038,8 +1035,23 @@ except ModuleNotFoundError as e:
         )
     else:
         _report_enterprise_failure(e)
-except Exception as e:
+except ImportError as e:
+    # A non-ModuleNotFoundError ImportError from the top-level import (e.g. the
+    # package exists but imports a name that doesn't) is a real bug, not an
+    # absent submodule.
     _report_enterprise_failure(e)
+else:
+    try:
+        register_enterprise(app)
+        # `print(..., flush=True)`: this block runs at module init, BEFORE
+        # `lifespan` calls `setup_logging()`. The default Python logger drops
+        # INFO records, so `logger.info` here would be silently swallowed. Print
+        # to stdout — docker logs captures it and CI greps for this exact string.
+        print("Trinity Enterprise modules registered", flush=True)
+    except Exception as e:
+        # ANY failure inside registration is a bug and gets the diagnostic —
+        # including ModuleNotFoundError, which is why this is a separate try.
+        _report_enterprise_failure(e)
 
 
 # WebSocket endpoint
