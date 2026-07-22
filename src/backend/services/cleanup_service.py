@@ -314,6 +314,7 @@ class CleanupReport:
     health_checks_pruned: int = 0
     # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
     backlog_metadata_scrubbed: int = 0
+    legacy_tool_calls_converted: int = 0  # #1741
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -371,6 +372,7 @@ class CleanupReport:
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
             "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
+            "legacy_tool_calls_converted": self.legacy_tool_calls_converted,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -843,6 +845,23 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
+
+        # #1741: convert legacy raw-transcript `tool_calls` blobs to the summary
+        # shape. The writer is fixed going forward, but existing rows would keep
+        # reporting 0 tool calls and rendering an empty panel until they aged
+        # out. Non-destructive (the transcript stays in `execution_log`) and
+        # idempotent, so it simply finds nothing once history is converted.
+        try:
+            converted = db.resummarize_legacy_tool_calls()
+            report.legacy_tool_calls_converted = converted
+            if converted > 0:
+                _log_prune(
+                    converted,
+                    f"[Cleanup] Converted legacy tool_calls on {converted} "
+                    f"executions to the summary shape (#1741)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error converting legacy tool_calls: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past

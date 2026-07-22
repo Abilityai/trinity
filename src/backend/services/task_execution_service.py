@@ -49,6 +49,7 @@ from services import event_dispatch_service
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
+from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -1787,7 +1788,18 @@ class TaskExecutionService:
                 try:
                     execution_log_json = json.dumps(exec_log)
                     execution_log_json = sanitize_execution_log(execution_log_json)
-                    tool_calls_json = execution_log_json
+                    # #1741: `tool_calls` is a SUMMARY, not a second copy of the
+                    # transcript. It used to be assigned `execution_log_json`
+                    # verbatim, which made `tool_call_total` read 0 forever (every
+                    # consumer looks for `{"tool": …}` entries, the transcript has
+                    # envelope events) and left a transcript copy in a column the
+                    # log-retention sweep never touched. `/api/task` — unlike
+                    # `/api/chat` — sends no `execution_log_simplified`, so derive
+                    # it here: that works on every agent image with no rebuild.
+                    tool_calls = extract_tool_calls(exec_log)
+                    tool_calls_json = (
+                        sanitize_execution_log(json.dumps(tool_calls)) if tool_calls else None
+                    )
                 except Exception as e:
                     logger.error(
                         f"[TaskExecService] Failed to serialize execution_log for {eid}: {e}"
