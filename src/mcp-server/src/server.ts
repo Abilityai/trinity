@@ -12,6 +12,7 @@ import { createChatTools } from "./tools/chat.js";
 import { createSystemTools } from "./tools/systems.js";
 import { createDocsTools } from "./tools/docs.js";
 import { createSkillsTools } from "./tools/skills.js";
+import { createRoomTools } from "./tools/rooms.js";  // ent#169 shared sessions
 import { createScheduleTools } from "./tools/schedules.js";
 import { createTagTools } from "./tools/tags.js";
 import { createNotificationTools } from "./tools/notifications.js";
@@ -270,6 +271,7 @@ export async function createServer(config: ServerConfig = {}) {
     createVoipTools(client, requireApiKey),       // VoIP telephony — call_user (VOIP-001, #1056)
     createOperatorQueueTools(client, requireApiKey), // Operator queue read + respond (OPS-001, #1101/#1104)
     createGitTools(client, requireApiKey),           // Direct git status/sync/log/pull/sync-state/reset (#905)
+    createRoomTools(client, requireApiKey),          // Shared sessions / rooms (ent#169)
   ];
   // Operator tools: hidden from connector-scoped keys.
   for (const group of toolGroups) {
