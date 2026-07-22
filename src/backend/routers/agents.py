@@ -508,8 +508,21 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
             )
         }
 
+    # #1747: an agent's identity lives in `agent_ownership`, not in Docker.
+    # This used to 404 whenever the container was missing, which left an agent
+    # with a live row simultaneously invisible (the listing is Docker-as-truth),
+    # undeletable, and still holding its own name — escapable only by calling
+    # `/start` on an agent you cannot see. Agents reach that state routinely:
+    # the #834 Phase 1c recovery flow leaves them there BY DESIGN (metadata-only,
+    # "operator runs POST /start"), as does any docker prune / daemon reset or a
+    # crash between the row write and container creation.
+    #
+    # Decide existence from the ROW and treat the container as best-effort
+    # cleanup — exactly what the ephemeral branch above already does for the same
+    # "live row, no container" residue. An already-soft-deleted agent still 404s:
+    # it is deleted, and `is_agent_live` is False for it.
     container = get_agent_container(agent_name)
-    if not container:
+    if not container and not db.is_agent_live(agent_name):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Issue #834 Phase 1a: agent delete is now a SOFT-delete. We stop +
@@ -522,11 +535,20 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     # (default 180). At that point the #816 cascade_delete primitive
     # tears down all the child rows and on-disk artifacts in one shot.
 
-    try:
-        await container_stop(container)
-        await container_remove(container)
-    except Exception as e:
-        logger.warning(f"Error stopping/removing container: {e}")
+    if container:
+        try:
+            await container_stop(container)
+            await container_remove(container)
+        except Exception as e:
+            logger.warning(f"Error stopping/removing container: {e}")
+    else:
+        # Nothing to tear down. Everything below — soft-delete, queue cancel,
+        # Redis keyspace clearing, name reservation — keys off the agent NAME,
+        # so the delete completes normally without a container (#1747).
+        logger.info(
+            f"Deleting {agent_name} with no container present (#1747) — "
+            "proceeding with the ownership-row delete"
+        )
 
     # BACKLOG-001: in-flight queued tasks can't be recovered (the
     # container is gone), so cancel them now rather than waiting for
