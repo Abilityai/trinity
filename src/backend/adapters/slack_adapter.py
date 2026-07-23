@@ -109,19 +109,40 @@ class SlackAdapter(ChannelAdapter):
         team_id = raw_event.get("team_id")
         event_type = event.get("type")
 
+        message = None
         # Handle DM messages
         if event_type == "message" and event.get("channel_type") == "im":
-            return self._parse_dm(event, team_id)
-
+            message = self._parse_dm(event, team_id)
         # Handle @mentions in channels
-        if event_type == "app_mention":
-            return self._parse_mention(event, team_id)
-
+        elif event_type == "app_mention":
+            message = self._parse_mention(event, team_id)
         # Handle thread replies in bot channels (no @mention needed)
-        if event_type == "message" and event.get("thread_ts"):
-            return self._parse_thread_reply(event, team_id)
+        elif event_type == "message" and event.get("thread_ts"):
+            message = self._parse_thread_reply(event, team_id)
 
-        return None
+        if message is None:
+            return None
+        return self._stamp_recipient_bot(message, raw_event, team_id)
+
+    def _stamp_recipient_bot(self, message, raw_event: dict, team_id):
+        """ent#222: record WHICH bot received this event so the router can route a
+        per-agent dedicated bot (over the channel binding). ``authorizations[0]
+        .user_id`` is the bot the event was delivered to; ``api_app_id`` its app.
+        Additive metadata — inert unless a per-agent resolver is registered."""
+        auths = raw_event.get("authorizations") or []
+        recipient_bot = (
+            auths[0].get("user_id") if auths and isinstance(auths[0], dict) else None
+        )
+        md = dict(getattr(message, "metadata", None) or {})
+        md.update({
+            "slack_team_id": team_id,
+            "slack_recipient_bot_user_id": recipient_bot,
+            "slack_recipient_app_id": raw_event.get("api_app_id"),
+        })
+        try:
+            return message.model_copy(update={"metadata": md})
+        except Exception:  # noqa: BLE001 — never fail parsing over metadata
+            return message
 
     def format_response(self, text: str) -> str:
         """Convert standard markdown to Slack mrkdwn format.
