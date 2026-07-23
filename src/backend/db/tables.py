@@ -473,6 +473,21 @@ product_events = Table(
     Column("created_at", Text),
 )
 
+agent_evaluations = Table(
+    "agent_evaluations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("execution_id", Text),
+    Column("archetype", Text),
+    Column("completion", Integer),
+    Column("quality", Float),
+    Column("checks_json", Text),
+    Column("judge_json", Text),
+    Column("evaluator", Text),
+    Column("created_at", Text),
+)
+
 agent_notifications = Table(
     "agent_notifications",
     metadata,

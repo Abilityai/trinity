@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
@@ -1225,6 +1225,31 @@ class FleetExecutionStats(BaseModel):
     # the field additive for any client that predates it.
     deleted_agent_count: int = 0
     deleted_agent_cost: float = 0.0
+
+
+class EvaluationCreate(BaseModel):
+    """Body for a manual/admin evaluation write (ent#206). The graded agent is
+    the path `{name}`; the caller is fenced human-admin-only at the router, so
+    a graded agent can never write its own grade."""
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = Field(default=None, max_length=40)
+    completion: Optional[bool] = None
+    quality: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    checks: Optional[dict] = None
+    judge: Optional[dict] = None
+
+
+class EvaluationResponse(BaseModel):
+    id: str
+    agent_name: str
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = None
+    completion: Optional[bool] = None
+    quality: Optional[float] = None
+    checks: Optional[Any] = None
+    judge: Optional[Any] = None
+    evaluator: str
+    created_at: str
 
 
 class CircuitBreakerConfigUpdate(BaseModel):

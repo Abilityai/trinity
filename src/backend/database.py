@@ -114,6 +114,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.product_events import ProductEventOperations
+from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -434,6 +435,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._product_event_ops = ProductEventOperations()
+        self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -1991,6 +1993,22 @@ class DatabaseManager:
         return self._public_chat_ops.delete_link_sessions(link_id)
 
     # Public User Memory (MEM-001 + #895 split storage)
+    # --- Behavioral evaluations (ent#206) — referee surface ---------------
+    def create_agent_evaluation(self, agent_name, **kw):
+        return self._evaluation_ops.create_evaluation(agent_name, **kw)
+
+    def get_agent_evaluation(self, eval_id):
+        return self._evaluation_ops.get_evaluation(eval_id)
+
+    def list_agent_evaluations(self, agent_name, limit=50):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+
+    def list_fleet_evaluations(self, agent_names, limit=100):
+        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+
+    def latest_evaluation_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_for_execution(execution_id)
+
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
 
