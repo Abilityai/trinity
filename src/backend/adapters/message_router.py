@@ -784,6 +784,20 @@ class ChannelMessageRouter:
         (the caller short-circuits). Both return silently — there is no token to
         reply with on the no-token path.
         """
+        # ent#222: if the event was received by an agent's DEDICATED Slack bot,
+        # that agent wins over the channel binding and its own bot token is used
+        # for the reply. Inert for non-Slack / OSS-only (no resolver registered).
+        from adapters import per_agent_bot
+        pab_agent = per_agent_bot.resolve_from_message(message)
+        if pab_agent:
+            pab_token = per_agent_bot.get_token(pab_agent)
+            if pab_token:
+                logger.debug(f"[ROUTER:{channel}] per-agent bot → agent {pab_agent}")
+                return pab_agent, pab_token
+            # Binding without a usable token → fall through to channel routing.
+            logger.warning(f"[ROUTER:{channel}] per-agent bot for {pab_agent} has no token; "
+                           "falling back to channel routing")
+
         agent_name = await adapter.get_agent_name(message)
         logger.debug(f"[ROUTER:{channel}] Step 1 - resolved agent: {agent_name}")
         if not agent_name:
