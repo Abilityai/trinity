@@ -999,33 +999,61 @@ app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 # repo is restructured into `backend/` and `frontend/` subdirs so the
 # same repo can be dual-mounted (`src/backend/enterprise/` for Python,
 # `src/frontend/src/enterprise/` for Vite).
-try:
-    from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
-    register_enterprise(app)
-    # `print(..., flush=True)`: this import block runs at module init,
-    # which is BEFORE `lifespan` calls `setup_logging()`. The default
-    # Python logger drops INFO-level records, so `logger.info` here
-    # would be silently swallowed. Print to stdout instead — docker
-    # logs captures it for ops + the CI workflow greps for it.
-    print("Trinity Enterprise modules registered", flush=True)
-except ImportError:
-    print(
-        "Trinity Enterprise submodule not present — OSS-only build "
-        "(this is normal; enterprise modules are an optional private submodule)",
-        flush=True,
-    )
-except Exception as e:
-    # A BUG in enterprise registration (schema init, migration, router
-    # mount, pusher start) must NOT take down the core platform. Degrade
-    # to OSS-only and surface loudly instead of crashing boot. Any modules
-    # that registered before the failure stay active; the rest are absent
-    # (their entitlement simply won't appear in feature-flags). (#995/#997)
+def _report_enterprise_failure(exc: BaseException) -> None:
+    """Surface a real enterprise-registration failure loudly.
+
+    A BUG in registration (schema init, migration, router mount, a bad import)
+    must NOT take down the core platform — degrade and report instead of
+    crashing boot. Modules that registered before the failure stay active.
+    """
     import traceback
     print(
-        f"Trinity Enterprise registration FAILED — continuing OSS-only: {e!r}",
+        f"Trinity Enterprise registration FAILED — continuing OSS-only: {exc!r}",
         flush=True,
     )
     traceback.print_exc()
+
+
+try:
+    from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
+except ModuleNotFoundError as e:
+    # SCOPE: this arm covers ONLY the top-level import. It used to wrap
+    # `register_enterprise(app)` too, so a ModuleNotFoundError raised deep inside
+    # a module's `register()` — enterprise modules lazily import OSS seams there
+    # — was reported as the calm line below. On a MOUNTED install that message is
+    # actively false, the diagnostic traceback never printed, and the failing
+    # module's routes could stay mounted-but-unentitled, 403-ing forever with
+    # nothing in the logs connecting the two (#1653, spotted by @vybe).
+    #
+    # Even here "not present" is only true when the missing module IS the
+    # enterprise package. If `enterprise.backend` imports some third-party
+    # package that isn't installed, that is a real failure wearing the same
+    # exception type — so check which module went missing.
+    if (e.name or "").split(".")[0] == "enterprise":
+        print(
+            "Trinity Enterprise submodule not present — OSS-only build "
+            "(this is normal; enterprise modules are an optional private submodule)",
+            flush=True,
+        )
+    else:
+        _report_enterprise_failure(e)
+except ImportError as e:
+    # A non-ModuleNotFoundError ImportError from the top-level import (e.g. the
+    # package exists but imports a name that doesn't) is a real bug, not an
+    # absent submodule.
+    _report_enterprise_failure(e)
+else:
+    try:
+        register_enterprise(app)
+        # `print(..., flush=True)`: this block runs at module init, BEFORE
+        # `lifespan` calls `setup_logging()`. The default Python logger drops
+        # INFO records, so `logger.info` here would be silently swallowed. Print
+        # to stdout — docker logs captures it and CI greps for this exact string.
+        print("Trinity Enterprise modules registered", flush=True)
+    except Exception as e:
+        # ANY failure inside registration is a bug and gets the diagnostic —
+        # including ModuleNotFoundError, which is why this is a separate try.
+        _report_enterprise_failure(e)
 
 
 # WebSocket endpoint
