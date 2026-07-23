@@ -21,7 +21,11 @@ from services.agent_service.helpers import accessible_agent_names, narrow_to_age
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
 _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled", "skipped"}
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder"}
+# NOTE: this is a filter ALLOW-LIST, not a DB enum — `triggered_by` is a plain
+# TEXT column. An unknown value here degrades to "no filter" (see below), which
+# silently returns EVERY execution instead of none, so a trigger that reaches
+# this endpoint must be listed or its filter lies. `room` is ent#169.
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 

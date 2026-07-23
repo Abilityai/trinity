@@ -241,6 +241,44 @@ export class TrinityClient {
   /**
    * Public request method for custom API calls
    */
+  // --- Shared sessions / rooms (ent#169) ------------------------------------
+  // A room is a shared persistent RECORD; membership is the grant, so an
+  // agent-scoped key reaches exactly the rooms its agent belongs to and the
+  // backend answers a uniform 404 otherwise.
+
+  async createRoom(body: {
+    name: string;
+    agents: string[];
+    topic?: string;
+    max_messages?: number;
+    max_cost_usd?: number;
+    ttl_hours?: number;
+    scribe?: string;
+  }): Promise<any> {
+    return this.request("POST", "/api/rooms", body);
+  }
+
+  async listRooms(): Promise<{ rooms: any[] }> {
+    return this.request("GET", "/api/rooms");
+  }
+
+  async readRoom(roomId: string, since = 0): Promise<any> {
+    return this.request(
+      "GET",
+      `/api/rooms/${encodeURIComponent(roomId)}?since=${encodeURIComponent(String(since))}`
+    );
+  }
+
+  async postToRoom(roomId: string, content: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+      content,
+    });
+  }
+
+  async closeRoom(roomId: string, reason?: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/close`, { reason });
+  }
+
   async request<T>(
     method: string,
     path: string,
