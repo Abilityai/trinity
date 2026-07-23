@@ -105,7 +105,7 @@
                   Share anonymous usage → see how your setup compares to the fleet
                 </p>
                 <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                  Coarse counts only — no content, prompts, emails, or agent names. Off by default, reversible in Settings.
+                  Coarse counts only — no content, prompts, emails, or agent names. Includes the last 30 days of local counts. Off by default, reversible in Settings.
                 </p>
               </div>
               <button

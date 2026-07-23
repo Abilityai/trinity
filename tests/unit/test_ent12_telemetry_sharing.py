@@ -144,3 +144,41 @@ def test_set_consent_roundtrip(tss):
     st = mod.set_consent(False)
     assert st["enabled"] is False
     assert mod.is_consent_enabled() is False
+
+
+# --- review fixes (validation pass, 0.8.5) -----------------------------------
+
+def test_consent_audit_uses_a_real_audit_event_type():
+    """The consent handler audited with `AuditEventType.SETTINGS`, which does
+    not exist — the AttributeError was swallowed by the best-effort except, so
+    every consent flip of an egress channel went silently un-audited. Pin that
+    the member referenced by the telemetry handler actually exists."""
+    import re
+    from pathlib import Path
+    from services.platform_audit_service import AuditEventType
+
+    src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+           / "settings.py").read_text()
+    handler = src[src.index("telemetry_sharing_consent") - 2000:
+                  src.index("telemetry_sharing_consent") + 200]
+    members = re.findall(r"AuditEventType\.([A-Z_]+)", handler)
+    assert members, "consent handler must audit-log"
+    for m in members:
+        assert hasattr(AuditEventType, m), (
+            f"AuditEventType.{m} does not exist — the audit call would raise "
+            "AttributeError inside the best-effort except and never log"
+        )
+
+
+def test_generic_settings_put_blocks_telemetry_sharing_keys():
+    """Consent is human-only via the dedicated route (reject_agent_principal +
+    hard-disable 409 + audit). The generic PUT /api/settings/{key} must 422 the
+    telemetry_sharing_* family or an admin-owned agent-scoped key can flip
+    egress consent around all of that (trinity-ops-agent#232 class)."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+           / "settings.py").read_text()
+    assert 'key.startswith("telemetry_sharing_")' in src, (
+        "generic settings PUT must block the telemetry_sharing_* key family"
+    )

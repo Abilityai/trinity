@@ -253,7 +253,7 @@ async def set_telemetry_sharing(
 
     try:
         await platform_audit_service.log(
-            event_type=AuditEventType.SETTINGS,
+            event_type=AuditEventType.CONFIGURATION,
             event_action="telemetry_sharing_consent",
             source="api",
             actor_user=current_user,
@@ -2185,6 +2185,21 @@ async def update_setting(
             detail=(
                 f"{key} must be set via PUT /api/settings/proactive-rate-limits "
                 f"(range-validated 0–{PROACTIVE_RATE_LIMIT_MAX}, 0 = unlimited)"
+            ),
+        )
+
+    # ent#12: telemetry-sharing consent is a human-only decision. The dedicated
+    # PUT /api/settings/telemetry-sharing enforces reject_agent_principal, the
+    # hard-disabled 409, consent_at stamping, and the dedicated audit action —
+    # this generic PUT has none of those, so an admin-owned agent-scoped key
+    # could otherwise flip egress consent (trinity-ops-agent#232 class). Block
+    # the whole key family.
+    if key.startswith("telemetry_sharing_"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "telemetry_sharing_* must be set via "
+                "PUT /api/settings/telemetry-sharing (admin + human-only, audit-logged)"
             ),
         )
 
