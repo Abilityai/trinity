@@ -1026,6 +1026,14 @@ class DatabaseManager:
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
 
+    def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
+        """#1745: activate/deactivate an agent's per-agent MCP keys."""
+        return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
+
+    def deactivate_orphaned_agent_keys(self) -> int:
+        """#1745: deactivate per-agent keys whose agent is no longer live."""
+        return self._mcp_key_ops.deactivate_orphaned_agent_keys()
+
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 

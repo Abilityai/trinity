@@ -325,6 +325,7 @@ class CleanupReport:
     health_checks_pruned: int = 0
     # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
     backlog_metadata_scrubbed: int = 0
+    orphaned_agent_keys_revoked: int = 0  # #1745
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -382,6 +383,7 @@ class CleanupReport:
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
             "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
+            "orphaned_agent_keys_revoked": self.orphaned_agent_keys_revoked,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -919,6 +921,24 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
+
+        # #1745: deactivate per-agent MCP keys whose agent is no longer live.
+        # The delete/recover paths keep this in sync going forward; this catches
+        # keys orphaned BEFORE the fix, and any that slip through a path that
+        # removes an agent without going through delete_agent_ownership. Not
+        # age-gated — an orphaned credential is a security invariant, not a
+        # retention window (the #1449 reasoning).
+        try:
+            revoked = db.deactivate_orphaned_agent_keys()
+            report.orphaned_agent_keys_revoked = revoked
+            if revoked > 0:
+                _log_prune(
+                    revoked,
+                    f"[Cleanup] Deactivated {revoked} MCP key(s) belonging to "
+                    f"agents that are no longer live (#1745)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error deactivating orphaned agent keys: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past

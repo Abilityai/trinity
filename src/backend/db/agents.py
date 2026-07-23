@@ -375,6 +375,26 @@ class AgentOperations(
         with get_engine().connect() as conn:
             return int(conn.execute(stmt).scalar() or 0)
 
+    @staticmethod
+    def _deactivate_agent_keys_in_txn(conn, agent_name: str, *, active: bool) -> int:
+        """Flip per-agent key activity on an EXISTING connection (#1745).
+
+        Runs inside the caller's transaction so the credential state can never
+        diverge from the ownership state — a key left active after a committed
+        delete is the whole bug.
+        """
+        from .tables import mcp_api_keys
+
+        return conn.execute(
+            update(mcp_api_keys)
+            .where(
+                mcp_api_keys.c.agent_name == agent_name,
+                mcp_api_keys.c.scope.in_(("agent", "connector")),
+                mcp_api_keys.c.is_active == (0 if active else 1),
+            )
+            .values(is_active=1 if active else 0)
+        ).rowcount or 0
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 
@@ -400,6 +420,16 @@ class AgentOperations(
                 .values(deleted_at=utc_now_iso())
             )
             if result.rowcount > 0:
+                # #1745: revoke the agent's credentials in the SAME transaction.
+                # `mcp_api_keys` is CASCADE in AGENT_REFS precisely because "an
+                # orphaned key must not survive its agent", but that cascade only
+                # runs at the hard purge — i.e. after the whole soft-delete
+                # window (default 180 days), during which the key kept
+                # authenticating, enumerating the fleet, and able to mint a fresh
+                # key of its own. Deactivate (not delete) so recovery can restore
+                # them; `validate_mcp_api_key` requires is_active=1, so this
+                # closes both the REST and MCP paths.
+                self._deactivate_agent_keys_in_txn(conn, agent_name, active=False)
                 return True
             # rowcount==0 — either already soft-deleted or doesn't exist
             row = conn.execute(
@@ -480,6 +510,11 @@ class AgentOperations(
                 )
                 .values(deleted_at=None)
             )
+            if result.rowcount > 0:
+                # #1745: recovery is the inverse of delete — restore the same
+                # credentials so a recovered agent keeps working without
+                # re-issuing keys into a running container.
+                self._deactivate_agent_keys_in_txn(conn, agent_name, active=True)
             return result.rowcount > 0
 
     def list_soft_deleted_agents(self, limit: int = 200) -> List[Dict]:
