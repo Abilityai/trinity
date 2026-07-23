@@ -1096,6 +1096,17 @@
         "unit"
       ],
       "description": "PAT-free clone of public github: templates (ent#123). 50 tests over the 1484-shape purge-and-mock harness: _gate_tokenless_request (\"\"->None normalization, source-mode-only 400 incl. explicit None, fork passthrough), _parse_github_ref charset guard (eval-interpolation hardening), _validate_github_access tokenless ls-remote probe (ok/unavailable->400/transient->502 fail-closed, anonymous branch check, PAT-ful REST regression), _apply_github_env token-var gating (+GIT_SYNC_AUTO belt), lifecycle._apply_persisted_auth_env rebuild seam (repo-only gate, source-mode re-derivation), git_service.probe_anonymous_repo_access stderr classification, the no_write_credentials sync/reset guard (baked env OR per-agent PAT row \u2014 #1264 live-injection window, fail-open), and startup.sh static guards (repo-only clone gate, credential-less CLONE_URL, GIT_TERMINAL_PROMPT=0, push blackhole, .env PAT fallback, private-repo failure cause)."
+    },
+    {
+      "file": "unit/test_ent125_resilient_system_deploy.py",
+      "feature": "trinity-enterprise#125",
+      "added": "2026-07-23",
+      "categories": [
+        "backend",
+        "systems",
+        "unit"
+      ],
+      "description": "Resilient system-manifest deploy (ent#125): best-effort default \u2014 partial deploy continues past a failed agent-create and reports failed[] with {name, short_name, template, reason, status_code}; post-create config (folders/permissions/schedules/tags) scoped to the survivor map; config-phase failures degrade to warnings; total failure returns HTTP 500 with the full report body, skips config/start, and never writes trinity_prompt; partial still writes it; strict=True aborts preserving the original status code (dict-detail 429 not flattened to 500); reason normalization (dict detail \u2192 error field), PAT-bearing git-URL userinfo redaction (learnings 2026-07-14), and 500-char truncation; orchestrator-workers preset with failed orchestrator warns 'non-functional' and configures permissions over survivors only; dry_run and all-success responses unchanged (failed == []). Router mounted alone with create_agent_internal/config fns/db patched at the routers.systems module binding."
     }
   ]
 }

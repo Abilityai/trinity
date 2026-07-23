@@ -207,19 +207,34 @@ class SystemManifest(BaseModel):
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
 ```
 
-**SystemDeployRequest** (Lines 256-259)
+**SystemDeployRequest**
 ```python
 class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
     manifest: str  # Raw YAML string
     dry_run: bool = False
+    # trinity-enterprise#125: abort on first agent-create failure (legacy behavior)
+    strict: bool = False
 ```
 
-**SystemDeployResponse** (Lines 262-273)
+**SystemDeployFailure** (trinity-enterprise#125)
+```python
+class SystemDeployFailure(BaseModel):
+    """One agent that failed to create during a system deploy."""
+    name: str  # Final (resolved) agent name
+    short_name: str  # Short name from the manifest
+    template: str
+    reason: str  # Sanitized, truncated failure reason
+    status_code: Optional[int] = None  # Original HTTP status when HTTPException
+```
+
+**SystemDeployResponse**
 ```python
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
-    status: str  # "deployed" or "valid" (for dry_run)
+    # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
+    # | "valid" (dry_run) — trinity-enterprise#125
+    status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run preview
@@ -229,6 +244,7 @@ class SystemDeployResponse(BaseModel):
     tags_configured: int = 0  # ORG-001 Phase 4: Total tags applied
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
+    failed: List[SystemDeployFailure] = []  # trinity-enterprise#125
 ```
 
 ### Service Layer (`src/backend/services/system_service.py`)
@@ -506,7 +522,7 @@ async def deploy_system(
     """
 ```
 
-**Deployment Flow**:
+**Deployment Flow** (best-effort by default, trinity-enterprise#125):
 ```
 1. parse_manifest(body.manifest) -> SystemManifest
    └─ Raises ValueError on YAML syntax error or missing required fields
@@ -522,63 +538,108 @@ async def deploy_system(
 4. If dry_run=True:
    └─ Return preview: {status: "valid", agents_to_create: [...], warnings: [...]}
 
-5. Update trinity_prompt (if manifest.prompt provided):
-   └─ db.set_setting("trinity_prompt", manifest.prompt)
-
-6. Create agents:
+5. Create agents — BEST-EFFORT loop (trinity-enterprise#125):
    For each agent in manifest.agents:
      a. Build AgentConfig(name=final_name, template, resources)
      b. create_agent_internal(config, current_user, request, skip_name_sanitization=True)
-     c. Append to created_agents list
-     d. On error: Log audit event, raise HTTPException with partial failure details
+     c. Success → append to created_agents
+     d. Failure → _failure_reason(exc) normalizes (dict detail → 'error' field,
+        credential-sanitize + URL-userinfo redact + 500-char truncate — learnings
+        2026-07-14: git errors embed PAT-bearing remote URLs) and appends a
+        SystemDeployFailure {name, short_name, template, reason, status_code}.
+        Each failed create self-cleans via crud.py's own rollback (#1484).
+     e. strict=True → abort on first failure instead, re-raising with the
+        ORIGINAL status code (4xx no longer flattened to 500) and detail
+        {error: "Deployment failed", failed_at, created, reason}
 
-7. Configure shared folders:
-   └─ configure_folders(agent_names, manifest.agents) -> folders_configured
+6. Total failure (created == [], not dry_run):
+   └─ status="failed"; HTTP 500 with the FULL report as the body (JSONResponse)
+      so code-only callers (curl -f) don't read it as success
+   └─ Skips prompt write, all config phases, system view, and start
 
-8. Configure permissions (if manifest.permissions):
-   └─ configure_permissions(agent_names, manifest.permissions, current_user.username) -> permissions_count
+6b. Update trinity_prompt (if manifest.prompt AND ≥1 agent created):
+   └─ db.set_setting("trinity_prompt", manifest.prompt)
+   └─ Moved post-loop (trinity-enterprise#125) so a totally-failed deploy
+      never mutates the platform-wide prompt
 
-9. Create schedules:
-   └─ create_schedules(agent_names, manifest.agents, current_user.username) -> schedules_count
+6c. Survivor scoping + partial warnings:
+   └─ created_map = agent_names filtered to created agents; all config phases
+      below receive created_map (the config fns skip missing short_names)
+   └─ Partial → warning: re-deploying this manifest creates _N-suffixed
+      duplicates of already-created agents (converge: trinity-enterprise#124)
+   └─ orchestrator-workers preset with failed orchestrator → warning:
+      workers have no inter-agent permissions, system may be non-functional
 
-10. Configure tags (ORG-001 Phase 4):
-    └─ configure_tags(manifest.name, agent_names, manifest.agents, manifest.default_tags) -> tags_count
+7. Configure shared folders (guarded — failure degrades to a warning):
+   └─ configure_folders(created_map, manifest.agents) -> folders_configured
+
+8. Configure permissions (if manifest.permissions; guarded):
+   └─ configure_permissions(created_map, manifest.permissions, current_user.username) -> permissions_count
+
+9. Create schedules (guarded):
+   └─ create_schedules(created_map, manifest.agents, current_user.username) -> schedules_count
+
+10. Configure tags (ORG-001 Phase 4; guarded):
+    └─ configure_tags(manifest.name, created_map, manifest.agents, manifest.default_tags) -> tags_count
     └─ Applies: system_name tag + default_tags + per-agent tags
     └─ All tags normalized (lowercase, deduplicated)
 
 11. Create System View (ORG-001 Phase 4, if manifest.system_view):
     └─ create_system_view(manifest.name, manifest.system_view, manifest.default_tags, current_user.id) -> system_view_id
     └─ Filter tags: system_name + default_tags
-    └─ View appears in Dashboard sidebar
+    └─ View appears in Dashboard sidebar (self-guards: returns None on error)
 
 12. Start all agents:
     └─ start_all_agents(created_agents) -> start_results
-    └─ Count agents_started and agents_failed
+    └─ Count agents_started and agents_failed (start failures stay warnings)
 
-13. Audit log success:
-    └─ log_audit_event(event_type="system_deployment", action="deploy", ...)
-
-14. Return response:
-    └─ {status: "deployed", system_name, agents_created, prompt_updated, permissions_configured,
-        schedules_created, tags_configured, system_view_created, warnings}
+13. Return response:
+    └─ {status: "deployed" | "partial", system_name, agents_created, prompt_updated,
+        permissions_configured, schedules_created, tags_configured,
+        system_view_created, warnings, failed: [SystemDeployFailure]}
 ```
+
+Steps 7–10 are individually wrapped (trinity-enterprise#125): once agents exist, a
+config-phase exception appends a sanitized warning and the deploy report is still
+returned — it never converts a partial success into an opaque 500.
+
+**Response status contract** (trinity-enterprise#125):
+| status | Meaning | HTTP |
+|--------|---------|------|
+| `valid` | dry_run validation passed | 200 |
+| `deployed` | all agents created | 200 |
+| `partial` | some agents failed; survivors deployed + configured | 200 |
+| `failed` | zero agents created | 500 (full report body) |
+
+`SystemDeployRequest.strict` (default false) restores legacy abort-on-first-error.
+Callers must check `status`/`failed[]`, not just the HTTP code.
 
 **Error Handling**:
-- Lines 51-54: YAML parse error - 400 with ValueError message
-- Lines 57-60: Validation error - 400 with ValueError message
-- Lines 120-131: Agent creation HTTPException - 500 with partial failure details
-- Lines 133-144: Agent creation generic error - 500 with partial failure details
-- Lines 192-196: Unexpected error - 500 with error message
+- YAML parse error - 400 with ValueError message
+- Validation error - 400 with ValueError message
+- Agent creation failure (default) - collected into `failed[]`, deploy continues
+- Agent creation failure (strict=true) - abort with the failure's original status
+  code, detail {error, failed_at, created, reason}
+- Config-phase failure after creation - warning appended, report still returned
+- Unexpected error outside the guarded phases - 500 with error message
 
-**Partial Failure Response** (Lines 123-131):
+**Failure entry** (`SystemDeployFailure`, models.py):
 ```json
 {
-  "error": "Deployment failed",
-  "failed_at": "my-system-worker2",
-  "created": ["my-system-worker1"],
-  "reason": "Template not found: github:invalid/repo"
+  "name": "my-system-worker2",
+  "short_name": "worker2",
+  "template": "github:invalid/repo",
+  "reason": "Failed to validate GitHub repository access: repository not found",
+  "status_code": 502
 }
 ```
+
+**Known redeploy caveat**: a redeploy after partial failure `_N`-suffixes every
+already-created agent (resolve_agent_names conflict handling), and a create that
+failed after volume creation can 409 on the same name until the orphan-volume
+sweep reclaims it (#1667 guard; the 409 reason carries the `docker volume rm`
+remediation verbatim). Idempotent converge (`on_conflict: skip`) is deferred to
+trinity-enterprise#124.
 
 #### GET /api/systems (Lines 199-244)
 ```python
@@ -1088,25 +1149,33 @@ Returns: 3 (total permissions configured)
 
 All tools support MCP API key authentication when `requireApiKey=true` in server config.
 
-#### deploy_system (Lines 44-100)
+#### deploy_system
 ```typescript
 {
   name: "deploy_system",
-  description: "Deploy a multi-agent system from a YAML manifest...",
+  description: "Deploy a multi-agent system from a YAML manifest... " +
+    "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') " +
+    "and `failed[]` in the response. Pass strict: true to restore abort-on-first-error.",
   parameters: z.object({
     manifest: z.string().describe("YAML manifest as a string..."),
-    dry_run: z.boolean().optional().describe("If true, validates without creating agents")
+    dry_run: z.boolean().optional().describe("If true, validates without creating agents"),
+    strict: z.boolean().optional().describe("Abort on first agent-create failure (legacy)")
   }),
-  execute: async ({ manifest, dry_run }, context?) => {
+  execute: async ({ manifest, dry_run, strict }, context?) => {
     const apiClient = getClient(context?.session);
     const response = await apiClient.request("POST", "/api/systems/deploy", {
       manifest,
-      dry_run: dry_run || false
+      dry_run: dry_run || false,
+      strict: strict || false
     });
     return JSON.stringify(response, null, 2);
   }
 }
 ```
+
+On a total failure the backend answers HTTP 500 with the report as the body; the
+MCP client's `ApiError` embeds that body in the tool error message, so the report
+is still visible to the calling agent (trinity-enterprise#125).
 
 #### list_systems (Lines 105-133)
 ```typescript
@@ -1577,6 +1646,13 @@ prompt: !!python/object:db_models.Setting
 - **Slow Tests** (`@pytest.mark.slow`): Full multi-agent system tests with all features
 - **Integration Tests**: Complete workflows (export and redeploy)
 - **Edge Cases**: Error handling, authentication, validation
+- **Resilient Deploy** (`TestResilientDeploy`, trinity-enterprise#125): partial deploy
+  continues + reports `failed[]`, total failure returns 500 + report body, strict
+  aborts with the original status. Failure vector: `resources: {cpu: "3"}`
+  (deterministic pre-side-effect 400). Hermetic router coverage lives in
+  `tests/unit/test_ent125_resilient_system_deploy.py` (14 tests: survivor scoping,
+  config-phase degradation, reason normalization/sanitization, prompt-write gating,
+  orchestrator-failed warning).
 
 ### Phase 1 Tests: YAML Parsing and Validation
 
