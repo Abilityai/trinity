@@ -33,6 +33,8 @@ export const useRoomsStore = defineStore('rooms', () => {
 
   let _pollTimer = null
   let _seqSeen = 0                   // highest seq applied to activeRoom
+  let _appendInFlight = false        // serialize refetches (chain events arrive back-to-back)
+  let _appendAgain = false           // an event landed mid-refetch → run once more
 
   // --- getters ---
   const anyWorking = computed(() =>
@@ -66,6 +68,8 @@ export const useRoomsStore = defineStore('rooms', () => {
     roomLoading.value = true
     workingState.value = {}
     _seqSeen = 0
+    _appendInFlight = false
+    _appendAgain = false
     try {
       await _refreshActiveRoom()
     } finally {
@@ -85,24 +89,44 @@ export const useRoomsStore = defineStore('rooms', () => {
 
   // Append only the messages after what we've applied, so a WS-triggered refetch
   // doesn't rebuild the whole transcript (and lose scroll).
+  //
+  // Two guards make this dedup-safe. Room chains fire several `room_message`
+  // events back-to-back, so overlapping refetches would otherwise BOTH read the
+  // same `_seqSeen`, fetch the same rows, and append them twice (observed: the
+  // same message + execution_id rendered twice).
+  //  1. In-flight lock — only one refetch runs; an event mid-flight sets a rerun
+  //     flag so nothing is missed.
+  //  2. Dedup by seq — append only rows whose seq isn't already present, so even
+  //     an overlapping `since=` window (or the backstop poll) can't duplicate.
   async function _appendSince() {
     if (!activeRoomId.value || !activeRoom.value) return
-    const { data } = await api.get(
-      `/api/rooms/${encodeURIComponent(activeRoomId.value)}?since=${_seqSeen}`
-    )
-    const fresh = data.messages || []
-    if (fresh.length) {
-      // drop any optimistic placeholders now confirmed by a real row
-      activeRoom.value.messages = activeRoom.value.messages.filter((m) => !m._optimistic)
-      activeRoom.value.messages.push(...fresh)
-      _seqSeen = fresh[fresh.length - 1].seq
+    if (_appendInFlight) { _appendAgain = true; return }
+    _appendInFlight = true
+    try {
+      const { data } = await api.get(
+        `/api/rooms/${encodeURIComponent(activeRoomId.value)}?since=${_seqSeen}`
+      )
+      if (!activeRoom.value) return
+      const known = new Set(
+        activeRoom.value.messages.filter((m) => !m._optimistic).map((m) => m.seq)
+      )
+      const fresh = (data.messages || []).filter((m) => !known.has(m.seq))
+      if (fresh.length) {
+        // drop optimistic placeholders now confirmed by real rows
+        activeRoom.value.messages = activeRoom.value.messages.filter((m) => !m._optimistic)
+        activeRoom.value.messages.push(...fresh)
+        _seqSeen = Math.max(_seqSeen, ...fresh.map((m) => m.seq))
+      }
+      activeRoom.value.status = data.status
+      activeRoom.value.stop_reason = data.stop_reason
+      activeRoom.value.message_count = data.message_count
+      activeRoom.value.cost = data.cost
+      activeRoom.value.participants = data.participants
+      _syncRailRow(data)
+    } finally {
+      _appendInFlight = false
+      if (_appendAgain) { _appendAgain = false; _appendSince() }
     }
-    activeRoom.value.status = data.status
-    activeRoom.value.stop_reason = data.stop_reason
-    activeRoom.value.message_count = data.message_count
-    activeRoom.value.cost = data.cost
-    activeRoom.value.participants = data.participants
-    _syncRailRow(data)
   }
 
   function _syncRailRow(data) {
@@ -201,6 +225,8 @@ export const useRoomsStore = defineStore('rooms', () => {
     activeRoom.value = null
     workingState.value = {}
     _seqSeen = 0
+    _appendInFlight = false
+    _appendAgain = false
   }
 
   return {
