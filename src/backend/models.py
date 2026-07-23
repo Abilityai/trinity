@@ -928,6 +928,14 @@ class FleetExecutionStats(BaseModel):
     total_cost: float
     success_rate: float
     hours: int  # 0 = all-time
+    # #1743: the slice of the above that belongs to a DELETED agent (soft-deleted
+    # or purged). Execution rows outlive their agent deliberately — cost is
+    # billing truth and a soft-deleted agent is recoverable — but the per-agent
+    # surfaces render only live agents, so these totals would otherwise exceed
+    # the sum of the tiles by an amount nothing on screen explains. Defaults keep
+    # the field additive for any client that predates it.
+    deleted_agent_count: int = 0
+    deleted_agent_cost: float = 0.0
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
