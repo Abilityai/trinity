@@ -5,7 +5,7 @@
 GitHub-native agents can synchronize with GitHub repositories in two modes:
 
 ### Source Mode (Default - Recommended)
-**Unidirectional pull-only sync**: Agent tracks a source branch (default: `main`) and can pull updates on demand. Changes made in the agent are local only and not pushed back. This is ideal for agents developed locally and deployed to Trinity.
+**Unidirectional pull-only sync**: Agent tracks a source branch (default: `main`) and can pull updates on demand. Changes made in the agent are local only and not pushed back. This is ideal for agents developed locally and deployed to Trinity. **Public** templates need no GitHub PAT at all — see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123) (ent#123).
 
 ### Working Branch Mode (Legacy)
 **Bidirectional sync**: Agent gets a unique working branch (`trinity/{agent-name}/{instance-id}`) and can push changes back to GitHub. This is the original Phase 7 implementation, now available as an opt-in feature.
@@ -110,13 +110,28 @@ CLONE_CMD="git clone -b ${CLONE_BRANCH} ${CLONE_URL} /home/developer"
 
 ```bash
 GITHUB_REPO=Owner/repo
-GITHUB_PAT=ghp_xxx
+GITHUB_PAT=ghp_xxx             # Omitted entirely for tokenless agents (ent#123)
+GH_TOKEN=ghp_xxx               # #1574 mirror of GITHUB_PAT (gh CLI / REST) — same gating
+GITHUB_TOKEN=ghp_xxx           # #1574 mirror — same gating
 GIT_SYNC_ENABLED=true
 GIT_SOURCE_MODE=true           # Enables source mode
 GIT_SOURCE_BRANCH=main         # Branch to track (default: main)
 ```
 
-### Startup Behavior (`docker/base-image/startup.sh:41-71`)
+> **ent#123**: `GITHUB_PAT`/`GH_TOKEN`/`GITHUB_TOKEN` are baked only when a PAT
+> resolved at creation. A source-mode agent created from a **public** template
+> with no PAT at any tier gets repo + sync flags only and clones anonymously —
+> see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123).
+
+### Startup Behavior (`docker/base-image/startup.sh`)
+
+The clone gate is `[ -n "${GITHUB_REPO}" ]` only (ent#123 — previously the
+block also required a PAT). `CLONE_URL` is built conditionally: with a PAT it
+embeds `oauth2:${GITHUB_PAT}@` as before; without one it is the plain
+credential-less URL (mirroring the fork-to-own `UPSTREAM_URL`), and
+`GIT_TERMINAL_PROMPT=0` is exported so any auth challenge fails fast instead
+of hanging on a prompt. After clone/restart, `configure_push_remote()` sets or
+clears the tokenless push blackhole (see the ent#123 section below).
 
 ```bash
 # SOURCE MODE (lines 41-54): Track the source branch directly (unidirectional pull only)
@@ -210,10 +225,15 @@ AgentConfig(
 
 ```bash
 GITHUB_REPO=Owner/repo
-GITHUB_PAT=ghp_xxx
+GITHUB_PAT=ghp_xxx             # REQUIRED — a tokenless working-branch create is rejected 400 (ent#123)
 GIT_SYNC_ENABLED=true
 GIT_WORKING_BRANCH=trinity/my-agent/a1b2c3d4  # Auto-generated
 ```
+
+Working-branch mode pushes a new branch at container boot, which is impossible
+anonymously — a create with no resolvable PAT and `source_mode` falsy fails at
+`crud.py::_gate_tokenless_request` with 400 "Bidirectional git sync requires
+write credentials…" (ent#123).
 
 ### Startup Behavior
 
@@ -274,6 +294,146 @@ or `/home/developer/workspace` for legacy pre-2026-02 agents).
 
 ---
 
+## Tokenless (Anonymous) Clone of Public Templates (ent#123)
+
+A `github:owner/repo` create no longer hard-fails when NO GitHub PAT resolves
+at any tier (per-agent → owner's per-user → global). A **public** template in
+**source mode** (pull-only) is cloned anonymously; the resulting agent is
+read-only toward GitHub by construction. Requirements:
+`docs/memory/requirements/github.md` §11.11. Tests:
+`tests/unit/test_ent123_tokenless_clone.py` (50 cases). Ships with a
+**base-image rebuild** (startup.sh changed).
+
+### Creation gate — `crud.py::_gate_tokenless_request`
+
+- `resolve_github_pat` returns `("", "none")` when no tier has a token; the
+  helper normalizes the empty string to `None` so every downstream consumer
+  can rely on truthiness.
+- Tokenless + falsy `source_mode` (explicit `False` **or** `None` — it's
+  `Optional[bool]`) → **400** "Bidirectional git sync requires write
+  credentials — add your GitHub token in Settings (or ask an admin to
+  configure the platform token), or create the agent in source mode
+  (pull-only)."
+- Fork-to-own passes through (the user's own PAT becomes the write identity
+  later, in `_apply_fork_to_own`).
+- Both former hard-fail branches in `crud.py::_resolve_github_repo_and_pat`
+  (predefined catalog entry AND dynamic `owner/repo`) now route through this
+  helper — a tokenless source-mode create proceeds with `github_pat=None`.
+- The public-vs-private decision is deliberately NOT made here (the helper is
+  sync); it happens in `_validate_github_access` via the anonymous probe.
+
+### Repo-path charset guard — `crud.py::_parse_github_ref`
+
+`_GITHUB_REPO_PATH_RE` (`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`) → 400 on any
+other charset. The repo path is interpolated into startup.sh's eval-built
+clone command; the PAT-ful REST validation used to reject garbage
+incidentally, but the tokenless path fail-opens past REST, so the barrier is
+now explicit. GitHub's own charset is a subset of the pattern.
+
+### Anonymous reachability probe — `crud.py::_validate_github_access` → `git_service.probe_anonymous_repo_access`
+
+When no PAT resolved, the pre-create validation (#218) swaps the REST probe
+for a credential-less `git ls-remote <url> HEAD` (`GIT_TERMINAL_PROMPT=0`) —
+the **same transport** the container's anonymous clone uses (success here ≈
+the clone will succeed), and immune to the anonymous REST 60/hr cap that makes
+`GitHubService.check_repo_exists` raise on 403. Stderr classified against
+`git_service._ANON_PROBE_DEFINITIVE_PATTERNS` ("could not read username",
+"repository not found", …).
+
+| Probe outcome | Meaning | Create result |
+|---------------|---------|---------------|
+| `ok` | Remote answered; public and reachable | Proceed; the source branch is then verified anonymously via `check_remote_branch_exists` — missing branch → 400 "Branch '…' not found in public repository '…'" |
+| `unavailable` | Remote answered with auth-challenge / not-found (anonymous GitHub deliberately cannot distinguish private from nonexistent) | 400 combined message: "was not found or is private. If it is private, add your GitHub token…" |
+| `transient` | GitHub itself unreachable (timeout / DNS / no git binary) | **502 — FAIL-CLOSED.** The clone would fail too, and with monitoring default-off (#1121) a fail-open would produce a silently empty agent |
+
+The PAT-ful validation path is byte-identical to before (REST probe;
+`GitHubError` → 502; other transient errors logged, non-blocking).
+
+### Env baking — `crud.py::_apply_github_env`
+
+Gate is **repo-only**: a tokenless agent gets `GITHUB_REPO`,
+`GIT_SYNC_ENABLED=true`, and `GIT_SOURCE_MODE`/`GIT_SOURCE_BRANCH` — but NO
+`GITHUB_PAT`/`GH_TOKEN`/`GITHUB_TOKEN`. `GIT_SYNC_AUTO` additionally requires
+a PAT (belt — tokenless is provably source-mode+non-fork today, but auto-push
+must never engage without credentials if that restriction is ever relaxed).
+The post-create `db.set_git_auto_sync_enabled` opt-in in
+`crud.py::_materialize_agent_files` carries the same PAT requirement (new
+`github_pat_for_agent` param threaded from the orchestrator).
+
+### Rebuild-missing-container recovery — `lifecycle.py::_apply_persisted_auth_env` (#1559)
+
+Gate flipped from `if pat and repo:` to `if repo:` — a tokenless agent rebuilt
+after container loss still gets `GITHUB_REPO` + `GIT_SYNC_ENABLED`
+(previously the clone was never attempted → silently empty agent with green
+health, the #843/#1439 class). The PAT is injected only when present;
+source-mode rows also re-derive `GIT_SOURCE_MODE`/`GIT_SOURCE_BRANCH` so a
+volume-loss rebuild re-clones the right branch.
+
+### Container start — `docker/base-image/startup.sh`
+
+- **Clone gate is `[ -n "${GITHUB_REPO}" ]` only** (was PAT-gated).
+  `CLONE_URL`: PAT → `oauth2:${GITHUB_PAT}@…` as before; no PAT →
+  credential-less URL, mirroring the fork-to-own `UPSTREAM_URL`.
+- `export GIT_TERMINAL_PROMPT=0` in the git block — an auth challenge (repo
+  goes private later, PAT revoked) is a deterministic fail-fast "could not
+  read Username" instead of a hang on a prompt.
+- **`configure_push_remote()`** (new, called at both origin `set-url` sites —
+  fresh clone and restart): tokenless → blackholes the push URL with a
+  self-describing invalid URL
+  (`no-write-credentials--this-agent-is-read-only--fork-to-own-or-add-a-github-token-to-push`)
+  so ANY in-container `git push` (Claude turns, gh, skills) fails immediately
+  with readable text instead of a cryptic anonymous-auth failure an LLM will
+  retry-loop on; with a PAT it clears any leftover blackhole
+  (`git config --unset remote.origin.pushurl`) so a token added later
+  restores pushes.
+- **Workspace `.env` PAT fallback** (top of file): when the baked env lacks
+  `GITHUB_PAT`, it is read from `/home/developer/.env` — a per-agent PAT
+  configured AFTER creation is live-injected there (#1264) while the baked env
+  stays tokenless until the next recreate, and an ops-path raw restart re-runs
+  startup.sh with the tokenless baked env. Baked env wins when both are set.
+- **Restart-path `git remote set-url origin` is now unconditional** — with no
+  PAT the rewrite installs the credential-less URL, scrubbing a stale embedded
+  token (safe: the `.env` fallback above means a working live-injected
+  credential is never clobbered).
+- Clone-failure causes text gains "Repository is private and no GitHub token
+  is configured".
+
+### Push-path guards — `git_service.py`
+
+`_agent_has_write_credentials(agent_name, container)` — predicate = the
+container's baked `GITHUB_PAT` env **OR** `db.get_agent_github_pat` (per-agent
+tier only, never global — a global PAT never reaches a tokenless container's
+remote; the OR covers the #1264 live-injection window where the PAT reaches
+the workspace `.env` + origin remote before any recreate). **Fail-open**: any
+error reading either source returns `True`, so the guard can only ever produce
+a clearer message, never block a working push.
+
+- `sync_to_github` returns a named failure **before contacting the agent**:
+  `conflict_type: "no_write_credentials"`, `conflict_class: "AUTH_FAILURE"`,
+  message `NO_WRITE_CREDENTIALS_MESSAGE` ("This agent has no write
+  credentials — it tracks a public template read-only. To keep your changes,
+  create a new agent with fork-to-own and import your data…, or add a GitHub
+  token.").
+- `reset_to_main_preserve_state` refuses up front with
+  `{"error": "no_write_credentials", "message": NO_WRITE_CREDENTIALS_MESSAGE}`
+  (the recovery ends in a force-with-lease push); `routers/git.py` maps it
+  into the 409 `X-Conflict-Type` set alongside
+  `agent_busy`/`no_git_config`/`no_remote_main`.
+
+### Error Handling (ent#123 paths)
+
+| Error case | Where | HTTP | Signal |
+|------------|-------|------|--------|
+| Tokenless + working-branch mode | `crud.py::_gate_tokenless_request` | 400 | "Bidirectional git sync requires write credentials…" |
+| Repo path charset garbage | `crud.py::_parse_github_ref` | 400 | "Invalid GitHub repository reference…" |
+| Repo private or nonexistent (anonymous) | `crud.py::_validate_github_access` | 400 | Combined "not found or is private — add a GitHub token" |
+| GitHub unreachable during tokenless create | `crud.py::_validate_github_access` | **502 (fail-closed)** | "GitHub is unreachable — could not verify anonymous access…" |
+| Source branch missing (anonymous) | `crud.py::_validate_github_access` | 400 | "Branch '…' not found in public repository…" |
+| Push from a tokenless agent | `git_service.sync_to_github` | 409 | `X-Conflict-Type: no_write_credentials`, class `AUTH_FAILURE` |
+| Reset-to-main on a tokenless agent | `git_service.reset_to_main_preserve_state` | 409 | `X-Conflict-Type: no_write_credentials` |
+
+---
+
 ## Recovery: Reset-to-Main-Preserve-State (S3, #384)
 
 ### Purpose
@@ -308,9 +468,10 @@ POST /api/agents/{name}/git/reset-to-main-preserve-state
     commit_sha: "abc1234...",
     working_branch: "trinity/my-agent/abcd1234"
   }
-  409 (X-Conflict-Type: agent_busy)     -> agent currently executing a task
-  409 (X-Conflict-Type: no_git_config)  -> .git missing or origin unset
-  409 (X-Conflict-Type: no_remote_main) -> origin has no `main` branch
+  409 (X-Conflict-Type: agent_busy)           -> agent currently executing a task
+  409 (X-Conflict-Type: no_write_credentials) -> tokenless agent — recovery ends in a push (ent#123)
+  409 (X-Conflict-Type: no_git_config)        -> .git missing or origin unset
+  409 (X-Conflict-Type: no_remote_main)       -> origin has no `main` branch
   500 -> snapshot/reset/push failure (detail includes the failing step)
 ```
 
@@ -348,6 +509,10 @@ sequenceDiagram
    returns a non-empty list (chat, schedule, tool-call, collaboration in
    progress). Returned before any HTTP call to the agent-server so the
    agent is never interrupted mid-task.
+1b. **Backend: no_write_credentials** (ent#123) — the recovery ends in a
+   force-with-lease push, so `git_service._agent_has_write_credentials` is
+   checked next (also before any agent-server call); a tokenless agent gets
+   the same honest `NO_WRITE_CREDENTIALS_MESSAGE` as Push.
 2. **Agent-server: no_git_config** — `/home/developer/.git` missing or
    `git remote get-url origin` fails. Prevents destructive git ops on an
    agent that was never initialised for sync.
@@ -510,7 +675,7 @@ def get_github_pat_for_agent(agent_name: str) -> str:
     return get_github_pat()  # platform fallback: DB then GITHUB_PAT env var
 ```
 
-**Agent creation — 3-tier with provenance** (`resolve_github_pat(agent_name, owner_id)`, per-agent → owner's per-user → global). Called at both `github:` create sites in `services/agent_service/crud.py`; it returns `(pat, tier)` so the creator's own token (`users.github_pat_encrypted`, self-service `/api/users/me/github-pat`) is preferred over the shared admin PAT — a non-admin is no longer confined to the admin's repo scope. The resolved PAT is persisted as the #347 per-agent PAT **only** when `tier ∈ {per_user, fork}`, never `global`: a global-fallback agent keeps `github_pat_encrypted` NULL so `github_pat_propagation_service` still reaches it on admin rotation. Resolution keys on `owner_id` (the creator/owner) only — never a sharee — so a shared agent's git identity can't be hijacked. (Public-repo-no-PAT is out of scope here → #123.)
+**Agent creation — 3-tier with provenance** (`resolve_github_pat(agent_name, owner_id)`, per-agent → owner's per-user → global). Called at both `github:` create sites in `services/agent_service/crud.py`; it returns `(pat, tier)` so the creator's own token (`users.github_pat_encrypted`, self-service `/api/users/me/github-pat`) is preferred over the shared admin PAT — a non-admin is no longer confined to the admin's repo scope. The resolved PAT is persisted as the #347 per-agent PAT **only** when `tier ∈ {per_user, fork}`, never `global`: a global-fallback agent keeps `github_pat_encrypted` NULL so `github_pat_propagation_service` still reaches it on admin rotation. Resolution keys on `owner_id` (the creator/owner) only — never a sharee — so a shared agent's git identity can't be hijacked. When NO tier resolves a token (`("", "none")`), the create is no longer an automatic hard-fail: `crud.py::_gate_tokenless_request` admits source-mode public-template creates tokenless and rejects working-branch mode with 400 — see [Tokenless (Anonymous) Clone of Public Templates](#tokenless-anonymous-clone-of-public-templates-ent123) (ent#123).
 
 **Platform PAT** (`src/backend/services/settings_service.py`):
 ```python
@@ -929,7 +1094,8 @@ POST /api/agents/{name}/git/sync
   "conflict_class": "PARALLEL_HISTORY"
 }
 // Headers:
-//   X-Conflict-Type:  merge_conflict | local_uncommitted | push_rejected
+//   X-Conflict-Type:  merge_conflict | local_uncommitted | push_rejected |
+//                     no_write_credentials (tokenless agent, ent#123)
 //   X-Conflict-Class: AHEAD_ONLY | BEHIND_ONLY | PARALLEL_HISTORY |
 //                     UNCOMMITTED_LOCAL | AUTH_FAILURE |
 //                     WORKING_BRANCH_EXTERNAL_WRITE | UNKNOWN
@@ -1107,7 +1273,7 @@ Push is the right answer:
 
 ## Security Considerations
 
-1. **GitHub PAT**: Passed as environment variable, never exposed in logs or API responses
+1. **GitHub PAT**: Passed as environment variable, never exposed in logs or API responses. Not required for public source-mode templates — a tokenless agent (ent#123) bakes no `GITHUB_PAT`/`GH_TOKEN`/`GITHUB_TOKEN` at all, clones anonymously, and gets a blackholed push URL (`startup.sh::configure_push_remote`) so it is read-only toward GitHub by construction
 2. **Remote URL Sanitization**: Credentials stripped before display
 3. **Force Push Protection**: All pushes (normal AND `force_push` strategy) use `--force-with-lease`. `force_push` parameterizes the lease with the persisted last-observed remote SHA so a stale binding cannot clobber a peer (S7 Layer 3, #382). See "Branch-Ownership Collision Handling" above.
 4. **Force Operations Warning**: UI shows red destructive warnings for force operations
@@ -1118,7 +1284,7 @@ Push is the right answer:
 
 ## Status
 
-Working - Pull fix for working branches (2026-03-26)
+Working - PAT-free public-template clone (trinity-enterprise#123, 2026-07-23)
 
 ---
 
@@ -1138,6 +1304,7 @@ Working - Pull fix for working branches (2026-03-26)
 
 | Date | Changes |
 |------|---------|
+| 2026-07-23 | **PAT-free clone of public `github:` templates** (trinity-enterprise#123): a tokenless create is admitted in source mode (`crud.py::_gate_tokenless_request` normalizes `resolve_github_pat`'s `("", "none")` to None; working-branch mode → named 400) and validated via a credential-less `git ls-remote` probe (`git_service.probe_anonymous_repo_access`; unavailable → combined 400, transient → FAIL-CLOSED 502; source branch checked anonymously). `_parse_github_ref` gains the `_GITHUB_REPO_PATH_RE` owner/repo charset guard (400). Env baking (`_apply_github_env`) and the #1559 rebuild recovery (`lifecycle.py::_apply_persisted_auth_env`) gate on repo only — token vars/`GIT_SYNC_AUTO`/auto-sync opt-in still require a PAT. startup.sh (base-image rebuild): repo-only clone gate, conditional CLONE_URL, `GIT_TERMINAL_PROMPT=0`, `configure_push_remote()` push-URL blackhole for tokenless agents, workspace-`.env` PAT fallback for the #1264 live-injection window, unconditional restart-path origin rewrite. Push paths refuse honestly: `git_service._agent_has_write_credentials` (fail-open; baked env OR per-agent PAT, never global) → `sync_to_github` 409 `no_write_credentials`/`AUTH_FAILURE`; `reset_to_main_preserve_state` → 409 `X-Conflict-Type: no_write_credentials`. Tests: `tests/unit/test_ent123_tokenless_clone.py` (50). Requirements §11.11. |
 | 2026-04-19 | **S7 Layer 3 push-time guard** (#382, PR #396): `sync_to_github()` `force_push` strategy now uses `git push --force-with-lease=<branch>:<expected-sha>` instead of plain `--force` (`docker/base-image/agent_server/routers/git.py`). The expected-sha is the remote value last observed at fetch, persisted to `~/.trinity/last-remote-sha/<branch>` via `_persist_last_remote_sha()` after every successful fetch. Stale-lease rejection returns HTTP 409 with header `X-Conflict-Type: branch_ownership_collision` and appends a structured alert to `~/.trinity/operator-queue.json` (`_record_push_collision()`), which the backend's `OperatorQueueSyncService` surfaces in the Operating Room on its next 5s poll. Persistence/append failures are logged, never raised. Response to the 2026-04-17 alpaca-vybe-live silent clobber; Tier-1 regression at `tests/git-sync/test_p5_branch_ownership.sh`. Layers 0 and 2 (reservation helper + partial UNIQUE index) are documented in `github-repo-initialization.md`. |
 | 2026-04-19 | **S5 — operator-readable conflict diagnosis** (#386, PR #397): Added `ConflictClass` enum + pure `classify_conflict()` in `src/backend/services/git_service.py`, mirrored in new `docker/base-image/agent_server/utils/git_conflict.py`. New `conflict_class` field on `GitSyncResult` and `X-Conflict-Class` response header on 409s. Agent-server collapsed 5 `HTTPException` sites behind a shared `_conflict_response()` helper. `GitConflictModal.vue` picks per-class title/body/recommendation from a `COPY` lookup; raw stderr in an expandable `<details>`; pre-S5 fallback preserves old strings. Composable `useGitSync.js` reads the header into the existing `gitConflict` ref. Regression coverage in `tests/git-sync/test_s5_conflict_classifier.py` (11 pytest cases) and `tests/git-sync/test_s5_modal.spec.js` (5 Vitest snapshots). |
 | 2026-04-19 | **S2 — Parallel-history detection at modal open** (#385, PR #395): `get_git_status()` in `docker/base-image/agent_server/routers/git.py` now also returns `pull_branch`, `common_ancestor_sha`, and `common_ancestor_age_days`, computed via `git merge-base HEAD origin/<pull_branch>` and `git log -1 --format=%cI`. Existing `ahead`/`behind` are unchanged. Frontend `useGitSync.js` adds `pullBranch`, `isParallelHistory` predicate (threshold 30 days), and an `adoptUpstreamPreserveState()` resolver that POSTs to `/api/agents/{name}/git/reset-to-main-preserve-state` (S3 / #384, not yet live — surfaces a clear "blocked on #384" notification on 404 / missing store method). `GitConflictModal.vue` adds a sibling `<div v-if="show && isParallelHistory">` variant titled "Your agent cannot sync" with primary "Adopt latest upstream (preserve my state)" and secondary "Force push anyway"; the existing variant's outer `v-if` is narrowed to `show && !isParallelHistory` so the new branch takes priority. All copy uses `{{ pullBranchLabel }}` — no hardcoded "main". `AgentDetail.vue` forwards the two new reactives into the modal mount. Regression tests: `tests/git-sync/test_p2_parallel_history_detection.sh` and `tests/git-sync/test_s2_usegitsync.test.js`. |

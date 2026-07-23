@@ -22,6 +22,20 @@ AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
 mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
     echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
 
+# ent#123: a per-agent PAT configured AFTER creation is live-injected into the
+# workspace .env (#1264) while the baked env stays tokenless until the next
+# recreate. An ops-path raw restart re-runs this script with the tokenless
+# baked env — without this fallback the origin rewrite below would scrub the
+# working credential. Baked env wins when both are set.
+if [ -z "${GITHUB_PAT}" ] && [ -f /home/developer/.env ]; then
+    _ENV_PAT=$(grep -m1 '^GITHUB_PAT=' /home/developer/.env | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '\r')
+    if [ -n "${_ENV_PAT}" ]; then
+        echo "Using GITHUB_PAT from workspace .env (live-injected, not yet baked)"
+        export GITHUB_PAT="${_ENV_PAT}"
+    fi
+    unset _ENV_PAT
+fi
+
 # #1574: the managed PAT authenticates git (via the origin URL) AND the `gh` CLI
 # + REST API, which read GH_TOKEN/GITHUB_TOKEN. Export them from GITHUB_PAT so
 # every child process (agent server, terminal shells) auto-authenticates. Gated on
@@ -46,19 +60,45 @@ if [ -d /home/developer/.git ]; then
         -name "*.lock" -type f -delete 2>/dev/null || true
 fi
 
-# Initialize from GitHub repository if specified
-if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
+# Initialize from GitHub repository if specified.
+# ent#123: the gate is REPO-only — a tokenless agent (anonymous public
+# template) clones without credentials, mirroring the credential-less
+# fork-to-own UPSTREAM_URL. GIT_TERMINAL_PROMPT=0 makes any auth challenge
+# (private repo, repo gone private later) a deterministic fail-fast
+# "could not read Username" instead of a hang on a prompt.
+if [ -n "${GITHUB_REPO}" ]; then
     echo "Initializing agent from GitHub repository: ${GITHUB_REPO}"
     cd /home/developer || exit 1
+    export GIT_TERMINAL_PROMPT=0
 
-    # Clone the repository using PAT authentication.
+    # Clone the repository — PAT-authenticated when a token is present,
+    # anonymous (read-only public) otherwise.
     # TRINITY_GIT_BASE_URL defaults to https://github.com; overridable for
     # self-hosted gitea / GHES / dev harnesses.
     GIT_BASE_URL="${TRINITY_GIT_BASE_URL:-https://github.com}"
     GIT_BASE_URL="${GIT_BASE_URL%/}"
     GIT_HOST_PATH="${GIT_BASE_URL#*://}"
     GIT_SCHEME="${GIT_BASE_URL%%://*}"
-    CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+    if [ -n "${GITHUB_PAT}" ]; then
+        CLONE_URL="${GIT_SCHEME}://oauth2:${GITHUB_PAT}@${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+    else
+        CLONE_URL="${GIT_SCHEME}://${GIT_HOST_PATH}/${GITHUB_REPO}.git"
+    fi
+
+    # ent#123: tokenless agents are pull-only. Blackhole the push URL so ANY
+    # in-container `git push` (Claude turns, gh, skills) fails immediately
+    # with a self-describing error instead of a cryptic anonymous-auth
+    # failure an LLM will retry-loop on. With a PAT, clear any leftover
+    # blackhole so a token added later restores pushes.
+    configure_push_remote() {
+        if [ -n "${GITHUB_PAT}" ]; then
+            git config --unset remote.origin.pushurl 2>/dev/null || true
+        else
+            git remote set-url --push origin \
+                "no-write-credentials--this-agent-is-read-only--fork-to-own-or-add-a-github-token-to-push" \
+                2>/dev/null || true
+        fi
+    }
 
     # Check if GIT_SYNC_ENABLED - if so, keep .git directory for bidirectional sync
     if [ "${GIT_SYNC_ENABLED}" = "true" ]; then
@@ -72,10 +112,14 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             cd /home/developer || exit 1
             CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
             echo "Current branch: ${CURRENT_BRANCH} (preserved from previous run)"
-            # Update remote URL with current PAT (may have changed since last start)
-            if [ -n "${GITHUB_PAT}" ]; then
-                git remote set-url origin "${CLONE_URL}"
-            fi
+            # Update remote URL with the current credentials (PAT may have
+            # rotated since last start). ent#123: unconditional — with no PAT
+            # the rewrite installs the credential-less URL, scrubbing a stale
+            # embedded token (the live-injected-PAT case is covered by the
+            # workspace .env fallback above, so a working credential is never
+            # clobbered).
+            git remote set-url origin "${CLONE_URL}"
+            configure_push_remote
             # trinity-enterprise#93: keep the credential-less upstream remote
             # (template source) in place across restarts — self-healing if it
             # was removed.
@@ -170,8 +214,10 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
                 echo "Working branch '${GIT_WORKING_BRANCH}' ready"
             fi
 
-            # Store git remote URL with credentials for push operations
+            # Store git remote URL (with credentials when a PAT exists;
+            # credential-less + blackholed push for tokenless agents, ent#123)
             git remote set-url origin "${CLONE_URL}"
+            configure_push_remote
 
             # trinity-enterprise#93: fork-to-own agents track the template
             # they were copied from as `upstream` (credential-less — the
@@ -215,6 +261,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
                 echo "=========================================="
                 echo "Possible causes:"
                 echo "  - GitHub PAT does not have access to this repository"
+                echo "  - Repository is private and no GitHub token is configured"
                 echo "  - Repository does not exist"
                 echo "  - Branch '${CLONE_BRANCH}' does not exist"
                 echo "  - Network connectivity issue"
@@ -281,6 +328,7 @@ if [ -n "${GITHUB_REPO}" ] && [ -n "${GITHUB_PAT}" ]; then
             echo "=========================================="
             echo "Possible causes:"
             echo "  - GitHub PAT does not have access to this repository"
+            echo "  - Repository is private and no GitHub token is configured"
             echo "  - Repository does not exist"
             echo "  - Branch '${CLONE_BRANCH}' does not exist"
             echo "=========================================="

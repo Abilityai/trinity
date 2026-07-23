@@ -1084,6 +1084,18 @@
         "unit"
       ],
       "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse \u2014 alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting \u2014 REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
+    },
+    {
+      "file": "unit/test_ent123_tokenless_clone.py",
+      "feature": "trinity-enterprise#123",
+      "added": "2026-07-23",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit"
+      ],
+      "description": "PAT-free clone of public github: templates (ent#123). 50 tests over the 1484-shape purge-and-mock harness: _gate_tokenless_request (\"\"->None normalization, source-mode-only 400 incl. explicit None, fork passthrough), _parse_github_ref charset guard (eval-interpolation hardening), _validate_github_access tokenless ls-remote probe (ok/unavailable->400/transient->502 fail-closed, anonymous branch check, PAT-ful REST regression), _apply_github_env token-var gating (+GIT_SYNC_AUTO belt), lifecycle._apply_persisted_auth_env rebuild seam (repo-only gate, source-mode re-derivation), git_service.probe_anonymous_repo_access stderr classification, the no_write_credentials sync/reset guard (baked env OR per-agent PAT row \u2014 #1264 live-injection window, fail-open), and startup.sh static guards (repo-only clone gate, credential-less CLONE_URL, GIT_TERMINAL_PROMPT=0, push blackhole, .env PAT fallback, private-repo failure cause)."
     }
   ]
 }
