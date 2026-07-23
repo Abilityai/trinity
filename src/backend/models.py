@@ -392,6 +392,17 @@ class ReportCreate(BaseModel):
         return self
 
 
+class TelemetrySharingUpdate(BaseModel):
+    """PUT body for Tier-2 opt-in fleet sharing consent (ent#12).
+
+    ``enabled`` is the reversible, default-off consent. ``backfill_days`` (only
+    meaningful on enable) is the disclosed history window included in the
+    consent-time backfill share. Anonymized aggregates only — no PII.
+    """
+    enabled: bool
+    backfill_days: Optional[int] = Field(None, ge=0, le=3650)
+
+
 class ProductEventCreate(BaseModel):
     """Request body for a local product-event beacon (ent#184).
 

@@ -93,6 +93,34 @@
               <p class="mt-3 text-xs text-gray-400 dark:text-gray-500">No subscription? You can instead set a platform Anthropic API key in the same place.</p>
             </div>
 
+            <!-- ent#12 Tier-2 — value-framed, optional, default-off sharing ask.
+                 One line; never blocks finishing. Anonymized aggregates only. -->
+            <div
+              v-if="!shareHardDisabled"
+              class="mt-4 flex items-start gap-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 px-4 py-3"
+            >
+              <span class="text-lg leading-none">📊</span>
+              <div class="min-w-0 flex-1">
+                <p class="text-sm font-medium text-gray-900 dark:text-white">
+                  Share anonymous usage → see how your setup compares to the fleet
+                </p>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  Coarse counts only — no content, prompts, emails, or agent names. Includes the last 30 days of local counts. Off by default, reversible in Settings.
+                </p>
+              </div>
+              <button
+                type="button"
+                :disabled="shareBusy || shareOptedIn"
+                @click="enableSharing"
+                class="flex-shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-60"
+                :class="shareOptedIn
+                  ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-400'
+                  : 'bg-action-primary-600 text-white hover:bg-action-primary-700'"
+              >
+                {{ shareOptedIn ? '✓ Sharing on' : 'Share usage' }}
+              </button>
+            </div>
+
             <div class="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
                 @click="openChat"
@@ -151,10 +179,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import CreateAgentModal from './CreateAgentModal.vue'
 import { useProductTelemetryStore } from '../stores/productTelemetry'
+import { useTelemetrySharingStore } from '../stores/telemetrySharing'
 
 defineProps({
   // Whether platform Claude auth is configured (from feature-flags). Decides
@@ -168,6 +197,22 @@ const router = useRouter()
 // Local product-event funnel (ent#184). Fire-and-forget beacons; never awaited,
 // never blocks the wizard. Zero egress — recorded on this instance only.
 const telemetry = useProductTelemetryStore()
+
+// ent#12 Tier-2 — optional, value-framed sharing ask (default-off). Loaded lazily
+// so we know whether it's hard-disabled by config (then hide the ask entirely).
+const sharing = useTelemetrySharingStore()
+const shareBusy = ref(false)
+const shareOptedIn = computed(() => sharing.status.enabled)
+const shareHardDisabled = computed(() => sharing.status.hard_disabled)
+
+async function enableSharing() {
+  shareBusy.value = true
+  try {
+    await sharing.setConsent(true, 30)  // include 30d backfill so benchmarks are accurate
+  } finally {
+    shareBusy.value = false
+  }
+}
 
 // Intent → starter template. Each maps to a real local template shipped in
 // config/agent-templates. CreateAgentModal falls back to a blank agent if a
@@ -225,6 +270,8 @@ onMounted(() => {
   nextTick(() => focusable()[0]?.focus())
   // Funnel: the operator opened the first-run wizard (top of the funnel).
   telemetry.record('setup_started')
+  // ent#12: load sharing status so the (optional) consent ask reflects config.
+  sharing.load()
 })
 
 onUnmounted(() => {

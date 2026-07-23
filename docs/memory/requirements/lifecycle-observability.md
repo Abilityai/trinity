@@ -371,8 +371,57 @@ module's design lives in the private submodule.
   new standalone analytics dashboard in v1.
 
 **Deferred**: auto-retention sweep for `product_events` (volume is negligible —
-a handful of rows per install); per-user (vs per-install) funnel cohorts;
-Tier-2 opt-in sharing + backfill serialization (#12).
+a handful of rows per install); per-user (vs per-install) funnel cohorts.
+
+### 45.1 Tier-2 — Opt-in Fleet Sharing (ent#12)
+
+**Description**: the **opt-in egress** layer on top of Tier-1 (§45). On
+**explicit, default-off, reversible** operator consent, Trinity periodically
+shares **anonymized aggregates** with the Ability-operated hosted intake in
+exchange for reciprocal value (fleet benchmarks). The hosted aggregation/benchmark
+service is a **separate issue**; this covers the client consent + egress +
+backfill + the gated benchmark status surface.
+
+**Open-core split** (gating confirmed ent#12): the **consent + egress + backfill**
+are OSS-core (the sovereignty primitive — the operator's choice to share is
+edition-agnostic, and it mirrors the OSS operator-intake #38 credential-free
+transport); only the **reciprocity benchmark view** is entitlement-gated
+(`telemetry`).
+
+- **FR-1 — Two-gate egress, never without consent**: egress fires only when BOTH
+  the stored `telemetry_sharing_enabled` consent (system_settings, default-off)
+  AND the config switch `TELEMETRY_SHARING_ENABLED` (honors `DO_NOT_TRACK`) are
+  on. Either off ⇒ nothing leaves the box. Both re-checked in `share_now`.
+- **FR-2 — Anonymized aggregates only**: `services/telemetry_sharing_service.py`
+  `build_aggregate_payload` — `installation_id` (anonymous), version/edition/
+  platform/python, coarse `enterprise_features`, agent + execution **counts**, and
+  the Tier-1 activation-funnel counts. **No PII, no content, no prompts, no
+  emails, no agent names.** The exact payload is **inspectable before send** via
+  `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
+- **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
+  sleeps-first background loop (default 24h, jittered) that shares when consent is
+  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
+  air-gapped POST never affects the platform). Reuses the operator-intake httpx
+  fire-and-forget transport.
+- **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
+  schedules an immediate fire-and-forget backfill share over a disclosed window
+  (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
+  consent still yields accurate benchmarks. Disclosed at the moment of consent.
+- **FR-5 — Consent surfaces**: a value-framed, optional, non-blocking ask in the
+  onboarding wizard (`OnboardingWizard.vue`, hidden when hard-disabled) + a
+  reversible default-off toggle in Settings → General
+  (`components/settings/TelemetrySharingPanel.vue`), each stating exactly what is
+  shared. `PUT /api/settings/telemetry-sharing` is admin + human-only, audit-logged.
+- **FR-6 — Reciprocity carrot (gated, v1 status surface)**: `GET
+  /api/enterprise/telemetry/benchmark` (entitlement-gated) reports whether the
+  operator is sharing and that benchmarks are `pending_hosted_service` until the
+  hosted service lands; the OSS `ActivationFunnelPanel` renders it. Percentiles
+  are computable only for participants, so sharing is structurally the price of
+  the comparison.
+
+**Deferred**: the hosted aggregation/benchmark service (separate issue); v2/v3
+carrots (targeted alerts, live in-app benchmark panel, roadmap influence);
+warm-ask-after-value prompt.
 
 ---
 

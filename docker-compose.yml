@@ -162,6 +162,14 @@ services:
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
+      # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
+      # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
+      # (DO_NOT_TRACK also disables). URL keeps its FULL non-empty default —
+      # a bare :- would arrive set-but-empty and shadow the code default (#1076).
+      - TELEMETRY_SHARING_ENABLED=${TELEMETRY_SHARING_ENABLED:-true}
+      - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
+      - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
+      - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter

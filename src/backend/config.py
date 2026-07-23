@@ -40,6 +40,28 @@ OPERATOR_INTAKE_URL = os.getenv(
     "OPERATOR_INTAKE_URL", "https://intake.abilityai.dev/v1/operator-intake"
 )
 
+# --- Tier-2 telemetry sharing (ent#12) -----------------------------------
+# The opt-IN fleet-sharing channel (Tier-2) on top of the Tier-1 local capture
+# (ent#184). Egress NEVER fires unless the operator explicitly opted in (the
+# `telemetry_sharing_enabled` system-setting, default-off) AND this hard
+# off-switch is on. `TELEMETRY_SHARING_ENABLED=false` (or the cross-tool
+# `DO_NOT_TRACK=1`) is an operator/air-gapped kill switch that disables egress
+# regardless of any stored consent — the toggle still appears, nothing leaves.
+TELEMETRY_SHARING_ENABLED = (
+    os.getenv("TELEMETRY_SHARING_ENABLED", "true").lower() == "true"
+    and os.getenv("DO_NOT_TRACK", "0").strip().lower() in ("0", "", "false")
+)
+# Same Cloudflare-fronted hosted-intake app as operator intake; a sibling
+# versioned path. The hosted aggregation/benchmark service is a separate issue.
+TELEMETRY_SHARING_URL = os.getenv(
+    "TELEMETRY_SHARING_URL", "https://intake.abilityai.dev/v1/telemetry-share"
+)
+# Periodic share cadence (hours) + default backfill window offered at consent.
+TELEMETRY_SHARING_INTERVAL_HOURS = int(os.getenv("TELEMETRY_SHARING_INTERVAL_HOURS", "24"))
+TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
+    os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
+)
+
 # JWT Settings
 # SECURITY: SECRET_KEY must be set via environment variable in production
 # Generate with: openssl rand -hex 32

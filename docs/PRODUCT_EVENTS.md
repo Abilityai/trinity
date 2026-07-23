@@ -62,3 +62,73 @@ step-by-step activation counts, drop-off between steps, and the first-value
 tiles, with an honest empty state before any data exists. The funnel view is an
 entitlement-gated enterprise surface; the **capture** described above runs in
 every edition.
+
+---
+
+# Tier-2 — Opt-in Fleet Sharing (ent#12)
+
+Everything above (Tier-1) is **local only**. Tier-2 is a **separate, opt-in,
+default-off** channel that — *only after you explicitly turn it on* — shares
+**anonymized aggregates** with the Ability-operated hosted intake, so you get
+fleet benchmarks in return ("how does my setup compare?").
+
+> **Nothing is shared until you opt in, and opting out stops it immediately.**
+> Two independent gates must both be on for any egress: your stored consent
+> (Settings → General → **Usage sharing**, default-off) **and** the config switch
+> `TELEMETRY_SHARING_ENABLED` (which honors the cross-tool `DO_NOT_TRACK=1`).
+
+## What is shared (anonymized aggregates only)
+
+A single JSON document on a periodic heartbeat (default every 24h), keyed by the
+anonymous `installation_id`:
+
+```jsonc
+{
+  "installation_id": "…",          // anonymous, random, per-install
+  "schema_version": 1,
+  "shared_at": "…Z",
+  "window_days": 30,               // period the counts cover
+  "backfill": true,                // true on the consent-time history send
+  "instance": {
+    "trinity_version": "…",        // short git commit
+    "edition": "community" | "enterprise",
+    "platform": "Linux",
+    "python_version": "3.13.x"
+  },
+  "enterprise_features": ["…"],    // coarse module ids (already in /api/version)
+  "counts": {                      // COUNTS ONLY
+    "agents": 3,
+    "executions_total": 22,
+    "executions_success": 21,
+    "executions_failed": 1
+  },
+  "activation_funnel": {           // Tier-1 wizard-step counts
+    "setup_started": 1, "setup_step_create": 1,
+    "setup_step_credential": 0, "setup_completed": 0, "setup_dismissed": 0
+  }
+}
+```
+
+**Never shared:** no message/chat content, no prompts, no agent outputs, no
+credentials or tokens, no emails, no user identities, **no agent names** — only
+coarse counts and enums. The exact payload for your instance is **inspectable
+before you consent** in the Settings → Usage sharing panel (expand "Exactly what
+would be shared").
+
+## Retroactive backfill at consent
+
+Because Tier-1 records locally from t=0, turning sharing on offers to include the
+last N days of local history (default 30, your choice) in the first send, so your
+benchmarks are accurate even though consent arrived later. This is disclosed at
+the moment of consent.
+
+## Reversibility
+
+Turn **Usage sharing** off (Settings → General) and egress stops at the next
+heartbeat — no further data leaves. For a hard, air-gapped guarantee set
+`TELEMETRY_SHARING_ENABLED=false` (or `DO_NOT_TRACK=1`): the toggle then can't
+enable egress at all.
+
+The reciprocity benchmark view (Settings → Activation → "Fleet benchmarks") is an
+entitlement-gated enterprise surface; the consent + egress mechanism above is
+OSS-core and available in every edition.
