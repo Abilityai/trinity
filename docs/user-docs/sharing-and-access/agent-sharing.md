@@ -17,7 +17,10 @@ The **Access** tab lists platform users with access to this agent.
 3. Each row shows a status badge:
    - **Active** — the email resolved to an existing Trinity account (shows username, role, and last-active time).
    - **Pending** — no account yet ("Invited — no account yet"); the entry activates automatically once the person logs in for the first time.
-4. Click **Remove** on a row to revoke access.
+4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`).
+5. Click **Remove** on a row to revoke access.
+
+The per-recipient DM toggle above is complemented on the channel side by the per-channel Slack consent — see [Slack Integration](../integrations/slack-integration.md). Platform-wide proactive-messaging rate caps are admin-configurable in **Settings**.
 
 ### Access Levels
 
@@ -63,7 +66,7 @@ Compact status rows for **Slack**, **Telegram**, **WhatsApp**, and **Voice calls
 - [WhatsApp Integration](../integrations/whatsapp-integration.md)
 - [VoIP Telephony](../advanced/voip-telephony.md)
 
-Each channel dialog also carries the shared **Voice replies** toggle — see [Voice Replies](../advanced/voice-replies.md).
+Each channel dialog also carries that channel's **voice-replies allow flag** — replies are text by default and the agent opts individual replies into voice per message. See [Voice Replies](../advanced/voice-replies.md).
 
 ### Client roster — who's reaching this agent
 
@@ -84,6 +87,7 @@ Two collapsible panels for distributing the agent's output rather than granting 
 | `/api/agents/{name}/share/{email}` | DELETE | Remove a share |
 | `/api/agents/{name}/shares` | GET | List all shares for an agent |
 | `/api/agents/{name}/access` | GET | Operator roster (active + pending) for the Access tab |
+| `/api/agents/{name}/shares/proactive` | GET / PUT | Per-recipient proactive-DM permission; PUT body `{email, allow_proactive}` (owner/admin) |
 | `/api/agents/{name}/clients` | GET | External client roster (owner-only, read-only) |
 | `/api/agents/{name}/public-prompt` | GET / PUT | Public/channel-only custom instructions (owner-only, ≤4000 chars; empty clears) |
 | `/api/agents/{name}/public-channel-model` | GET / PUT | Public-channel model override (owner-only; null clears to platform default) |

@@ -14,6 +14,14 @@ Socket Mode is the default transport: Trinity opens an outbound WebSocket connec
 
 Yes. Each agent gets its own dedicated Slack channel via **Create Channel** in the agent's Sharing tab, and @mentions in that channel route to the bound agent. Direct messages to the bot go to a single workspace-wide DM-default agent instead. Replies post with each agent's own name and avatar, so multiple agents in one workspace stay visually distinct. See [Slack Integration](../integrations/slack-integration.md).
 
+## Can each agent have its own Slack bot identity instead of sharing one?
+
+By default all agents share one workspace bot and are told apart by their per-message name and avatar. Giving an agent its **own dedicated Slack bot** — one people can DM directly and `@mention` by name, alongside other agents in the same channel — is an enterprise-tier capability, configured from the agent's Sharing tab. See [Slack Integration](../integrations/slack-integration.md#per-agent-dedicated-bots-enterprise).
+
+## Can I control whether an agent posts to a Slack channel on its own?
+
+Yes. Proactively posting to a Slack channel requires a per-channel consent toggle, separate from the per-recipient consent for DMs — a newly bound channel denies proactive posts until you enable it in the Slack channel panel. Replying inline to someone's message never needs consent. See [Slack Integration](../integrations/slack-integration.md#per-channel-proactive-consent).
+
 ## Which agent answers when someone DMs the Slack bot?
 
 DMs are routed to the workspace's DM-default agent. The first agent bound to the workspace becomes the DM default automatically, but you can reassign it anytime: open the target agent's **Sharing** tab → Slack section and click **Set as DM Default** — the change takes effect immediately, no restart needed. Only one agent per workspace can be the DM default, and you cannot unbind the current DM-default agent while other agents are still bound; reassign the default first. See [Slack Integration](../integrations/slack-integration.md).

@@ -423,7 +423,7 @@ Trinity includes three reference agent implementations that demonstrate real-wor
 
 | Agent | Repository | Purpose |
 |-------|------------|---------|
-| **Cornelius** | [github.com/abilityai/agent-cornelius](https://github.com/abilityai/agent-cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
+| **Cornelius** | [github.com/Abilityai/cornelius](https://github.com/Abilityai/cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
 | **Corbin** | [github.com/abilityai/agent-corbin](https://github.com/abilityai/agent-corbin) | Business Assistant — Google Workspace integration, task coordination, team management |
 | **Ruby** | [github.com/abilityai/agent-ruby](https://github.com/abilityai/agent-ruby) | Content Creator — Multi-platform publishing, social media distribution, content strategy |
 
@@ -436,8 +436,8 @@ These agents demonstrate:
 
 **Usage**: Create agents from these templates via the Trinity UI:
 ```bash
-# Via UI: Create Agent → Select "github:abilityai/agent-cornelius"
-# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/agent-cornelius")
+# Via UI: Create Agent → Select "github:abilityai/cornelius"
+# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/cornelius")
 ```
 
 **Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.

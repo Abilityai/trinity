@@ -1,14 +1,14 @@
 # Trinity User Documentation
 
-> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-07-11.
+> Auto-generated from source code. Run `/generate-user-docs` to update. Last sync: 2026-07-24.
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.8.0](whats-new/v0.8.0.md))
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.8.5](whats-new/v0.8.5.md))
 
 ## FAQ
 
-- [Trinity FAQ](faq/README.md) — 260+ grounded answers to common questions, organized by topic ([troubleshooting](faq/troubleshooting.md) for symptom → fix)
+- [Trinity FAQ](faq/README.md) — 280+ grounded answers to common questions, organized by topic ([troubleshooting](faq/troubleshooting.md) for symptom → fix)
 
 ## Watch
 
@@ -51,10 +51,11 @@
 
 ## Collaboration
 
-- [Agent Network](collaboration/agent-network.md) — Multi-agent communication, async collaboration, DAG visualization
+- [Agent Network](collaboration/agent-network.md) — Multi-agent communication, async collaboration, Timeline replay
 - [Agent Permissions](collaboration/agent-permissions.md) — Who can call whom, access control
-- [Event Subscriptions](collaboration/event-subscriptions.md) — Pub/sub between agents, message templates
-- [System Manifest](collaboration/system-manifest.md) — Recipe-based multi-agent deployment
+- [Event Subscriptions](collaboration/event-subscriptions.md) — Pub/sub + automatic task-completion report-back
+- [Shared Sessions (Rooms)](collaboration/rooms.md) — Several agents converse in one shared room (enterprise)
+- [System Manifest](collaboration/system-manifest.md) — Recipe-based multi-agent deployment, resilient deploy
 
 ## Automation
 
@@ -62,15 +63,17 @@
 - [Skills and Playbooks](automation/skills-and-playbooks.md) — Skills library, assignment, chat autocomplete
 - [Approvals](automation/approvals.md) — Human-in-the-loop approval gates
 - [Fan-Out](automation/fan-out.md) — Parallel task dispatch and result collection
-- [Agent Loops](automation/agent-loops.md) — Bounded sequential task repetition with templates and stop signals
+- [Agent Loops](automation/agent-loops.md) — Bounded sequential task repetition, templates, stop signals, failure policy
+- [Agent Reminders](automation/agent-reminders.md) — One-shot durable deferred self-triggers
 
 ## Operations
 
-- [Dashboard](operations/dashboard.md) — Network graph, timeline view, tag clouds
+- [Dashboard](operations/dashboard.md) — Grid and timeline views, tag clouds, activity feed
 - [Operations Page](operations/operating-room.md) — Unified tabbed view: operator queue, notifications, health, executions
-- [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service
+- [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service, retention sweeps
 - [Executions](operations/executions.md) — Fleet execution list, stats, detail, live streaming, termination
 - [Audit Trail](operations/audit-trail.md) — Append-only administrative action log
+- [Telemetry](operations/telemetry.md) — Local product events and opt-in fleet sharing
 - [Agent Quotas](operations/agent-quotas.md) — Per-role agent creation limits
 
 ## Sharing and Access
@@ -78,6 +81,7 @@
 - [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory
+- [Customer Portal](sharing-and-access/customer-portal.md) — Branded signed-in client chat app with history and file upload (enterprise)
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 
@@ -88,7 +92,7 @@
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 93 MCP tools, API keys, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 100+ MCP tools, API keys, dedicated per-agent tools
 - [A2A Agent Card](integrations/a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
@@ -112,7 +116,7 @@
 ## Advanced
 
 - [Voice Chat](advanced/voice-chat.md) — Real-time voice via Gemini Live API
-- [Voice Replies](advanced/voice-replies.md) — Agents speak channel replies as voice notes (ElevenLabs TTS)
+- [Voice Replies](advanced/voice-replies.md) — Agents speak individual channel replies as voice notes (ElevenLabs TTS)
 - [VoIP Telephony](advanced/voip-telephony.md) — Agents place outbound phone calls via Twilio + Gemini Live
 - [Image Generation](advanced/image-generation.md) — Gemini two-step image pipeline
 - [Agent Avatars](advanced/agent-avatars.md) — AI-generated avatars, emotion variants
