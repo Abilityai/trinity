@@ -136,6 +136,10 @@ services:
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
+      # First-run default system seed (trinity-enterprise#124): a path to an
+      # operator manifest, or `disabled` to skip seeding. Empty = bundled
+      # config/manifests/default-system.yaml.
+      - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -257,6 +261,7 @@ services:
       - ./config/agent-templates:/agent-configs/templates:ro
       - ./config/process-templates:/agent-configs/process-templates:ro
       - ./config/process-docs:/app/config/process-docs:ro
+      - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
       - agent-configs:/agent-configs
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
       # Read-only access to Vector's logs so log_archive_service.py (reads

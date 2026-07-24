@@ -507,6 +507,19 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
 
 ### Router Layer (`src/backend/routers/systems.py`)
 
+> **ent#124 (2026-07-24):** the full deploy orchestration (parse → validate →
+> resolve → create loop → prompt → config phases → start) now lives in
+> `services/system_service.py::deploy_manifest(manifest_yaml, current_user,
+> request=None, *, dry_run, strict, create_agent_fn=None)` — the router below
+> is a thin HTTP wrapper: it calls `deploy_manifest` and maps
+> `status == "failed"` to a 500 `JSONResponse` (everything else, including
+> HTTPException 400/strict-abort propagation, passes through unchanged).
+> `create_agent_fn=None` lazily resolves the `routers/agents.py`
+> `create_agent_internal` FACADE (which injects `ws_manager`), so
+> `agent_created` WebSocket broadcasts are preserved on every deploy path.
+> The pseudocode below documents the orchestration behavior wherever it lives;
+> read `deploy_manifest` for the current line numbers.
+
 #### POST /api/systems/deploy (Lines 31-196)
 ```python
 @router.post("/deploy", response_model=SystemDeployResponse)
@@ -1987,10 +2000,78 @@ pytest tests/test_systems.py --cov=src/backend/routers/systems --cov=src/backend
 
 ---
 
+## First-Run Default Seed (trinity-enterprise#124)
+
+On a genuinely fresh install, Trinity auto-deploys a bundled default manifest
+once, right after first-time setup — the multi-agent generalization of the
+Cornelius seeder (ent#107).
+
+**Service**: `src/backend/services/system_seed_service.py`
+
+**Flow**: `routers/setup.py` (setup-completion background task) and `main.py`
+lifespan (safety-net, gated on `setup_completed`, strong task ref) both call
+`ensure_first_run_seeded()`, which:
+
+1. **Resolves the persisted first-run verdict** (`first_run_fresh`
+   system-setting): stored value wins; else computed ONCE as
+   `count_non_system_agents() == 0`, with `cornelius_seeded == "true"` forcing
+   NOT-fresh (an established ent#107-era install — even one whose agents were
+   all deleted — never wakes up to a surprise fleet). Persisting the verdict
+   is load-bearing: recomputing per pass is poisoned by the first seeder's own
+   agents (a failed fleet deploy could never retry; a failed Cornelius would
+   self-mark seeded after the fleet lands). DB error ⇒ verdict `None`
+   (undetermined, nothing persisted, everything defers).
+2. Runs `cornelius_agent_service.ensure_seeded(fresh=verdict)` (unchanged
+   behavior; `fresh=None` falls back to its legacy internal count).
+3. Runs `system_seed_service.ensure_seeded(fresh=verdict)`:
+   - Skips (no flag burn): Docker unavailable, disable sentinel, verdict
+     undetermined, admin missing (pre-setup), manifest unavailable, lock held.
+   - Converges the flag without deploying: verdict not-fresh, or **existence
+     backstop** — any final `{system}-{short}` name already reserved
+     (`is_agent_name_reserved`, soft-deleted included). The backstop is the
+     real duplicate guard: the deploy path suffixes name collisions (`_N`)
+     instead of 409ing, so a fail-open SETNX race would otherwise double-seed.
+   - Deploys via `system_service.deploy_manifest(strict=False)` as the admin
+     owner, `request=None`.
+   - Flag policy: `deployed`/`partial` → `default_system_seeded=true`
+     (+ `default_system_seed_info` JSON: manifest name/sha256/source/status/
+     counts/timestamp; a partial fleet is never re-deployed — that would
+     suffix-duplicate survivors); `failed` (0 created) / exception → flag NOT
+     set, later pass retries safely.
+   - Honest status: partial / failed / seed-path error (e.g. parse-broken
+     override) / unreadable-override / crash-interrupted partial fleet (the
+     converge backstop finding only SOME names reserved) each raise ONE
+     operator-queue alert (direct DB create on `trinity-system`,
+     deterministic `system-seed-<kind>` id — a #1632 reserved prefix, so an
+     agent cannot pre-create-and-silence it; best-effort).
+
+**Manifest resolution**: `TRINITY_DEFAULT_SYSTEM_MANIFEST` env, read at call
+time and `strip()`ed (compose `${VAR:-}` arrives set-but-empty ⇒ bundled):
+a path ⇒ operator override (unreadable ⇒ loud failure, NO bundled fallback);
+`disabled`/`none`/`off`/`0`/`false` ⇒ seeding disabled (flag not burned, so
+re-enabling on a still-fresh install seeds); unset ⇒ bundled
+`config/manifests/default-system.yaml` — baked into the backend image
+(Dockerfile COPY) **and** bind-mounted via `./config/manifests` in both
+compose files (the dev compose `./src/backend:/app` mount shadows image
+COPYs, so the mount is load-bearing locally). The e2e CI stack sets the
+`disabled` sentinel explicitly to keep its zero-agent baseline.
+
+**Bundled fleet**: the in-tree acme trio (`local:scout`/`sage`/`scribe`)
+deployed as the coherent team its CLAUDE.md content assumes (`name: acme`,
+shared folders, `preset: full-mesh`); no `schedules:` (zero-credential
+installs must not accumulate failing crons), no `prompt:` (never mutates the
+platform-wide `trinity_prompt`). Content is data — ent#137's curated public
+fleet replaces the manifest without touching the mechanism.
+
+**Tests**: `tests/unit/test_ent124_default_system_seed.py` (includes
+executor's-own-parser validation of the real bundled manifest + in-tree
+template existence — learnings 2026-07-23 blank-agent trap).
+
 ## Revision History
 
 | Date | Changes |
 |------|---------|
+| 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
 | 2026-02-17 | **ORG-001 Phase 4**: Added tags and System View integration - `default_tags`, `system_view`, per-agent `tags` in manifest. Updated models.py (221-273), system_service.py (configure_tags, create_system_view), routers/systems.py (steps 10-11 in deploy flow). Added response fields `tags_configured`, `system_view_created`. |
 | 2026-02-11 | Fixed Docker volume mount path - now mounts to `/home/developer` (not workspace subdirectory) |
 | 2026-01-23 | Line number verification: Updated models.py (248-286), systems.py (1-427), MCP tools. Removed outdated audit logging references (not in current implementation). Updated test section with correct class line numbers. |

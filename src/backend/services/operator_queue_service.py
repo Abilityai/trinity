@@ -104,6 +104,7 @@ _RESERVED_ID_PREFIXES = (
     "git-bloat-",        # sync_health_service
     "skill-not-found-",  # task_execution_service
     "val_",              # validation_service
+    "system-seed-",      # system_seed_service first-run seed alerts (ent#124)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a

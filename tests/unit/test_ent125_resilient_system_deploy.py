@@ -8,10 +8,14 @@ configuration is scoped to the created agents and each config phase degrades to
 failed, 200) / failed (none created, 500 with the full report body). `strict:
 true` restores abort-on-first-error preserving the original status code.
 
-True unit tests: the router is mounted on a bare FastAPI app with
-`create_agent_internal`, the system_service config functions, and the db
-singleton all patched at the MODULE binding (`routers.systems.<name>` — the
-from-import binding; patching the source modules would be a no-op).
+True unit tests: the router is mounted on a bare FastAPI app. The deploy
+orchestration lives in `services.system_service.deploy_manifest` (moved there
+by trinity-enterprise#124), so every collaborator is patched on the
+`services.system_service` module object: the config functions + db at their
+module bindings, and agent creation via the `_default_create_agent_fn` seam
+(the real seam lazy-imports the `routers/agents` ws-broadcasting facade at
+call time, so patching a from-import binding would be a no-op — learnings
+2026-07-11).
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import routers.systems as systems
+import services.system_service as system_service
 from dependencies import get_current_user
 
 pytestmark = pytest.mark.unit
@@ -71,17 +76,22 @@ def env(monkeypatch):
         ),
         db=MagicMock(),
     )
-    monkeypatch.setattr(systems, "create_agent_internal", mocks.create_agent)
-    monkeypatch.setattr(systems, "configure_folders", mocks.configure_folders)
-    monkeypatch.setattr(systems, "configure_permissions", mocks.configure_permissions)
-    monkeypatch.setattr(systems, "create_schedules", mocks.create_schedules)
-    monkeypatch.setattr(systems, "configure_tags", mocks.configure_tags)
-    monkeypatch.setattr(systems, "create_system_view", mocks.create_system_view)
-    monkeypatch.setattr(systems, "start_all_agents", mocks.start_all_agents)
-    monkeypatch.setattr(systems, "db", mocks.db)
+    # ent#124: deploy orchestration lives in services.system_service — patch
+    # there. The create seam is `_default_create_agent_fn` (called when no
+    # `create_agent_fn` is passed); do NOT patch `systems.db` — the router
+    # keeps its own db import for list/get endpoints and a patch there would
+    # silently assert nothing.
+    monkeypatch.setattr(system_service, "_default_create_agent_fn", lambda: mocks.create_agent)
+    monkeypatch.setattr(system_service, "configure_folders", mocks.configure_folders)
+    monkeypatch.setattr(system_service, "configure_permissions", mocks.configure_permissions)
+    monkeypatch.setattr(system_service, "create_schedules", mocks.create_schedules)
+    monkeypatch.setattr(system_service, "configure_tags", mocks.configure_tags)
+    monkeypatch.setattr(system_service, "create_system_view", mocks.create_system_view)
+    monkeypatch.setattr(system_service, "start_all_agents", mocks.start_all_agents)
+    monkeypatch.setattr(system_service, "db", mocks.db)
     # Hermetic name resolution — no shared-SQLite reads.
     monkeypatch.setattr(
-        systems,
+        system_service,
         "resolve_agent_names",
         lambda system_name, agents: (
             {s: f"{system_name}-{s}" for s in agents}, []
