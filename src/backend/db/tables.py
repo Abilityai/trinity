@@ -810,6 +810,7 @@ slack_channel_agents = Table(
     Column("is_dm_default", Integer),
     Column("created_by", Text),
     Column("created_at", Text),
+    Column("allow_proactive", Integer),   # ent#223: per-channel proactive consent
 )
 
 slack_active_threads = Table(

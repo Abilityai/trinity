@@ -2689,6 +2689,11 @@ class TelegramGroupMessageRequest(BaseModel):
     message: str
 
 
+class SlackChannelProactiveRequest(BaseModel):
+    """ent#223 — toggle per-channel proactive consent on a Slack channel binding."""
+    allow_proactive: bool
+
+
 class SlackChannelMessageRequest(BaseModel):
     """Request model for proactive Slack channel messaging (#350)."""
     message: str
