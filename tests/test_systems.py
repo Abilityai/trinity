@@ -1057,3 +1057,103 @@ permissions:
         """POST /api/systems/{name}/restart returns 404 for nonexistent system."""
         response = api_client.post("/api/systems/nonexistent-12345/restart")
         assert_status(response, 404)
+
+
+# =============================================================================
+# RESILIENT DEPLOY TESTS (trinity-enterprise#125)
+# =============================================================================
+
+class TestResilientDeploy:
+    """trinity-enterprise#125: best-effort deploy — continue-on-error + report.
+
+    Failure vector: `resources: {cpu: "3"}` is rejected by normalize_cpu with a
+    deterministic, side-effect-free HTTP 400 before any container work — an
+    offline-safe way to make exactly one agent fail. (A well-formed but absent
+    `local:` template does NOT fail — it silently creates a blank agent.)
+    """
+
+    def test_partial_deploy_continues_and_reports(self, api_client: TrinityApiClient):
+        """One bad agent doesn't abort the deploy; the rest are created."""
+        system_name = f"test-part-{uuid.uuid4().hex[:6]}"
+        manifest = f"""
+name: {system_name}
+agents:
+  good:
+    template: local:default
+  bad:
+    template: local:default
+    resources:
+      cpu: "3"
+"""
+        good_name = f"{system_name}-good"
+        try:
+            response = api_client.post(
+                "/api/systems/deploy",
+                json={"manifest": manifest, "dry_run": False},
+            )
+
+            assert_status(response, 200)
+            data = assert_json_response(response)
+
+            assert data["status"] == "partial"
+            assert data["agents_created"] == [good_name]
+            assert len(data["failed"]) == 1
+            failure = data["failed"][0]
+            assert failure["name"] == f"{system_name}-bad"
+            assert failure["short_name"] == "bad"
+            assert failure["status_code"] == 400
+            assert "cpu" in failure["reason"].lower()
+            # Partial responses warn about the redeploy-duplicate trap.
+            assert any("duplicates" in w for w in data["warnings"])
+
+            # The good agent really exists.
+            time.sleep(3)
+            agent_response = api_client.get(f"/api/agents/{good_name}")
+            assert_status(agent_response, 200)
+        finally:
+            cleanup_test_agent(api_client, good_name)
+
+    def test_total_failure_returns_500_with_report(self, api_client: TrinityApiClient):
+        """Zero agents created: HTTP 500 with the full report as the body."""
+        system_name = f"test-fail-{uuid.uuid4().hex[:6]}"
+        manifest = f"""
+name: {system_name}
+agents:
+  only:
+    template: local:default
+    resources:
+      cpu: "3"
+"""
+        response = api_client.post(
+            "/api/systems/deploy",
+            json={"manifest": manifest, "dry_run": False},
+        )
+
+        assert_status(response, 500)
+        data = assert_json_response(response)
+        assert data["status"] == "failed"
+        assert data["agents_created"] == []
+        assert len(data["failed"]) == 1
+        assert data["failed"][0]["short_name"] == "only"
+
+    def test_strict_deploy_aborts_with_original_status(self, api_client: TrinityApiClient):
+        """strict=True restores abort-on-first-error, preserving the 400."""
+        system_name = f"test-strict-{uuid.uuid4().hex[:6]}"
+        manifest = f"""
+name: {system_name}
+agents:
+  bad:
+    template: local:default
+    resources:
+      cpu: "3"
+"""
+        response = api_client.post(
+            "/api/systems/deploy",
+            json={"manifest": manifest, "dry_run": False, "strict": True},
+        )
+
+        assert_status(response, 400)
+        detail = response.json()["detail"]
+        assert detail["error"] == "Deployment failed"
+        assert detail["failed_at"] == f"{system_name}-bad"
+        assert detail["created"] == []

@@ -600,11 +600,25 @@ class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
     manifest: str  # Raw YAML string
     dry_run: bool = False
+    # trinity-enterprise#125: abort on the first agent-create failure (legacy
+    # behavior) instead of the default best-effort continue-and-report.
+    strict: bool = False
+
+
+class SystemDeployFailure(BaseModel):
+    """One agent that failed to create during a system deploy (trinity-enterprise#125)."""
+    name: str  # Final (resolved) agent name
+    short_name: str  # Short name from the manifest
+    template: str
+    reason: str  # Sanitized, truncated failure reason
+    status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
 
 
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
-    status: str  # "deployed" or "valid" (for dry_run)
+    # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
+    # | "valid" (dry_run) — trinity-enterprise#125
+    status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
@@ -614,6 +628,7 @@ class SystemDeployResponse(BaseModel):
     tags_configured: int = 0  # ORG-001 Phase 4: Number of tags applied
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
+    failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
 
 
 # ============================================================================

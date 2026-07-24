@@ -37,9 +37,10 @@
 - **Flow**: `docs/memory/feature-flows/parallel-headless-execution.md`
 
 ### 16.5 System Manifest Deployment
-- **Status**: ✅ Implemented (2025-12-18)
+- **Status**: ✅ Implemented (2025-12-18; resilient deploy 2026-07-23, trinity-enterprise#125)
 - **Description**: Recipe-based multi-agent deployment via YAML manifest
 - **Key Features**: Permission presets, shared folders, schedules, auto-start
+- **Resilient deploy (trinity-enterprise#125)**: deploy is **best-effort by default** — a per-agent create failure is collected into `failed: [{name, short_name, template, reason, status_code}]` and the remaining agents still deploy; post-create configuration (folders/permissions/schedules/tags/view) is scoped to the created agents and each phase degrades to `warnings` instead of aborting. Response `status` is tri-state: `deployed` (all created) / `partial` (some failed, HTTP 200) / `failed` (none created, HTTP 500 with the full report as the body) — plus `valid` for dry-run. `strict: true` on the request restores abort-on-first-error, preserving the failing agent's original status code. Failure reasons are credential-sanitized + URL-userinfo-redacted + truncated at the exit point. A partial response warns that re-deploying the same manifest creates `_N`-suffixed duplicates (converge/`on_conflict` semantics deferred to the first-run seed work, trinity-enterprise#124). The global `trinity_prompt` write only happens when at least one agent was created. Prerequisite for the fresh-install seed (trinity-enterprise#124) and UI manifest install (trinity-enterprise#126).
 - **Flow**: `docs/memory/feature-flows/system-manifest.md`
 
 ### 16.6 Local Agent Deployment via MCP
