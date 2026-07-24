@@ -211,6 +211,7 @@ class SlackChannelOperations:
             slack_channel_agents.c.is_dm_default,
             slack_channel_agents.c.created_by,
             slack_channel_agents.c.created_at,
+            slack_channel_agents.c.allow_proactive,
         ).where(
             and_(
                 slack_channel_agents.c.team_id == team_id,
@@ -301,6 +302,26 @@ class SlackChannelOperations:
             changed = result.rowcount > 0
         return changed
 
+    def set_channel_allow_proactive(self, team_id: str, slack_channel_id: str,
+                                    enabled: bool) -> bool:
+        """ent#223 — toggle per-channel proactive consent on a channel binding.
+
+        Returns True when a binding was updated, False when no such binding
+        exists (the caller turns that into a 404 rather than a silent success).
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(slack_channel_agents)
+                .where(
+                    and_(
+                        slack_channel_agents.c.team_id == team_id,
+                        slack_channel_agents.c.slack_channel_id == slack_channel_id,
+                    )
+                )
+                .values(allow_proactive=1 if enabled else 0)
+            )
+        return (result.rowcount or 0) > 0
+
     def get_agents_for_workspace(self, team_id: str) -> List[dict]:
         """Get all agent-channel bindings for a workspace."""
         stmt = (
@@ -313,6 +334,7 @@ class SlackChannelOperations:
                 slack_channel_agents.c.is_dm_default,
                 slack_channel_agents.c.created_by,
                 slack_channel_agents.c.created_at,
+                slack_channel_agents.c.allow_proactive,
             )
             .where(slack_channel_agents.c.team_id == team_id)
             .order_by(slack_channel_agents.c.created_at.asc())
@@ -333,6 +355,7 @@ class SlackChannelOperations:
             slack_channel_agents.c.is_dm_default,
             slack_channel_agents.c.created_by,
             slack_channel_agents.c.created_at,
+            slack_channel_agents.c.allow_proactive,
         ).where(
             and_(
                 slack_channel_agents.c.team_id == team_id,
@@ -363,6 +386,7 @@ class SlackChannelOperations:
                 slack_channel_agents.c.is_dm_default,
                 slack_channel_agents.c.created_by,
                 slack_channel_agents.c.created_at,
+                slack_channel_agents.c.allow_proactive,
             )
             .where(slack_channel_agents.c.agent_name == agent_name)
             .order_by(slack_channel_agents.c.created_at.asc())
@@ -471,4 +495,7 @@ class SlackChannelOperations:
             "is_dm_default": bool(row[5]),
             "created_by": row[6],
             "created_at": row[7],
+            # ent#223: per-channel proactive consent. Older rows predate the
+            # column; treat a missing value as denied (safe default).
+            "allow_proactive": bool(row[8]) if len(row) > 8 else False,
         }

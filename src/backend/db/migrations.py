@@ -3118,6 +3118,39 @@ def _migrate_product_events_table(cursor, conn):
     print("Created product_events table (ent#184)")
 
 
+def _migrate_slack_channel_allow_proactive(cursor, conn):
+    """ent#223 — per-channel proactive consent for Slack.
+
+    Adds ``allow_proactive INTEGER DEFAULT 0`` to ``slack_channel_agents``. In an
+    open Slack workspace users never authenticate, so the per-recipient consent
+    model (``agent_sharing.allow_proactive``, keyed by verified email) has nobody
+    to key on; for Slack the consent unit is the CHANNEL BINDING.
+
+    Default posture, and why it differs for existing vs new rows:
+      * NEW bindings default to 0 (deny) — binding an agent to a channel is not
+        by itself consent to unprompted posts; consent is explicit, matching the
+        DM path.
+      * EXISTING bindings are backfilled to 1 (allow) — channel posts had no
+        consent gate at all before this migration, so leaving them at 0 would
+        silently break every working integration. The AC is explicit that
+        existing behavior must not silently flip.
+
+    Mirrored by Alembic 0030_slack_channel_allow_proactive.
+    """
+    added = _safe_add_column(
+        cursor,
+        "slack_channel_agents",
+        "allow_proactive",
+        "ALTER TABLE slack_channel_agents ADD COLUMN allow_proactive INTEGER DEFAULT 0",
+    )
+    if added:
+        # Preserve today's behavior for bindings that already exist.
+        cursor.execute(
+            "UPDATE slack_channel_agents SET allow_proactive = 1 "
+            "WHERE allow_proactive IS NULL OR allow_proactive = 0"
+        )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3218,5 +3251,6 @@ MIGRATIONS = [
     ("operator_queue_request_id", _migrate_operator_queue_request_id),
     ("users_github_pat", _migrate_users_github_pat),
     ("agent_reminders_table", _migrate_agent_reminders_table),
+    ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
     ("product_events_table", _migrate_product_events_table),
 ]

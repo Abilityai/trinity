@@ -684,6 +684,34 @@ _TaskDerivation = namedtuple(
 )
 
 
+
+def _inherited_channel_context(request) -> tuple:
+    """ent#224: resolve the originating channel/thread from the CALLER's execution.
+
+    When agent A (answering in Slack) delegates to agent B, B's row would carry no
+    channel context and B's completion would have nowhere to go — that is exactly
+    the reported failure. If the caller passes its own ``parent_execution_id`` we
+    copy the destination down, so B's terminal can report into A's thread.
+
+    Fail-open: any miss returns (None, None, None) and behaviour is unchanged.
+    """
+    parent_id = getattr(request, "parent_execution_id", None)
+    if not parent_id:
+        return (None, None, None)
+    try:
+        from database import db
+        parent = db.get_execution(parent_id)
+        if parent is None:
+            return (None, None, None)
+        return (
+            getattr(parent, "source_channel", None),
+            getattr(parent, "source_channel_chat_id", None),
+            getattr(parent, "source_channel_thread", None),
+        )
+    except Exception:  # noqa: BLE001 — never fail a dispatch over provenance
+        return (None, None, None)
+
+
 async def run_async_task(
     agent_name: str,
     request: ParallelTaskRequest,
@@ -723,11 +751,15 @@ async def run_async_task(
     # signaled even if the post-task side effects below raise.
     result = None
     chat_session_id = None
+    _src_ch, _src_chat, _src_thread = _inherited_channel_context(request)
     try:
         result = await task_service.execute_task(
             agent_name=agent_name,
             message=request.message,
             triggered_by=triggered_by,
+            source_channel=_src_ch,
+            source_channel_chat_id=_src_chat,
+            source_channel_thread=_src_thread,
             source_user_id=user_id,
             source_user_email=user_email,
             source_agent_name=x_source_agent,

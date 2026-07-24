@@ -253,6 +253,11 @@ class ParallelTaskRequest(BaseModel):
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
     inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
     files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
+    # ent#224: the CALLER's current execution id. When agent A delegates to B,
+    # B inherits A's originating channel/thread from this row, so B's completion
+    # can be reported back to the Slack thread the work actually came from.
+    # Optional and fail-open — absent means "no channel context to inherit".
+    parent_execution_id: Optional[str] = None
 
 
 # ============================================================================
@@ -2687,6 +2692,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class SlackChannelProactiveRequest(BaseModel):
+    """ent#223 — toggle per-channel proactive consent on a Slack channel binding."""
+    allow_proactive: bool
 
 
 class SlackChannelMessageRequest(BaseModel):

@@ -2272,6 +2272,11 @@ class DatabaseManager:
     def get_slack_channels_for_agent(self, agent_name):
         return self._slack_channel_ops.get_channels_for_agent(agent_name)
 
+    def set_slack_channel_allow_proactive(self, team_id, slack_channel_id, enabled):
+        """ent#223 — toggle per-channel proactive consent on a channel binding."""
+        return self._slack_channel_ops.set_channel_allow_proactive(
+            team_id, slack_channel_id, enabled)
+
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
 

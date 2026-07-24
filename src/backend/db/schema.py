@@ -927,6 +927,12 @@ TABLES = {
             is_dm_default INTEGER DEFAULT 0,
             created_by TEXT,
             created_at TEXT NOT NULL,
+            -- ent#223: per-channel proactive consent. In an open Slack workspace
+            -- users never authenticate, so the per-recipient email consent
+            -- (agent_sharing.allow_proactive) has nobody to key on; for Slack the
+            -- consent unit is the CHANNEL BINDING. Deny by default: binding an
+            -- agent is not itself consent to unprompted posts.
+            allow_proactive INTEGER DEFAULT 0,
             UNIQUE(team_id, slack_channel_id),
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE
         )
