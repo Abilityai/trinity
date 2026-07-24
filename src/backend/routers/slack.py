@@ -20,7 +20,7 @@ from fastapi.responses import RedirectResponse
 
 from database import db
 from dependencies import get_current_user
-from models import SlackChannelMessageRequest, SlackEventResponse, User
+from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
 from services import channel_history, rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
@@ -648,6 +648,40 @@ async def list_agent_slack_channels(
     return {"channels": channels, "count": len(channels)}
 
 
+@auth_router.put("/api/agents/{name}/slack/channels/{channel_id}/proactive")
+async def set_slack_channel_proactive(
+    name: str,
+    channel_id: str,
+    request: SlackChannelProactiveRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """ent#223 — toggle proactive-messaging consent for one channel binding.
+
+    Owner-gated, mirroring the channel-message endpoint. This is what makes the
+    flag toggleable from the UI rather than API-only.
+    """
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310)
+        raise HTTPException(status_code=403, detail="Only owners can change channel settings")
+
+    target = next(
+        (c for c in db.get_slack_channels_for_agent(name) if c["slack_channel_id"] == channel_id),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
+
+    updated = db.set_slack_channel_allow_proactive(
+        target["team_id"], channel_id, request.allow_proactive)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Channel binding not found")
+
+    return {
+        "agent_name": name,
+        "slack_channel_id": channel_id,
+        "allow_proactive": request.allow_proactive,
+    }
+
+
 @auth_router.post("/api/agents/{name}/slack/channels/{channel_id}/messages")
 async def send_agent_slack_channel_message(
     name: str,
@@ -680,6 +714,24 @@ async def send_agent_slack_channel_message(
     )
     if not target:
         raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
+
+    # ent#223: per-channel proactive consent. Open Slack workspaces have no
+    # verified-email recipient to key the DM-style consent on, so the consent unit
+    # is this channel binding. Refuse with a NAMED, actionable reason so the agent
+    # can relay *why* (consent) rather than a generic failure — and so it is
+    # distinguishable from "not bound" (404 above) and "rate capped" (429 below).
+    if not target.get("allow_proactive"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "proactive_not_allowed",
+                "message": (
+                    f"Proactive messages are not enabled for channel {channel_id}. "
+                    "Enable 'Allow proactive messages' on this channel binding "
+                    "(agent → Channels → Slack) to let this agent post unprompted."
+                ),
+            },
+        )
 
     # Rate limit: per-channel then per-agent, caps sourced from settings (#1609;
     # 0 = unlimited → skip). Fail-open inside the limiter.
