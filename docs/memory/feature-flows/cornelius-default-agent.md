@@ -7,8 +7,20 @@ A fresh Trinity install auto-seeds a default **"Cornelius"** second-brain agent 
 As a first-time Trinity operator, I want a ready-to-use second-brain agent with a rendered Brain Orb the moment I finish setup, so I can see the platform's flagship capability without learning template syntax or cloning a repo first.
 
 ## Entry Points
-- **Setup-completion handler** (fresh installs): `src/backend/routers/setup.py` — right after the admin account is created, schedules `CorneliusAgentService.ensure_seeded()` as a FastAPI `BackgroundTask` (so setup returns immediately; provisioning runs off the request path).
-- **Lifespan safety-net** (upgrades / missed BackgroundTask): `src/backend/main.py` — on boot, gated on `setup_completed && !cornelius_seeded`, backgrounds `ensure_seeded()` via `asyncio.create_task(...)`.
+
+> **ent#124 (2026-07-24):** both call sites now go through the first-run
+> orchestrator `services/system_seed_service.py::ensure_first_run_seeded()`,
+> which resolves ONE persisted freshness verdict (`first_run_fresh` — with
+> `cornelius_seeded=="true"` forcing not-fresh) and passes it to
+> `ensure_seeded(fresh=...)` before ALSO seeding the default starter fleet.
+> The injected verdict replaces this service's internal
+> `count_non_system_agents()` check (step 2) so fleet-seeded agents can't
+> flip a genuinely-fresh install to "not fresh" on a retry pass;
+> `fresh=None` preserves the legacy internal count. Cornelius behavior is
+> otherwise unchanged. See `system-manifest.md` → First-Run Default Seed.
+
+- **Setup-completion handler** (fresh installs): `src/backend/routers/setup.py` — right after the admin account is created, schedules `ensure_first_run_seeded()` (Cornelius + starter fleet) as a FastAPI `BackgroundTask` (so setup returns immediately; provisioning runs off the request path).
+- **Lifespan safety-net** (upgrades / missed BackgroundTask): `src/backend/main.py` — on boot, gated on `setup_completed`, backgrounds `ensure_first_run_seeded()` via `asyncio.create_task(...)` with a module-level strong task reference (asyncio GC footgun).
 - **No operator-facing API change**: no new endpoint, no UI trigger. Provisioning is a platform boot/setup side effect.
 
 ## Bundled Template

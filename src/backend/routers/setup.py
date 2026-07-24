@@ -24,7 +24,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from models import SetAdminPasswordRequest
 from database import db
 from dependencies import hash_password
-from services.cornelius_agent_service import cornelius_agent_service
+from services.system_seed_service import ensure_first_run_seeded
 from services.operator_intake_service import submit_operator_intake
 from utils.password_validation import validate_password_strength, PASSWORD_REQUIREMENTS_MESSAGE
 
@@ -131,13 +131,15 @@ async def set_admin_password(
     # Mark setup as completed.
     db.set_setting('setup_completed', 'true')
 
-    # Seed the default Cornelius agent (ent#107). Now that the admin account
-    # exists, provision the bundled Brain-Orb-enabled Cornelius so a fresh install
-    # comes up with it present — zero manual steps. Scheduled as a background task
-    # so it runs AFTER the response is sent: a container create must never delay or
-    # break setup. The service is idempotent, first-run-only, and fresh-install-
-    # scoped, so this can never double-provision or surprise an established fleet.
-    background_tasks.add_task(cornelius_agent_service.ensure_seeded)
+    # First-run seeding: the default Cornelius agent (ent#107) plus the default
+    # system manifest (trinity-enterprise#124), sequenced under ONE persisted
+    # freshness verdict. Now that the admin account exists, provision the bundled
+    # Brain-Orb-enabled Cornelius and the starter fleet so a fresh install comes up
+    # working — zero manual steps. Scheduled as a background task so it runs AFTER
+    # the response is sent: container creates must never delay or break setup. Both
+    # seeders are idempotent, first-run-only, and fresh-install-scoped, so this can
+    # never double-provision or surprise an established fleet.
+    background_tasks.add_task(ensure_first_run_seeded)
 
     # Operator intake (trinity-enterprise#38): only on affirmative consent.
     # Scheduled as a background task so it runs AFTER the response is sent — it
