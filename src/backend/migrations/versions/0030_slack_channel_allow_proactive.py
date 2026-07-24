@@ -12,16 +12,16 @@ Default posture (identical to the SQLite track in ``db/migrations.py``):
     gate before this migration, so leaving them at 0 would silently break every
     working integration.
 
-Revision ID: 0029_slack_channel_allow_proactive
-Revises: 0028_agent_reminders
+Revision ID: 0030_slack_channel_allow_proactive
+Revises: 0029_product_events
 Create Date: 2026-07-23
 """
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "0029_slack_channel_allow_proactive"
-down_revision = "0028_agent_reminders"
+revision = "0030_slack_channel_allow_proactive"
+down_revision = "0029_product_events"
 branch_labels = None
 depends_on = None
 

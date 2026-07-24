@@ -3135,7 +3135,7 @@ def _migrate_slack_channel_allow_proactive(cursor, conn):
         silently break every working integration. The AC is explicit that
         existing behavior must not silently flip.
 
-    Mirrored by Alembic 0029_slack_channel_allow_proactive.
+    Mirrored by Alembic 0030_slack_channel_allow_proactive.
     """
     added = _safe_add_column(
         cursor,
