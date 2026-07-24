@@ -803,6 +803,9 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options
       inject_result?: boolean;
       chat_session_id?: string;
+      // ent#224: the CALLER's execution id, so the delegated task inherits the
+      // originating channel/thread and its completion can be reported back.
+      parent_execution_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -843,6 +846,7 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options for result injection
       inject_result: options?.inject_result,
       chat_session_id: options?.chat_session_id,
+      parent_execution_id: options?.parent_execution_id,   // ent#224
     };
 
     // Async mode returns immediately; sync mode waits for full execution.
