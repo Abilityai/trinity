@@ -169,6 +169,8 @@
           :derive-status="slackStatus"
         >
           <SlackChannelPanel :agent-name="agentName" />
+          <!-- ent#222: dedicated per-agent Slack bot (entitlement-gated, self-hiding) -->
+          <SlackAgentBotPanel :agent-name="agentName" />
         </ChannelConfigRow>
 
         <ChannelConfigRow
@@ -291,6 +293,7 @@ import ChannelDisclosure from './ChannelDisclosure.vue'
 import ChannelConfigRow from './ChannelConfigRow.vue'
 import PublicLinksPanel from './PublicLinksPanel.vue'
 import SlackChannelPanel from './SlackChannelPanel.vue'
+import SlackAgentBotPanel from './SlackAgentBotPanel.vue'
 import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
