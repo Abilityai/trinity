@@ -11,6 +11,18 @@ Enables agents to send proactive messages to specific users by verified email ac
 ## Key Features
 
 - **Explicit opt-in consent**: Users must enable `allow_proactive` flag on their sharing record
+- **Two consent units, by channel shape (ent#223)**: a **DM** to a person is consented
+  **per recipient** (`agent_sharing.allow_proactive`, keyed by verified email). A post to a
+  **Slack channel** is consented **per channel binding**
+  (`slack_channel_agents.allow_proactive`) — in an open Slack workspace users never
+  authenticate, so there is no verified-email recipient record to opt in, and the channel
+  is the only meaningful consent unit. Default posture: a **new** binding denies (binding
+  an agent is not itself consent); **existing** bindings were backfilled to allow, because
+  channel posts had no consent gate before ent#223 and must not silently break. Toggled in
+  the Slack channel panel, or via
+  `PUT /api/agents/{name}/slack/channels/{channel_id}/proactive`. Refusal is a named
+  `proactive_not_allowed` (403), kept distinct from *not bound* (404) and *rate capped*
+  (429) so the agent can relay **why**. Replying to a user's own message never needs it.
 - **Redis-based rate limiting**: 10 messages per recipient per hour (survives restarts)
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.

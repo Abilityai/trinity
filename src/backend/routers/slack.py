@@ -409,6 +409,9 @@ async def get_agent_slack_channel(
                 "workspace_team_id": ws["team_id"],
                 "workspace_name": ws["team_name"],
                 "is_dm_default": binding.get("is_dm_default", False),
+                # ent#223: per-channel proactive consent, so the UI can render
+                # (and toggle) the switch instead of it being API-only.
+                "allow_proactive": binding.get("allow_proactive", False),
                 "workspace_agent_count": len(workspace_agents),
                 "created_at": binding.get("created_at"),
             }
