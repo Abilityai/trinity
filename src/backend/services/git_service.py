@@ -524,6 +524,86 @@ async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
     return False
 
 
+# Stderr fragments that mean the REMOTE answered and refused: the repo needs
+# credentials (private) or does not exist. Anonymous GitHub deliberately
+# answers both the same way, so callers must present them as one outcome.
+_ANON_PROBE_DEFINITIVE_PATTERNS = (
+    "could not read username",       # auth challenge with GIT_TERMINAL_PROMPT=0
+    "authentication failed",
+    "repository not found",
+    "could not read password",
+)
+
+
+async def probe_anonymous_repo_access(github_repo: str) -> str:
+    """Probe whether ``github_repo`` is clonable WITHOUT credentials (ent#123).
+
+    Runs a credential-less ``git ls-remote <url> HEAD`` — the same transport
+    the container's anonymous clone uses (so success here ≈ the clone will
+    succeed) and immune to the anonymous REST 60/hr cap that makes
+    ``GitHubService.check_repo_exists`` raise on 403.
+
+    Returns one of:
+      - ``"ok"``          — remote answered; public and reachable
+      - ``"unavailable"`` — remote answered with an auth challenge / not-found;
+                            anonymous GitHub cannot distinguish private from
+                            nonexistent, so this is one combined outcome
+      - ``"transient"``   — GitHub itself unreachable (timeout/DNS/no git);
+                            says nothing about the repo
+    """
+    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
+    remote_url = f"{base}/{github_repo}.git"
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "ls-remote",
+            remote_url,
+            "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            # Force the deterministic fail-fast: an auth challenge becomes
+            # "could not read Username" instead of a hang on a prompt.
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning(
+                "probe_anonymous_repo_access: ls-remote timed out for %s",
+                github_repo,
+            )
+            return "transient"
+    except FileNotFoundError:
+        logger.warning(
+            "probe_anonymous_repo_access: git not installed on backend host"
+        )
+        return "transient"
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.warning(
+            "probe_anonymous_repo_access: ls-remote failed for %s: %s",
+            github_repo,
+            exc,
+        )
+        return "transient"
+
+    if proc.returncode == 0:
+        return "ok"
+
+    stderr_text = (stderr or b"").decode("utf-8", errors="replace").lower()
+    if any(p in stderr_text for p in _ANON_PROBE_DEFINITIVE_PATTERNS):
+        return "unavailable"
+    logger.warning(
+        "probe_anonymous_repo_access: ls-remote for %s exited %s "
+        "with unrecognized error — treating as transient",
+        github_repo,
+        proc.returncode,
+    )
+    return "transient"
+
+
 async def reserve_and_generate_instance_id(
     agent_name: str,
     github_repo: str,
@@ -677,6 +757,40 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+NO_WRITE_CREDENTIALS_MESSAGE = (
+    "This agent has no write credentials — it tracks a public template "
+    "read-only. To keep your changes, create a new agent with fork-to-own "
+    "and import your data (agent Files → Export), or add a GitHub token."
+)
+
+
+def _agent_has_write_credentials(agent_name: str, container) -> bool:
+    """True if the agent can plausibly push (ent#123 tokenless guard).
+
+    Predicate = the container's baked ``GITHUB_PAT`` env **or** a per-agent
+    PAT row. The OR matters: ``set_agent_github_pat`` live-injects the token
+    into the workspace ``.env`` and rewrites origin (``update_remote_pat``,
+    #1264) BEFORE any recreate, so baked env alone would block the user who
+    just fixed the problem. The global tier is deliberately excluded — a
+    global PAT never reaches a tokenless container's remote.
+
+    Fail-open: any error reading either source returns True so this guard
+    can only ever produce a clearer message, never block a working push.
+    """
+    try:
+        env_list = container.attrs.get("Config", {}).get("Env", []) or []
+        for entry in env_list:
+            if entry.startswith("GITHUB_PAT=") and len(entry) > len("GITHUB_PAT="):
+                return True
+        return bool(db.get_agent_github_pat(agent_name))
+    except Exception as exc:  # noqa: BLE001 — guard must never break push
+        logger.warning(
+            "_agent_has_write_credentials: check failed for %s: %s — "
+            "failing open", agent_name, exc,
+        )
+        return True
+
+
 async def sync_to_github(
     agent_name: str,
     message: Optional[str] = None,
@@ -708,6 +822,17 @@ async def sync_to_github(
         return GitSyncResult(
             success=False,
             message="Agent must be running to sync"
+        )
+
+    # ent#123: a tokenless (anonymous public-template) agent has no push
+    # credentials — fail with an honest, actionable message instead of
+    # letting the in-container push die on a cryptic auth prompt.
+    if not _agent_has_write_credentials(agent_name, container):
+        return GitSyncResult(
+            success=False,
+            message=NO_WRITE_CREDENTIALS_MESSAGE,
+            conflict_type="no_write_credentials",
+            conflict_class="AUTH_FAILURE",
         )
 
     # #462: bring the workspace `.gitignore` up to the current canonical list
@@ -1340,6 +1465,15 @@ async def reset_to_main_preserve_state(agent_name: str) -> Dict[str, Any]:
                 f"Agent {agent_name} is currently executing a task. "
                 "Wait for it to finish before resetting."
             ),
+        }
+
+    # ent#123: the recovery ends in a force-with-lease PUSH — refuse up front
+    # for a tokenless agent with the same honest message as sync.
+    container = get_agent_container(agent_name)
+    if container and not _agent_has_write_credentials(agent_name, container):
+        return {
+            "error": "no_write_credentials",
+            "message": NO_WRITE_CREDENTIALS_MESSAGE,
         }
 
     async with agent_httpx_client(agent_name, timeout=180.0) as client:

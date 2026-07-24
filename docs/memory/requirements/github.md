@@ -152,4 +152,65 @@
   `services/credential_encryption.py`; endpoints `routers/users.py`. Prose it
   supersedes: the `users` table block in `architecture.md`.
 
+### 11.11 PAT-Free Clone of Public Templates (trinity-enterprise#123)
+- **Status**: ✅ Implemented (2026-07-23) — gating prerequisite for the ent#122
+  fresh-install fleet provisioning epic (first-run manifest seed ent#124, UI
+  manifest install ent#126).
+- **Description**: Creating an agent from a **public** `github:owner/repo`
+  template with **no** GitHub PAT anywhere (no per-agent, per-user, or global
+  token) succeeds via an **anonymous, read-only, source-mode clone**. Previously
+  the create path hard-failed 400 without a token and `startup.sh` skipped the
+  clone entirely when `GITHUB_PAT` was empty.
+- **FR-1 — Tokenless create is source-mode only**: a tokenless request with
+  `source_mode` falsy (explicit `False` **or** `None`) fails with a named 400
+  ("bidirectional git sync requires write credentials") — working-branch mode
+  pushes at boot and is impossible anonymously. Fork-to-own requests are
+  unaffected (they carry the user's PAT).
+- **FR-2 — Visibility probe rides the git transport, not the REST API**:
+  the tokenless path validates reachability via a credential-less
+  `git ls-remote <url> HEAD` (`git_service.probe_anonymous_repo_access`) — the
+  same transport the container clone uses, immune to the anonymous REST 60/hr
+  cap. Outcomes: reachable → proceed; definitive auth-challenge/not-found →
+  named 400 *"not found or private — add a GitHub token"* (anonymous GitHub
+  cannot distinguish the two; no new existence oracle); transient failure →
+  **fail-closed 502** (same transport ⇒ the clone would fail too; avoids a
+  silently-empty agent while monitoring is default-off). PAT-ful validation
+  is unchanged (REST probe, GitHubError → 502).
+- **FR-3 — Container env carries no token vars**: `GITHUB_PAT`/`GH_TOKEN`/
+  `GITHUB_TOKEN` are set only when a PAT exists; `GITHUB_REPO` +
+  `GIT_SYNC_ENABLED` + `GIT_SOURCE_MODE` are set for every github-template
+  agent. Applies to creation (`_apply_github_env`) AND the rebuild-recovery
+  seam (`lifecycle._apply_persisted_auth_env`) so a tokenless agent rebuilt
+  after container loss still clones (silent-empty-agent class, #843/#1439).
+- **FR-4 — startup.sh clones anonymously**: clone gate is `GITHUB_REPO`-only;
+  `CLONE_URL` embeds `oauth2:<PAT>@` only when a PAT is present (else the
+  credential-less form, mirroring the fork-to-own `UPSTREAM_URL`); tokenless
+  git network ops run with `GIT_TERMINAL_PROMPT=0` (deterministic fail-fast);
+  on restart the baked-env PAT falls back to the workspace `.env` value
+  before the origin URL is rewritten (preserves a live-injected per-agent PAT
+  across ops-path raw restarts, #1264/#1089). Tokenless agents get a
+  **blackholed push remote** (self-describing invalid push URL) so any
+  in-container `git push` fails legibly.
+- **FR-5 — Push surfaces fail honestly**: backend push paths (`sync_to_github`,
+  `reset_to_main_preserve_state`) pre-check write credentials — baked env
+  `GITHUB_PAT` **or** the per-agent PAT row (never the global tier, which
+  cannot reach a tokenless container) — and return conflict_type
+  `no_write_credentials` with the actionable message (create a new agent with
+  fork-to-own + data import, or add a token). MCP `git_sync` suppresses the
+  "resolve via chat" hint for this conflict type.
+- **FR-6 — Private repos with no token fail with a named error**, never a raw
+  500 (FR-2's combined 400 at create; auth-classified clone failure +
+  `.git-clone-status` marker in-container if a repo goes private later).
+- **Mixed-fleet caveat (release note)**: an un-rebuilt base image still has the
+  old `GITHUB_PAT`-gated clone block — tokenless creation on an old image
+  yields an empty agent with no failure marker. Base-image rebuild is a hard
+  ordering requirement when upgrading.
+- **Source of truth**: `services/agent_service/crud.py`
+  (`_resolve_github_repo_and_pat`, `_validate_github_access`,
+  `_apply_github_env`), `services/agent_service/lifecycle.py`
+  (`_apply_persisted_auth_env`), `services/git_service.py`
+  (`probe_anonymous_repo_access`, write-credential guard),
+  `docker/base-image/startup.sh`.
+- **GitHub Issue**: trinity-enterprise#123 (Epic ent#122)
+
 ---
