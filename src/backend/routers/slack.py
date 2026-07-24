@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, reject_agent_principal
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
 from services import channel_history, rate_limiter
 from services.slack_service import slack_service
@@ -663,6 +663,11 @@ async def set_slack_channel_proactive(
     Owner-gated, mirroring the channel-message endpoint. This is what makes the
     flag toggleable from the UI rather than API-only.
     """
+    # Human-only: an agent-scoped key resolves to the OWNER on REST
+    # (dependencies.py:423), so can_user_share_agent alone would let an agent flip
+    # its own consent on — self-granting the very control ent#223 adds. Granting
+    # consent is a human decision; SENDING under it stays agent-callable.
+    reject_agent_principal(current_user)
     if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310)
         raise HTTPException(status_code=403, detail="Only owners can change channel settings")
 

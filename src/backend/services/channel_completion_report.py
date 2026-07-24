@@ -41,9 +41,24 @@ _MAX_REPORT_CHARS = 2800
 def _summarize(status: str, summary_or_error: Optional[str]) -> str:
     """A short, honest completion line. Failures report too — a silent failure is
     exactly the bug this closes."""
-    body = (summary_or_error or "").strip()
-    if len(body) > _MAX_REPORT_CHARS:
-        body = body[:_MAX_REPORT_CHARS].rstrip() + "…"
+    from utils.credential_sanitizer import sanitize_text
+
+    # Credential-sanitise BEFORE truncating, over a 2x window — the #1578 emit
+    # chokepoint does exactly this (event_dispatch_service.py:311) and for the
+    # same reason: a failure terminal's error text can carry secrets, and a bare
+    # slice can cut a secret so the redaction pattern no longer matches and it
+    # survives. Slack is a persistent, externally hosted, human-visible surface,
+    # so this is the last place to skip it.
+    raw = (summary_or_error or "").strip()
+    window = raw[: _MAX_REPORT_CHARS * 2]
+    cleaned = sanitize_text(window)
+    # Truncation is decided on what we actually cut — NOT by comparing against
+    # `raw`, because redaction changes length and would append a phantom ellipsis
+    # to text that was never truncated.
+    truncated = len(cleaned) > _MAX_REPORT_CHARS or len(raw) > len(window)
+    body = cleaned[:_MAX_REPORT_CHARS].rstrip()
+    if truncated:
+        body += "…"
     if status == "success":
         head = "✅ Task finished"
         return f"{head}\n\n{body}" if body else head

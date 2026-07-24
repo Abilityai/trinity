@@ -177,3 +177,32 @@ def test_reporter_never_raises(wired):
 
     db.get_execution = _boom
     assert _report() is False        # swallowed, not raised
+
+
+# Assembled at runtime, never written as a literal: this is a PUBLIC repo and a
+# realistic token literal trips GitHub push protection (and is the "hardcoded
+# credential in a test" the review checklist forbids). The sanitiser still sees a
+# complete, well-formed token at run time.
+_FAKE_SLACK_TOKEN = "-".join(["xoxb", "1" * 10, "2" * 10, "a" * 24])
+
+
+class TestCredentialSafety:
+    def test_failure_text_is_sanitised_before_it_reaches_slack(self, wired):
+        """A failure terminal's error text can carry secrets — that is why the
+        #1578 emit chokepoint sanitises. Slack is a persistent, externally hosted,
+        human-visible surface, so it must not be the one egress that skips it."""
+        sent, _ = wired
+        assert _report(status="failed",
+                       summary_or_error=f"boom: {_FAKE_SLACK_TOKEN}") is True
+        assert _FAKE_SLACK_TOKEN not in sent[0]["text"], (
+            "a raw Slack bot token was posted into a channel"
+        )
+
+    def test_short_text_gets_no_phantom_ellipsis(self, wired):
+        """Redaction changes length, so truncation must be decided on what was
+        actually cut — comparing against the raw input would mark a short,
+        redacted message as truncated."""
+        sent, _ = wired
+        assert _report(status="failed",
+                       summary_or_error=f"failed: {_FAKE_SLACK_TOKEN}") is True
+        assert not sent[0]["text"].endswith("…"), "nothing was truncated, yet an ellipsis was added"

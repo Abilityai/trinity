@@ -154,3 +154,18 @@ class TestMigrationBackfill:
         conn.commit()
         cur.execute("SELECT allow_proactive FROM slack_channel_agents WHERE id='1'")
         assert cur.fetchone()[0] == 0, "an operator's explicit OFF must survive re-runs"
+
+
+class TestConsentToggleIsHumanOnly:
+    def test_toggle_endpoint_rejects_an_agent_principal(self):
+        """An agent-scoped key resolves to the OWNER on REST (dependencies.py:423),
+        so can_user_share_agent alone would let an agent flip its OWN consent on —
+        self-granting the control ent#223 exists to enforce."""
+        import inspect
+        from routers import slack as slack_router
+
+        src = inspect.getsource(slack_router.set_slack_channel_proactive)
+        assert "reject_agent_principal" in src, (
+            "the consent toggle lost its human-only guard — an agent could grant "
+            "itself proactive-messaging consent"
+        )
