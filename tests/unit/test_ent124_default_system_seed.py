@@ -162,6 +162,12 @@ def test_bundled_manifest_local_templates_exist_in_tree():
             f"{short}: bundled manifest references '{cfg.template}' but "
             f"{template_dir}/template.yaml does not exist — this would seed a blank agent"
         )
+        # ent#239: template.yaml alone still deploys "successfully" but seeds an
+        # agent with no instructions — CLAUDE.md is the zero-cred usefulness bar.
+        assert (template_dir / "CLAUDE.md").is_file(), (
+            f"{short}: '{cfg.template}' ships no CLAUDE.md — the agent would "
+            f"deploy but have no instructions (fails the zero-cred useful bar)"
+        )
 
 
 # --- gating --------------------------------------------------------------------
