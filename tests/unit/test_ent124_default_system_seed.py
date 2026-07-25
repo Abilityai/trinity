@@ -170,6 +170,32 @@ def test_bundled_manifest_local_templates_exist_in_tree():
         )
 
 
+def test_bundled_manifest_templates_ship_declared_commands():
+    """ent#239 live finding: Claude Code intercepts any leading-`/` message
+    before the model sees it, so a command that is only *documented* (in
+    template.yaml / CLAUDE.md prose) fails as typed — `/research` returned
+    "Unknown command: /research" and `/status` hit the built-in. Every command
+    a seeded template declares must ship a real `.claude/commands/<name>.md`
+    (the pattern trinity-system / demo-* templates already follow); a shipped
+    file also shadows same-named built-ins (verified live for /status)."""
+    import yaml
+
+    manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
+    for short, cfg in manifest.agents.items():
+        template_dir = REPO_ROOT / "config" / "agent-templates" / cfg.template.split(":", 1)[1]
+        declared = [
+            c["name"]
+            for c in (yaml.safe_load((template_dir / "template.yaml").read_text()) or {}).get("commands", [])
+        ]
+        for cmd in declared:
+            cmd_file = template_dir / ".claude" / "commands" / f"{cmd}.md"
+            assert cmd_file.is_file(), (
+                f"{short}: template.yaml declares command '{cmd}' but ships no "
+                f"{cmd_file.relative_to(REPO_ROOT)} — as typed, /{cmd} is "
+                f"intercepted by the CLI and fails ('Unknown command')"
+            )
+
+
 # --- gating --------------------------------------------------------------------
 
 def test_seeds_on_fresh_install(env):
