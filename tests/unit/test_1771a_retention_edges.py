@@ -421,12 +421,82 @@ class TestRefusalAlarm:
     def test_alarm_id_is_the_natural_key_and_expiry_is_null(self, guard_db):
         """C9 + C10. `expires_at` must stay None: `mark_operator_queue_expired`
         flips any pending row past `expires_at` to `expired` fleet-wide every 5s,
-        which would silently retire the alarm."""
+        which would silently retire the alarm.
+
+        The id is compared against a LITERAL format, not against `_alarm_id()`
+        itself. Asserting `item["id"] == _alarm_id(...)` is a tautology — both
+        sides move together, so it survives any change to the id's shape. The
+        mutation gate caught exactly that: mutating the `"retention-guard-"`
+        prefix left the original assertion green. The format is load-bearing:
+        `create_item` is INSERT ... ON CONFLICT DO NOTHING on `id`, so the natural
+        key is what makes re-emission idempotent (one alarm per setting+window).
+        """
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
         _agent, item = guard_db.queue_items[0]
 
-        assert item["id"] == _RG._alarm_id("execution_row_retention_days", 5)
+        assert item["id"] == "retention-guard-execution_row_retention_days-5"
         assert item["expires_at"] is None
+
+    def test_alarm_is_raised_as_a_critical_alert(self, guard_db):
+        """The alarm's ROUTING and VISIBILITY fields, not just its key set.
+
+        `priority` decides how loudly a refused mass-deletion surfaces to an
+        operator; downgrading it to `low` is a silent re-run of the #1638
+        failure mode (the signal exists but nobody sees it). `type` decides
+        which queue surface renders it, and `alert_type` is the discriminator
+        consumers filter on. The C8 payload test pins the key SET; these are the
+        VALUES, which the mutation gate showed were unasserted.
+        """
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _agent, item = guard_db.queue_items[0]
+
+        assert item["type"] == "alert"
+        assert item["priority"] == "critical"
+        assert item["context"]["alert_type"] == "retention_blast_radius"
+        assert item["context"]["setting_key"] == "execution_row_retention_days"
+        assert item["context"]["window_days"] == 5
+
+    def test_window_source_distinguishes_a_db_row_from_a_code_default(self, guard_db):
+        """The provenance field whose ABSENCE made #1638 invisible.
+
+        A `code-default` window is one a future edit to `OPS_SETTINGS_DEFAULTS`
+        can move under the operator's feet; a `db-row` window is one they chose.
+        Reporting the wrong one on a refusal alarm points the investigation at
+        the wrong cause. Both branches asserted — the mutation gate showed only
+        the `db-row` side was covered.
+        """
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _agent, item = guard_db.queue_items[0]
+        assert (
+            item["context"]["window_source"] == "code-default"
+        ), "no setting row exists, so the window came from the code default"
+
+        guard_db.settings["health_check_retention_days"] = "7"
+        _RG.announce_refusal("health_check_retention_days", "health", 7, _verdict())
+        _agent, item = guard_db.queue_items[1]
+        assert item["context"]["window_source"] == "db-row"
+
+
+class TestVerdictImmutability:
+
+    def test_guard_verdict_cannot_be_mutated_after_the_decision(self):
+        """`GuardVerdict` is a FROZEN dataclass, and that is a safety property.
+
+        The verdict is handed to `announce_refusal` and returned through
+        `_guard_allows` to the sweep that is about to delete rows. If it were
+        mutable, any of those hops — or a future one — could flip `allowed` from
+        False to True after the decision was made, turning a refusal into a
+        prune with no re-evaluation. `test_1644:170` asserts `v.allowed is False`
+        after a failed alarm, which only proves anything BECAUSE the object is
+        frozen; the mutation gate showed `frozen=True` -> `frozen=False` survived
+        the whole suite.
+        """
+        import dataclasses
+
+        v = _RG.GuardVerdict(False, 5000, 1000, "over_threshold")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            v.allowed = True
+        assert v.allowed is False
 
     def test_alarm_hosts_on_the_uncreatable_sentinel_agent(self, guard_db):
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
