@@ -22,7 +22,7 @@
     "axios": "^1.18.1",
     "chart.js": "^4.4.7",
     "dompurify": "^3.4.11",
-    "js-yaml": "^5.2.1",
+    "js-yaml": "^5.2.2",
     "marked": "^18.0.7",
     "mermaid": "^11.16.0",
     "monaco-editor": "^0.56.0",
