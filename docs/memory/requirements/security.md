@@ -231,6 +231,22 @@
 - **Non-scanned zones**: `tests/**` (~192 intentionally-fake fixtures), `docs/memory/**` (the live engineering docs — architecture/requirements/feature-flows — carry API-usage examples: curl `Authorization: Bearer` commands, truncated JWTs, `KEY=`/`condition=` samples the default `curl-auth-header`/`generic-api-key` rules flag; 8 such FPs were verified during #1164), and `docs/archive|releases|security-reports/**` (historical records; the CSO reports hold secret-pattern examples) are blanket path allowlists — gitleaks pre-skips allowlisted paths before per-finding regex, so these are documented non-scanned zones rather than a narrowing that wouldn't hold. A real credential belongs in `.env`/injection, never a test/doc file; GUARD-002 runtime scanning + human review are the complementary layers. `.env.example` is deliberately **NOT** excluded (a real key pasted there fires). *(Scope note for review: only `docs/memory/**` is excluded, not all of `docs/**` — a broader `docs/**` exclusion is deferred to reviewer judgement; other doc trees stay scanned and rely on the inline `gitleaks:allow` escape hatch for any example FP.)*
 - **Honest limit**: the custom rule catches a **verbatim** `re_`-body key. It does **NOT** catch a re-split / XOR-obfuscated secret — verified: the settled #1158 leak's two base85 halves are undetectable by gitleaks under both `useDefault` and this config (neither half is a `re_` key nor keyword-adjacent, and generic entropy on base85 is unreliable in a codebase full of legitimate encoded data). Regex+entropy is defense-in-depth against a *re-land*; **credential rotation** (done in #1158) is the real defense against the original leak. Because the halves produce no finding, `.gitleaksignore` carries no #1158 fingerprint (documented there); it is a non-load-bearing baseline for any future known historical finding, and the range-scoped CI gate does not depend on it.
 
+### 20.9 Stored User Credential — Per-User GitHub PAT (ent#162)
+- **Status**: ✅ Implemented (v0.8.5 payload).
+- **Credential-storage summary (cross-reference)**: the per-user GitHub token is a
+  **stored user credential** — a new credential-bearing column
+  `users.github_pat_encrypted`, an **AES-256-GCM JSON envelope** under
+  **Invariant #12** (plaintext persistence forbidden; the column is listed among
+  the Invariant #12 tables in `architecture.md`). Set/cleared self-service by its
+  owner only; **the token is never echoed on read** (status/`configured` flag
+  only) — a standing requirement, not just current behavior. Resolution keys on
+  **agent ownership**, never a calling/sharing user, so a sharee cannot inject
+  their PAT as an agent's git identity.
+- **Full requirement (capability + resolution ladders + persist carve-out)**:
+  `docs/memory/requirements/github.md` §11.10 — this section is the
+  security-surface pointer; the resolution mechanics and the recreate-vs-create
+  ladder distinction live there.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)

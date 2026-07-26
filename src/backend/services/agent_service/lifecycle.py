@@ -220,19 +220,34 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 
     logger.info(f"Injecting {len(skill_names)} skills into agent {agent_name}: {skill_names}")
 
-    # Inject skills
-    result = await skill_service.inject_skills(agent_name, skill_names)
+    # Inject skills. force=False: the start path skips skills whose agent-side
+    # version already matches the library tree SHA (ent#183); manual sync via
+    # the REST/MCP inject endpoint stays an unconditional repair (force=True).
+    from services.skill_service import SkillInjectionBusy
+    try:
+        result = await skill_service.inject_skills(agent_name, skill_names, force=False)
+    except SkillInjectionBusy:
+        return {"status": "skipped", "reason": "injection_already_running"}
 
+    warning_count = sum(
+        len(r.get("warnings") or []) for r in result.get("results", {}).values()
+    )
     if result.get("success"):
         return {
             "status": "success",
-            "skills_injected": result.get("skills_injected", 0)
+            "skills_injected": result.get("skills_injected", 0),
+            "skills_unchanged": result.get("skills_unchanged", 0),
+            "skills_warnings": warning_count,
+            "results": result.get("results", {}),
         }
     else:
+        injected = result.get("skills_injected", 0) + result.get("skills_unchanged", 0)
         return {
-            "status": "partial" if result.get("skills_injected", 0) > 0 else "failed",
+            "status": "partial" if injected > 0 else "failed",
             "skills_injected": result.get("skills_injected", 0),
+            "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_failed": result.get("skills_failed", 0),
+            "skills_warnings": warning_count,
             "results": result.get("results", {})
         }
 
@@ -945,15 +960,33 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
             env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
     # Per-agent GitHub PAT (opt-in), plus GITHUB_REPO / GIT_SYNC from git config.
+    # ent#123: gate on the REPO, not the PAT — a tokenless (anonymous
+    # public-template) agent rebuilt after container loss must still get
+    # GITHUB_REPO + GIT_SYNC_ENABLED, or startup.sh never attempts the clone
+    # and the rebuild yields a silently empty agent with green health
+    # (the #843/#1439 class). Token vars are injected only when a PAT exists.
     git_config = db.get_git_config(agent_name)
     if git_config:
         from routers.git import get_github_pat_for_agent
+
+        def _gc(key: str):
+            if isinstance(git_config, dict):
+                return git_config.get(key)
+            return getattr(git_config, key, None)
+
         pat = get_github_pat_for_agent(agent_name)
-        repo = git_config.get("github_repo") if isinstance(git_config, dict) else getattr(git_config, "github_repo", None)
-        if pat and repo:
+        repo = _gc("github_repo")
+        if repo:
             env_vars["GITHUB_REPO"] = repo
-            env_vars["GITHUB_PAT"] = pat
+            if pat:
+                env_vars["GITHUB_PAT"] = pat
             env_vars["GIT_SYNC_ENABLED"] = "true"
+            # Source-mode rows also re-derive the mode/branch pair so a
+            # volume-loss rebuild re-clones the right branch instead of a
+            # bare default-branch clone with no tracking.
+            if _gc("source_mode"):
+                env_vars["GIT_SOURCE_MODE"] = "true"
+                env_vars["GIT_SOURCE_BRANCH"] = _gc("source_branch") or "main"
             _git_base = os.getenv("TRINITY_GIT_BASE_URL")
             if _git_base:
                 env_vars["TRINITY_GIT_BASE_URL"] = _git_base

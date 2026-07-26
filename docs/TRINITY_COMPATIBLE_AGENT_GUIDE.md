@@ -190,6 +190,7 @@ __pycache__/
 .claude/debug/
 .claude/sessions/
 .claude/shell-snapshots/
+.claude/plugins/
 # Keep: .claude/commands/, .claude/skills/, .claude/agents/, settings.local.json
 
 # Temporary files

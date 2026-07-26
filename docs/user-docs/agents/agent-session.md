@@ -8,7 +8,7 @@
 
 - **Session** -- A conversation thread with a Claude Code working memory attached. The visible message log is stored separately from the working memory and survives Reset.
 - **Cached Claude session** -- A Claude Code session UUID stored on the session row. Each turn calls `claude --print --resume <uuid>` so working memory persists.
-- **Auto-compact** -- Built-in Claude Code behaviour. When the underlying conversation reaches ~85% of the model's context window, Claude Code summarizes ~170k tokens of history into a ~10k summary mid-turn. Working memory survives in compressed form.
+- **Auto-compact** -- Built-in Claude Code behaviour. When the underlying conversation reaches ~85% of the model's context window (model-specific — 1M tokens for Sonnet 5 and other 1M-capable models, 200K for older Claude models), Claude Code summarizes most of that history into a ~10k summary mid-turn. Working memory survives in compressed form.
 - **Reset memory** -- Clear the cached Claude session UUID. The visible message log stays; the agent starts the next turn cold.
 
 ### Reset memory vs. New Session
@@ -70,11 +70,13 @@ A high value tells you the last turn loaded a lot into Claude's cache, not that 
 
 ### Auto-compact
 
-When Claude Code's internal conversation history approaches ~85% of the model window (preTokens around 170k of 200k for Sonnet/Opus), it automatically:
+When Claude Code's internal conversation history approaches ~85% of the model window, it automatically:
 
 1. Summarizes the conversation history into a ~10k-token summary.
 2. Replaces the in-memory history with the summary.
 3. Continues the current turn.
+
+The context-window size is **model-specific**, not a flat 200K. Sonnet 5 (and other 1M-capable models) report a 1M-token window, while older Claude models report 200K — so the compaction point scales with the running model (e.g. ~85% of 1M for a 1M model, ~85% of 200K for a 200K model). The `% used` denominator you see adapts to whichever model the agent is running.
 
 Effects users will notice:
 - The turn appears to take longer than expected (~2 minutes added per compact).

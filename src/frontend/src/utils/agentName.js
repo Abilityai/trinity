@@ -53,3 +53,20 @@ export function agentNameTooltip(agent) {
   if (!hasDistinctLabel(agent)) return shown
   return `${shown} · ${agent.name}`
 }
+
+/**
+ * Label for an agent in a `<select>`/picker `<option>` (#1642). An `<option>`
+ * renders a single text line and can't carry a tooltip or a second field, so
+ * disambiguation goes inline: `Display name (slug)` when a distinct label is
+ * set, else the bare slug. The `<option>` **value** stays the slug — this is
+ * the display text only. Pickers are the surface class where "which agent is
+ * this?" matters most, hence the slug rides along here rather than being
+ * dropped (§1.3.1 FR-4, the #964 render rule).
+ * @param {{name?: string, display_label?: string|null}|string|null|undefined} agent
+ * @returns {string}
+ */
+export function agentOptionLabel(agent) {
+  const shown = agentDisplayName(agent)
+  if (!hasDistinctLabel(agent)) return shown
+  return `${shown} (${agent.name})`
+}

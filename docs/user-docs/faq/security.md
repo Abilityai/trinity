@@ -64,7 +64,15 @@ In both directions, with per-agent credentials. Every backend call into an agent
 
 ## Does Trinity phone home?
 
-Not by default, and never silently. There is no background telemetry. The only outbound submission is an explicit opt-in at first-run setup: if you check the box to receive security and product updates, your contact details are sent once per installation — and only then. Operators can additionally hard-disable this via environment configuration (including the standard `DO_NOT_TRACK` convention), and a failed or blocked submission never affects setup.
+Nothing leaves your server without an explicit, admin-level opt-in — and never silently. By default Trinity records only anonymous product events (a small fixed set of onboarding/setup steps) **locally**, in its own database; they produce zero network egress. The outbound paths are all opt-in: a one-time contact submission at first-run setup if you check the "security and product updates" box, and a separate, reversible admin toggle that shares coarse anonymized aggregates with a hosted benchmark service (never PII, message content, emails, or agent names). Operators can hard-disable outbound sharing through environment configuration, including the standard `DO_NOT_TRACK` convention, and a blocked or failed submission never affects the platform. See [Product Telemetry](../operations/telemetry.md).
+
+## What does Trinity record about my usage, and does any of it leave my server?
+
+By default Trinity records only anonymous local product events — a small fixed allow-list of onboarding and setup step events, stored in its own database — and they never leave your server; there is no toggle and nothing to configure. Separately, an admin can opt in to share coarse anonymized aggregates (platform version, edition, and counts of agents, executions, and funnel steps) with a hosted benchmark service in exchange for fleet benchmarks; this is off by default. The shared aggregates never include PII, message content or prompts, emails, or agent names, and they can't be used to reconstruct individual activity. See [Product Telemetry](../operations/telemetry.md).
+
+## How do I turn usage-data sharing on or off?
+
+Fleet sharing is an admin-only toggle in Settings, off by default and fully reversible — opting out stops the next cycle from sending. Before you consent, Settings shows a preview of the exact aggregate payload that would be sent, so nothing goes out sight-unseen, and enabling it is audit-logged. Egress requires two independent gates — your stored consent and a config switch that honors the cross-tool `DO_NOT_TRACK` environment variable — so if either is off, nothing leaves the box. The local product events have no toggle because they never egress in the first place. See [Product Telemetry](../operations/telemetry.md).
 
 ## What should I do before exposing Trinity to the internet?
 

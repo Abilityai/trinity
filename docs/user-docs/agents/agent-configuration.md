@@ -90,7 +90,7 @@ Controls which API key the agent uses for Claude.
 
 Choose the Claude model used for tasks and scheduled executions.
 
-- Available models: Opus, Sonnet, Haiku (latest generations).
+- Available models lead with the current flagships: **Fable 5** (most capable, best for the longest tasks) and **Sonnet 5** (fast and smart, with a 1M-token context window), alongside the current Opus and Haiku generations.
 - Custom model input is supported.
 - Selection is persisted to `localStorage`; `model_used` is recorded in the execution audit trail.
 - **Platform default**: when an agent has no model override, executions use the platform default model configured in Settings → Platform. The UI now surfaces this fallback so empty selections aren't mistaken for failures.

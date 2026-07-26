@@ -313,6 +313,14 @@ async def _guard_leftover_workspace_volume(
             )
 
 
+# ent#123: owner/repo charset guard. The repo path is interpolated into
+# startup.sh's `eval`-built clone command; the PAT-ful REST validation only
+# blocked garbage incidentally, and the tokenless path replaces REST with a
+# git-transport probe — so the barrier must be explicit, not incidental.
+# GitHub's own owner/repo charset is a subset of this.
+_GITHUB_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
 def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     """GIT-002: parse `github:owner/repo[@branch]` into `(template_lookup,
     repo_path, url_branch)`. Mutates `config.source_branch` when a valid branch
@@ -328,9 +336,49 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
         else:
             url_branch = None  # Invalid branch, ignore
 
+    if "/" in template_str and not _GITHUB_REPO_PATH_RE.match(template_str):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid GitHub repository reference. Use github:owner/repo "
+                "with letters, digits, '.', '_' or '-' only."
+            ),
+        )
+
     # Reconstruct template ID without branch for lookup
     template_lookup = f"github:{template_str}" if url_branch else config.template
     return template_lookup, template_str, url_branch
+
+
+def _gate_tokenless_request(
+    config: AgentConfig, github_pat: str
+) -> Optional[str]:
+    """ent#123: admit or reject a github-template create with no PAT.
+
+    ``resolve_github_pat`` returns an EMPTY STRING (not None) when no tier
+    has a token — normalize to None so every downstream consumer can rely
+    on truthiness. A tokenless request is allowed only in source mode
+    (pull-only): working-branch mode pushes a new branch at container boot,
+    which is impossible anonymously. ``source_mode`` is Optional[bool], so
+    the falsy check deliberately catches an explicit None too. Fork-to-own
+    passes through — the user's own PAT becomes the write identity later.
+    The public-vs-private decision is NOT made here (this helper is sync);
+    it happens in ``_validate_github_access`` via the anonymous ls-remote
+    probe.
+    """
+    if github_pat:
+        return github_pat
+    if not config.fork_to_own and not config.source_mode:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bidirectional git sync requires write credentials — add "
+                "your GitHub token in Settings (or ask an admin to configure "
+                "the platform token), or create the agent in source mode "
+                "(pull-only)."
+            ),
+        )
+    return None
 
 
 def _resolve_github_repo_and_pat(
@@ -364,22 +412,13 @@ def _resolve_github_repo_and_pat(
         # Fork-to-own (#93) doesn't need it — the user's PAT is the
         # write identity and public templates clone unauthenticated.
         github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
-        if not github_pat and not config.fork_to_own:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No GitHub token available to clone this template. "
-                    "Add your personal GitHub token in Settings, or ask an "
-                    "admin to configure the platform token."
-                ),
-            )
+        github_pat = _gate_tokenless_request(config, github_pat)
 
         config.resources = gh_template.get("resources", config.resources)
         config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
         return gh_template, github_repo, github_pat, github_pat_tier
 
     # Dynamic GitHub template - use any github:owner/repo[@branch] format
-    # Requires system GitHub PAT to be configured
     # Note: Branch was already parsed above; repo_path already has branch removed
     if "/" not in repo_path:
         raise HTTPException(
@@ -391,15 +430,7 @@ def _resolve_github_repo_and_pat(
     # (live) → global (ent#162). Prefers the creator's own token so a
     # non-admin can clone a private repo the admin PAT can't see.
     github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
-    if not github_pat and not config.fork_to_own:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No GitHub token available to clone this repository. "
-                "Add your personal GitHub token in Settings, or ask an "
-                "admin to configure the platform token."
-            ),
-        )
+    github_pat = _gate_tokenless_request(config, github_pat)
 
     logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
     return None, repo_path, github_pat, github_pat_tier
@@ -489,7 +520,60 @@ async def _validate_github_access(
 ) -> None:
     """#218: validate PAT access to the repo (and branch) before container create,
     so a bad token fails loud here instead of silently in startup.sh. Transient
-    network errors are logged and NOT fatal (matches the monolith)."""
+    network errors are logged and NOT fatal (matches the monolith).
+
+    ent#123 tokenless path: no PAT ⇒ probe over the git transport instead of
+    REST (`probe_anonymous_repo_access` — same transport as the container's
+    anonymous clone, immune to the anonymous REST rate cap). Unlike the
+    PAT-ful path this is FAIL-CLOSED on transient errors: if the probe can't
+    reach GitHub the clone would fail too, and with monitoring default-off
+    (#1121) a fail-open would produce a silently empty agent.
+    """
+    if not github_pat_for_agent:
+        outcome = await git_service.probe_anonymous_repo_access(
+            github_repo_for_agent
+        )
+        if outcome == "unavailable":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Repository '{github_repo_for_agent}' was not found or is "
+                    f"private. If it is private, add your GitHub token in "
+                    f"Settings or ask an admin to configure the platform token."
+                ),
+            )
+        if outcome != "ok":
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "GitHub is unreachable — could not verify anonymous access "
+                    f"to '{github_repo_for_agent}'. Retry shortly, or add a "
+                    f"GitHub token."
+                ),
+            )
+        # Repo reachable anonymously. Also verify the source branch exists —
+        # source-mode clones `-b <branch>`, and a missing branch would fail
+        # the clone with the same silent-empty-agent risk (the credential-less
+        # ls-remote helper answers for public repos).
+        if config.source_branch:
+            branch_ok = await git_service.check_remote_branch_exists(
+                github_repo_for_agent, config.source_branch
+            )
+            if not branch_ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Branch '{config.source_branch}' not found in public "
+                        f"repository '{github_repo_for_agent}'. Pass the "
+                        f"branch explicitly (github:owner/repo@branch) if the "
+                        f"repository's default branch is not 'main'."
+                    ),
+                )
+        logger.info(
+            f"Validated anonymous access to public repo: {github_repo_for_agent}"
+        )
+        return
+
     try:
         gh_service = GitHubService(github_pat_for_agent)
         repo_parts = github_repo_for_agent.split("/", 1)
@@ -943,16 +1027,20 @@ def _apply_github_env(
 ) -> None:
     """Bake the GitHub sync env (#1574/#93/#389) for a GitHub-native agent —
     repo/PAT/gh-CLI tokens, upstream remote, auto-sync heartbeat flag, and
-    source-vs-working-branch mode. No-op for a tokenless agent."""
-    if github_repo_for_agent and github_pat_for_agent:
+    source-vs-working-branch mode. ent#123: a tokenless agent (anonymous
+    public-template clone) gets repo + sync flags but NO token vars."""
+    if github_repo_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent
-        env_vars['GITHUB_PAT'] = github_pat_for_agent
-        # #1574: the SAME managed token also authenticates the `gh` CLI and the
-        # REST API (which read GH_TOKEN/GITHUB_TOKEN), not just git. Gated
-        # identically to GITHUB_PAT — never set for a tokenless agent.
-        env_vars['GH_TOKEN'] = github_pat_for_agent
-        env_vars['GITHUB_TOKEN'] = github_pat_for_agent
-        # Phase 7: Enable git sync for GitHub-native agents
+        if github_pat_for_agent:
+            env_vars['GITHUB_PAT'] = github_pat_for_agent
+            # #1574: the SAME managed token also authenticates the `gh` CLI
+            # and the REST API (which read GH_TOKEN/GITHUB_TOKEN), not just
+            # git. Gated identically to GITHUB_PAT — never set for a
+            # tokenless agent.
+            env_vars['GH_TOKEN'] = github_pat_for_agent
+            env_vars['GITHUB_TOKEN'] = github_pat_for_agent
+        # Phase 7: Enable git sync for GitHub-native agents (tokenless
+        # included — the .git dir is what makes pull-only updates work)
         env_vars['GIT_SYNC_ENABLED'] = 'true'
         # Dev/self-host: propagate optional git base-URL override to agent container
         _git_base = os.getenv('TRINITY_GIT_BASE_URL')
@@ -970,7 +1058,10 @@ def _apply_github_env(
         # can toggle per-agent via PUT /api/agents/{name}/git/auto-sync.
         # Exception (#93): fork-to-own agents own their repo — auto-pushing
         # captures to their own main is the point.
-        if not config.source_mode or fork_upstream_repo:
+        # ent#123: `and github_pat_for_agent` is a belt — tokenless is
+        # provably source-mode+non-fork today, but auto-push must never
+        # engage without credentials if that restriction is ever relaxed.
+        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -1327,6 +1418,16 @@ def _register_agent(
         max_parallel_tasks=(1 if config.ephemeral else None),
     )
 
+    # ent#1640: persist the optional display label set at creation. Reuses the
+    # same setter as PUT /label (trim + blank→NULL), on the row just created.
+    # Best-effort: a label write must never fail a successful agent creation —
+    # the agent is fully functional under its slug without it.
+    if config.display_label:
+        try:
+            db.set_display_label(config.name, config.display_label)
+        except Exception as e:
+            logger.warning(f"Could not set display label for {config.name}: {e}")
+
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
     # chat/list/info its child (the MCP layer gates on
@@ -1386,6 +1487,7 @@ async def _materialize_agent_files(
     template_data: dict,
     github_repo_for_agent: Optional[str],
     fork_upstream_repo: Optional[str],
+    github_pat_for_agent: Optional[str] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383) and the declared
     data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
@@ -1435,7 +1537,8 @@ async def _materialize_agent_files(
     # except fork-to-own agents (#93), which own their repo.
     # trinity-enterprise#69: ghosts never auto-push — their workspace
     # is throwaway by definition, so the 15-min sync heartbeat stays off.
-    if github_repo_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+    # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
+    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
         try:
             db.set_git_auto_sync_enabled(config.name, True)
         except Exception as e:
@@ -1800,7 +1903,11 @@ async def create_agent_internal(
                 auto_assigned_subscription_id,
             )
             await _materialize_agent_files(
-                config, tr.template_data, tr.github_repo_for_agent, tr.fork_upstream_repo
+                config,
+                tr.template_data,
+                tr.github_repo_for_agent,
+                tr.fork_upstream_repo,
+                tr.github_pat_for_agent,
             )
             return agent_status
         except Exception as e:

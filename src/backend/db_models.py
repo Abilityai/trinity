@@ -8,7 +8,7 @@ For API request/response models, see models.py.
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional, List
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # =========================================================================
@@ -654,11 +654,26 @@ class AgentSkill(BaseModel):
 
 
 class SkillInfo(BaseModel):
-    """Information about a skill from the library."""
+    """Information about a skill from the library.
+
+    ent#183: carries the parsed frontmatter contract (declared deps, env keys,
+    automation level, invocability) plus package metadata. All additive with
+    defaults so pre-contract consumers are unaffected.
+    """
     name: str
     description: Optional[str] = None
     path: str  # Relative path in library
     content: Optional[str] = None  # Full SKILL.md content (optional)
+    automation: Optional[str] = None  # e.g. autonomous | gated | manual (surfaced, not enforced)
+    user_invocable: bool = True
+    allowed_tools: Optional[Any] = None  # string or list, surfaced verbatim
+    requires: Dict[str, List[str]] = Field(
+        default_factory=lambda: {"packages": [], "binaries": [], "env": []}
+    )
+    multi_file: bool = False
+    file_count: int = 0
+    size_bytes: int = 0
+    version: Optional[str] = None  # git tree SHA of the skill dir
 
 
 class AgentSkillsUpdate(BaseModel):

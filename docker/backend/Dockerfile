@@ -103,6 +103,10 @@ COPY ../../src/backend/alembic.ini /app/alembic.ini
 # Copy configuration files (documentation, templates)
 COPY ../../config/process-docs /app/config/process-docs/
 COPY ../../config/process-templates /app/config/process-templates/
+# Bundled system manifests — the default first-run starter fleet lives here
+# (trinity-enterprise#124). Dev compose bind-mounts ./config/manifests over
+# this (the ./src/backend:/app mount shadows image COPYs); prod relies on it.
+COPY ../../config/manifests /app/config/manifests/
 
 # Platform version file — read by /api/version (#958). The dev compose also
 # bind-mounts ./VERSION:/app/VERSION:ro for hot edits, but prod compose

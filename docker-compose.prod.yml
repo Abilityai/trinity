@@ -136,6 +136,10 @@ services:
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
+      # First-run default system seed (trinity-enterprise#124): a path to an
+      # operator manifest, or `disabled` to skip seeding. Empty = bundled
+      # config/manifests/default-system.yaml.
+      - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -202,6 +206,14 @@ services:
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
+      # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
+      # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
+      # (DO_NOT_TRACK also disables). URL keeps its FULL non-empty default —
+      # a bare :- would arrive set-but-empty and shadow the code default (#1076).
+      - TELEMETRY_SHARING_ENABLED=${TELEMETRY_SHARING_ENABLED:-true}
+      - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
+      - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
+      - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Configurable database backend (#300, experimental) — mirrors
@@ -249,6 +261,7 @@ services:
       - ./config/agent-templates:/agent-configs/templates:ro
       - ./config/process-templates:/agent-configs/process-templates:ro
       - ./config/process-docs:/app/config/process-docs:ro
+      - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
       - agent-configs:/agent-configs
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
       # Read-only access to Vector's logs so log_archive_service.py (reads

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -48,8 +48,11 @@ def _restore_sys_modules():
 
 
 # A naive scheduler-written timestamp (no 'Z') and its aware equivalent.
-NAIVE = "2026-07-06T11:00:00.207634"
-INSTANT = datetime(2026, 7, 6, 11, 0, 0, 207634, tzinfo=timezone.utc)
+# Derived from now − 1h, NOT a fixed literal: the schedules-summary read is
+# 168h-windowed, so a literal date rots out of the window and the test becomes
+# a time bomb (#1783 — fired first on the v0.8.5 release PR).
+INSTANT = datetime.now(timezone.utc).replace(microsecond=207634) - timedelta(hours=1)
+NAIVE = INSTANT.replace(tzinfo=None).isoformat()
 
 
 def _assert_utc_normalized(value: str):

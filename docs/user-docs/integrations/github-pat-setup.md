@@ -56,11 +56,41 @@ No `gh auth login`, no per-command `GH_TOKEN="$GITHUB_PAT" …` prefix.
 
 ## Who Owns the Platform PAT
 
-Trinity stores a single **platform-wide PAT** that every agent inherits unless an agent has its own per-agent override. In the standard setup, the **Trinity admin** creates this token in their own GitHub account — which means:
+Trinity stores a single **platform-wide PAT** as the shared fallback. Agent creation resolves a token in **three tiers**: **per-agent override → your personal token → platform global** (see [Your Personal GitHub Token](#your-personal-github-token-per-user)). In the standard setup, the **Trinity admin** creates the platform token in their own GitHub account — which means, for any agent that falls back to it:
 
 - **The token's reach is the admin's reach.** Anything the admin's GitHub user can do, every agent using the platform PAT can do.
-- **Agents are hosted under the admin's GitHub account / org** for the repos they push to. If an agent needs to push to a repo the admin doesn't have access to, use a per-agent PAT override instead.
+- **Agents are hosted under the admin's GitHub account / org** for the repos they push to. If an agent needs to push to a repo the admin doesn't have access to, use a personal token or a per-agent PAT override instead.
 - **The admin's decision up front**: how much of their own GitHub access should bleed through to the agents? This is the question that picks classic vs. fine-grained.
+
+Non-admins are no longer confined to the admin PAT's repo scope — anyone can add their **own** token, resolved ahead of the global fallback.
+
+## Your Personal GitHub Token (per-user)
+
+You do not have to rely on the shared platform PAT. **Any authenticated user — not just admins — can store their own GitHub token** in personal Settings. At agent creation Trinity resolves a token in three tiers:
+
+**per-agent override → your personal token → platform global**
+
+So a non-admin is no longer confined to the admin PAT's repo scope: an agent you create picks up *your* token first, reaching the repos *your* GitHub user can reach.
+
+- **Never echoed back.** A read returns status only (`configured`, `has_global`) — never the token string.
+- **Validated and encrypted.** The token is checked against GitHub before it is saved, then encrypted at rest.
+
+**How the resolved token is persisted:**
+
+- When the resolved token came from the **personal (or fork) tier**, it is saved as that agent's per-agent token, so the agent keeps working even if you later change your personal token.
+- When the agent fell back to the **platform global** PAT, it keeps **no** copy — it stays on the shared token and follows global rotations.
+
+**Clearing your personal token** reverts **future** agent creations to the platform global. **Already-created agents are unaffected** — they keep the copy they were given. Conversely, *adding* a personal token never force-recreates a running agent; it only changes what new agents resolve.
+
+### Endpoints (per-user)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/users/me/github-pat` | GET | Personal token status only — `{configured, has_global}`; never the token |
+| `/api/users/me/github-pat` | PUT | Store your personal token (body `{pat}`); validated → 400 rejected / 503 GitHub unreachable; encrypted at rest |
+| `/api/users/me/github-pat` | DELETE | Remove your personal token (future creations fall back to global) |
+
+Full request/response schemas are in the [Swagger docs](http://localhost:8000/docs).
 
 ## Choosing a Token Type
 
@@ -308,7 +338,7 @@ Uses the configured PAT to create/connect a GitHub repository for the agent.
 
 ## Limitations
 
-- Trinity stores one platform-wide GitHub PAT. All agents share it unless overridden per-agent.
+- Trinity stores one platform-wide GitHub PAT as the shared fallback. At creation an agent resolves per-agent override → the owner's personal token → platform global, so agents share the global PAT only when neither higher tier is set.
 - Fine-grained tokens require GitHub to be configured to allow them (enabled by default for personal accounts).
 - Organization-owned fine-grained tokens require org admin approval.
 - PAT propagation targets only currently-running agents. Stopped agents receive the updated PAT on next start.

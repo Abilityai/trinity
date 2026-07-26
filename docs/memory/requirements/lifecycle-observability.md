@@ -323,6 +323,108 @@ endpoint — reports flow agent → MCP → backend.
 
 ---
 
+## 45. Local Product-Event Capture — Activation Funnel, Tier-1 (ent#184)
+
+**Description**: A **local-only** product-event capture layer — the **Tier-1**
+half of the two-tier telemetry model (Tier-2 = opt-in anonymized fleet sharing,
+#758 / trinity-enterprise#12, which builds on this). Tier-1 records
+activation/usage events **on the operator's own instance, default-ON, with zero
+network egress**, so the operator can see where their own first-run users drop
+off. It is *not* a sovereignty concern — nothing leaves the box — and is distinct
+from the identifiable opt-in operator intake (§43.1): this is anonymous,
+instance-local instrumentation keyed by the same `installation_id`.
+
+**Open-core split** (product decision, gating confirmed ent#184): the **capture**
+is OSS-core (the edition-agnostic instrumentation primitive, default-on); the
+operator-facing **activation-funnel view** is an entitlement-gated enterprise
+surface (`telemetry` feature-id). The generic seam is documented here; the funnel
+module's design lives in the private submodule.
+
+- **FR-1 — Event set v1 (OSS capture)**: the genuinely-new client beacons are the
+  onboarding-wizard step transitions — `setup_started`, `setup_step_intro`,
+  `setup_step_create`, `setup_step_credential`, `setup_completed`,
+  `setup_dismissed` — emitted by `components/OnboardingWizard.vue` through
+  `stores/productTelemetry.js` → `POST /api/product-events`. **First-value
+  events** (`first_agent_created`, `first_chat`, `first_schedule_created`,
+  `first_channel_connected`) are **derived on read** from the rows Trinity
+  already writes (`audit_log`, `agent_activities`, `schedule_executions`), never
+  re-emitted — so they survive restart by construction and add no write path.
+- **FR-2 — Storage (OSS)**: a local SQLite/Postgres table `product_events`
+  (`installation_id`, `event_type`, `event_context` optional small JSON,
+  `created_at`; dual-track migration + `db/tables.py` MetaData). The emit
+  endpoint accepts only a **fixed allow-list** of `event_type` values (unknown →
+  422) so the table can't be spammed with arbitrary strings. Rows carry the
+  stable `installation_id` (§43.1) and a UTC timestamp so Tier-2's opt-in
+  **retroactive backfill at consent** can serialize history — the mechanism that
+  rescues early-funnel data despite consent arriving late.
+- **FR-3 — Zero egress**: the capture layer NEVER phones home; the emit endpoint
+  writes one local row and returns. All sharing/consent lives in Tier-2 (#12).
+  Verifiable and documented as local-only in user docs.
+- **FR-4 — Operator funnel view (enterprise-gated)**: an operator-facing
+  activation/funnel panel on an existing admin surface (Settings, admin-only)
+  shows step-by-step activation counts + drop-off with an honest empty state when
+  there's no data yet. It reads a gated enterprise endpoint
+  (`requires_entitlement("telemetry")`) that aggregates `product_events` +
+  derives the first-value events from the OSS tables above. The **panel Vue**
+  ships in the OSS bundle but is hidden unless `telemetry` is in
+  `enterprise_features` (the standard feature-flag gating). Explicitly **NOT** a
+  new standalone analytics dashboard in v1.
+
+**Deferred**: auto-retention sweep for `product_events` (volume is negligible —
+a handful of rows per install); per-user (vs per-install) funnel cohorts.
+
+### 45.1 Tier-2 — Opt-in Fleet Sharing (ent#12)
+
+**Description**: the **opt-in egress** layer on top of Tier-1 (§45). On
+**explicit, default-off, reversible** operator consent, Trinity periodically
+shares **anonymized aggregates** with the Ability-operated hosted intake in
+exchange for reciprocal value (fleet benchmarks). The hosted aggregation/benchmark
+service is a **separate issue**; this covers the client consent + egress +
+backfill + the gated benchmark status surface.
+
+**Open-core split** (gating confirmed ent#12): the **consent + egress + backfill**
+are OSS-core (the sovereignty primitive — the operator's choice to share is
+edition-agnostic, and it mirrors the OSS operator-intake #38 credential-free
+transport); only the **reciprocity benchmark view** is entitlement-gated
+(`telemetry`).
+
+- **FR-1 — Two-gate egress, never without consent**: egress fires only when BOTH
+  the stored `telemetry_sharing_enabled` consent (system_settings, default-off)
+  AND the config switch `TELEMETRY_SHARING_ENABLED` (honors `DO_NOT_TRACK`) are
+  on. Either off ⇒ nothing leaves the box. Both re-checked in `share_now`.
+- **FR-2 — Anonymized aggregates only**: `services/telemetry_sharing_service.py`
+  `build_aggregate_payload` — `installation_id` (anonymous), version/edition/
+  platform/python, coarse `enterprise_features`, agent + execution **counts**, and
+  the Tier-1 activation-funnel counts. **No PII, no content, no prompts, no
+  emails, no agent names.** The exact payload is **inspectable before send** via
+  `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
+- **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
+  sleeps-first background loop (default 24h, jittered) that shares when consent is
+  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
+  air-gapped POST never affects the platform). Reuses the operator-intake httpx
+  fire-and-forget transport.
+- **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
+  schedules an immediate fire-and-forget backfill share over a disclosed window
+  (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
+  consent still yields accurate benchmarks. Disclosed at the moment of consent.
+- **FR-5 — Consent surfaces**: a value-framed, optional, non-blocking ask in the
+  onboarding wizard (`OnboardingWizard.vue`, hidden when hard-disabled) + a
+  reversible default-off toggle in Settings → General
+  (`components/settings/TelemetrySharingPanel.vue`), each stating exactly what is
+  shared. `PUT /api/settings/telemetry-sharing` is admin + human-only, audit-logged.
+- **FR-6 — Reciprocity carrot (gated, v1 status surface)**: `GET
+  /api/enterprise/telemetry/benchmark` (entitlement-gated) reports whether the
+  operator is sharing and that benchmarks are `pending_hosted_service` until the
+  hosted service lands; the OSS `ActivationFunnelPanel` renders it. Percentiles
+  are computable only for participants, so sharing is structurally the price of
+  the comparison.
+
+**Deferred**: the hosted aggregation/benchmark service (separate issue); v2/v3
+carrots (targeted alerts, live in-app benchmark panel, roadmap influence);
+warm-ask-after-value prompt.
+
+---
+
 ## Ephemeral "Ghost" Agents (trinity-enterprise#69)
 
 **Description**: A disposable-agent lifecycle — an agent is created with a hard

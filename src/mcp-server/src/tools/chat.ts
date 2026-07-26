@@ -155,6 +155,9 @@ export interface RunAgentChatParams {
   async?: boolean;
   inject_result?: boolean;
   chat_session_id?: string;
+  /** ent#224: YOUR current execution_id, so the delegated task inherits the
+   *  Slack channel/thread this work came from and can report back on finish. */
+  execution_id?: string;
 }
 
 /**
@@ -181,6 +184,7 @@ export async function runAgentChat(
     model,
     allowed_tools,
     system_prompt,
+    execution_id,
     timeout_seconds,
     async: asyncMode,
     inject_result,
@@ -287,6 +291,9 @@ export async function runAgentChat(
         // SELF-EXEC-001: Pass inject_result and chat_session_id for self-tasks
         inject_result: isSelfTask ? inject_result : undefined,
         chat_session_id: isSelfTask ? chat_session_id : undefined,
+        // ent#224: carry the caller's execution so the child inherits the
+        // originating channel/thread and its completion can be reported back.
+        parent_execution_id: execution_id,
       },
       sourceAgent,
       mcpKeyInfo,
@@ -459,6 +466,14 @@ export function createChatTools(
           .describe(
             "Chat session ID to link this self-task to. Required for inject_result=true. " +
             "The result will be injected into this session when the task completes."
+          ),
+        execution_id: z
+          .string()
+          .optional()
+          .describe(
+            "Your CURRENT execution_id. Pass it when delegating long-running work so the " +
+            "delegated task inherits the channel/thread this request came from and its " +
+            "completion is reported back there (ent#224). Optional."
           ),
       }),
       execute: async (

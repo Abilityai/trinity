@@ -4,9 +4,14 @@ Timezone-aware timestamp helpers for the standalone scheduler (#1474).
 CANONICAL SOURCE: src/backend/utils/helpers.py. The scheduler is a *separate*
 package (own pyproject.toml / Dockerfile that copies only src/scheduler) and
 cannot import src/backend at runtime, so ``utc_now_iso`` / ``to_utc_iso`` are
-vendored here byte-for-byte from the backend — edit the backend copy and
-regenerate this mirror. Same "regenerate-from-backend" discipline as
-``failure_classifier.py``.
+vendored here. This is a **behavioral** mirror, not a byte copy: it must AGREE
+ON OUTPUT with the backend (same Z-suffixed ISO format), and ``to_utc_iso`` is
+functionally identical but written with an early return rather than the
+backend's if/else — so "regenerate and diff" cannot mechanically verify it.
+Edit the backend copy and keep the *outputs* in sync; the contract is enforced
+by ``tests/unit/test_1713_scheduler_utils_parity.py`` (#1713). (Contrast
+``failure_classifier.py``, whose two copies ARE genuinely byte-identical and are
+guarded by a byte-diff test — ``test_904_sigkill_no_false_auth.py::TestBackendSchedulerParity``.)
 
 IMPORTANT: All timestamps the scheduler writes MUST be stored as UTC with the
 'Z' suffix so JavaScript (`new Date(...)`) interprets them as UTC — otherwise a

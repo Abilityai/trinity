@@ -1,7 +1,16 @@
 # Feature: Automatic Skill Injection on Agent Start
 
+> **Injection mechanics moved (ent#183, 2026-07-19)**: skills now ship as FULL
+> directory packages (`SKILL.md` + `scripts/` + resources) with tree-SHA
+> versioning — the start path passes `force=False`, so version-unchanged skills
+> are skipped (`unchanged`) instead of rewritten. The canonical injection flow
+> (packaging, transport, prune, dep-check warnings) is
+> [skill-injection.md](skill-injection.md); this doc covers the START-path
+> wiring only. Code excerpts below predate ent#183 where they show the old
+> single-file `write_file` loop.
+
 ## Overview
-When an agent starts, Trinity automatically injects all assigned skills into the agent container by writing SKILL.md files to `~/.claude/skills/{name}/SKILL.md`. This happens after container start, Trinity prompt injection, and credential injection.
+When an agent starts, Trinity automatically injects all assigned skills into the agent container as full skill-directory packages under `~/.claude/skills/{name}/`. This happens after container start, Trinity prompt injection, and credential injection, and is skipped entirely for an already-running container that needed no recreation (#421).
 
 ## User Story
 As a platform user, I want my agents to automatically receive their assigned skills when they start so that agents have consistent methodology guidance without manual intervention.
@@ -37,7 +46,8 @@ start_agent_internal() [lifecycle.py:215-272]
 2. container.start()
 3. inject_trinity_meta_prompt()     --> Trinity planning commands
 4. inject_assigned_credentials()    --> .env, .mcp.json files
-5. inject_assigned_skills()         --> .claude/skills/{name}/SKILL.md
+5. inject_assigned_skills()         --> .claude/skills/{name}/ (full package,
+       |                                   force=False: unchanged versions skipped)
        |                                   + CLAUDE.md "Platform Skills" section
        v
 Return result with skills_injection status

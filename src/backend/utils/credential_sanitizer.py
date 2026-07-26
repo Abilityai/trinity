@@ -106,6 +106,19 @@ def _redact_kv_match(match: "re.Match") -> str:
 
 REDACTION_PLACEHOLDER = "***REDACTED***"
 
+# URL userinfo (e.g. a PAT baked into a git remote: https://x-access-token:ghp_…@github.com/…).
+# Git prints the full remote URL in common error lines, so any surface that persists
+# raw git output needs this redaction at the exit point (learnings 2026-07-14, #1595).
+# Mirrors the agent-side `_redact_url_userinfo` in docker/base-image/agent_server/routers/git.py.
+_URL_USERINFO_RE = re.compile(r'://[^/@\s]+@')
+
+
+def redact_url_userinfo(text: str) -> str:
+    """Redact the userinfo component of any URL in `text` (`://user:pat@host` → `://***@host`)."""
+    if not text:
+        return text
+    return _URL_USERINFO_RE.sub('://***@', text)
+
 
 def sanitize_text(text: str) -> str:
     """

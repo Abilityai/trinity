@@ -13,7 +13,7 @@
           >
             <option value="">All Agents</option>
             <option v-for="agent in availableAgents" :key="agent" :value="agent">
-              {{ agent }}
+              {{ agentOptionLabel(agentsStore.agentRefForSlug(agent)) }}
             </option>
           </select>
         </div>
@@ -301,7 +301,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useNotificationsStore } from '../../stores/notifications'
 import { useAgentsStore } from '../../stores/agents'
-import { agentNameTooltip } from '../../utils/agentName'
+import { agentNameTooltip, agentOptionLabel } from '../../utils/agentName'
 import {
   XMarkIcon,
   CheckIcon,

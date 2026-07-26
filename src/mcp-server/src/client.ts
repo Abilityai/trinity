@@ -244,6 +244,44 @@ export class TrinityClient {
   /**
    * Public request method for custom API calls
    */
+  // --- Shared sessions / rooms (ent#169) ------------------------------------
+  // A room is a shared persistent RECORD; membership is the grant, so an
+  // agent-scoped key reaches exactly the rooms its agent belongs to and the
+  // backend answers a uniform 404 otherwise.
+
+  async createRoom(body: {
+    name: string;
+    agents: string[];
+    topic?: string;
+    max_messages?: number;
+    max_cost_usd?: number;
+    ttl_hours?: number;
+    scribe?: string;
+  }): Promise<any> {
+    return this.request("POST", "/api/rooms", body);
+  }
+
+  async listRooms(): Promise<{ rooms: any[] }> {
+    return this.request("GET", "/api/rooms");
+  }
+
+  async readRoom(roomId: string, since = 0): Promise<any> {
+    return this.request(
+      "GET",
+      `/api/rooms/${encodeURIComponent(roomId)}?since=${encodeURIComponent(String(since))}`
+    );
+  }
+
+  async postToRoom(roomId: string, content: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+      content,
+    });
+  }
+
+  async closeRoom(roomId: string, reason?: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/close`, { reason });
+  }
+
   async request<T>(
     method: string,
     path: string,
@@ -329,6 +367,35 @@ export class TrinityClient {
       "GET",
       `/api/agents/${encodeURIComponent(name)}/connector/playbooks`
     );
+  }
+
+  /**
+   * Skills the calling agent is permitted to execute on the skill runner
+   * (ent#139). The acting agent is resolved server-side from the API key, so
+   * an agent-scoped key can never ask on another agent's behalf.
+   * Returns `enabled: false` with an empty list when the feature is off.
+   */
+  async getRunnableSkills(): Promise<{
+    caller_agent: string;
+    enabled: boolean;
+    skills: Array<{ name: string; description?: string; version?: string }>;
+  }> {
+    return this.request("GET", "/api/enterprise/skill-runner/available");
+  }
+
+  /**
+   * Execute one library skill on the skill runner (ent#139). Server-side the
+   * per-skill allow-list is re-checked at dispatch — this client never decides
+   * what is runnable.
+   */
+  async runSkill(
+    skillName: string,
+    input?: string
+  ): Promise<{ skill: string; result: string; cost?: number; execution_id?: string }> {
+    return this.request("POST", "/api/enterprise/skill-runner/run", {
+      skill_name: skillName,
+      input,
+    });
   }
 
   /**
@@ -739,6 +806,9 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options
       inject_result?: boolean;
       chat_session_id?: string;
+      // ent#224: the CALLER's execution id, so the delegated task inherits the
+      // originating channel/thread and its completion can be reported back.
+      parent_execution_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -779,6 +849,7 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options for result injection
       inject_result: options?.inject_result,
       chat_session_id: options?.chat_session_id,
+      parent_execution_id: options?.parent_execution_id,   // ent#224
     };
 
     // Async mode returns immediately; sync mode waits for full execution.

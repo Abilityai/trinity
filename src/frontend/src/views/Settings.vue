@@ -83,6 +83,39 @@
               <div v-else-if="retentionError" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ retentionError }}</div>
 
               <div v-else-if="retention" class="mt-5 space-y-4">
+                <!-- #1709: prunes a cleanup cycle would REFUSE right now, awaiting
+                     an admin's explicit approval. Irreversible (destroys volumes),
+                     so we name exactly what will be deleted before offering approve. -->
+                <div v-if="(retention.pending_acknowledgements || []).length" class="rounded-md bg-amber-50 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700 p-4">
+                  <h4 class="text-sm font-semibold text-amber-900 dark:text-amber-200">⚠ Deletion awaiting your approval</h4>
+                  <p class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+                    A cleanup cycle wants to permanently delete more than the safety threshold at once. Nothing is deleted until you approve — and approving is <strong>irreversible</strong>. Each approval is single-use.
+                  </p>
+                  <ul class="mt-3 space-y-3">
+                    <li v-for="p in retention.pending_acknowledgements" :key="p.key" class="rounded-md bg-white dark:bg-gray-800 border border-amber-200 dark:border-amber-800 p-3">
+                      <p class="text-sm text-gray-900 dark:text-gray-100">{{ p.label }}</p>
+                      <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                        <strong>{{ p.candidate_count }}</strong> item{{ p.candidate_count === 1 ? '' : 's' }} past the <strong>{{ p.window_days }}-day</strong> window
+                        (<code class="text-[11px]">{{ p.key }}</code>).
+                      </p>
+                      <div class="mt-2 flex items-center gap-3">
+                        <button
+                          @click="acknowledgePrune(p)" :disabled="acknowledgingKey === p.key"
+                          class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-md text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                        >{{ acknowledgingKey === p.key ? 'Approving…' : 'Approve deletion' }}</button>
+                        <span v-if="ackErrorKey === p.key && ackError" class="text-xs text-red-600 dark:text-red-400">{{ ackError }}</span>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+                <!-- Honest empty state (AC #1709) -->
+                <div v-else class="rounded-md bg-gray-50 dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 p-3">
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    ✓ No deletions are awaiting approval. If a cleanup cycle ever needs to delete more than the safety threshold at once (e.g. several soft-deleted agents reaching their purge date — which destroys their data volumes), it pauses and asks here first.
+                  </p>
+                </div>
+                <p v-if="ackDone" class="text-xs text-green-600 dark:text-green-400">Approved — the next cleanup cycle will delete these, then the guard re-arms (single-use).</p>
+
                 <!-- Community: read-only fixed floor + upgrade hint -->
                 <div v-if="!retentionEntitled" class="rounded-md bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 p-4">
                   <p class="text-sm text-indigo-800 dark:text-indigo-200">
@@ -127,6 +160,17 @@
 
               </div>
             </div>
+          </div>
+
+          <!-- ent#184 — Activation funnel (local product events). Capture is
+               OSS-core; this operator view is entitlement-gated (`telemetry`).
+               The panel fetches the gated enterprise endpoint itself. -->
+          <ActivationFunnelPanel v-if="activeTab === 'activation'" />
+
+          <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
+               reversible. Admin-only (General tab), visible in every edition. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <TelemetrySharingPanel />
           </div>
 
           <!-- Platform Section -->
@@ -1292,7 +1336,7 @@
                                       :key="agent.name"
                                       :value="agent.name"
                                     >
-                                      {{ agentDisplayName(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
+                                      {{ agentOptionLabel(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
                                     </option>
                                   </select>
                                   <button
@@ -2262,7 +2306,7 @@ import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
-import { agentDisplayName } from '../utils/agentName'
+import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
@@ -2273,6 +2317,8 @@ import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
+import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
@@ -2312,6 +2358,10 @@ const ALL_TABS = [
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
+  // ent#184 — local product-event activation funnel. Capture is OSS-core;
+  // this operator view is entitlement-gated (`telemetry`), so the tab is hidden
+  // in OSS-only builds. Local-only data, admin-only.
+  { id: 'activation',   label: 'Activation',   adminOnly: true, requires: 'telemetry' },
 ]
 const { isAdmin } = useRole()
 const visibleTabs = computed(() =>
@@ -2400,6 +2450,39 @@ const retentionLoading = ref(false)
 const retentionSaving = ref(false)
 const retentionError = ref('')
 const retentionSaved = ref(false)
+
+// #1709: in-product approval of a guard-refused (over-threshold) retention prune.
+// POST /api/settings/retention/acknowledge is the GATE (admin + human only,
+// window-bound: a 409 means the window in force changed under us). Single-use —
+// after the next cleanup cycle prunes, the guard re-arms and loadRetention()
+// shows the item gone (no stale "approved" state).
+const acknowledgingKey = ref('')
+const ackError = ref('')
+const ackErrorKey = ref('')
+const ackDone = ref(false)
+
+async function acknowledgePrune(item) {
+  acknowledgingKey.value = item.key
+  ackError.value = ''
+  ackErrorKey.value = ''
+  ackDone.value = false
+  try {
+    await axios.post(
+      '/api/settings/retention/acknowledge',
+      { key: item.key, window_days: item.window_days },
+      { headers: authStore.authHeader }
+    )
+    ackDone.value = true
+    await loadRetention()   // the acked sweep is now allowed → drops off pending
+  } catch (e) {
+    ackErrorKey.value = item.key
+    // 409 = window mismatch (the window in force moved); surface the server's
+    // readable message rather than a generic failure.
+    ackError.value = apiErrorMessage(e, 'Failed to approve the deletion.')
+  } finally {
+    acknowledgingKey.value = ''
+  }
+}
 
 async function loadRetention() {
   retentionLoading.value = true

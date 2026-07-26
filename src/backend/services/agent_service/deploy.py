@@ -33,6 +33,7 @@ from services.docker_service import get_agent_container
 from services.docker_utils import container_stop
 from utils.helpers import sanitize_agent_name
 from services.settings_service import get_agent_quota_for_role
+from services.mcp_validator import validate_mcp_config, McpValidationError
 from .helpers import get_agents_by_prefix, get_next_version_name, get_latest_version
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,35 @@ DEPLOYED_TEMPLATES_DIR_IN_BACKEND = "/data/deployed-templates"
 # Pinned to a specific tag so a Docker Hub `latest` swap can't silently
 # change deploy behavior.
 _PREPOP_IMAGE = "alpine:3.20"
+
+
+def _validate_archive_mcp_config(mcp_file: Path, version_name: str,
+                                 actor_email: str | None) -> None:
+    """Structure-validate an archive-supplied `.mcp.json` (ent#213).
+
+    The `deploy-local` path used to copy an archive `.mcp.json` into the
+    workspace WITHOUT validating it, while the post-deploy inject path
+    (`routers/credentials.py`) does. Claude Code auto-loads `~/.mcp.json` via
+    `--mcp-config` on the next chat/headless execution, so an unvalidated
+    archive config was an ingress the inject-path guard (#598, AISEC-C2 Layer 2)
+    never covered — command substitution, shell metacharacters, reserved
+    env-ref overrides (LD_PRELOAD/PATH/…), oversize, unknown fields.
+
+    Same validator (`services/mcp_validator.validate_mcp_config`) and same 400
+    shape as the inject path, so the two ingresses now agree. A valid config —
+    including the canonical auto-injected `trinity` entry — passes unchanged.
+    """
+    try:
+        validate_mcp_config(mcp_file.read_text())
+    except McpValidationError as e:
+        logger.warning(
+            "deploy-local blocked by .mcp.json validator for %s by %s: %s",
+            version_name, actor_email or "?", e,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid .mcp.json in archive: {e}",
+        )
 
 
 def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) -> None:
@@ -535,6 +565,10 @@ async def deploy_local_agent_logic(
 
         mcp_file = dest_path / ".mcp.json"
         if mcp_file.exists():
+            # ent#213: structure-validate an archive-supplied `.mcp.json` before
+            # it is pre-populated into the workspace, matching the inject path.
+            _validate_archive_mcp_config(mcp_file, version_name,
+                                         getattr(current_user, "email", None))
             credentials_imported[".mcp.json"] = "from_archive"
 
         # Write credentials from request to template directory

@@ -113,13 +113,27 @@ Two phases: **stand up an instance** (Phase A), then **build and deploy agents t
 - Docker and Docker Compose v2+
 - Anthropic API key (for Claude-powered agents) OR Google API key (for Gemini-powered agents)
 
-**One-line install**
+**Recommended: let your agent install it (one shot)**
+
+Tell your Claude (or any capable coding agent) to install Trinity and follow the
+agent-facing runbook — it verifies Docker, installs unattended, confirms the
+stack is serving, surfaces the generated admin password, and hands you a
+next-steps card:
+
+> **Install Trinity on my computer.** Follow the runbook at
+> `https://raw.githubusercontent.com/abilityai/trinity/main/docs/AGENT_INSTALL_GUIDE.md`
+
+The runbook ([`docs/AGENT_INSTALL_GUIDE.md`](docs/AGENT_INSTALL_GUIDE.md)) is a
+deterministic verify → install → confirm → report-next-steps loop that any
+capable agent can execute and explain to you as it goes.
+
+**One-line install (run it yourself)**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
 ```
 
-This clones the repository, configures the environment, builds the base image, and starts all services.
+This clones the repository, configures the environment, builds the base image, and starts all services. For a fully non-interactive bring-up (no admin-password prompt — one is generated and printed), run `./scripts/deploy/start.sh --unattended`.
 
 **Manual installation**
 
@@ -409,7 +423,7 @@ Trinity includes three reference agent implementations that demonstrate real-wor
 
 | Agent | Repository | Purpose |
 |-------|------------|---------|
-| **Cornelius** | [github.com/abilityai/agent-cornelius](https://github.com/abilityai/agent-cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
+| **Cornelius** | [github.com/Abilityai/cornelius](https://github.com/Abilityai/cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
 | **Corbin** | [github.com/abilityai/agent-corbin](https://github.com/abilityai/agent-corbin) | Business Assistant — Google Workspace integration, task coordination, team management |
 | **Ruby** | [github.com/abilityai/agent-ruby](https://github.com/abilityai/agent-ruby) | Content Creator — Multi-platform publishing, social media distribution, content strategy |
 
@@ -422,8 +436,8 @@ These agents demonstrate:
 
 **Usage**: Create agents from these templates via the Trinity UI:
 ```bash
-# Via UI: Create Agent → Select "github:abilityai/agent-cornelius"
-# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/agent-cornelius")
+# Via UI: Create Agent → Select "github:abilityai/cornelius"
+# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/cornelius")
 ```
 
 **Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.

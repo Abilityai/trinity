@@ -76,6 +76,23 @@
   store isn't fetched yet); the next navigation self-heals. Comma-joined agent
   lists (e.g. the GitHub-PAT propagation failure list) keep the slug — long
   labels make them unreadable.
+- **FR-7 — Findable by display name: pickers, search, sort (#1642)**: the
+  picker surface class carries the slug **inline** — `<option>`s render
+  `Display name (slug)` via `agentOptionLabel` (else the bare slug), and the
+  `<option>` **value stays the slug** so filtering/selection never keys on the
+  label. Six dropdowns: `ExecutionsPanel`, `ReportsPanelFleet`, operator
+  `QueueList` + `NotificationsPanel`, `FileManager`, `Settings` (subscription
+  assignment). `Agents.vue` name search matches **both** the slug and the
+  display name (case-insensitive) — otherwise typing "TOM" against a
+  `tom-marketing-ops` slug returns nothing. **Sort-key decision (AC):** the
+  "Name (A-Z / Z-A)" sort orders by the **display name when set, else the slug**
+  (`agentDisplayName`, in the store's `_getSortedAgents`) — sorting by the slug
+  while the row renders the label would order the list by an invisible key. Every
+  per-agent lookup (`getActivityState`/tags/stats/router actions) still keys on
+  `agent.name`; only the option label, the search predicate, and the sort
+  comparator changed. No store-shape change — the label is resolved off the
+  loaded agents (FR-6 resolvers), so `agentNames`/`availableAgents` stay
+  slug-string arrays.
 
 ### 1.4 Agent Deletion
 - **Status**: ✅ Implemented

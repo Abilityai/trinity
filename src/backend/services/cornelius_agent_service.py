@@ -34,6 +34,7 @@ Two fire-and-forget call sites (neither ever blocks its caller):
      backgrounded via `asyncio.create_task`.
 """
 import logging
+from typing import Optional
 
 from database import db
 from models import AgentConfig, User
@@ -62,7 +63,7 @@ _PROVISION_LOCK_TTL = 300  # seconds
 class CorneliusAgentService:
     """Seeds the default Cornelius agent exactly once on a fresh install."""
 
-    async def ensure_seeded(self) -> dict:
+    async def ensure_seeded(self, fresh: Optional[bool] = None) -> dict:
         """
         Seed the default Cornelius agent if — and only if — this is a genuinely
         fresh install that hasn't been seeded yet.
@@ -70,6 +71,15 @@ class CorneliusAgentService:
         Idempotent and safe to call from multiple triggers / workers. Never raises:
         returns a result dict (mirrors `system_agent_service.ensure_deployed`) so a
         background task or lifespan caller can't be broken by provisioning failure.
+
+        Args:
+            fresh: Precomputed first-run verdict (trinity-enterprise#124). The
+                orchestrator (`system_seed_service.ensure_first_run_seeded`)
+                computes freshness ONCE and passes it to every seeder — without
+                this, agents created by a sibling seeder poison this service's
+                own count on a retry pass (a failed Cornelius would self-mark
+                seeded after the starter fleet lands). `None` preserves the
+                legacy behavior: compute from `count_non_system_agents()`.
         """
         result = {"agent_name": CORNELIUS_AGENT_NAME, "action": None, "status": None, "message": None}
 
@@ -85,16 +95,24 @@ class CorneliusAgentService:
         # 2. Fresh-install only. Any pre-existing non-system agent means this is an
         #    established install being upgraded — do NOT surprise it with a heavy
         #    container. Mark seeded so we stop re-checking every boot.
-        try:
-            if db.count_non_system_agents() > 0:
+        #    A precomputed verdict (ent#124 orchestrator) replaces the live count so
+        #    sibling-seeded agents can't flip a genuinely-fresh install to "not fresh".
+        if fresh is None:
+            try:
+                fresh = db.count_non_system_agents() == 0
+            except Exception as e:  # never let a count query break startup
+                logger.warning("Cornelius seed: non-system agent count failed (%s) — skipping this pass", e)
+                return self._skip(result, "skipped_error", f"agent count failed: {e}")
+        if not fresh:
+            try:
                 db.set_setting(_SEEDED_FLAG, "true")
-                return self._skip(
-                    result, "skipped_not_fresh",
-                    "Existing agents present — not a fresh install; marking seeded without provisioning",
-                )
-        except Exception as e:  # never let a count query break startup
-            logger.warning("Cornelius seed: non-system agent count failed (%s) — skipping this pass", e)
-            return self._skip(result, "skipped_error", f"agent count failed: {e}")
+            except Exception as e:  # preserve the never-raises contract
+                logger.warning("Cornelius seed: failed to persist seeded flag (%s)", e)
+                return self._skip(result, "skipped_error", f"flag write failed: {e}")
+            return self._skip(
+                result, "skipped_not_fresh",
+                "Existing agents present — not a fresh install; marking seeded without provisioning",
+            )
 
         # 3. Owner must exist. On a truly-fresh pre-setup boot the admin row is not
         #    created until first-time setup completes; skip WITHOUT setting the flag

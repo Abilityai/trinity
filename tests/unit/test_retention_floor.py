@@ -111,16 +111,29 @@ def _admin():
     return u
 
 
-def _call_retention(*, entitled: bool, ops_values=None, env=None):
+def _call_retention(
+    *, entitled: bool, ops_values=None, env=None,
+    agent_purge_count=0, schedule_purge_count=0, acked=False,
+):
     """Drive routers.settings.get_retention_status with mocked db + entitlement.
 
     Pins LOG_/AUDIT_ env on every call so a polluted process env can't leak in.
+
+    #1709: `agent_purge_count` / `schedule_purge_count` feed the guard's live
+    re-evaluation (the `pending_acknowledgements` surface); `acked` stubs the
+    guard's acknowledgement lookup so the single-use "acked ⇒ not pending"
+    branch is exercisable. Defaults (0 / False) leave every sweep under
+    threshold, so pre-#1709 tests see an empty pending list and are unaffected.
     """
+    import services.retention_guard as _RG
+
     ops_values = ops_values or {}
     db = MagicMock()
     db.get_setting_value.side_effect = (
         lambda key, default="0": ops_values.get(key, default)
     )
+    db.count_soft_deleted_agents_past_retention.return_value = agent_purge_count
+    db.count_soft_deleted_schedules_past_retention.return_value = schedule_purge_count
     ent = MagicMock()
     ent.is_entitled.return_value = entitled
 
@@ -128,6 +141,7 @@ def _call_retention(*, entitled: bool, ops_values=None, env=None):
     full_env.update(env or {})
     with patch.object(_RS, "db", db), \
          patch.object(_ENT, "entitlement_service", ent), \
+         patch.object(_RG, "is_acknowledged", return_value=acked), \
          patch.dict("os.environ", full_env, clear=False):
         return asyncio.run(get_retention_status(current_user=_admin()))
 
@@ -196,3 +210,140 @@ def test_read_surface_reflects_enterprise_set_ops_window():
         ops_values={"execution_row_retention_days": "90"},
     )
     assert res["windows"]["execution_row_retention_days"] == 90
+
+
+# ---------------------------------------------------------------------------
+# #1709 — pending-acknowledgement surface (the guard's in-product approval path)
+# ---------------------------------------------------------------------------
+
+def test_pending_lists_an_over_threshold_agent_purge():
+    """When a sweep is over threshold and unacked, GET names it in
+    `pending_acknowledgements` with the key, window, and candidate count — so the
+    panel can offer an approve control (#1709)."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={"agent_soft_delete_retention_days": "180"},
+        agent_purge_count=3,   # > FLOOR_AGENTS (0)
+        acked=False,
+    )
+    pend = {p["key"]: p for p in res["pending_acknowledgements"]}
+    assert "agent_soft_delete_retention_days" in pend
+    item = pend["agent_soft_delete_retention_days"]
+    assert item["candidate_count"] == 3
+    assert item["window_days"] == 180
+    assert item["floor"] == 0
+    assert "volume" in item["label"].lower()  # names the irreversible cost
+
+
+def test_acknowledged_sweep_drops_off_pending():
+    """Single-use, no stale 'approved' state: once acked, the sweep is allowed and
+    no longer appears as pending (#1709)."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={"agent_soft_delete_retention_days": "180"},
+        agent_purge_count=3,
+        acked=True,
+    )
+    keys = [p["key"] for p in res["pending_acknowledgements"]]
+    assert "agent_soft_delete_retention_days" not in keys
+
+
+def test_disabled_window_is_never_pending():
+    """A 0-day (disabled) window prunes nothing, so it must not be pending even if
+    a stale count came back non-zero (#1709)."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={"agent_soft_delete_retention_days": "0"},
+        agent_purge_count=5,
+        acked=False,
+    )
+    keys = [p["key"] for p in res["pending_acknowledgements"]]
+    assert "agent_soft_delete_retention_days" not in keys
+
+
+def test_nothing_pending_when_all_sweeps_under_threshold():
+    """The honest empty state: no sweep over threshold ⇒ empty pending list."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={
+            "agent_soft_delete_retention_days": "180",
+            "schedule_soft_delete_retention_days": "30",
+        },
+        agent_purge_count=0,
+        schedule_purge_count=0,
+    )
+    assert res["pending_acknowledgements"] == []
+
+
+def test_over_threshold_schedule_purge_is_pending():
+    """The schedule sweep (FLOOR_SCHEDULES=100) is also surfaced when it trips."""
+    res = _call_retention(
+        entitled=False,
+        ops_values={"schedule_soft_delete_retention_days": "30"},
+        schedule_purge_count=101,   # > FLOOR_SCHEDULES (100)
+        acked=False,
+    )
+    keys = [p["key"] for p in res["pending_acknowledgements"]]
+    assert "schedule_soft_delete_retention_days" in keys
+
+
+def test_acknowledge_endpoint_is_callable_and_records_the_ack():
+    """#1709 / #1310 regression: the ack endpoint called an UNIMPORTED
+    `require_admin` and 500'd with NameError on every request — the guard's
+    approval path was dead even for a valid admin caller. Drive it with a real
+    admin and assert it reaches `record_acknowledgement` (no NameError), binds
+    the window, and returns success.
+    """
+    from unittest.mock import AsyncMock
+    from models import RetentionAcknowledge
+
+    acknowledge = _RS.acknowledge_retention_prune
+
+    body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=180)
+    req = MagicMock()
+    req.client = None
+    req.url.path = "/api/settings/retention/acknowledge"
+    req.state.request_id = None
+
+    db = MagicMock()
+    db.get_setting_value.side_effect = (
+        lambda key, default="0": "180"
+        if key == "agent_soft_delete_retention_days" else default
+    )
+
+    recorded = {}
+    import services.retention_guard as _RG
+    import dependencies as _DEP
+
+    with patch.object(_RS, "db", db), \
+         patch.object(_RS, "platform_audit_service", AsyncMock()), \
+         patch.object(_DEP, "reject_agent_principal", lambda u: None), \
+         patch.object(_RG, "record_acknowledgement",
+                      lambda k, w: recorded.update(key=k, window=w)):
+        res = asyncio.run(acknowledge(body=body, request=req, current_user=_admin()))
+
+    assert res["success"] is True
+    assert res["window_days"] == 180
+    assert recorded == {"key": "agent_soft_delete_retention_days", "window": 180}
+
+
+def test_acknowledge_rejects_a_window_mismatch_with_409():
+    """The ack is bound to the window in force — a stale window is a named 409,
+    not a silent approval of the wrong deletion."""
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from models import RetentionAcknowledge
+
+    acknowledge = _RS.acknowledge_retention_prune
+    body = RetentionAcknowledge(key="agent_soft_delete_retention_days", window_days=999)
+    req = MagicMock(); req.client = None; req.url.path = "/x"; req.state.request_id = None
+    db = MagicMock()
+    db.get_setting_value.side_effect = lambda key, default="0": "180"
+
+    import dependencies as _DEP
+    with patch.object(_RS, "db", db), \
+         patch.object(_RS, "platform_audit_service", AsyncMock()), \
+         patch.object(_DEP, "reject_agent_principal", lambda u: None):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(acknowledge(body=body, request=req, current_user=_admin()))
+    assert exc.value.status_code == 409
