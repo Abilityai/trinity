@@ -450,17 +450,17 @@ def test_a12_bulk_writers_no_match_returns_zero(ops, method_name, agent_name):
 def test_a12_fail_all_nonterminal_covers_three_states(ops):
     """A12b — ``fail_all_nonterminal_for_agent`` sweeps queued + running +
     pending_retry and stops at every terminal (trinity-enterprise#69)."""
-    for st in ("queued", "running", "pending_retry"):
-        insert_execution(f"a12b-{st}", status=st, agent_name="agent-1")
-    for st in ("success", "failed", "cancelled", "skipped"):
-        insert_execution(f"a12b-{st}", status=st, agent_name="agent-1")
+    for state in ("queued", "running", "pending_retry"):
+        insert_execution(f"a12b-{state}", status=state, agent_name="agent-1")
+    for state in ("success", "failed", "cancelled", "skipped"):
+        insert_execution(f"a12b-{state}", status=state, agent_name="agent-1")
 
     assert ops.fail_all_nonterminal_for_agent("agent-1", "ghost_discarded") == 3
 
-    for st in ("queued", "running", "pending_retry"):
-        assert status_of(f"a12b-{st}") == "failed"
-    for st in ("success", "failed", "cancelled", "skipped"):
-        assert status_of(f"a12b-{st}") == st
+    for state in ("queued", "running", "pending_retry"):
+        assert status_of(f"a12b-{state}") == "failed"
+    for state in ("success", "failed", "cancelled", "skipped"):
+        assert status_of(f"a12b-{state}") == state
 
 
 # ===========================================================================

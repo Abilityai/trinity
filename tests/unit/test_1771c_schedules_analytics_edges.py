@@ -96,17 +96,24 @@ def add_execution(
     duration_ms: int | None = 1000,
     context_used: int | None = None,
     cost: float | None = None,
+    tool_calls: str | None = None,
     agent_name: str = AGENT,
     schedule_id: str = SCHEDULE,
 ) -> str:
-    """Insert one execution row through the active engine."""
+    """Insert one execution row through the active engine.
+
+    ``tool_calls`` is passed as a RAW string on purpose: the column is
+    agent-written JSON, so the shape guards under test only fire for payloads a
+    typed helper would have refused to build.
+    """
     if started_at is None:
         started_at = _iso(datetime.now(timezone.utc) - timedelta(minutes=5))
     exec_id = f"x-{next(_seq)}"
     _hrun(
         "INSERT INTO schedule_executions (id, schedule_id, agent_name, status, "
-        "started_at, duration_ms, context_used, cost, triggered_by, message) "
-        "VALUES (:i, :s, :a, :st, :sa, :d, :c, :co, :tb, 'm')",
+        "started_at, duration_ms, context_used, cost, tool_calls, "
+        "triggered_by, message) "
+        "VALUES (:i, :s, :a, :st, :sa, :d, :c, :co, :tc, :tb, 'm')",
         i=exec_id,
         s=schedule_id,
         a=agent_name,
@@ -115,6 +122,7 @@ def add_execution(
         d=duration_ms,
         c=context_used,
         co=cost,
+        tc=tool_calls,
         tb=triggered_by,
     )
     return exec_id
@@ -609,3 +617,180 @@ def test_b12b_summary_label_flows_through_for_a_zero_run_schedule(ops):
     assert row["success_rate"] is None  # no terminal runs -> "—", not 0%
     assert row["avg_duration_ms"] is None
     assert row["command"] == "/do-the-thing"
+
+
+# ===========================================================================
+# B13/B14 — get_schedule_analytics + get_agent_schedules_summary must survive
+#           ANY shape of the agent-written `tool_calls` JSON blob
+# ===========================================================================
+#
+# Added at /review (2026-07-26): the /edge-cases matrix flagged these shape
+# guards as the one genuinely-residual, un-enumerated coverage gap, and
+# `get_schedule_analytics` was named a subject-under-test by the plan (§3) and
+# by this file's own docstring while no test actually invoked it. Both are
+# closed here.
+#
+# `tool_calls` is written by the AGENT, so every one of these payloads is
+# reachable input, and a regressed guard turns the analytics read into a 500
+# rather than a degraded number. The neighbour suites cover only the
+# `json.loads` raise ("{not valid json"); the SHAPE guards below — valid JSON
+# that is not a list, a list of non-dicts, a dict with no name — were untested
+# on both surfaces.
+
+_TOOL_CALL_SHAPES = [
+    ("", 0),  # empty string: falsy raw
+    ("{not json", 0),  # JSONDecodeError
+    ('{"name": "Read"}', 0),  # valid JSON, object not list
+    ('"Read"', 0),  # valid JSON, bare string
+    ("[1, 2, 3]", 0),  # list of non-dicts
+    ('[{"duration_ms": 5}]', 0),  # dict with neither `name` nor `tool`
+    ('[{"name": ""}]', 0),  # falsy name
+    ('[{"name": "Read"}]', 1),  # counted; no usable duration
+    ('[{"tool": "Bash", "duration_ms": "5"}]', 1),  # non-numeric duration
+    ('[{"name": "Read"}, "junk", {"tool": "Bash", "duration_ms": 5}]', 2),
+]
+
+_TOOL_CALL_IDS = [
+    "empty",
+    "not-json",
+    "object-not-list",
+    "string-not-list",
+    "list-of-scalars",
+    "no-name-key",
+    "falsy-name",
+    "name-no-duration",
+    "non-numeric-duration",
+    "mixed-valid-and-junk",
+]
+
+
+@pytest.mark.parametrize("raw, expected_calls", _TOOL_CALL_SHAPES, ids=_TOOL_CALL_IDS)
+def test_b13_schedule_analytics_survives_malformed_tool_calls(ops, raw, expected_calls):
+    """B13 — ``get_schedule_analytics`` never raises on a malformed
+    ``tool_calls`` blob, and counts exactly the well-formed entries.
+
+    The tool-call pool is drawn from ``status='success' AND duration_ms IS NOT
+    NULL`` rows, so the seeded row uses the helper defaults deliberately.
+    ``total_calls`` counts every entry carrying a name; only entries with a
+    positive numeric ``duration_ms`` reach the top-5 ranking — which is why
+    ``name-no-duration`` and ``non-numeric-duration`` count but do not rank.
+    """
+    add_execution(tool_calls=raw)
+
+    out = ops.get_schedule_analytics(SCHEDULE, 24, AGENT)
+
+    assert out is not None
+    assert out["tool_calls"]["total_calls"] == expected_calls
+    assert all(
+        isinstance(t["total_duration_ms"], int) for t in out["tool_calls"]["top"]
+    )
+
+
+def test_b13b_schedule_analytics_top5_ranks_only_positive_numeric_durations(ops):
+    """B13b — an entry counts toward ``total_calls`` but only ranks when its
+    ``duration_ms`` is numeric AND positive (``0``/negative/str are excluded)."""
+    add_execution(
+        tool_calls=(
+            '[{"name": "Ranked", "duration_ms": 40},'
+            ' {"name": "ZeroDur", "duration_ms": 0},'
+            ' {"name": "NegDur", "duration_ms": -5},'
+            ' {"name": "StrDur", "duration_ms": "40"}]'
+        )
+    )
+
+    out = ops.get_schedule_analytics(SCHEDULE, 24, AGENT)
+
+    assert out["tool_calls"]["total_calls"] == 4
+    assert [t["name"] for t in out["tool_calls"]["top"]] == ["Ranked"]
+
+
+def test_b13c_schedule_analytics_timeline_counts_failures_and_ignores_the_rest(ops):
+    """B13c — the per-schedule timeline's FAILED branch.
+
+    ``get_schedule_analytics`` buckets a day into ``success`` / ``failed`` /
+    ``cost``; every other status contributes to ``total_executions`` and to
+    ``cost`` but to NEITHER day counter. Previously untested — the whole
+    ``failed`` arm of the timeline aggregation had no coverage, so a chart that
+    silently stopped drawing failure bars would have shipped green.
+    """
+    add_execution(status="success", cost=1.0)
+    add_execution(status="failed", cost=2.0)
+    add_execution(status="cancelled", cost=4.0)
+    add_execution(status="running", cost=8.0)
+
+    out = ops.get_schedule_analytics(SCHEDULE, 24, AGENT)
+    populated = [d for d in out["timeline"] if d["cost"]]
+
+    assert len(populated) == 1, "all four rows land in the same UTC day"
+    day = populated[0]
+    assert day["success"] == 1
+    assert day["failed"] == 1  # cancelled/running are NOT failures
+    assert day["cost"] == 15.0
+    assert out["total_executions"] == 4
+    assert out["cancelled_count"] == 1
+
+
+@pytest.mark.parametrize("raw, expected_calls", _TOOL_CALL_SHAPES, ids=_TOOL_CALL_IDS)
+def test_b14_schedules_summary_survives_malformed_tool_calls(ops, raw, expected_calls):
+    """B14 — the same shape guards on the #1115 summary surface.
+
+    Its ``q_tools`` query pre-filters ``tool_calls IS NOT NULL``, so the
+    ``if not raw`` arm is reachable only via an EMPTY string — which is why the
+    ``None`` case is deliberately absent from the shared shape table and
+    exercised separately below.
+    """
+    add_execution(tool_calls=raw)
+
+    out = ops.get_agent_schedules_summary(AGENT, 24)
+
+    assert out["schedule_count"] == 1
+    assert out["schedules"][0]["tool_call_total"] == expected_calls
+    assert out["tool_calls_sampled"] is False
+
+
+def test_b14b_schedules_summary_null_tool_calls_never_enters_the_loop(ops):
+    """B14b — a NULL ``tool_calls`` is filtered out in SQL, not in Python."""
+    add_execution(tool_calls=None)
+
+    out = ops.get_agent_schedules_summary(AGENT, 24)
+
+    assert out["schedules"][0]["total_executions"] == 1
+    assert out["schedules"][0]["tool_call_total"] == 0
+
+
+@pytest.mark.parametrize(
+    "durations, expected",
+    [
+        ([], (None, None, None)),
+        ([500], (500, 500, 500)),
+        ([100, 200], (150, 195, 199)),
+        ([100, 200, 300], (200, 290, 298)),
+    ],
+    ids=["B15-empty", "B15-single", "B15-pair", "B15-triple"],
+)
+def test_b15_schedule_analytics_percentile_ladder(ops, durations, expected):
+    """B15 — the ``>= 2`` / ``== 1`` / ``else`` percentile ladder of
+    ``get_schedule_analytics``.
+
+    ``statistics.quantiles`` raises ``StatisticsError`` below two data points,
+    so the ladder is load-bearing: a per-schedule analytics read on a brand-new
+    or single-run schedule must return ``None``/the single value rather than
+    500. Sibling of B7, which pins the same ladder on ``get_agent_analytics`` —
+    they are two separate implementations of the identical arithmetic, so
+    covering one does not cover the other.
+
+    ``method="inclusive"`` interpolates, which is why the pair yields
+    ``p95=195`` rather than the maximum. Pinned so a method switch is visible.
+    """
+    for dur in durations:
+        add_execution(status="success", duration_ms=dur)
+
+    out = ops.get_schedule_analytics(SCHEDULE, 24, AGENT)
+
+    assert (
+        out["duration_ms"]["p50"],
+        out["duration_ms"]["p95"],
+        out["duration_ms"]["p99"],
+    ) == expected
+    assert out["sampled"] is False
+    assert out["sample_size"] == len(durations)

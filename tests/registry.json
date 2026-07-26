@@ -1205,7 +1205,7 @@
         "analytics",
         "scheduling"
       ],
-      "description": "Edge-case matrix (sub-area B) for db/schedules/analytics.py on db_harness (#300): _TRIGGER_BUCKETS subset of _BUCKET_ORDER regression guard (the existing literal assertion omits 'Reminders'), unknown/empty/None trigger bucketing, zero-terminal day reports None not 0%, headline-0.0 spec gap (UNSPEC), terminal-based success_rate incl. the legacy 'error' alias, NULL-skipping context AVG, percentile-cap boundary, full-set avg vs sampled p95 (the locked data-source discipline), percentile pool 0/1/2 rows, offset-bearing day bucketing [SQLITE-ONLY], strict '>' window boundary with a frozen iso_cutoff, gap-filled contiguous timeline, and _schedule_command_label unicode/length boundaries."
+      "description": "Edge-case matrix (sub-area B) for db/schedules/analytics.py on db_harness (#300): _TRIGGER_BUCKETS subset of _BUCKET_ORDER regression guard (the existing literal assertion omits 'Reminders'), unknown/empty/None trigger bucketing, zero-terminal day reports None not 0%, headline-0.0 spec gap (UNSPEC), terminal-based success_rate incl. the legacy 'error' alias, NULL-skipping context AVG, percentile-cap boundary, full-set avg vs sampled p95 (the locked data-source discipline), percentile pool 0/1/2 rows, offset-bearing day bucketing [SQLITE-ONLY], strict '>' window boundary with a frozen iso_cutoff, gap-filled contiguous timeline, and _schedule_command_label unicode/length boundaries. Also covers get_schedule_analytics end-to-end (agent-written tool_calls SHAPE guards \u2014 valid-JSON-not-a-list, list-of-scalars, dict-without-name, non-numeric duration \u2014 on BOTH that surface and get_agent_schedules_summary; the FAILED arm of the per-schedule timeline; and its own 0/1/2/3-row percentile ladder, a second implementation of the same statistics.quantiles arithmetic get_agent_analytics has)."
     },
     {
       "file": "unit/test_1771c_schedules_analytics_properties.py",
@@ -1219,7 +1219,7 @@
         "scheduling",
         "property-based"
       ],
-      "description": "Hypothesis properties (sub-area B) for analytics aggregation: P-B1 conservation (sum of by_type totals equals total_executions over arbitrary unicode triggered_by, the mechanised 'a new trigger never silently vanishes') plus its per-day form, P-B2 rate/count bounds incl. the zero-terminal-day-is-None rule, P-B2b sampling-metadata self-consistency, P-B3 contiguous duplicate-free UTC-day timeline over arbitrary windows, P-B4 no-crash-total on _bucket_for_trigger and _schedule_command_label. Uses Hypothesis event() markers so --hypothesis-show-statistics proves non-vacuity."
+      "description": "Hypothesis properties (sub-area B) for analytics aggregation: P-B1 conservation (sum of by_type totals equals total_executions over arbitrary unicode triggered_by, the mechanised 'a new trigger never silently vanishes') plus its per-day form, P-B2 rate/count bounds incl. the zero-terminal-day-is-None rule, P-B2b sampling-metadata self-consistency, P-B3 contiguous duplicate-free UTC-day timeline over arbitrary windows, P-B4 no-crash-total on _bucket_for_trigger and _schedule_command_label. Uses Hypothesis event() markers so --hypothesis-show-statistics proves non-vacuity; P-B2b DRAWS the percentile cap instead of leaving it at its production 5000, because with <=12 seeded rows the 'sampled is True' arm of the biconditional would otherwise be unreachable and half the property would pass vacuously."
     }
   ]
 }

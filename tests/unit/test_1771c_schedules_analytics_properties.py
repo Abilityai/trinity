@@ -254,15 +254,28 @@ def test_p_b2_rates_and_counts_stay_in_bounds(ops, rows):
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
-@given(rows=_ROWS)
-def test_p_b2b_sampling_metadata_is_self_consistent(ops, rows):
+@given(rows=_ROWS, cap=st.integers(min_value=1, max_value=6))
+@example(rows=[("success", "schedule")] * 4, cap=2)  # pool strictly OVER the cap
+@example(rows=[("success", "schedule")] * 2, cap=2)  # pool exactly AT the cap
+@example(rows=[("running", "schedule")], cap=1)  # empty pool
+def test_p_b2b_sampling_metadata_is_self_consistent(ops, monkeypatch, rows, cap):
     """P-B2b — ``sample_size`` never exceeds the cap and never claims more rows
-    than exist; ``sampled`` is False whenever the pool fits.
+    than exist; ``sampled`` is True **iff** the eligible pool exceeds the cap.
 
     ``sample_size`` is what tells the UI whether to caption a percentile as
     approximate, so an inconsistent pair mislabels the number's trustworthiness.
+
+    THE CAP IS DRAWN, NOT LEFT AT ITS PRODUCTION VALUE. With
+    ``_PERCENTILE_ROWSET_CAP == 5000`` and at most 12 seeded rows, ``eligible >
+    cap`` is False for **every** example, so the ``sampled is True`` half of the
+    biconditional would pass vacuously — a property that only ever asserts one
+    side of an "iff" is a green tick that proves nothing. Shrinking the cap into
+    the row range is what makes both arms reachable (the ``@example`` pins keep
+    the over/at/empty trio deterministic even if random search misses them).
     """
-    from db.schedules.analytics import _PERCENTILE_ROWSET_CAP
+    import db.schedules.analytics as analytics_mod
+
+    monkeypatch.setattr(analytics_mod, "_PERCENTILE_ROWSET_CAP", cap)
 
     agent = f"pb2b-{next(_counter)}"
     _seed(agent, rows)
@@ -270,9 +283,10 @@ def test_p_b2b_sampling_metadata_is_self_consistent(ops, rows):
 
     out = ops.get_agent_analytics(agent, 24)
 
-    assert out["sample_size"] <= _PERCENTILE_ROWSET_CAP
+    event(f"pool over cap: {eligible > cap}")
+    assert out["sample_size"] <= cap
     assert out["sample_size"] <= eligible
-    assert out["sampled"] is (eligible > _PERCENTILE_ROWSET_CAP)
+    assert out["sampled"] is (eligible > cap)
     if eligible == 0:
         assert out["duration_ms"]["p95"] is None
 
