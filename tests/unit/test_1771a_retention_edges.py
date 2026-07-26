@@ -1123,6 +1123,34 @@ class TestStructuralInvariants:
             f"  guarded non-windows: {set(guarded) - set(RETENTION_OPS_KEYS)}"
         )
 
+    def test_the_prune_terminal_set_matches_the_platform_terminal_set(self):
+        """A new terminal status must not fall silently out of BOTH the prune and
+        its coverage.
+
+        `db/schedules/retention.py:_RETENTION_TERMINAL` is a hand-mirrored copy of
+        the platform's terminal set (`cleanup_service._TERMINAL_EXECUTION_STATUSES`,
+        itself mirroring `models.TaskExecutionStatus`). Two failure directions, and
+        this pins both because it is an EQUALITY, not a subset:
+          * a status added to the platform set but not here -> those rows are
+            terminal forever and never age out (an unbounded table, no signal);
+          * a status added here but not there -> the prune deletes rows the rest of
+            the platform still considers live.
+
+        It is also the coverage tripwire: `test_1771a_retention_properties.py`'s
+        `_TERMINAL` / `_row` strategy samples this set literally, so widening the
+        product set without widening the strategy would leave the new status
+        UNGENERATED and untested. Compared as SETS against another module's
+        constant, so nothing here is a hardcoded literal.
+        """
+        from db.schedules.retention import _RETENTION_TERMINAL
+
+        assert set(_RETENTION_TERMINAL) == set(_CS._TERMINAL_EXECUTION_STATUSES), (
+            "the retention predicate's terminal set drifted from the platform's. "
+            "Update both, plus `_TERMINAL` in test_1771a_retention_properties.py "
+            "(its `_row` strategy generates from that tuple) and the four-state "
+            "parity test above."
+        )
+
     def test_ack_prefix_is_blocklisted_from_the_generic_settings_endpoint(self):
         """G6 — SECURITY. `retention_guard.py:61-63` claims the ack prefix is
         blocklisted from the generic `PUT /api/settings/{key}`; nothing asserted
