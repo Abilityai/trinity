@@ -50,6 +50,13 @@ bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
+# hypothesis: property-based edge-case tests (#1771, /edge-cases). Test-only.
+# EXACT pin, not a floor: those tests run under a `derandomize=True` CI profile
+# whose frozen input set is stable only per Hypothesis version. An open lower
+# bound would let a new release silently change the generated inputs and produce
+# a head-only failure in the base-vs-head unit regression diff — the one thing
+# the derandomized profile exists to prevent.
+hypothesis==6.161.5
 # NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
 # An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
 # updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,
