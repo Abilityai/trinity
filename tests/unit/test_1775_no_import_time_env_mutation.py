@@ -303,3 +303,23 @@ def test_mask_never_leaks_the_password():
     assert "hunter2" not in masked
     # host:port and user survive — they are what identifies a misconfiguration.
     assert "localhost:6379" in masked and "backend" in masked
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "redis://backend:hunter2@localhost:notaport",  # urlsplit is lazy; .port raises
+        "redis://backend:hunter2@[oops:6379",  # unterminated IPv6 literal
+    ],
+)
+def test_mask_survives_a_malformed_url_without_leaking(malformed):
+    """A masker must not throw on the input it is most needed for.
+
+    `urlsplit` accepts these and only raises when `.port`/`.hostname` is read.
+    With that read outside the guard, `mask_redis_url` raised — and since every
+    caller passes the raw URL as an argument, the escaping ValueError made
+    pytest render the caller's frame and print the password verbatim.
+    """
+    masked = mask_redis_url(malformed)  # must not raise
+    assert "hunter2" not in masked
+    assert masked == "<unparseable REDIS_URL>"

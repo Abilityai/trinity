@@ -27,19 +27,30 @@ def mask_redis_url(url: str | None) -> str:
     Redis-unreachable skips into failures — retained failure reports, in a
     PUBLIC repo. The host, port and exception text are what identify a
     misconfiguration; the password never is.
+
+    EVERY parse step is inside the ``try``, not just ``urlsplit``. ``urlsplit``
+    is lazy: it accepts ``redis://u:pw@host:notaport`` and only raises when
+    ``.port`` is read. With that read outside the guard, this function raised on
+    a malformed URL — and because callers pass the raw URL as an argument, the
+    escaping ValueError made pytest render the caller's frame, printing the very
+    password this function exists to hide. A masker must never be able to throw
+    on the input it is most needed for.
     """
     if not url:
         return "<unset>"
     try:
         parts = urlsplit(url)
+        if parts.password is None:
+            return url
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+        netloc = f"{parts.username or ''}:***@{host}{port}"
+        return urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+        )
     except ValueError:
+        # Credential-bearing but unparseable: say nothing beyond that.
         return "<unparseable REDIS_URL>"
-    if parts.password is None:
-        return url
-    host = parts.hostname or ""
-    port = f":{parts.port}" if parts.port else ""
-    netloc = f"{parts.username or ''}:***@{host}{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def build_redis_url(password: str, endpoint: str = LOCAL_REDIS_ENDPOINT) -> str:

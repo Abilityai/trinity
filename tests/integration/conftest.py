@@ -190,20 +190,46 @@ def redis_client(redis_url: str):
 
     Replaces five per-module clients that each re-derived the target. On a
     connection failure the reachability policy above decides fail vs skip.
+
+    Two deliberate shapes here, both about keeping the URL out of the report:
+
+    1. ``from_url`` is INSIDE the ``try``. It can raise on its own (bad scheme,
+       unparseable port), and outside the block that error would escape both
+       guarantees this file provides — it would bypass ``mask_redis_url`` and
+       bypass the fail-vs-skip policy, erroring a bare developer run the derived
+       path is supposed to skip.
+    2. ``_unreachable`` is called AFTER the ``except`` block, not inside it.
+       ``pytest.fail(..., pytrace=False)`` suppresses its own traceback but NOT
+       an implicitly chained one: raising inside ``except`` makes pytest render
+       "During handling of the above exception..." plus the original frames —
+       and for a URL *parse* error those frames hold the unmasked URL as a local
+       (``ParseResult(netloc='backend:<password>@...')``). Deferring the raise
+       until the handler has exited clears the chain, so only the masked message
+       is reported. Verified: a malformed ``REDIS_URL`` leaked the password into
+       pytest output before this, and does not now.
     """
-    client = _redis.from_url(
-        redis_url,
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
+    client = None
+    failure: str | None = None
     try:
+        client = _redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         client.ping()
-    except Exception as e:  # noqa: BLE001 — any connect/auth error is "unusable"
-        client.close()
+    except Exception as e:  # noqa: BLE001 — construct/connect/auth all mean "unusable"
+        # Only the exception TYPE and TEXT survive; neither carries the password
+        # for any error redis-py or urllib raises here.
+        failure = f"{type(e).__name__}: {e}"
+        if client is not None:
+            client.close()
+            client = None
+
+    if failure is not None:
         _unreachable(
-            f"Redis unreachable at {mask_redis_url(redis_url)} "
-            f"({REDIS_DERIVATION}): {type(e).__name__}: {e}"
+            f"Redis unusable at {mask_redis_url(redis_url)} "
+            f"({REDIS_DERIVATION}): {failure}"
         )
     yield client
     client.close()

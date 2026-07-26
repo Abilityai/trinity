@@ -30,9 +30,10 @@ import httpx
 import pytest
 import redis as _redis
 
-# Add backend to sys.path BEFORE importing — agent_client imports `config` which
-# fails fast if REDIS_URL lacks credentials. We override REDIS_URL with the
-# backend ACL credentials sourced from .env so the backend's config.py accepts.
+# Add backend to sys.path BEFORE importing — agent_client imports `config`, which
+# fails fast if REDIS_URL lacks credentials. #1775: this module no longer supplies
+# those credentials itself; tests/integration/conftest.py has already resolved and
+# applied the target by the time this file is imported.
 _REPO = Path(__file__).resolve().parent.parent.parent
 _BACKEND = _REPO / "src" / "backend"
 if str(_BACKEND) not in sys.path:
