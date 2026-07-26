@@ -298,6 +298,7 @@ def test_C5_C9_negative_and_mixed_sign_windows_return_a_FUTURE_cutoff(kwargs, ba
     (`routers/agents.py`'s unvalidated `hours: int = 24`) is reported as
     finding F3 for its own issue.
     """
+    # HAZARD — observed behaviour, NOT a contract; see finding F3.
     before = backend.utc_now_iso()
     cutoff = backend.iso_cutoff(**kwargs)
     assert cutoff > before, "expected a future cutoff for a negative window"
@@ -556,6 +557,7 @@ def test_G3_space_separated_cutoff_vs_iso_z_row_compares_WRONG(backend):
     Same-date is essential — a cross-date pair coincidentally agrees, which is
     exactly why #476 was subtle enough to ship.
     """
+    # HAZARD — observed behaviour, NOT a contract; this pins the #476 bug.
     sqlite_cutoff = "2026-01-15 12:00:00"  # noon, SQLite datetime('now') shape
     iso_z_row = "2026-01-15T08:00:00.000000Z"  # 08:00 — chronologically BEFORE
 
@@ -580,6 +582,8 @@ def test_G4_offset_string_vs_Z_string_lexicographic_compare_is_WRONG(backend):
     in Python. This pins what breaks the moment someone puts it in a
     `WHERE next_run_at > ?`.
     """
+    # HAZARD — observed behaviour, NOT a contract; mixed-format is deliberate,
+    # SQL-comparing it is the bug.
     offset_row = "2026-01-15T13:30:00+03:00"  # == 10:30 UTC
     z_cutoff = "2026-01-15T12:00:00.000000Z"  # == 12:00 UTC
 
