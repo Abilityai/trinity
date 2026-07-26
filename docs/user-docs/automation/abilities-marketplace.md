@@ -44,7 +44,7 @@ Then install the plugins you need:
 
 ## The 5 Plugins
 
-### create-agent — 13 skills
+### create-agent — 14 skills
 
 Create new Claude Code agents with domain-specific wizards.
 
@@ -65,13 +65,14 @@ Create new Claude Code agents with domain-specific wizards.
 | `/create-agent:website` | Next.js website (no agent) |
 | `/create-agent:custom` | Blank canvas — you define everything |
 | `/create-agent:clone` | Clone an existing agent repo |
-| `/create-agent:adjust` | Audit and improve an existing agent |
+| `/create-agent:review` | Read-only audit of an existing agent — prioritized findings, no changes |
+| `/create-agent:adjust` | Apply best-practice improvements to an existing agent |
 
 Every wizard-created agent includes `CLAUDE.md`, 2–4 starter skills, `template.yaml`, `dashboard.yaml`, and an onboarding tracker.
 
-### agent-dev — 19 skills
+### agent-dev — 20 skills
 
-Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, and long-running pipelines.
+Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, long-running pipelines, and multi-agent orchestration.
 
 ```bash
 /agent-dev:create-playbook    # Add a new skill/playbook
@@ -79,6 +80,7 @@ Extend and develop existing agents: playbooks, memory, git-backed state, a full 
 /agent-dev:add-memory         # Add a memory system
 /agent-dev:add-git-sync       # Git-as-state hooks (auto-commit, rebase, snapshot)
 /agent-dev:add-backlog        # Install the GitHub Issues dev cycle
+/agent-dev:add-orchestrator   # Make the agent a system-aware orchestrator of other agents
 /agent-dev:claim              # Claim the next issue
 /agent-dev:autoplan           # Analyze a claimed issue before implementing
 /agent-dev:commit             # Commit and close the issue with traceability
@@ -146,6 +148,8 @@ General-purpose ops and productivity.
 /utilities:docker-ops             # Docker container management
 /utilities:save-conversation      # Export conversation as markdown
 /utilities:sync-ops-knowledge     # Update ops docs from commits
+/utilities:bug-report             # Create a sanitized GitHub issue
+/utilities:batch-claude-loop      # Batch headless Claude Code runs
 ```
 
 ## The Four-Step Agent Workflow

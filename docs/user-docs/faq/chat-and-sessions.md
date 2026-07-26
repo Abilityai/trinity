@@ -24,7 +24,7 @@ It's the size of the most recent assistant turn's cache as a fraction of the mod
 
 ## Is the context window always 200K tokens?
 
-No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-variant Claude models report a 1M window, Codex around 272K, and plain Claude models default to 200K as a safe floor). So the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
+No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-context Claude models such as Sonnet 5 report a 1M window, Codex around 272K, and plain Claude models default to 200K as a safe floor). So the percentage-used bar rescales to whichever model ran, and the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I make the agent forget the conversation and start fresh?
 
@@ -61,6 +61,10 @@ The turn keeps running on the server — the backend persists both your message 
 ## Can I pick a different model for a chat?
 
 Yes. Both chat surfaces have a model selector next to the chat controls (placeholder "Default model"): pick a Claude model from the list or type any model id. The choice is saved in your browser and applies to your chat turns only — it doesn't change the agent's default model or affect schedules, which have their own per-schedule override. See [Agent Chat](../agents/agent-chat.md).
+
+## What are the Fable 5 and Sonnet 5 models?
+
+Fable 5 is the most capable model — reach for it on the longest, hardest, most involved tasks where quality matters more than speed. Sonnet 5 is the fast, smart everyday model, and it carries a 1M-token context window, so it holds far more of a long conversation or large codebase before compaction. Both appear in the model picker next to the chat controls (and in the per-schedule and per-loop model overrides), so you can match the model to the task. See [Agent Configuration](../agents/agent-configuration.md).
 
 ## Does chat render markdown, and can I attach files?
 

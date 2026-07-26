@@ -2,6 +2,8 @@
 
 Cron-based automation for agents using APScheduler. Schedule recurring tasks with timezone support, execution history, and manual triggers.
 
+For a single, agent-initiated, one-shot deferred follow-up rather than a recurring cadence, use [Agent Self-Reminders](agent-reminders.md) — the durable, one-shot sibling of a cron schedule.
+
 > 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [all videos](../videos.md)
 
 ## Concepts
@@ -19,7 +21,7 @@ Cron-based automation for agents using APScheduler. Schedule recurring tasks wit
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.
 3. Configure: name, cron expression (e.g., `0 9 * * 1-5` for weekdays at 9 AM), message/task, timezone, and description.
-4. Optionally select a model override (Opus, Sonnet, Haiku, or custom).
+4. Optionally select a model override (Fable 5, Sonnet 5, Opus, Haiku, or custom). Fable 5 is the most capable model, for the longest and hardest tasks; Sonnet 5 is fast with a 1M-token context window.
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run Now** to trigger a schedule immediately.
@@ -195,4 +197,5 @@ Raise the agent cap first, then raise the schedule timeout.
 - [Managing Agents](../agents/managing-agents.md) — agent lifecycle, start/stop
 - [Agent Configuration](../agents/agent-configuration.md) — autonomy mode, execution timeout
 - [Agent Loops](agent-loops.md) — bounded sequential task repetition
+- [Agent Self-Reminders](agent-reminders.md) — one-shot, durable, agent-initiated deferred follow-ups
 - [Approvals](approvals.md) — human-in-the-loop gates for scheduled work
