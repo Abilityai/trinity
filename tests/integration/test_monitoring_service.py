@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
-import os
 import sys
 import types
 import uuid
@@ -28,7 +27,6 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-import redis as _redis
 
 
 # Modules this test stubs into sys.modules at import time so that
@@ -70,21 +68,11 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
-def _load_env_password() -> str:
-    """Pull REDIS_BACKEND_PASSWORD out of the repo .env."""
-    env_path = _REPO / ".env"
-    if not env_path.exists():
-        pytest.skip(".env missing — cannot derive Redis credentials")
-    for line in env_path.read_text().splitlines():
-        if line.startswith("REDIS_BACKEND_PASSWORD="):
-            return line.split("=", 1)[1].strip()
-    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env")
-
-
-_PASSWORD = _load_env_password()
-os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
-os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", _PASSWORD)
+# #1775: the Redis target is resolved once, in tests/integration/conftest.py,
+# at a scope that runs before this module is imported. This file used to write
+# os.environ["REDIS_URL"] UNCONDITIONALLY here — during collection — which
+# overwrote the harness's target for the entire pytest session and silently
+# turned every other Redis-backed integration module into a skip.
 
 
 # Pre-load src/backend/utils/helpers.py as the `utils.helpers` submodule so
@@ -177,20 +165,7 @@ pytestmark = pytest.mark.integration
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def redis_client():
-    client = _redis.from_url(
-        os.environ["REDIS_URL"],
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    try:
-        client.ping()
-    except Exception as e:
-        pytest.skip(f"Redis unavailable: {e}")
-    yield client
-    client.close()
+# `redis_client` comes from tests/integration/conftest.py (#1775).
 
 
 @pytest.fixture
