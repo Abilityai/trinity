@@ -288,16 +288,41 @@ def _write_template(root: Path, name: str, body: str = "type: business-assistant
     return d
 
 
-#: An absolute path is a `/`-rooted token at a token boundary. `/api/...` is an
-#: HTTP route, not a filesystem path — it is the message's whole remedy, so it
-#: is the one allowed form.
-_ABS_PATH_RE = re.compile(r"(?:^|\s)(/[A-Za-z0-9_.\-/]+)")
+#: An absolute path is a `/` that does NOT continue a relative path — i.e. one
+#: not preceded by a path character. The negative lookbehind (rather than a
+#: `(?:^|\s)` prefix) is load-bearing: a leading-whitespace rule is blind to a
+#: path wrapped in ANY punctuation, and `!r` — the quoting style this module's
+#: own messages already use for `config.template` — wraps in single quotes. A
+#: future `f"...{template_path!r}..."` would emit `'/data/deployed-templates/x'`
+#: and sail straight through a whitespace-anchored guard, shipping the leak with
+#: a green test. `config/agent-templates/` stays clean because its `/` follows
+#: `g`; `/api/...` is an HTTP route, not a filesystem path, and is the message's
+#: whole remedy, so it is the one allowed `/`-rooted form.
+#:
+#: POSIX-only by construction, deliberately: every path that could reach one of
+#: these messages is a `pathlib.Path` built inside the Linux backend container
+#: (`/agent-configs/templates`, `/data/deployed-templates`), so a Windows-style
+#: `C:\...` form is unreachable and a branch for it would be dead regex.
+_ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])/[A-Za-z0-9_.\-/]+")
+
+#: Naming EITHER root is banned outright, with or without a leading slash: the
+#: plan's binding rule is that one identical message is returned whichever root
+#: missed, because deploy-local templates (#950) are named after AGENT names, so
+#: "which root missed" is itself the #186 enumeration oracle. A relative
+#: `data/deployed-templates/victim` discloses exactly as much as the absolute
+#: form and is invisible to any leading-slash rule. `agent-templates` is NOT
+#: listed — `config/agent-templates/` is the public, intentional remedy.
+_SENSITIVE_ROOT_TOKENS = ("deployed-templates", "agent-configs")
 
 
 def _leaked_paths(msg: str) -> list[str]:
-    """Absolute filesystem paths disclosed by an error message (API routes
-    excluded). MUST always be empty — see `test_t1b`."""
-    return [p for p in _ABS_PATH_RE.findall(msg) if not p.startswith("/api/")]
+    """Filesystem disclosure in an error message (API routes excluded).
+
+    MUST always be empty — see `test_t1b` / `test_t6b`.
+    """
+    hits = [p for p in _ABS_PATH_RE.findall(msg) if not p.startswith("/api/")]
+    hits += [t for t in _SENSITIVE_ROOT_TOKENS if t in msg]
+    return hits
 
 
 def _agent_run_kwargs(ctx):
@@ -689,3 +714,4 @@ async def test_t10b_bind_source_absolute_when_host_path_unset_or_empty(
     assert source != "bindtpl-1759"
     assert Path(source).is_absolute(), source
     assert source == str(crud._repo_local_templates_dir() / "bindtpl-1759")
+

@@ -154,3 +154,52 @@ def test_every_shipped_template_resolves_through_the_create_gate(real_modules):
     # AC#2: `local:default` is referenced by the live-server suites and by the
     # onboarding/manifest docs as a real, deployable template id.
     assert "default" in names
+
+
+# ===========================================================================
+# Seam 2, container branch — the byte-identity claim D1-A3 rests on
+# ===========================================================================
+#
+# Widening the `/template` bind decision was justified by "the delta in the
+# verified container path is provably zero". Every other test in this branch
+# runs on a source checkout, where `/agent-configs/templates` does NOT exist —
+# so they only ever exercise the repo-fallback branch, and the container branch
+# (the one that actually ships) had no coverage at all. `.exists()` is read
+# from the module global at call time, so pointing that global at a real
+# directory exercises the in-container branch without a container.
+
+
+def test_container_branch_host_base_is_byte_identical_to_pre_1759(
+    real_modules, monkeypatch, tmp_path
+):
+    """Inside a Trinity container the bind-source base must be the literal
+    pre-#1759 default, character for character.
+
+    If this drifts, every containerised `local:` create silently changes where
+    `/template` is mounted from — the failure mode would be a wrong-but-present
+    template, which is strictly worse than the blank agent #1759 set out to
+    kill.
+    """
+    crud, _ = real_modules
+    fake_container_root = tmp_path / "agent-configs" / "templates"
+    fake_container_root.mkdir(parents=True)
+    monkeypatch.setattr(crud, "_CONTAINER_CURATED_TEMPLATES", fake_container_root)
+
+    assert crud._default_host_templates_base() == "./config/agent-templates"
+    # ...and the curated root follows the bind mount, not the repo.
+    assert crud._curated_templates_root() == fake_container_root.resolve()
+
+
+def test_host_branch_base_is_absolute_so_docker_accepts_it(
+    real_modules, monkeypatch, tmp_path
+):
+    """Outside a container the repo path IS a host path, so the fallback must
+    be absolute — Docker rejects a relative bind source outright."""
+    crud, _ = real_modules
+    monkeypatch.setattr(
+        crud, "_CONTAINER_CURATED_TEMPLATES", tmp_path / "definitely-absent"
+    )
+
+    base = crud._default_host_templates_base()
+    assert Path(base).is_absolute(), base
+    assert base == str(crud._repo_local_templates_dir())
