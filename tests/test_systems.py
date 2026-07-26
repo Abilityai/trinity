@@ -1068,8 +1068,14 @@ class TestResilientDeploy:
 
     Failure vector: `resources: {cpu: "3"}` is rejected by normalize_cpu with a
     deterministic, side-effect-free HTTP 400 before any container work — an
-    offline-safe way to make exactly one agent fail. (A well-formed but absent
-    `local:` template does NOT fail — it silently creates a blank agent.)
+    offline-safe way to make exactly one agent fail.
+
+    (#1759 note: an absent `local:` template now ALSO fails, with a 400
+    `LOCAL_TEMPLATE_NOT_FOUND` raised even earlier — at template resolution,
+    before normalize_cpu runs. It used to silently create a blank agent, which
+    is why this suite picked the cpu vector. The cpu vector is kept: it is the
+    only one that exercises a failure *after* the template resolved, and
+    swapping it would change what this test covers.)
     """
 
     def test_partial_deploy_continues_and_reports(self, api_client: TrinityApiClient):
