@@ -1,0 +1,910 @@
+"""#1771 target 1 — edge cases for the retention blast-radius guard (/edge-cases, P-38).
+
+Companion to `test_1644_retention_guard.py`, which pins the guard's headline
+properties (predicate parity, fail-closed). This file works the BOUNDARIES and the
+surfaces #1644's suite executes but never asserts:
+
+* exactly-at-threshold decisions (`<=` at `retention_guard.py:183`) — the existing
+  suite only probes 12-vs-1000 and 1001-vs-1000, so the one comparison that decides
+  whether a prune runs is never tested at its own boundary;
+* the `_last_refused` transition memo, the alarm's log LEVEL, its COUNT, and its
+  PAYLOAD — `announce_refusal`/`note_allowed`/`_alarm_id` all run today
+  (`test_1644:177`, `test_cleanup_inner_sweeps:105`) but nothing asserts what they
+  did, which is precisely the state in which a mutant survives;
+* `_read_retention_settings`, whose body never executes anywhere in the suite —
+  all 8 references are `patch.object(_CS, "_read_retention_settings", ...)`;
+* the per-sweep floors, which `MAX_ROWS_PER_SWEEP`'s direction test does NOT cover
+  (`retention_guard.py:170` is `MAX_ROWS_PER_SWEEP if floor is None else floor` —
+  there is no `min()`, so a floor OVERRIDES the global rather than being bounded by
+  it, and raising `FLOOR_SCHEDULES` would disarm that sweep with every test green).
+
+HOUSE RULE THIS FILE OBEYS (docs/memory/learnings.md:101-103)
+------------------------------------------------------------
+#1638 shipped green because a test asserted the DESTRUCTIVE VALUE as the
+requirement (`assert OPS_SETTINGS_DEFAULTS[key] == "5"`). Nothing here pins a
+retention value or a threshold value. Assertions pin DIRECTIONS
+(`FLOOR_SCHEDULES <= MAX_ROWS_PER_SWEEP`) and STRUCTURAL INVARIANTS (every
+`RETENTION_OPS_KEYS` window has a `_guard_allows` call site) — never a number that
+is safe today and catastrophic tomorrow.
+
+Invocation: `cd tests && python -m pytest unit/test_1771a_retention_edges.py`.
+`tests/unit/pytest.ini` wins ini-discovery, so rootdir is `tests/unit` and the root
+`pyproject.toml` `pythonpath`/`markers` do NOT apply; `tests/` reaches `sys.path`
+only via the `cd tests` + `python -m pytest` form.
+"""
+
+import ast
+import logging
+import sys
+from pathlib import Path
+
+import pytest
+
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+_BACKEND_STR = str(_BACKEND)
+while _BACKEND_STR in sys.path:
+    sys.path.remove(_BACKEND_STR)
+sys.path.insert(0, _BACKEND_STR)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from db_harness import db_backend, run as _hrun, scalar as _hscalar  # noqa: E402,F401
+
+import services.retention_guard as _RG  # noqa: E402
+from services import cleanup_service as _CS  # noqa: E402
+from utils.helpers import iso_cutoff  # noqa: E402
+
+_SRC_CLEANUP = _BACKEND / "services" / "cleanup_service.py"
+
+
+def _days_ago_iso(days: int) -> str:
+    return iso_cutoff(hours=days * 24)
+
+
+# ---------------------------------------------------------------------------
+# Doubles + isolation
+# ---------------------------------------------------------------------------
+
+
+class _DbDouble:
+    """In-memory stand-in for the four `db` methods this subsystem touches.
+
+    Verified signatures: `get_setting_value(key, default=None)`, `set_setting(key,
+    value)`, `delete_setting(key)` (database.py:1705-1711) and
+    `create_operator_queue_item(agent_name, item)` (database.py:2513).
+
+    A dict double rather than a real DB because these tests assert the exact alarm
+    PAYLOAD and the exact alarm COUNT, which a real queue table would only let us
+    observe indirectly.
+    """
+
+    def __init__(self, settings=None):
+        self.settings = dict(settings or {})
+        self.queue_items = []
+        self.raise_on_get = False
+        self.raise_on_create = False
+
+    def get_setting_value(self, key, default=None):
+        if self.raise_on_get:
+            raise RuntimeError("settings read exploded")
+        return self.settings.get(key, default)
+
+    def set_setting(self, key, value):
+        self.settings[key] = value
+
+    def delete_setting(self, key):
+        self.settings.pop(key, None)
+
+    def create_operator_queue_item(self, agent_name, item):
+        if self.raise_on_create:
+            raise RuntimeError("operator queue is down")
+        self.queue_items.append((agent_name, item))
+
+
+@pytest.fixture(autouse=True)
+def _reset_transition_memo(monkeypatch):
+    """`retention_guard._last_refused` is module state that outlives every test.
+
+    `test_1644:177` already writes `_last_refused["execution_row_retention_days"]`
+    and `test_cleanup_inner_sweeps` pops keys via `note_allowed`. CI runs
+    `pytest-randomly` under three seeds (backend-unit-test.yml:99,117), so without
+    this reset a "first refusal fires ERROR + exactly one alarm" assertion silently
+    degrades into the repeat-refusal case whenever another file ran first — a test
+    that passes for the wrong reason.
+    """
+    monkeypatch.setattr(_RG, "_last_refused", {})
+
+
+@pytest.fixture
+def guard_db(monkeypatch):
+    """Patch `db` BY OBJECT on the guard module.
+
+    `retention_guard.py:56` does `from database import db`, binding its own
+    module-global — patching `database.db` is inert here (learnings.md:99, and the
+    same note at test_cleanup_inner_sweeps.py:32-35).
+    """
+    double = _DbDouble()
+    monkeypatch.setattr(_RG, "db", double)
+    return double
+
+
+@pytest.fixture
+def cleanup_db(monkeypatch):
+    """Same, for `cleanup_service`'s own `db` binding."""
+    double = _DbDouble()
+    monkeypatch.setattr(_CS, "db", double)
+    return double
+
+
+# ---------------------------------------------------------------------------
+# A — evaluate() decision boundaries
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateBoundaries:
+    """The `candidates <= threshold` comparison decides whether data dies."""
+
+    @pytest.mark.parametrize(
+        "row,floor,available,expect_allowed,expect_reason",
+        [
+            # A3/A5: exactly AT the threshold passes — `<=`, not `<`.
+            (
+                "A5-rows-at-threshold",
+                None,
+                _RG.MAX_ROWS_PER_SWEEP,
+                True,
+                "under_threshold",
+            ),
+            (
+                "A3-schedules-at-floor",
+                _RG.FLOOR_SCHEDULES,
+                _RG.FLOOR_SCHEDULES,
+                True,
+                "under_threshold",
+            ),
+            # A6: one below / one above, both floors.
+            (
+                "A6-rows-below",
+                None,
+                _RG.MAX_ROWS_PER_SWEEP - 1,
+                True,
+                "under_threshold",
+            ),
+            (
+                "A4-rows-above",
+                None,
+                _RG.MAX_ROWS_PER_SWEEP + 1,
+                False,
+                "over_threshold",
+            ),
+            (
+                "A6-schedules-below",
+                _RG.FLOOR_SCHEDULES,
+                _RG.FLOOR_SCHEDULES - 1,
+                True,
+                "under_threshold",
+            ),
+            (
+                "A4-schedules-above",
+                _RG.FLOOR_SCHEDULES,
+                _RG.FLOOR_SCHEDULES + 1,
+                False,
+                "over_threshold",
+            ),
+            # A2: floor=0 must NOT fall back to MAX_ROWS_PER_SWEEP (`is None`, not falsy).
+            ("A2-agents-at-zero", _RG.FLOOR_AGENTS, 0, True, "under_threshold"),
+            ("A2-agents-one-candidate", _RG.FLOOR_AGENTS, 1, False, "over_threshold"),
+        ],
+    )
+    def test_threshold_boundary(
+        self, row, floor, available, expect_allowed, expect_reason, guard_db
+    ):
+        """`available` is what a real bounded count would see; count_fn is
+        limit-honouring (`min`), exactly like `_bounded_count`."""
+        v = _RG.evaluate(
+            "execution_row_retention_days",
+            90,
+            lambda limit: min(available, limit),
+            floor=floor,
+        )
+        assert (v.allowed, v.reason) == (expect_allowed, expect_reason), row
+
+    def test_count_fn_receives_exactly_threshold_plus_one(self, guard_db):
+        """A14: the bound must be `threshold + 1` — with `threshold`, a candidate
+        set of exactly `threshold + 1` would count as `threshold` and slip through
+        the `<=` as 'under threshold'."""
+        seen = []
+
+        def counting(limit):
+            seen.append(limit)
+            return 0
+
+        _RG.evaluate("execution_row_retention_days", 90, counting, floor=7)
+        assert seen == [8]
+
+    def test_negative_candidate_count_is_allowed_through(self, guard_db):
+        """A11: a negative return is `<= threshold`, so it proceeds. Documented so
+        the fail-safe direction is deliberate: `-1` is also the sentinel
+        `count_failed` uses, and only the REASON distinguishes them."""
+        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: -5)
+        assert (v.allowed, v.reason) == (True, "under_threshold")
+
+    def test_nan_count_without_ack_refuses(self, guard_db):
+        """A10: `nan <= threshold` is False, so a NaN count falls through to the
+        ack path and refuses — the safe direction, but by accident of IEEE-754
+        rather than by an explicit check."""
+        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: float("nan"))
+        assert (v.allowed, v.reason) == (False, "over_threshold")
+
+    def test_nan_count_with_ack_is_allowed(self, guard_db):
+        """A10b: the NaN fail-safe is NOT unconditional. With an ack on file the
+        same NaN yields allowed=True. Pinned so nobody reads the test above as
+        'NaN always refuses'."""
+        _RG.record_acknowledgement("execution_row_retention_days", 90)
+        v = _RG.evaluate("execution_row_retention_days", 90, lambda limit: float("nan"))
+        assert v.allowed is True
+        assert v.reason == "acknowledged"
+
+    def test_negative_floor_refuses_regardless_of_data(self, guard_db):
+        """A17: no caller passes a negative floor; pin the fail-safe direction in
+        case one ever does. threshold=-1 makes the bound 0, the accessors
+        short-circuit on `limit <= 0` and return 0, and `0 <= -1` is False — so it
+        refuses on an EMPTY table. Refusing too much is the correct direction."""
+        v = _RG.evaluate(
+            "execution_row_retention_days",
+            90,
+            lambda limit: 0 if limit <= 0 else 1,
+            floor=-1,
+        )
+        assert v.allowed is False
+
+    def test_zero_candidates_never_trips_any_floor(self, guard_db):
+        """A7: an empty candidate set must pass at every floor — otherwise a
+        healthy install refuses forever and the alarm becomes noise."""
+        for floor in (None, _RG.FLOOR_AGENTS, _RG.FLOOR_SCHEDULES):
+            v = _RG.evaluate(
+                "execution_row_retention_days", 90, lambda limit: 0, floor=floor
+            )
+            assert v.allowed is True, f"floor={floor}"
+
+
+class TestEvaluateRaisesContract:
+    """`evaluate`'s docstring says 'NEVER raises. Fails CLOSED.' — one case
+    contradicts it. Recorded as OBSERVED behaviour, not endorsed as correct."""
+
+    def test_non_numeric_count_raises_out_of_evaluate(self, guard_db):
+        """A9 — OBSERVED, NOT CONTRACTUAL. `candidates <= threshold`
+        (retention_guard.py:183) sits OUTSIDE the try that wraps `count_fn`, so a
+        `count_fn` returning a non-number raises `TypeError` straight out of
+        `evaluate`, contradicting the ':153' docstring and the
+        `cleanup_service.py:219-221` comment that leans on it.
+
+        Production-unreachable: all 8 `count_fn`s are `db.count_*` accessors that
+        return `int(...)`. Safety today therefore comes from each sweep's OUTER
+        try/except, not from the documented contract — which is exactly what
+        `test_cleanup_inner_sweeps.py:81-85` records ('a bare MagicMock ...
+        correctly fails closed'). Pinned here so any change to it is a deliberate,
+        visible edit; the docstring correction is a flagged follow-up (#1771).
+        """
+        with pytest.raises(TypeError):
+            _RG.evaluate("execution_row_retention_days", 90, lambda limit: None)
+
+    def test_numeric_returns_never_raise(self, guard_db):
+        """The half of the contract that IS true, pinned as the real guarantee."""
+        for value in (0, 1, -1, 10**12, 0.5, float("inf"), float("nan")):
+            _RG.evaluate("execution_row_retention_days", 90, lambda limit: value)
+
+
+# ---------------------------------------------------------------------------
+# B — ack lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestAckLifecycle:
+
+    def test_consume_without_an_ack_is_a_no_op(self, guard_db):
+        """B5: the common path. Every under-threshold sweep calls this."""
+        _RG.consume_acknowledgement("execution_row_retention_days")
+        assert guard_db.settings == {}
+
+    def test_stored_value_is_stripped_before_comparison(self, guard_db):
+        """B6: `is_acknowledged` does `str(raw).strip()`, so a value written with
+        stray whitespace still matches."""
+        guard_db.settings["retention_ack_execution_row_retention_days"] = "  30  "
+        assert _RG.is_acknowledged("execution_row_retention_days", 30) is True
+
+    @pytest.mark.parametrize("stored", ["030", "+30", "30.0", "3 0", "", "thirty"])
+    def test_non_canonical_stored_values_do_not_acknowledge(self, stored, guard_db):
+        """B7: the comparison is on the STRING, so only the canonical `str(int)`
+        form authorizes. Fail-safe: an unparseable ack must never approve a mass
+        delete."""
+        guard_db.settings["retention_ack_execution_row_retention_days"] = stored
+        assert _RG.is_acknowledged("execution_row_retention_days", 30) is False
+
+    def test_ack_key_is_namespaced_under_the_blocklisted_prefix(self, guard_db):
+        """The prefix is what `PUT /api/settings/{key}` blocklists; an ack written
+        outside it would be self-writable through the catch-all."""
+        _RG.record_acknowledgement("execution_row_retention_days", 5)
+        assert list(guard_db.settings) == [
+            f"{_RG.ACK_KEY_PREFIX}execution_row_retention_days"
+        ]
+
+
+# ---------------------------------------------------------------------------
+# C — announce_refusal / _last_refused / note_allowed / _alarm_id
+# ---------------------------------------------------------------------------
+
+
+def _verdict(candidates=5000, threshold=1000, reason="over_threshold"):
+    return _RG.GuardVerdict(False, candidates, threshold, reason)
+
+
+class TestRefusalAlarm:
+    """These functions execute today; nothing asserts what they DID."""
+
+    def test_first_refusal_logs_error_and_raises_exactly_one_alarm(
+        self, guard_db, caplog
+    ):
+        """C1. 'Exactly one' is the point: `create_item` is INSERT ... ON CONFLICT
+        DO NOTHING, so a duplicate is silent — only a count proves the transition
+        gate works."""
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+        assert len(guard_db.queue_items) == 1
+        levels = [r.levelno for r in caplog.records]
+        assert logging.ERROR in levels
+
+    def test_repeat_refusal_drops_to_info_and_raises_no_second_alarm(
+        self, guard_db, caplog
+    ):
+        """C2. 288 identical ERRORs a day is how an alert gets muted — and a muted
+        alert is the #1638 failure mode repeated."""
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+        assert len(guard_db.queue_items) == 1, "the repeat must not re-alarm"
+        assert [r.levelno for r in caplog.records] == [logging.INFO]
+
+    def test_a_narrowed_window_is_a_fresh_transition(self, guard_db, caplog):
+        """C3. The memo is keyed by (setting, window). A window narrowing 30 -> 5
+        is a NEW blast radius and must re-alarm even though the key is unchanged —
+        that narrowing IS the #1638 event."""
+        _RG.announce_refusal("execution_row_retention_days", "rows", 30, _verdict())
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+        assert len(guard_db.queue_items) == 2
+        assert logging.ERROR in [r.levelno for r in caplog.records]
+
+    def test_note_allowed_rearms_the_error_level(self, guard_db, caplog):
+        """C4. A sweep that recovers and then degrades again must shout again."""
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _RG.note_allowed("execution_row_retention_days")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+        assert len(guard_db.queue_items) == 2
+        assert logging.ERROR in [r.levelno for r in caplog.records]
+
+    def test_note_allowed_only_clears_its_own_key(self, guard_db, caplog):
+        """A recovering sweep must not re-arm an unrelated sweep's alarm."""
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _RG.announce_refusal("health_check_retention_days", "health", 5, _verdict())
+        _RG.note_allowed("execution_row_retention_days")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _RG.announce_refusal("health_check_retention_days", "health", 5, _verdict())
+
+        assert (
+            len(guard_db.queue_items) == 2
+        ), "health was still refusing — no new alarm"
+
+    def test_settings_read_failure_degrades_source_and_never_propagates(self, guard_db):
+        """C7: `announce_refusal` is decorative and must never raise into a caller
+        that has already refused."""
+        guard_db.raise_on_get = True
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+        _agent, item = guard_db.queue_items[0]
+        assert item["context"]["window_source"] == "unknown"
+
+    def test_alarm_failure_does_not_propagate(self, guard_db):
+        """C5, restated at the alarm surface (test_1644:170 asserts only that the
+        verdict object is unchanged, which it trivially is — it is frozen)."""
+        guard_db.raise_on_create = True
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+
+    def test_alarm_id_is_the_natural_key_and_expiry_is_null(self, guard_db):
+        """C9 + C10. `expires_at` must stay None: `mark_operator_queue_expired`
+        flips any pending row past `expires_at` to `expired` fleet-wide every 5s,
+        which would silently retire the alarm."""
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _agent, item = guard_db.queue_items[0]
+
+        assert item["id"] == _RG._alarm_id("execution_row_retention_days", 5)
+        assert item["expires_at"] is None
+
+    def test_alarm_hosts_on_the_uncreatable_sentinel_agent(self, guard_db):
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        agent, _item = guard_db.queue_items[0]
+        assert agent == _RG.ALARM_AGENT_NAME
+
+    def test_alarm_payload_carries_counts_and_identifiers_only(self, guard_db):
+        """C8 — SECURITY. The queue row is durable and operator-visible, and
+        `schedule_executions.message`/`response`/`error`/`backlog_metadata` hold
+        user content and credential-bearing agent output (canary G-04 exists
+        because that blob leaked secrets into exactly this kind of state).
+
+        Allowlists the WHOLE item, not just `context`: `question` embeds the
+        free-text message built at `retention_guard.py:255-260`, so a
+        context-only assertion would false-green on a leak through the prose.
+        Any future `"sample_rows"` / `"examples"` key fails this test.
+        """
+        guard_db.settings["execution_row_retention_days"] = "SENTINEL-WINDOW-VALUE"
+        _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
+        _agent, item = guard_db.queue_items[0]
+
+        assert set(item) == {
+            "id",
+            "type",
+            "priority",
+            "title",
+            "question",
+            "context",
+            "expires_at",
+        }
+        assert set(item["context"]) == {
+            "alert_type",
+            "setting_key",
+            "window_days",
+            "window_source",
+            "candidate_count",
+            "threshold",
+            "reason",
+        }
+        # No nested containers anywhere in `context` — a row payload could only
+        # arrive as a list/dict of rows.
+        for key, value in item["context"].items():
+            assert isinstance(value, (str, int, type(None))), key
+
+        # The setting's stored VALUE must never be echoed; only its provenance
+        # ("db-row" / "code-default") may be. A mutant that reported the raw value
+        # instead of the derived source leaks operator config into a durable row.
+        flat = repr(item)
+        assert "SENTINEL-WINDOW-VALUE" not in flat
+        assert item["context"]["window_source"] == "db-row"
+
+
+# ---------------------------------------------------------------------------
+# D — _read_retention_settings coercion (body never executes elsewhere)
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionSettingsCoercion:
+
+    @pytest.mark.parametrize(
+        "row,raw,expected",
+        [
+            ("D1-plain-int-string", "30", 30),
+            ("D1-zero", "0", 0),
+            ("D6-surrounding-space", " 7 ", 7),
+            ("D2-alpha", "abc", 0),
+            ("D2-empty", "", 0),
+            ("D2-blank", "   ", 0),
+            ("D2-float-string", "1.5", 0),
+            ("D2-scientific", "1e5", 0),
+            ("D2-hex", "0x10", 0),
+            ("D3-none", None, 0),
+            ("D4-negative", "-5", 0),
+            ("D4-negative-large", "-999999", 0),
+        ],
+    )
+    def test_raw_value_coercion(self, row, raw, expected, cleanup_db, monkeypatch):
+        """Invalid or negative -> 0 (sweep disabled). The failure direction is
+        'keep everything', which is the correct one: a malformed setting must
+        never enable an unbounded prune."""
+        monkeypatch.setattr(
+            cleanup_db, "get_setting_value", lambda key, default=None: raw
+        )
+        assert _CS._read_retention_settings() == (expected,) * 4, row
+
+    def test_returns_the_four_windows_in_a_fixed_order(self, cleanup_db, monkeypatch):
+        """The caller unpacks positionally
+        (`log_days, row_days, hc_days, reports_days`) — a reordering would swap
+        two retention windows silently."""
+        values = {
+            "execution_log_retention_days": "11",
+            "execution_row_retention_days": "22",
+            "health_check_retention_days": "33",
+            "agent_reports_retention_days": "44",
+        }
+        monkeypatch.setattr(
+            cleanup_db,
+            "get_setting_value",
+            lambda key, default=None: values.get(key, default),
+        )
+        assert _CS._read_retention_settings() == (11, 22, 33, 44)
+
+    def test_unicode_digits_are_accepted_by_int(self, cleanup_db, monkeypatch):
+        """D5 — OBSERVED, NOT ENDORSED. `int()` accepts non-ASCII decimal digits,
+        so an Arabic-Indic '١٢' resolves to a real 12-day window. Harmless (the
+        result is still a bounded positive int that the guard then gates), but
+        recorded so the behaviour is known rather than discovered."""
+        monkeypatch.setattr(
+            cleanup_db, "get_setting_value", lambda key, default=None: "١٢"
+        )
+        assert _CS._read_retention_settings() == (12,) * 4
+
+    def test_absurdly_large_window_stays_an_int_and_disables_nothing(
+        self, cleanup_db, monkeypatch
+    ):
+        """D7: a huge window is not coerced to 0 — it is a legitimately enormous
+        int. It reaches `iso_cutoff(hours=days*24)`, whose overflow is slice b's
+        target; the fail-closed chain is that the COUNT raises and the guard
+        refuses. Asserted here only as 'the reader does not silently disable'."""
+        monkeypatch.setattr(
+            cleanup_db, "get_setting_value", lambda key, default=None: "9" * 40
+        )
+        result = _CS._read_retention_settings()
+        assert all(isinstance(v, int) and v > 0 for v in result)
+
+
+# ---------------------------------------------------------------------------
+# E — _log_prune level rule
+# ---------------------------------------------------------------------------
+
+
+class TestLogPruneLevels:
+    """Chunking splits one catastrophic delete into a sequence of unremarkable
+    lines; the level rule is the only thing that makes a big prune visible."""
+
+    @pytest.mark.parametrize(
+        "row,pruned,expected_level",
+        [
+            ("E3-zero", 0, logging.INFO),
+            ("E2-trickle", 3, logging.INFO),
+            ("E2-just-under-cap", _CS.RETENTION_CHUNK_SIZE_PER_CYCLE - 1, logging.INFO),
+            ("E1-exactly-cap", _CS.RETENTION_CHUNK_SIZE_PER_CYCLE, logging.WARNING),
+            ("E1-over-cap", _CS.RETENTION_CHUNK_SIZE_PER_CYCLE + 1, logging.WARNING),
+        ],
+    )
+    def test_level_escalates_at_the_chunk_boundary(
+        self, row, pruned, expected_level, caplog
+    ):
+        with caplog.at_level(logging.INFO, logger=_CS.logger.name):
+            _CS._log_prune(pruned, "prune happened")
+        assert [r.levelno for r in caplog.records] == [expected_level], row
+
+
+# ---------------------------------------------------------------------------
+# H — the cleanup_service guard adapters
+# ---------------------------------------------------------------------------
+
+
+class TestGuardAdapters:
+    """`_guard_allows` and `_after_guarded_prune` are the only things standing
+    between a verdict and a DELETE."""
+
+    def test_allowed_verdict_clears_the_memo_and_permits_the_prune(self, monkeypatch):
+        """H1."""
+        calls = []
+        monkeypatch.setattr(
+            _RG,
+            "evaluate",
+            lambda *a, **k: _RG.GuardVerdict(True, 1, 1000, "under_threshold"),
+        )
+        monkeypatch.setattr(
+            _RG, "note_allowed", lambda key: calls.append(("allow", key))
+        )
+        monkeypatch.setattr(
+            _RG,
+            "announce_refusal",
+            lambda *a: calls.append(("refuse", a[0])),
+        )
+
+        assert _CS._guard_allows("k", "label", 5, lambda limit: 1) is True
+        assert calls == [("allow", "k")]
+
+    def test_refused_verdict_announces_and_blocks_the_prune(self, monkeypatch):
+        """H2. Returning True here is the unrecoverable failure — it is the
+        difference between 'refused' and '95.7% of the table is gone'."""
+        calls = []
+        monkeypatch.setattr(
+            _RG,
+            "evaluate",
+            lambda *a, **k: _RG.GuardVerdict(False, 9999, 1000, "over_threshold"),
+        )
+        monkeypatch.setattr(
+            _RG, "note_allowed", lambda key: calls.append(("allow", key))
+        )
+        monkeypatch.setattr(
+            _RG, "announce_refusal", lambda *a: calls.append(("refuse", a[0]))
+        )
+
+        assert _CS._guard_allows("k", "label", 5, lambda limit: 9999) is False
+        assert calls == [("refuse", "k")]
+
+    def test_floor_is_forwarded_to_evaluate(self, monkeypatch):
+        """A dropped `floor` would silently promote the agent sweep (floor 0, every
+        candidate destroys Docker volumes) to the 1000-row default."""
+        seen = {}
+
+        def fake_evaluate(setting_key, window_days, count_fn, floor=None):
+            seen["floor"] = floor
+            return _RG.GuardVerdict(True, 0, 0, "under_threshold")
+
+        monkeypatch.setattr(_RG, "evaluate", fake_evaluate)
+        monkeypatch.setattr(_RG, "note_allowed", lambda key: None)
+        _CS._guard_allows("k", "label", 5, lambda limit: 0, floor=_RG.FLOOR_AGENTS)
+        assert seen["floor"] == _RG.FLOOR_AGENTS
+
+    def test_after_guarded_prune_is_a_no_op_without_an_ack(self, guard_db):
+        """H3: the common, under-threshold path."""
+        _CS._after_guarded_prune("execution_row_retention_days")
+        assert guard_db.settings == {}
+
+    def test_after_guarded_prune_consumes_a_present_ack(self, guard_db):
+        """Single-use: one approval buys one complete drain, then the guard re-arms."""
+        _RG.record_acknowledgement("execution_row_retention_days", 5)
+        _CS._after_guarded_prune("execution_row_retention_days")
+        assert _RG.is_acknowledged("execution_row_retention_days", 5) is False
+
+    def test_after_guarded_prune_never_raises_into_a_completed_sweep(
+        self, monkeypatch, caplog
+    ):
+        """H4. This runs AFTER rows were deleted. A raise here would abort the
+        sweep's remaining bookkeeping over a stale-ack problem, which is a (small)
+        safety hole, not a data-loss one."""
+        monkeypatch.setattr(
+            _RG,
+            "consume_acknowledgement",
+            lambda key: (_ for _ in ()).throw(RuntimeError("settings write failed")),
+        )
+        with caplog.at_level(logging.ERROR, logger=_CS.logger.name):
+            _CS._after_guarded_prune("execution_row_retention_days")
+        assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+
+# ---------------------------------------------------------------------------
+# F — predicate edges (real DB)
+# ---------------------------------------------------------------------------
+
+
+def _seed(eid, completed_at, status="success", log="x"):
+    _hrun(
+        "INSERT INTO schedule_executions "
+        "(id, schedule_id, agent_name, status, started_at, completed_at, message, "
+        " triggered_by, execution_log) "
+        "VALUES (:id, 's1', 'a1', :st, :ts, :done, 'm', 'schedule', :log)",
+        id=eid,
+        st=status,
+        ts=_days_ago_iso(200),
+        done=completed_at,
+        log=log,
+    )
+
+
+@pytest.fixture
+def sched(db_backend, monkeypatch):
+    for mod in ("db.connection", "db.schedules"):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    from db.schedules import ScheduleOperations
+
+    return ScheduleOperations(None, None)
+
+
+class TestPredicateEdges:
+
+    def test_all_four_terminal_states_are_counted_and_pruned_together(self, sched):
+        """F4: `test_execution_retention_prune` covers all four for the PRUNE, and
+        `test_1644` covers parity for `success` only — so parity across the full
+        terminal set was never proven. A state counted but not pruned (or vice
+        versa) is exactly the drift the shared predicate exists to prevent."""
+        for i, status in enumerate(("success", "failed", "cancelled", "skipped")):
+            _seed(f"term{i}", _days_ago_iso(100), status=status)
+        _seed("running", _days_ago_iso(100), status="running")
+        _seed("queued", _days_ago_iso(100), status="queued")
+
+        counted = sched.count_execution_row_candidates(90, limit=1000)
+        pruned = sched.prune_execution_rows(90, chunk_size=1000)
+        assert counted == pruned == 4
+        assert _hscalar("SELECT COUNT(*) FROM schedule_executions") == 2
+
+    def test_terminal_row_with_null_completed_at_is_excluded_by_both_sides(self, sched):
+        """F5: the predicate's `completed_at IS NOT NULL` term, untested on either
+        side. A terminal row that never recorded a completion has no age, so it
+        must not be aged out."""
+        _seed("no-completion", None)
+        _seed("old", _days_ago_iso(100))
+
+        counted = sched.count_execution_row_candidates(90, limit=1000)
+        pruned = sched.prune_execution_rows(90, chunk_size=1000)
+        assert counted == pruned == 1
+        assert (
+            _hscalar(
+                "SELECT COUNT(*) FROM schedule_executions WHERE id = 'no-completion'"
+            )
+            == 1
+        )
+
+    def test_a_row_exactly_at_the_cutoff_survives(self, sched, monkeypatch):
+        """F6: the predicate is a strict `<`, so `completed_at == cutoff` is kept.
+
+        The cutoff MUST be frozen. `iso_cutoff` is evaluated INSIDE the accessor at
+        call time (retention.py:134), so a row seeded 'at the cutoff' at T0 is
+        compared against a cutoff computed at T1 > T0 and is strictly older by the
+        elapsed microseconds — written naively this test fails on CORRECT code.
+        """
+        import db.schedules.retention as _RET
+
+        frozen = _days_ago_iso(90)
+        monkeypatch.setattr(_RET, "iso_cutoff", lambda **kwargs: frozen)
+
+        _seed("at-cutoff", frozen)
+        _seed("one-tick-older", frozen[:-1] + "0" if frozen[-1] != "0" else frozen)
+
+        counted = sched.count_execution_row_candidates(90, limit=1000)
+        pruned = sched.prune_execution_rows(90, chunk_size=1000)
+        assert counted == pruned
+        assert (
+            _hscalar("SELECT COUNT(*) FROM schedule_executions WHERE id = 'at-cutoff'")
+            == 1
+        ), "a row exactly at the cutoff is not yet past it"
+
+    def test_prune_execution_rows_drains_fully_with_a_small_chunk_size(self, sched):
+        """F11: `chunk_size` bounds each TRANSACTION, not the call — the loop
+        drains the entire candidate set (`cleanup_service.py:84-96`, 'READ THIS,
+        THE NAME LIES'). This accessor is the one #1638 accessor lacking a drain
+        proof; #1638 destroyed 5352 rows in one sweep, which a real per-call cap
+        could not have produced. A regression to a single-chunk return would make
+        that comment a lie and understate every reported blast radius."""
+        for i in range(23):
+            _seed(f"old{i}", _days_ago_iso(100))
+
+        assert sched.prune_execution_rows(90, chunk_size=5) == 23
+        assert _hscalar("SELECT COUNT(*) FROM schedule_executions") == 0
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_non_positive_chunk_size_prunes_nothing(self, bad, sched):
+        """A `chunk_size <= 0` must be a no-op, never an unbounded delete."""
+        _seed("old", _days_ago_iso(100))
+        assert sched.prune_execution_rows(90, chunk_size=bad) == 0
+        assert _hscalar("SELECT COUNT(*) FROM schedule_executions") == 1
+
+
+# ---------------------------------------------------------------------------
+# G — structural invariants
+# ---------------------------------------------------------------------------
+
+
+class TestStructuralInvariants:
+
+    def test_every_retention_window_has_a_guard_call_site(self):
+        """G3. Read the SOURCE, don't import it (learnings.md:111): importing
+        `cleanup_service` for a structural check drags in `settings_service` ->
+        `database` -> `init_database()` at module-import time.
+
+        Strict SET EQUALITY in both directions, and deliberately NO hardcoded
+        count — `architecture.md` still says '7 window-driven destructive prunes'
+        while there are 8 since #1296, and hardcoding a count is the #1638
+        'pin the value' trap in miniature. Set equality also catches the inverse
+        bug: a guarded sweep whose key is not a registered retention window.
+        """
+        from services.settings_service import RETENTION_OPS_KEYS
+
+        tree = ast.parse(_SRC_CLEANUP.read_text())
+        guarded = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_guard_allows"
+            ):
+                first = node.args[0] if node.args else None
+                assert isinstance(first, ast.Constant), (
+                    "a _guard_allows call site whose setting_key is not a literal "
+                    "cannot be audited statically"
+                )
+                guarded.append(first.value)
+
+        assert len(guarded) == len(
+            set(guarded)
+        ), f"a retention window is guarded twice: {guarded}"
+        assert set(guarded) == set(RETENTION_OPS_KEYS), (
+            "every registered retention window must have exactly one "
+            "_guard_allows call site, and every guarded sweep must be a "
+            "registered window.\n"
+            f"  unguarded windows: {set(RETENTION_OPS_KEYS) - set(guarded)}\n"
+            f"  guarded non-windows: {set(guarded) - set(RETENTION_OPS_KEYS)}"
+        )
+
+    def test_ack_prefix_is_blocklisted_from_the_generic_settings_endpoint(self):
+        """G6 — SECURITY. `retention_guard.py:61-63` claims the ack prefix is
+        blocklisted from the generic `PUT /api/settings/{key}`; nothing asserted
+        it. Without that blocklist, anything reaching the catch-all could write
+        its own approval and disarm the guard — the ack IS the gate, so this is
+        the one setting whose writability is a security property.
+
+        Read the SOURCE, don't import it (learnings.md:111): `routers/settings.py`
+        pulls `routers/__init__.py`, which imports every router in the app.
+
+        Deliberately matched on the SYMBOL, not the literal string: the router
+        does `from services.retention_guard import ACK_KEY_PREFIX` rather than
+        duplicating `"retention_ack_"`, which is the correct choice (no mirror to
+        drift). An earlier draft of this test grepped for the literal and failed
+        on correct code.
+        """
+        tree = ast.parse((_BACKEND / "routers" / "settings.py").read_text())
+
+        handler = next(
+            (
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "update_setting"
+            ),
+            None,
+        )
+        assert handler is not None, (
+            "the generic PUT /api/settings/{key} handler was renamed — re-point "
+            "this test, do not delete it (#1644)"
+        )
+
+        guards = [
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Attribute)
+            and node.test.func.attr == "startswith"
+            and any(
+                isinstance(a, ast.Name) and a.id == "ACK_KEY_PREFIX"
+                for a in node.test.args
+            )
+            and any(isinstance(stmt, ast.Raise) for stmt in ast.walk(node))
+        ]
+        assert guards, (
+            "PUT /api/settings/{key} no longer refuses keys starting with "
+            "ACK_KEY_PREFIX. An ack written through this unvalidated endpoint "
+            "pre-approves a mass deletion — the blast-radius guard is disarmed by "
+            "the same route that causes the bug it exists to catch (#1644)."
+        )
+
+    def test_per_sweep_floors_are_pinned_by_direction_not_by_value(self):
+        """G7. `test_1644:285` pins only `MAX_ROWS_PER_SWEEP`. But
+        `retention_guard.py:170` is `MAX_ROWS_PER_SWEEP if floor is None else
+        floor` — there is no `min()`, so a floor OVERRIDES the global rather than
+        being bounded by it. Raising `FLOOR_SCHEDULES` 100 -> 100000 disarms that
+        sweep entirely while every existing test stays green: exactly the failure
+        the threshold-direction test exists to prevent, one level down.
+
+        Lowering a floor is always safe; raising one weakens every install."""
+        from services.retention_guard import FLOOR_AGENTS, FLOOR_SCHEDULES
+
+        PREVIOUS_AGENTS = 0
+        PREVIOUS_SCHEDULES = 100
+        assert FLOOR_AGENTS <= PREVIOUS_AGENTS, (
+            "FLOOR_AGENTS is 0 because every agent purge destroys Docker volumes "
+            "(#1581). Raising it lets volume destruction through unacknowledged."
+        )
+        assert FLOOR_SCHEDULES <= PREVIOUS_SCHEDULES, (
+            "Raising a per-sweep floor disarms that sweep's guard. If intentional, "
+            "it needs a reviewer and a docs/migrations/ note, not a one-line diff."
+        )
+
+    def test_no_per_sweep_floor_exceeds_the_global_ceiling(self):
+        """G8. The floors are meant to be STRICTER than the global threshold (they
+        encode how unrecoverable each sweep's loss is). A floor above
+        MAX_ROWS_PER_SWEEP would be a per-sweep RELAXATION wearing the word
+        'floor' — and `evaluate` would honour it, because there is no `min()`."""
+        from services.retention_guard import (
+            FLOOR_AGENTS,
+            FLOOR_SCHEDULES,
+            MAX_ROWS_PER_SWEEP,
+        )
+
+        assert max(FLOOR_AGENTS, FLOOR_SCHEDULES) <= MAX_ROWS_PER_SWEEP
