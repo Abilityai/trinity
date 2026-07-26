@@ -715,3 +715,54 @@ async def test_t10b_bind_source_absolute_when_host_path_unset_or_empty(
     assert Path(source).is_absolute(), source
     assert source == str(crud._repo_local_templates_dir() / "bindtpl-1759")
 
+
+# ===========================================================================
+# Field-level malformation stays a DEGRADE, not a 400 and not a 500
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_malformed_field_still_creates_and_names_the_template(
+    crud_env, monkeypatch, tmp_path, caplog
+):
+    """#1759 narrowed the PARSE, not the field mutation.
+
+    A `template.yaml` that parses to a dict but carries a malformed FIELD
+    (`credentials: "a string"` → `creds.get(...)` raises `AttributeError`) is
+    still swallowed into a warning, on purpose: the file is valid YAML, the
+    agent gets its template files, and only some `config` mutations are
+    skipped. Tightening that to a 400 would reject templates that deploy today
+    and is outside this issue's ACs.
+
+    This pins two things the swallow must never lose:
+
+    1. It stays a DEGRADE — the handler runs inside an `except`, so a bug in
+       the handler itself (a missing attribute in the log call) would convert a
+       graceful degrade into a 500 on the create path.
+    2. The warning names the template AND the agent. Without them an operator
+       has no way to find which agent came out subtly wrong.
+    """
+    crud, ctx = crud_env
+    curated, _ = _roots(monkeypatch, crud, tmp_path)
+    _write_template(
+        curated,
+        "badfield-1759",
+        "type: business-assistant\ncredentials: not-a-mapping\n",
+    )
+
+    with caplog.at_level("WARNING"):
+        await crud.create_agent_internal(
+            AgentConfig(name="degrade-1759", template="local:badfield-1759"),
+            _user(),
+            None,
+        )
+
+    # 1. Still created — no raise, container really ran.
+    _agent_run_kwargs(ctx)
+
+    # 2. The warning is greppable by template and by agent.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    hits = [w for w in warnings if "badfield-1759" in w and "degrade-1759" in w]
+    assert hits, (
+        f"no warning named both the template and the agent; got: {warnings}"
+    )

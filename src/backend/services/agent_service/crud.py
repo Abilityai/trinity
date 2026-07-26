@@ -837,7 +837,22 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
                 "consume": shared_folders_config.get("consume", False)
             }
     except Exception as e:
-        logger.warning(f"Error loading template config: {e}")
+        # Still broad and still non-fatal, deliberately: the file parsed, so the
+        # agent DOES get its template files and only some `config` mutations are
+        # skipped. Tightening this to a 400 would reject templates that deploy
+        # successfully today — beyond #1759's ACs. But the mutations above run in
+        # order, so a raise part-way through leaves a PARTIALLY applied template
+        # (e.g. `credentials: "a string"` applies type/resources/tools, then
+        # silently skips mcp_servers/runtime/shared_folders). Name the template
+        # and the agent: the old message carried neither, leaving an operator
+        # nothing to grep when the resulting agent is subtly wrong.
+        logger.warning(
+            "Template %r for agent %r: field-level config only partially "
+            "applied (agent still created): %s",
+            config.template,
+            config.name,
+            e,
+        )
     return template_data, template_shared_folders
 
 
