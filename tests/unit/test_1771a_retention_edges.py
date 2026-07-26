@@ -599,6 +599,41 @@ class TestRetentionSettingsCoercion:
         )
         assert _CS._read_retention_settings() == (11, 22, 33, 44)
 
+    def test_a_missing_row_falls_back_to_that_keys_code_default(
+        self, cleanup_db, monkeypatch
+    ):
+        """The un-configured install — the DEFAULT state, and #1638's blast radius.
+
+        Every other test in this class overrides `get_setting_value` to IGNORE the
+        `default` it is handed, so nothing asserted where that default comes from.
+        The reader passes `OPS_SETTINGS_DEFAULTS.get(key, "0")`
+        (cleanup_service.py:174); replacing that lookup with a literal, or reading
+        it under the wrong key, hands every install-with-no-row a window nobody
+        chose — the #1638 mechanism one layer above the constant it moved.
+
+        The expectation is READ from `OPS_SETTINGS_DEFAULTS` at runtime, never
+        transcribed: pinning the numbers here would BE the anti-pattern this file
+        exists to avoid (learnings.md:101-103). The DIRECTION those defaults may
+        move is pinned by `test_1638_retention_upgrade_safety.py`, which is where
+        that belongs. This test pins only the WIRING.
+        """
+        from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+        # Returning the handed-in `default` is exactly "there is no system_settings
+        # row for this key" — `db.get_setting_value` is a get-or-default accessor.
+        monkeypatch.setattr(
+            cleanup_db, "get_setting_value", lambda key, default=None: default
+        )
+        assert _CS._read_retention_settings() == tuple(
+            int(OPS_SETTINGS_DEFAULTS[key])
+            for key in (
+                "execution_log_retention_days",
+                "execution_row_retention_days",
+                "health_check_retention_days",
+                "agent_reports_retention_days",
+            )
+        )
+
     def test_unicode_digits_are_accepted_by_int(self, cleanup_db, monkeypatch):
         """D5 — OBSERVED, NOT ENDORSED. `int()` accepts non-ASCII decimal digits,
         so an Arabic-Indic '١٢' resolves to a real 12-day window. Harmless (the
@@ -681,22 +716,26 @@ class TestGuardAdapters:
 
     def test_refused_verdict_announces_and_blocks_the_prune(self, monkeypatch):
         """H2. Returning True here is the unrecoverable failure — it is the
-        difference between 'refused' and '95.7% of the table is gone'."""
+        difference between 'refused' and '95.7% of the table is gone'.
+
+        The WHOLE forwarded argument tuple is asserted, not just the setting key.
+        `announce_refusal(setting_key, label, window_days, verdict)` is positional,
+        so transposing `label` and `window_days` would key the transition memo on a
+        label string and stamp the alarm's `context.window_days` with prose — a
+        wrong blast-radius report on the one row an operator reads to decide.
+        """
         calls = []
-        monkeypatch.setattr(
-            _RG,
-            "evaluate",
-            lambda *a, **k: _RG.GuardVerdict(False, 9999, 1000, "over_threshold"),
-        )
+        refused = _RG.GuardVerdict(False, 9999, 1000, "over_threshold")
+        monkeypatch.setattr(_RG, "evaluate", lambda *a, **k: refused)
         monkeypatch.setattr(
             _RG, "note_allowed", lambda key: calls.append(("allow", key))
         )
         monkeypatch.setattr(
-            _RG, "announce_refusal", lambda *a: calls.append(("refuse", a[0]))
+            _RG, "announce_refusal", lambda *a: calls.append(("refuse", a))
         )
 
         assert _CS._guard_allows("k", "label", 5, lambda limit: 9999) is False
-        assert calls == [("refuse", "k")]
+        assert calls == [("refuse", ("k", "label", 5, refused))]
 
     def test_floor_is_forwarded_to_evaluate(self, monkeypatch):
         """A dropped `floor` would silently promote the agent sweep (floor 0, every
@@ -808,22 +847,36 @@ class TestPredicateEdges:
         call time (retention.py:134), so a row seeded 'at the cutoff' at T0 is
         compared against a cutoff computed at T1 > T0 and is strictly older by the
         elapsed microseconds — written naively this test fails on CORRECT code.
+
+        The neighbouring row is seeded ONE TICK older, and its removal is asserted:
+        `counted == pruned` alone is satisfied by `0 == 0`, so without a positive
+        control a predicate that matched NOTHING would pass this test. `iso_cutoff`
+        always returns `...ffffffZ`, so swapping the trailing `Z` (0x5A) for `0`
+        (0x30) yields a same-length string that sorts strictly BEFORE the cutoff —
+        the tightest possible input for `<` versus `<=`.
         """
         import db.schedules.retention as _RET
 
         frozen = _days_ago_iso(90)
+        assert frozen.endswith("Z"), f"iso_cutoff format changed: {frozen!r}"
         monkeypatch.setattr(_RET, "iso_cutoff", lambda **kwargs: frozen)
 
         _seed("at-cutoff", frozen)
-        _seed("one-tick-older", frozen[:-1] + "0" if frozen[-1] != "0" else frozen)
+        _seed("one-tick-older", frozen[:-1] + "0")
 
         counted = sched.count_execution_row_candidates(90, limit=1000)
         pruned = sched.prune_execution_rows(90, chunk_size=1000)
-        assert counted == pruned
+        assert counted == pruned == 1, "exactly the strictly-older row is a candidate"
         assert (
             _hscalar("SELECT COUNT(*) FROM schedule_executions WHERE id = 'at-cutoff'")
             == 1
         ), "a row exactly at the cutoff is not yet past it"
+        assert (
+            _hscalar(
+                "SELECT COUNT(*) FROM schedule_executions WHERE id = 'one-tick-older'"
+            )
+            == 0
+        ), "one tick past the cutoff IS past it"
 
     def test_prune_execution_rows_drains_fully_with_a_small_chunk_size(self, sched):
         """F11: `chunk_size` bounds each TRANSACTION, not the call — the loop

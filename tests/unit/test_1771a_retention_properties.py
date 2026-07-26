@@ -821,6 +821,12 @@ class TestPredicateParityProperty:
     )
     @settings(max_examples=DB_EXAMPLES, deadline=None)
     @example(available=20, limit=6)
+    # `limit=1` is the boundary of the LIMIT subquery and the only input that
+    # separates `limit <= 0` from `limit <= 1` in the accessor's disabled-sweep
+    # guard. Random search usually finds it (the strategy's min_value is 1), but
+    # "usually" is not a gate: pinned so that mutant is killed deterministically
+    # rather than whenever Hypothesis happens to draw the boundary.
+    @example(available=5, limit=1)
     def test_bounded_count_returns_min_of_candidates_and_limit(
         self, available, limit, retention_db
     ):
