@@ -199,33 +199,73 @@ if config.template.startswith("github:"):
     git_working_branch = git_service.generate_working_branch(config.name, git_instance_id)
 ```
 
-### Local Templates (`services/agent_service/crud.py:145-182`)
+### Local Templates (`services/agent_service/crud.py::_resolve_local_template`)
+
+Two roots, tried in order (#950): the **curated catalog** and the **deploy-local
+writable store**. Both go through `_safe_local_template_path`, which is the
+CodeQL `py/path-injection` barrier (regex allowlist on the name, then
+`.resolve()` + `is_relative_to(root)`), so every subsequent filesystem call on
+the returned path is untainted.
+
 ```python
-elif config.template.startswith("local:"):
-    template_name = config.template[6:]  # Remove "local:" prefix (line 147)
-    templates_dir = Path("/agent-configs/templates")
-    if not templates_dir.exists():
-        templates_dir = Path("./config/agent-templates")
+_LOCAL_TEMPLATE_ROOTS = (
+    _curated_templates_root(),                  # /agent-configs/templates, or the
+                                                # in-repo config/agent-templates
+                                                # when that bind mount is absent
+    Path("/data/deployed-templates").resolve(),  # deploy-local store (#950)
+)
 
-    template_path = templates_dir / template_name
-    template_yaml = template_path / "template.yaml"
+raw_name = config.template[6:]                   # strip "local:"
+template_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+if not (template_path / "template.yaml").exists():
+    template_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+template_yaml = template_path / "template.yaml"
 
-    if template_yaml.exists():
-        with open(template_yaml) as f:
-            template_data = yaml.safe_load(f)
-            config.type = template_data.get("type", config.type)
-            config.resources = template_data.get("resources", config.resources)
-            config.tools = template_data.get("tools", config.tools)
-            # Extract MCP servers from credentials section (lines 162-165)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
-            if mcp_servers:
-                config.mcp_servers = mcp_servers
-            # Multi-runtime support (lines 167-172)
-            runtime_config = template_data.get("runtime", {})
-            # Shared folder config (lines 173-179)
-            shared_folders_config = template_data.get("shared_folders", {})
+if not template_yaml.exists():
+    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_NOT_FOUND"})   # #1759
+
+try:
+    with open(template_yaml) as f:
+        template_data = yaml.safe_load(f)
+except (OSError, yaml.YAMLError):
+    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})     # #1759
+if not isinstance(template_data, dict):                                            # yaml.safe_load("") -> None
+    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})     # #1759
+
+# then mutate config from the template: type / resources / tools /
+# credentials.mcp_servers / runtime / shared_folders
 ```
+
+**Failure contract (#1759).** Before this, an unresolvable `local:` id returned
+empty `template_data` and the agent was created anyway — HTTP 200, blank
+container, no warning; only *malformed* names failed. Now:
+
+| Condition | Status | Code |
+|---|---|---|
+| Name fails the regex / traversal barrier | 400 | `INVALID_LOCAL_TEMPLATE_NAME` (checked first) |
+| No `template.yaml` under either root | 400 | `LOCAL_TEMPLATE_NOT_FOUND` |
+| `template.yaml` empty / not a mapping / unparseable | 400 | `LOCAL_TEMPLATE_INVALID` |
+| `template` is `null` or `""` (Blank Agent) | 200 | — never enters this branch |
+
+The raise sits in the same pre-side-effect band as `FORK_REQUIRES_GITHUB_TEMPLATE`
+and the #843 reject: no container, MCP key, volume or slot has been allocated
+yet, so there is nothing to roll back, and it is outside the caller's docker
+try-block so the 4xx is not flattened to a 500. `create_agent_internal` gains
+zero lines (#1484).
+
+**Disclosure rule:** one identical message whichever root missed, carrying no
+filesystem path and no root name. Deploy-local templates are named after *agent*
+names, so a root-distinguishing message would let a `creator`-role caller probe
+another user's agents (#186 adjacency).
+
+**Two seams read `_LOCAL_TEMPLATE_ROOTS`** and must stay in agreement: this
+resolver, and the `/template` bind-mount decision in `_stage_config_files`
+(curated templates bind their host path read-only at `/template`; deploy-local
+ones do not, because `deploy.py` already pre-populated the workspace volume via
+`put_archive`). The bind source is
+`os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()` — an
+**empty** env value would otherwise make `Path("") / name` collapse to a bare
+name, which Docker resolves as an empty *named volume* at `/template`.
 
 ---
 
