@@ -1,6 +1,11 @@
 # Test dependencies for Trinity API tests
 pytest>=8.3.0
 pytest-asyncio>=0.24.0
+# Property-based testing (#1771 / P-38 `/edge-cases`). Exact pin, deliberately
+# NOT a floor: the three concurrent #1771 slices each add this identical line,
+# so an identical string makes the merge conflict trivial in any order. Used by
+# tests/unit/test_1771*_*_properties.py.
+hypothesis==6.161.5
 pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
