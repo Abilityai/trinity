@@ -435,17 +435,34 @@ def test_b9_offset_bearing_started_at_buckets_by_its_literal_prefix(ops):
     exist historically, so this is the mechanism by which such a row would land
     in the wrong bucket — worth being explicit about rather than assuming the
     docstring's "UTC-day" claim covers it.
-    """
-    # Same instant, two spellings — they must NOT share a bucket today.
-    add_execution(started_at="2026-03-02T01:00:00.000000+05:00", status="success")
-    add_execution(started_at="2026-03-01T20:00:00.000000Z", status="success")
 
-    out = ops.get_agent_analytics(AGENT, 24 * 365 * 10)
+    Dates are derived from *today* rather than hard-coded so the test cannot age
+    out of its own window (a fixed 2026-03-01 pair would have needed an
+    ever-growing ``hours`` argument, and a 10-year window makes the gap-fill
+    loop build ~3650 day-dicts per call).
+    """
+    # One instant, two spellings. 20:00Z is 01:00 the NEXT day at +05:00, so a
+    # UTC-day-correct implementation would file both under the same date.
+    instant = (datetime.now(timezone.utc) - timedelta(days=2)).replace(
+        hour=20, minute=0, second=0, microsecond=0
+    )
+    utc_day = instant.date().isoformat()
+    offset_spelling = instant.astimezone(timezone(timedelta(hours=5)))
+    offset_day = offset_spelling.date().isoformat()
+    assert offset_day != utc_day, "fixture must straddle a UTC day boundary"
+
+    add_execution(started_at=_iso(instant), status="success")
+    add_execution(
+        started_at=offset_spelling.strftime("%Y-%m-%dT%H:%M:%S.%f%z"),
+        status="success",
+    )
+
+    out = ops.get_agent_analytics(AGENT, 168)
     days = {d["date"]: d["total"] for d in out["timeline"] if d["total"]}
 
     assert days == {
-        "2026-03-02": 1,
-        "2026-03-01": 1,
+        utc_day: 1,
+        offset_day: 1,
     }, "offset-bearing row bucketed by its literal prefix, not its UTC instant"
 
 
