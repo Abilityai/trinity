@@ -144,6 +144,48 @@ def test_partial_deploy_continues_and_reports(env):
     assert any("duplicates" in w for w in data["warnings"])
 
 
+def test_absent_local_template_surfaces_per_agent(env):
+    """AC#3 of #1759: the new create-time 400 must reach the operator through
+    the ent#125 per-agent `failed[]` report, not abort the whole manifest.
+
+    No new plumbing is needed — this asserts that by construction. Note
+    `_failure_reason` keeps only `detail["error"]` and DROPS `detail["code"]`,
+    which is why the error sentence has to stand alone and name its own
+    remedy.
+    """
+    real_400 = HTTPException(
+        status_code=400,
+        detail={
+            "error": (
+                "Local template 'local:typo-template' not found — no "
+                "template.yaml for this template. List available templates "
+                "with GET /api/templates, or add it under "
+                "config/agent-templates/."
+            ),
+            "code": "LOCAL_TEMPLATE_NOT_FOUND",
+        },
+    )
+    _fail_agent(env, "alpha", real_400)
+
+    resp = _deploy(env, TWO_AGENT_MANIFEST)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "partial"
+    assert data["agents_created"] == ["test-sys-beta"]
+    failure = data["failed"][0]
+    assert failure["name"] == "test-sys-alpha"
+    assert failure["status_code"] == 400
+    # The sentence survives intact and is self-contained: `code` is dropped by
+    # `_failure_reason`, so the operator only ever sees this string.
+    assert failure["reason"].startswith("Local template 'local:typo-template' not found")
+    assert "GET /api/templates" in failure["reason"]
+    assert "LOCAL_TEMPLATE_NOT_FOUND" not in failure["reason"]
+    # The sibling agent still deployed — one typo'd template does not sink the
+    # manifest (the trinity-enterprise#124 first-run-seed failure mode).
+    assert env.m.create_agent.await_count == 2
+
+
 def test_partial_deploy_scopes_config_to_survivors(env):
     _fail_agent(env, "alpha", HTTPException(status_code=409, detail="conflict"))
 
